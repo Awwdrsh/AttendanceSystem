@@ -122,13 +122,21 @@ function monthsBetween(fromAd: string, toAd: string): number {
   return Math.max(0, Math.round((b.getTime() - a.getTime()) / (30.44 * 86_400_000)));
 }
 
-export async function computeRun(db: Db, companyId: string, runId: string, actorId: string): Promise<{ payslips: number; totals: Record<string, string>; variance: unknown }> {
+export interface ComputeOverride { reason: string; roles: string[] }
+
+export async function computeRun(db: Db, companyId: string, runId: string, actorId: string, override?: ComputeOverride): Promise<{ payslips: number; totals: Record<string, string>; variance: unknown }> {
   const run = await getRun(db, companyId, runId);
   if (!['draft', 'preflight_failed', 'computed', 'reviewed'].includes(run.status)) throw new ConflictError(`run is ${run.status}; cannot compute`);
   const pf = await preflight(db, companyId, run);
   if (!pf.ok) {
-    await db.query(`UPDATE payroll_run SET status = 'preflight_failed', preflight = $2 WHERE id = $1`, [runId, JSON.stringify(pf)]);
-    throw new HttpError(409, 'pre-flight blockers must be resolved before computing', pf);
+    // Blockers stop the run unless HR explicitly overrides with a reason (plan §13.6: blockers vs warnings); the override is audited.
+    const canOverride = override && override.reason.trim().length >= 5 && (override.roles.includes('hr') || override.roles.includes('admin'));
+    if (!canOverride) {
+      await db.query(`UPDATE payroll_run SET status = 'preflight_failed', preflight = $2 WHERE id = $1`, [runId, JSON.stringify(pf)]);
+      throw new HttpError(409, 'pre-flight blockers must be resolved before computing (HR may override with a reason)', pf);
+    }
+    pf.info = { ...pf.info, override: { reason: override!.reason, by: actorId, at: new Date().toISOString() } };
+    await audit(db, { actorId, action: 'preflight_override', table: 'payroll_run', rowId: runId, after: { reason: override!.reason, blockers: pf.blockers.map((b) => b.code) } });
   }
   const p = await getPeriod(db, companyId, run.period_id);
   const policy = await payrollPolicy(db, companyId);
@@ -140,21 +148,32 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
 
   const client = await db.connect();
   const results: Array<{ emp: EmpRow; result: PayrollResult; input: PayrollInput; payslipId: string }> = [];
+  const componentCache = new Map<string, ComponentDef[]>();
+  const isFinal = run.run_type === 'final_settlement';
+  // Only regular and final-settlement runs carry the salary itself; every other run type pays one-time lines only.
+  const carriesSalary = run.run_type === 'regular' || isFinal;
   try {
     await client.query('BEGIN');
     await client.query('DELETE FROM payslip_line WHERE payslip_id IN (SELECT id FROM payslip WHERE run_id = $1)', [runId]);
     await client.query('DELETE FROM payslip WHERE run_id = $1', [runId]);
     for (const emp of emps) {
       if (!emp.assignment) continue;
-      const components = await componentsFor(client, companyId, emp.assignment.structure_version_id);
+      let components = componentCache.get(emp.assignment.structure_version_id);
+      if (!components) { components = await componentsFor(client, companyId, emp.assignment.structure_version_id); componentCache.set(emp.assignment.structure_version_id, components); }
       // Employment window inside the period.
       const from = emp.join_date && emp.join_date > p.start_ad ? emp.join_date : p.start_ad;
       const to = emp.exit_date && emp.exit_date < p.end_ad ? emp.exit_date : p.end_ad;
       const employedDays = Math.round((new Date(to).getTime() - new Date(from).getTime()) / 86_400_000) + 1;
       const att = await client.query<{ lop: string; ot_min: string; rows: string }>(
-        `SELECT coalesce(sum(CASE WHEN status IN ('Absent', 'Incomplete') THEN 1 WHEN status = 'HalfDay' THEN 0.5
-                                  WHEN status = 'OnLeave' AND flags::text LIKE '%UnpaidLeave%' THEN 1
-                                  WHEN status = 'HalfDayLeave' AND flags::text LIKE '%UnpaidLeave%' THEN 0.5 ELSE 0 END), 0)::text AS lop,
+        `SELECT coalesce(sum(CASE
+                  -- half-day leave with no punches: the leave half is paid unless the leave type is unpaid, the other half is absent
+                  WHEN status = 'Absent' AND flags @> '[{"kind":"HalfDayLeave"}]' AND flags @> '[{"kind":"UnpaidLeave"}]' THEN 1
+                  WHEN status = 'Absent' AND flags @> '[{"kind":"HalfDayLeave"}]' THEN 0.5
+                  WHEN status IN ('Absent', 'Incomplete') THEN 1
+                  WHEN status = 'HalfDay' THEN 0.5
+                  WHEN status = 'OnLeave' AND flags @> '[{"kind":"UnpaidLeave"}]' THEN 1
+                  WHEN status = 'HalfDayLeave' AND flags @> '[{"kind":"UnpaidLeave"}]' THEN 0.5
+                  ELSE 0 END), 0)::text AS lop,
                 count(*)::text AS rows,
                 (SELECT coalesce(sum(approved_min), 0) FROM ot_slip s WHERE s.employee_id = $1 AND s.local_date BETWEEN $2 AND $3 AND s.status IN ('approved', 'posted'))::text AS ot_min
            FROM v_attendance_latest WHERE employee_id = $1 AND local_date BETWEEN $2 AND $3`, [emp.id, from, to]);
@@ -162,13 +181,27 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
       const paidDays = D(employedDays).minus(lop);
       const otHours = D(att.rows[0]?.ot_min ?? 0).div(60).toDecimalPlaces(2);
 
+      // Year-to-date from every LOCKED payslip of this fiscal year, including other runs of the same period (a locked
+      // regular run before a supplementary one). Only locked runs count: an unlocked run may still be recomputed.
       const ytd = await client.query<{ taxable: string; tds: string; ee: string; er: string; festival: boolean; gross: string }>(
-        `SELECT coalesce(sum(ps.taxable), 0)::text AS taxable, coalesce(sum(ps.tds), 0)::text AS tds, coalesce(sum(ps.employee_statutory), 0)::text AS ee,
+        `SELECT coalesce(sum(ps.taxable), 0)::text AS taxable, coalesce(sum(ps.tds), 0)::text AS tds,
+                coalesce((SELECT sum(l.amount) FROM payslip_line l WHERE l.payslip_id = ANY(array_agg(ps.id)) AND l.component_code IN ('SSF_EE', 'PF_EE', 'CIT')), 0)::text AS ee,
                 coalesce(sum(ps.employer_statutory), 0)::text AS er, coalesce(sum(ps.gross), 0)::text AS gross,
-                bool_or(EXISTS (SELECT 1 FROM payslip_line l WHERE l.payslip_id = ps.id AND l.component_code = 'FESTIVAL')) AS festival
+                coalesce(bool_or(EXISTS (SELECT 1 FROM payslip_line l WHERE l.payslip_id = ps.id AND l.component_code = 'FESTIVAL')), false) AS festival
            FROM payslip ps JOIN payroll_run r ON r.id = ps.run_id JOIN payroll_period pp ON pp.id = r.period_id
-          WHERE ps.employee_id = $1 AND r.locked_at IS NOT NULL AND r.id <> $4 AND pp.start_ad >= $2 AND pp.start_ad < $3`, [emp.id, fy.startAd, p.start_ad, runId]);
+          WHERE ps.employee_id = $1 AND r.locked_at IS NOT NULL AND r.id <> $4 AND pp.start_ad >= $2 AND pp.start_ad <= $3`, [emp.id, fy.startAd, p.start_ad, runId]);
       const y = ytd.rows[0]!;
+      // One-off runs have no salary lines, so the annual projection borrows the recurring figures of the latest locked
+      // regular payslip of this fiscal year (plan §11.4 keeps projecting the year).
+      let recurringOverride: { taxable: string; retirement: string } | undefined;
+      if (!carriesSalary) {
+        const ref = await client.query<{ tax: { recurringTaxable?: string; recurringRetirement?: string } | null }>(
+          `SELECT ps.inputs_snapshot->'result'->'tax' AS tax FROM payslip ps JOIN payroll_run r ON r.id = ps.run_id JOIN payroll_period pp ON pp.id = r.period_id
+            WHERE ps.employee_id = $1 AND r.locked_at IS NOT NULL AND r.run_type = 'regular' AND pp.start_ad >= $2 AND pp.start_ad <= $3
+            ORDER BY pp.start_ad DESC, r.locked_at DESC LIMIT 1`, [emp.id, fy.startAd, p.start_ad]);
+        const t = ref.rows[0]?.tax;
+        if (t?.recurringTaxable) recurringOverride = { taxable: t.recurringTaxable, retirement: t.recurringRetirement ?? '0' };
+      }
       const decl = await client.query<{ life_premium: string; health_premium: string; cit_monthly: string; medical_cost: string; other_retirement_annual: string }>(
         `SELECT life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual FROM tax_declaration WHERE employee_id = $1 AND fiscal_year_start = $2 AND status IN ('submitted', 'verified')`, [emp.id, fy.startYear]);
       const dcl = decl.rows[0];
@@ -179,9 +212,12 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
       const inputs = (await client.query<{ component_code: string; amount: string; note: string | null }>('SELECT component_code, amount, note FROM payroll_input WHERE run_id = $1 AND employee_id = $2', [runId, emp.id])).rows
         .map((i) => ({ code: i.component_code, amount: i.amount, ...(i.note ? { note: i.note } : {}) }));
 
-      const isFinal = run.run_type === 'final_settlement';
+      // Festival allowance proration (Sec 37(3)): months of service inside the fiscal year, bounded by join and exit dates.
+      const serviceFrom = emp.join_date && emp.join_date > fy.startAd ? emp.join_date : fy.startAd;
+      const serviceTo = emp.exit_date && emp.exit_date < fy.endAd ? emp.exit_date : fy.endAd;
       const extras: NonNullable<PayrollInput['extras']> = {
-        monthsOfServiceInFy: emp.join_date && emp.join_date > fy.startAd ? Math.min(12, Math.max(1, monthsBetween(emp.join_date, fy.endAd))) : 12,
+        monthsOfServiceInFy: serviceFrom === fy.startAd && serviceTo === fy.endAd ? 12 : Math.min(12, Math.max(1, monthsBetween(serviceFrom, serviceTo))),
+        ...(recurringOverride ? { recurringOverride } : {}),
       };
       if (isFinal) {
         const enc = await client.query<{ days: string }>(
@@ -194,43 +230,47 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
           inputs.push(D(run.params.noticePay).gt(0) ? { code: 'NOTICE_PAY', amount: D(run.params.noticePay).toFixed(2) } : { code: 'NOTICE_DEDUCTION', amount: D(run.params.noticePay).abs().toFixed(2) });
         }
       }
-      const baseAmounts = ['regular', 'final_settlement', 'off_cycle', 'supplementary'].includes(run.run_type) ? emp.assignment.base_amounts : {};
+      const baseAmounts = carriesSalary ? emp.assignment.base_amounts : {};
       const input: PayrollInput = {
         employee: { id: emp.id, code: emp.emp_code, nameEn: emp.name_en, nameNe: emp.name_ne, gender: emp.gender, maritalStatus: emp.marital_status, isResident: emp.is_resident, regime: emp.regime,
           remoteAreaClass: emp.remote_area_class, disability: emp.disability, otEligible: emp.ot_eligible, festivalMonth: emp.festival_month },
         period: { bsYear: p.bs_year, bsMonth: p.bs_month, daysInMonth: p.days, fiscalYearStart: fy.startYear, monthIndexInFy },
         components, baseAmounts, inputs,
-        attendance: { paidDays: paidDays.toFixed(2), lopDays: lop.toFixed(2), otHours: run.run_type === 'regular' ? otHours.toFixed(2) : '0' },
+        attendance: carriesSalary ? { paidDays: paidDays.toFixed(2), lopDays: lop.toFixed(2), otHours: run.run_type === 'regular' ? otHours.toFixed(2) : '0' }
+          : { paidDays: String(p.days), lopDays: '0', otHours: '0' },
         ytd: { taxable: y.taxable, tdsPaid: y.tds, retirementEmployee: y.ee, retirementEmployer: y.er, festivalPaid: Boolean(y.festival) },
         declaration: { lifePremium: dcl?.life_premium ?? '0', healthPremium: dcl?.health_premium ?? '0', citMonthly: dcl?.cit_monthly ?? '0', medicalCost: dcl?.medical_cost ?? '0', otherRetirementAnnual: dcl?.other_retirement_annual ?? '0' },
         loans: run.run_type === 'regular' || isFinal ? loanInputs : [], rules, policy, extras,
       };
+      if (!carriesSalary && run.run_type !== 'arrears' && run.run_type !== 'bonus' && inputs.length === 0) continue; // nothing to pay in a one-off run
       if (run.run_type === 'arrears') {
         const ref = await referencedGross(client, run.references_run_id!, emp.id);
         if (!ref) continue;
         // Recompute the referenced period as if the current assignment had applied then (same attendance, same one-time inputs).
-        const asIf = computePayslip({ ...input, baseAmounts: emp.assignment.base_amounts, inputs: ref.inputs, loans: [], attendance: ref.attendance, ytd: ref.ytd });
+        const { recurringOverride: _ro, ...asIfExtras } = extras;
+        const asIf = computePayslip({ ...input, extras: asIfExtras, baseAmounts: emp.assignment.base_amounts, inputs: ref.inputs, loans: [], attendance: ref.attendance, ytd: ref.ytd });
         // Compare earnings before the net-rounding adjustment so paisa differences are not lost.
         const asIfGross = asIf.lines.filter((l) => l.type === 'earning' && l.code !== 'ROUNDING').reduce((a, l) => a.plus(l.amount), D(0));
         const diff = asIfGross.minus(ref.gross);
         if (!diff.gt(0)) continue;
         input.inputs = [{ code: 'ARREARS', amount: diff.toFixed(2), note: `difference vs run ${run.references_run_id}` }];
-        input.attendance = { paidDays: String(p.days), lopDays: '0', otHours: '0' };
       }
       if (run.run_type === 'bonus') {
         const bonus = (run.params.bonusByEmployee as Record<string, string> | undefined)?.[emp.id];
         if (!bonus || !D(bonus).gt(0)) continue;
         input.inputs = [{ code: 'BONUS', amount: D(bonus).toFixed(2), note: 'Bonus Act 2030' }];
-        input.attendance = { paidDays: String(p.days), lopDays: '0', otHours: '0' };
       }
       const result = computePayslip(input);
       const flags = [...result.flags];
       const prevNet = prev.get(emp.id);
-      if (prevNet === undefined) flags.push('FirstPayslip');
-      else if (D(prevNet).gt(0) && D(result.net).minus(prevNet).abs().div(prevNet).gt('0.10')) flags.push('NetChangedOver10Pct');
-      if (paidDays.lte(0)) flags.push('ZeroAttendance');
+      if (run.run_type === 'regular') {
+        if (prevNet === undefined) flags.push('FirstPayslip');
+        else if (D(prevNet).gt(0) && D(result.net).minus(prevNet).abs().div(prevNet).gt('0.10')) flags.push('NetChangedOver10Pct');
+        if (paidDays.lte(0)) flags.push('ZeroAttendance');
+        if (otHours.gt(20)) flags.push('HighOvertime');
+      }
+      if (!carriesSalary && !recurringOverride) flags.push('NoRecurringReference');
       if (emp.exit_date && emp.exit_date <= p.end_ad) flags.push('LastMonth');
-      if (otHours.gt(20)) flags.push('HighOvertime');
       const ps = await client.query<{ id: string }>(
         `INSERT INTO payslip (run_id, employee_id, inputs_snapshot, rule_version_ids, bs_days_in_month, paid_days, lop_days, ot_hours, gross, taxable, tds, employee_statutory, employer_statutory, total_deductions, net, ytd, explain, flags)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING id`,
@@ -292,16 +332,32 @@ export async function reviewRun(db: Db, companyId: string, runId: string, actorI
   await audit(db, { actorId, action: 'review', table: 'payroll_run', rowId: runId });
 }
 
-export async function approveRun(db: Db, companyId: string, runId: string, checker: { id: string; roles: string[] }): Promise<string> {
+export interface ApprovalResult { signature: string; approved: boolean; pendingSecondApproval: boolean }
+
+/**
+ * Checker approval (plan §11.8, §12.4): a finance user other than the maker signs. Above payroll.policy.twoApproverThreshold
+ * (total net) a second, different finance approver is required before the run becomes approved.
+ */
+export async function approveRun(db: Db, companyId: string, runId: string, checker: { id: string; roles: string[] }): Promise<ApprovalResult> {
   const run = await getRun(db, companyId, runId);
   if (run.status !== 'reviewed') throw new ConflictError(`run is ${run.status}; it must be reviewed by the maker first`);
   if (run.maker_id === checker.id) throw new ForbiddenError('the maker cannot approve their own run (maker-checker)');
   if (!checker.roles.includes('finance') && !checker.roles.includes('admin')) throw new ForbiddenError('approval requires the finance role');
+  const policy = await payrollPolicy(db, companyId);
+  const totalNet = D((run.totals?.net as string | undefined) ?? '0');
+  const needsTwo = totalNet.gt(policy.twoApproverThreshold);
+  const first = run.params.firstApproval as { checkerId: string; signature: string; at: string } | undefined;
   const payload = JSON.stringify({ runId, totals: run.totals, checkerId: checker.id, at: new Date().toISOString() });
   const signature = `sha256:${createHash('sha256').update(payload).digest('hex')}`;
+  if (needsTwo && !first) {
+    await db.query(`UPDATE payroll_run SET params = params || $2::jsonb WHERE id = $1`, [runId, JSON.stringify({ firstApproval: { checkerId: checker.id, signature, at: new Date().toISOString() } })]);
+    await audit(db, { actorId: checker.id, action: 'approve_first', table: 'payroll_run', rowId: runId, after: { signature, payload, threshold: policy.twoApproverThreshold } });
+    return { signature, approved: false, pendingSecondApproval: true };
+  }
+  if (needsTwo && first && first.checkerId === checker.id) throw new ConflictError('a second, different finance approver is required above the two-approver threshold');
   await db.query(`UPDATE payroll_run SET status = 'approved', approved_at = now(), checker_id = $2, approval_signature = $3 WHERE id = $1`, [runId, checker.id, signature]);
-  await audit(db, { actorId: checker.id, action: 'approve', table: 'payroll_run', rowId: runId, after: { signature, payload } });
-  return signature;
+  await audit(db, { actorId: checker.id, action: 'approve', table: 'payroll_run', rowId: runId, after: { signature, payload, ...(first ? { firstApproval: first } : {}) } });
+  return { signature, approved: true, pendingSecondApproval: false };
 }
 
 export async function lockRun(db: Db, companyId: string, runId: string, actorId: string): Promise<{ attendanceLocked: number }> {
@@ -311,8 +367,18 @@ export async function lockRun(db: Db, companyId: string, runId: string, actorId:
   const client = await db.connect();
   try {
     await client.query('BEGIN');
-    const n = await lockAttendance(client, companyId, p.start_ad, p.end_ad);
-    await client.query(`UPDATE payroll_period SET attendance_locked_at = coalesce(attendance_locked_at, now()) WHERE id = $1`, [p.id]);
+    // A run scoped to specific employees (final settlement, supplementary) locks only their attendance; a regular run locks the period.
+    const only = Array.isArray(run.params.employeeIds) ? (run.params.employeeIds as string[]) : null;
+    let n: number;
+    if (only) {
+      const r = await client.query(
+        `UPDATE attendance_day a SET locked_at = now() FROM v_attendance_latest v
+          WHERE a.id = v.id AND v.employee_id = ANY($1) AND v.local_date BETWEEN $2 AND $3 AND a.locked_at IS NULL`, [only, p.start_ad, p.end_ad]);
+      n = r.rowCount ?? 0;
+    } else {
+      n = await lockAttendance(client, companyId, p.start_ad, p.end_ad);
+      await client.query(`UPDATE payroll_period SET attendance_locked_at = coalesce(attendance_locked_at, now()) WHERE id = $1`, [p.id]);
+    }
     await client.query(`UPDATE payroll_run SET status = 'locked', locked_at = now() WHERE id = $1`, [runId]);
     if (run.run_type === 'regular') {
       await client.query(`UPDATE ot_slip s SET status = 'posted', posted_payslip_id = ps.id FROM payslip ps

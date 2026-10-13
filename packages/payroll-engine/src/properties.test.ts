@@ -37,7 +37,9 @@ describe('payroll engine invariants (plan §11.11)', () => {
       const earn = r.lines.filter((l) => l.type === 'earning').reduce((a, l) => a.plus(l.amount), D(0));
       const ded = r.lines.filter((l) => l.type === 'deduction').reduce((a, l) => a.plus(l.amount), D(0));
       expect(earn.minus(ded).toFixed(2)).toBe(r.net);
-      expect(D(r.gross).gte(r.net)).toBe(true);
+      // Net may exceed gross only by the half-rupee rounding adjustment when there are no deductions.
+      expect(D(r.gross).plus('0.5').gte(r.net)).toBe(true);
+      expect(D(r.gross).minus(r.totalDeductions).minus(r.net).abs().lte('0.5')).toBe(true);
       expect(D(r.net).gte(0)).toBe(true);
       expect(r.lines.every((l) => D(l.amount).gte(0))).toBe(true);
     }), { numRuns: 300 });

@@ -55,7 +55,8 @@ function ruleLookup(rules: PayrollInput['rules']): EvalEnv['rule'] {
     let v: unknown = rules[key];
     if (v === undefined) throw new FormulaError(`unknown rule ${key}`);
     if (path) for (const seg of path.split('.')) { v = (v as Record<string, unknown>)?.[seg]; if (v === undefined) throw new FormulaError(`rule ${key} has no ${path}`); }
-    if (typeof v === 'number' || typeof v === 'string') { const d = new Decimal(v); if (!d.isNaN()) return d; return String(v); }
+    if (typeof v === 'number') return new Decimal(v);
+    if (typeof v === 'string') { try { const d = new Decimal(v); return d.isNaN() ? v : d; } catch { return v; } }
     if (typeof v === 'boolean') return v;
     throw new FormulaError(`rule ${key}${path ? '.' + path : ''} is not a value`);
   };
@@ -87,8 +88,11 @@ export function computePayslip(input: PayrollInput): PayrollResult {
   const evalNum = (src: string, code: string): Decimal => {
     const v = evaluateFormula(src, env);
     if (!(v instanceof Decimal)) throw new PayrollError(`${code}: formula must produce a number`);
+    if (!v.isFinite()) throw new PayrollError(`${code}: formula produced a non-finite amount`);
     return v;
   };
+  /** Pre-proration amount of every evaluated component (zero amounts included), for the recurring-income projection. */
+  const unprorated = new Map<string, Decimal>();
   const roundLine = (c: ComponentDef, v: Decimal): Decimal =>
     c.rounding === 'rupee' || (policy.rounding === 'half_up_rupee' && (c.statutory || c.code === 'TDS')) ? rupee(v) : paisa(v);
 
@@ -143,16 +147,27 @@ export function computePayslip(input: PayrollInput): PayrollResult {
       }
       case 'TDS': {
         const monthTaxable = amounts.get('TAXABLE') ?? ZERO;
-        const recurring = sum(lines.filter((l) => ((l.type === 'earning' && l.taxable) || (policy.includeEmployerContributionInIncome && l.type === 'employer_contribution' && l.taxable))
-          && !ONE_OFF.has(l.code) && !fromInputs.has(l.code)).map((l) => l.amount));
+        // Recurring monthly income for the annual projection (plan §11.4): the full-month (pre-proration) amount of
+        // every recurring taxable earning, less any one-time input part, plus the employer retirement contribution on
+        // the full basic when policy counts it as income. A formula that references an already prorated line stays
+        // prorated; the true-up in later months corrects any residual.
+        const recurringEarnings = sum(input.components
+          .filter((c) => c.type === 'earning' && c.taxable && !ONE_OFF.has(c.code))
+          .map((c) => max0((unprorated.get(c.code) ?? ZERO).minus(inputsFor(c.code)))));
+        const employerRecurring = !policy.includeEmployerContributionInIncome ? ZERO
+          : employee.regime === 'ssf' ? basicFull.times(D(ssf.employer))
+          : employee.regime === 'pf' ? basicFull.times(D(pf.employer).plus(D(pf.gratuity))) : ZERO;
+        const employeeRecurring = employee.regime === 'ssf' ? basicFull.times(D(ssf.employee)) : employee.regime === 'pf' ? basicFull.times(D(pf.employee)) : ZERO;
+        const recurring = extras.recurringOverride ? D(extras.recurringOverride.taxable) : recurringEarnings.plus(employerRecurring);
         const retirement = ['SSF_EE', 'SSF_ER', 'PF_EE', 'PF_ER', 'GRATUITY', 'CIT'].reduce((a, k) => a.plus(amounts.get(k) ?? ZERO), ZERO);
+        const recurringRetirement = extras.recurringOverride ? D(extras.recurringOverride.retirement) : employeeRecurring.plus(employerRecurring).plus(D(declaration.citMonthly));
         const festivalLater = !ytd.festivalPaid && !(amounts.get('FESTIVAL') ?? ZERO).gt(0) && monthIndexOf(festivalMonth) > period.monthIndexInFy && !extras.isFinalSettlement
           ? basicFull.times(D(rules['festival.allowance'].months)) : ZERO;
         tax = computeTds({
           schedule: rules['tax.schedule'], deductions: rules['tax.deductions'], regime: employee.regime, isResident: employee.isResident, gender: employee.gender,
-          maritalStatus: employee.maritalStatus, remoteAreaClass: employee.remoteAreaClass, disability: employee.disability,
+          maritalStatus: employee.maritalStatus, remoteAreaClass: employee.remoteAreaClass, disability: employee.disability, remunerationOnlyIncome: employee.remunerationOnlyIncome ?? true,
           monthTaxable, recurringTaxable: recurring, futureOneOffs: festivalLater, ytdTaxable: D(ytd.taxable), ytdTdsPaid: D(ytd.tdsPaid),
-          monthRetirement: retirement, recurringRetirement: retirement, ytdRetirement: D(ytd.retirementEmployee).plus(D(ytd.retirementEmployer)),
+          monthRetirement: retirement, recurringRetirement, ytdRetirement: D(ytd.retirementEmployee).plus(D(ytd.retirementEmployer)),
           otherRetirementAnnual: D(declaration.otherRetirementAnnual), lifePremium: D(declaration.lifePremium), healthPremium: D(declaration.healthPremium),
           medicalCost: D(declaration.medicalCost), monthIndexInFy: period.monthIndexInFy, deductFullTaxNow: Boolean(extras.deductFullTaxNow), isFinalSettlement: Boolean(extras.isFinalSettlement),
         });
@@ -202,6 +217,7 @@ export function computePayslip(input: PayrollInput): PayrollResult {
         basis = { base: b.toFixed(2), inputs: i.toFixed(2) };
         text = i.isZero() ? `${c.nameEn} ${b.toFixed(2)}` : `${c.nameEn} ${b.toFixed(2)} + one-time ${i.toFixed(2)}`;
       }
+      unprorated.set(c.code, amount);
       if (c.dependsOnPaymentDays && !fraction.eq(1)) {
         const before = amount;
         amount = amount.times(fraction);
@@ -209,18 +225,28 @@ export function computePayslip(input: PayrollInput): PayrollResult {
         text = `${before.toFixed(2)} × ${paidDays.toFixed(2)}/${policy.prorationBasis === 'bs_calendar_days' ? period.daysInMonth : policy.prorationBasis === 'fixed_30' ? 30 : 26} paid days = ${paisa(amount.times(1)).toFixed(2)}`;
       }
       if (amount.isNegative() && c.type !== 'statistical') { flags.push(`NegativeAmount:${c.code}`); amount = ZERO; }
-      push(c, roundLine(c, amount), basis, text);
+      if (!amount.isFinite()) throw new PayrollError(`${c.code}: amount is not finite`);
+      amount = roundLine(c, amount);
+      // Withholding cannot exceed the pay it is withheld from: TDS (Sec 87 applies to amounts paid) and the Sec 38
+      // (c)-(i) deductions are capped at the pay remaining after the statutory shares, so net never goes below zero.
+      // A capped TDS is caught by the true-up in later months (only what was actually withheld counts as YTD TDS).
+      if (c.type === 'deduction' && p >= 4 && c.code !== 'LOAN') {
+        const available = max0(sum(lines.filter((l) => l.type === 'earning').map((l) => l.amount)).minus(sum(lines.filter((l) => l.type === 'deduction').map((l) => l.amount))));
+        if (amount.gt(available)) { flags.push(c.code === 'TDS' ? 'TdsCapped' : `DeductionCapped:${c.code}`); basis = { ...basis, capped: { requested: amount.toFixed(2), available: available.toFixed(2) } }; amount = available; }
+      }
+      push(c, amount, basis, text);
     }
   }
 
-  // Totals and the rounding line that keeps Σ lines = net (plan §11.7).
-  const earnings = () => sum(lines.filter((l) => l.type === 'earning').map((l) => l.amount));
-  const deductions = () => sum(lines.filter((l) => l.type === 'deduction').map((l) => l.amount));
-  let net = earnings().minus(deductions());
-  if (policy.rounding === 'half_up_rupee' && !net.eq(rupee(net))) {
-    const diff = rupee(net).minus(net);
-    lines.push({ code: 'ROUNDING', type: diff.gt(0) ? 'earning' : 'deduction', nameEn: 'Rounding', nameNe: 'पूर्णाङ्कन', amount: diff.abs().toFixed(2), taxable: false, basis: {}, sortOrder: 9999 });
-    net = earnings().minus(deductions());
+  // Totals (plan §11.7): gross and total deductions exclude the rounding adjustment; the ROUNDING line only exists so
+  // that Σ earning lines − Σ deduction lines equals the whole-rupee net.
+  const grossTotal = sum(lines.filter((l) => l.type === 'earning').map((l) => l.amount));
+  const deductionTotal = sum(lines.filter((l) => l.type === 'deduction').map((l) => l.amount));
+  const exact = grossTotal.minus(deductionTotal);
+  const net = policy.rounding === 'half_up_rupee' ? rupee(exact) : exact;
+  if (!net.eq(exact)) {
+    const diff = net.minus(exact);
+    lines.push({ code: 'ROUNDING', type: diff.gt(0) ? 'earning' : 'deduction', nameEn: 'Rounding', nameNe: 'पूर्णाङ्कन', amount: diff.abs().toFixed(2), taxable: false, basis: { exactNet: exact.toFixed(2) }, sortOrder: 9999 });
   }
   if (net.isNegative()) flags.push('NegativeNet');
 
@@ -235,15 +261,15 @@ export function computePayslip(input: PayrollInput): PayrollResult {
 
   if (!tax) {
     tax = computeTds({ schedule: rules['tax.schedule'], deductions: rules['tax.deductions'], regime: employee.regime, isResident: employee.isResident, gender: employee.gender,
-      maritalStatus: employee.maritalStatus, remoteAreaClass: employee.remoteAreaClass, disability: employee.disability, monthTaxable: ZERO, recurringTaxable: ZERO, futureOneOffs: ZERO,
+      maritalStatus: employee.maritalStatus, remoteAreaClass: employee.remoteAreaClass, disability: employee.disability, remunerationOnlyIncome: employee.remunerationOnlyIncome ?? true, monthTaxable: ZERO, recurringTaxable: ZERO, futureOneOffs: ZERO,
       ytdTaxable: ZERO, ytdTdsPaid: ZERO, monthRetirement: ZERO, recurringRetirement: ZERO, ytdRetirement: ZERO, otherRetirementAnnual: ZERO, lifePremium: ZERO, healthPremium: ZERO,
       medicalCost: ZERO, monthIndexInFy: period.monthIndexInFy, deductFullTaxNow: false, isFinalSettlement: false });
   }
 
   lines.sort((a, b) => a.sortOrder - b.sortOrder || a.code.localeCompare(b.code));
   return {
-    lines, gross: paisa(earnings()).toFixed(2), taxable: paisa(amounts.get('TAXABLE') ?? ZERO).toFixed(2), tds: paisa(amounts.get('TDS') ?? ZERO).toFixed(2),
-    employeeStatutory: paisa(employeeStatutory).toFixed(2), employerStatutory: paisa(employerStatutory).toFixed(2), totalDeductions: paisa(deductions()).toFixed(2),
+    lines, gross: paisa(grossTotal).toFixed(2), taxable: paisa(amounts.get('TAXABLE') ?? ZERO).toFixed(2), tds: paisa(amounts.get('TDS') ?? ZERO).toFixed(2),
+    employeeStatutory: paisa(employeeStatutory).toFixed(2), employerStatutory: paisa(employerStatutory).toFixed(2), totalDeductions: paisa(deductionTotal).toFixed(2),
     net: paisa(net).toFixed(2), paidDays: paidDays.toFixed(2), lopDays: lopDays.toFixed(2), otHours: otHours.toFixed(2), payableFraction: fraction.toFixed(6),
     tax, ssfAllocation, loanInstallments, explain, flags: [...new Set(flags)],
   };

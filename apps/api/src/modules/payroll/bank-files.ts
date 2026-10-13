@@ -11,7 +11,14 @@ export function buildBankFile(bankCode: string, rows: BankRow[], period: string)
   const errors: string[] = [];
   for (const r of rows) {
     if (!r.account) errors.push(`${r.empCode}: no bank account on file`);
-    if (!D(r.amount).gt(0)) errors.push(`${r.empCode}: amount must be positive`);
+    else if (!/^[A-Za-z0-9-]{4,34}$/.test(r.account)) errors.push(`${r.empCode}: bank account must be 4-34 letters/digits`);
+    if (!/^-?\d+(\.\d{1,2})?$/.test(r.amount) || !D(r.amount).gt(0)) errors.push(`${r.empCode}: amount must be a positive amount with at most 2 decimals`);
+    if (D(r.amount).gte('10000000000')) errors.push(`${r.empCode}: amount exceeds the bank file limit`);
+    if (!ascii(r.name)) errors.push(`${r.empCode}: name has no printable ASCII characters (fill name_en)`);
+    if (/[\t\r\n]/.test(r.branch)) errors.push(`${r.empCode}: branch contains control characters`);
+    if (bankCode === 'EVEREST' && r.account.length > 14) errors.push(`${r.empCode}: Everest account field is 14 characters (got ${r.account.length})`);
+    if (bankCode === 'NABIL' && ascii(r.name).length > 50) errors.push(`${r.empCode}: Nabil name field is 50 characters; shorten name_en`);
+    if ((bankCode === 'NMB' || bankCode === 'EVEREST') && !/^\d{1,4}$/.test(r.branch)) errors.push(`${r.empCode}: branch code must be 1-4 digits for ${bankCode}`);
   }
   const amt = (a: string) => D(a).toFixed(2);
   switch (bankCode) {

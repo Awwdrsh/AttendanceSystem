@@ -54,9 +54,18 @@ export function tokenize(src: string): Tok[] {
   return out;
 }
 
+/** Nesting limit so hostile formulas cannot exhaust the stack. */
+export const MAX_DEPTH = 64;
+export const MAX_FORMULA_LENGTH = 2000;
+
 export function parseFormula(src: string): Ast {
+  if (typeof src !== 'string') throw new FormulaError('formula must be a string');
+  if (src.length > MAX_FORMULA_LENGTH) throw new FormulaError(`formula longer than ${MAX_FORMULA_LENGTH} characters`);
   const toks = tokenize(src);
   let p = 0;
+  let depth = 0;
+  const enter = (): void => { if (++depth > MAX_DEPTH) throw new FormulaError('expression nested too deeply'); };
+  const leave = (): void => { depth--; };
   const peek = () => toks[p]!;
   const next = () => toks[p++]!;
   const isOp = (v: string) => { const t = peek(); return t.k === 'op' && t.v === v; };
@@ -65,7 +74,7 @@ export function parseFormula(src: string): Ast {
 
   const orExpr = (): Ast => { let l = andExpr(); while (isId('or')) { next(); l = { t: 'bin', op: 'or', l, r: andExpr() }; } return l; };
   const andExpr = (): Ast => { let l = notExpr(); while (isId('and')) { next(); l = { t: 'bin', op: 'and', l, r: notExpr() }; } return l; };
-  const notExpr = (): Ast => { if (isId('not')) { next(); return { t: 'un', op: 'not', e: notExpr() }; } return cmpExpr(); };
+  const notExpr = (): Ast => { if (isId('not')) { next(); enter(); const e = notExpr(); leave(); return { t: 'un', op: 'not', e }; } return cmpExpr(); };
   const cmpExpr = (): Ast => {
     let l = addExpr();
     while (['<', '<=', '>', '>=', '==', '!='].some(isOp)) { const op = (next() as { v: string }).v; l = { t: 'bin', op, l, r: addExpr() }; }
@@ -73,18 +82,20 @@ export function parseFormula(src: string): Ast {
   };
   const addExpr = (): Ast => { let l = mulExpr(); while (isOp('+') || isOp('-')) { const op = (next() as { v: string }).v; l = { t: 'bin', op, l, r: mulExpr() }; } return l; };
   const mulExpr = (): Ast => { let l = unary(); while (isOp('*') || isOp('/')) { const op = (next() as { v: string }).v; l = { t: 'bin', op, l, r: unary() }; } return l; };
-  const unary = (): Ast => { if (isOp('-')) { next(); return { t: 'un', op: '-', e: unary() }; } return primary(); };
+  const unary = (): Ast => { if (isOp('-')) { next(); enter(); const e = unary(); leave(); return { t: 'un', op: '-', e }; } return primary(); };
   const primary = (): Ast => {
     const t = next();
     if (t.k === 'num') return { t: 'num', v: t.v };
     if (t.k === 'str') return { t: 'str', v: t.v };
-    if (t.k === 'lp') { const e = orExpr(); expect('rp'); return e; }
+    if (t.k === 'lp') { enter(); const e = orExpr(); leave(); expect('rp'); return e; }
     if (t.k === 'id') {
       if (t.v === 'true' || t.v === 'false') return { t: 'id', name: t.v };
       if (peek().k === 'lp') {
         next();
+        enter();
         const args: Ast[] = [];
         if (peek().k !== 'rp') { args.push(orExpr()); while (peek().k === 'comma') { next(); args.push(orExpr()); } }
+        leave();
         expect('rp');
         return { t: 'call', name: t.v, args };
       }
@@ -125,8 +136,11 @@ export function evaluateAst(ast: Ast, env: EvalEnv): Value {
     case 'id': {
       if (ast.name === 'true') return true;
       if (ast.name === 'false') return false;
-      if (!(ast.name in env.vars)) throw new FormulaError(`unknown identifier ${ast.name}`);
-      return env.vars[ast.name]!;
+      // Own properties only: 'constructor', '__proto__' and friends are not variables.
+      if (!Object.hasOwn(env.vars, ast.name)) throw new FormulaError(`unknown identifier ${ast.name}`);
+      const v = env.vars[ast.name]!;
+      if (!(v instanceof Decimal) && typeof v !== 'boolean' && typeof v !== 'string') throw new FormulaError(`identifier ${ast.name} is not a value`);
+      return v;
     }
     case 'un': {
       const v = evaluateAst(ast.e, env);
@@ -164,7 +178,11 @@ export function evaluateAst(ast: Ast, env: EvalEnv): Value {
       switch (ast.name) {
         case 'min': return Decimal.min(...args);
         case 'max': return Decimal.max(...args);
-        case 'round': return args[0]!.toDecimalPlaces(args[1] ? args[1].toNumber() : 0, Decimal.ROUND_HALF_UP);
+        case 'round': {
+          const dp = args[1] ? args[1] : D(0);
+          if (!dp.isInteger() || dp.lt(0) || dp.gt(10)) throw new FormulaError('round() decimal places must be an integer between 0 and 10');
+          return args[0]!.toDecimalPlaces(dp.toNumber(), Decimal.ROUND_HALF_UP);
+        }
         case 'floor': return args[0]!.floor();
         case 'ceil': return args[0]!.ceil();
         case 'abs': return args[0]!.abs();
@@ -174,20 +192,30 @@ export function evaluateAst(ast: Ast, env: EvalEnv): Value {
   }
 }
 
+/** Any failure (parse, type, arithmetic, Decimal range) surfaces as a FormulaError; nothing else escapes. */
 export function evaluateFormula(src: string, env: EvalEnv): Value {
-  return evaluateAst(parseFormula(src), env);
+  try {
+    const v = evaluateAst(parseFormula(src), env);
+    if (v instanceof Decimal && !v.isFinite()) throw new FormulaError('result is not a finite number');
+    return v;
+  } catch (e) {
+    if (e instanceof FormulaError) throw e;
+    throw new FormulaError(`formula error: ${(e as Error).message}`);
+  }
 }
 
 /** Identifiers referenced by a formula (component codes and variables), excluding keywords. */
 export function formulaReferences(src: string): Set<string> {
   const refs = new Set<string>();
+  let ast: Ast;
+  try { ast = parseFormula(src); } catch (e) { if (e instanceof FormulaError) throw e; throw new FormulaError(`formula error: ${(e as Error).message}`); }
   const walk = (a: Ast): void => {
     if (a.t === 'id') { if (!['true', 'false'].includes(a.name)) refs.add(a.name); }
     else if (a.t === 'bin') { walk(a.l); walk(a.r); }
     else if (a.t === 'un') walk(a.e);
     else if (a.t === 'call') a.args.forEach(walk);
   };
-  walk(parseFormula(src));
+  walk(ast);
   return refs;
 }
 

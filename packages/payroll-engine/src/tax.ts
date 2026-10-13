@@ -8,6 +8,8 @@ export interface TaxInput {
   isResident: boolean;
   gender: 'male' | 'female' | 'other' | null;
   maritalStatus: 'single' | 'couple' | null;
+  /** Remuneration is the only income (female rebate condition, plan §6.6). */
+  remunerationOnlyIncome: boolean;
   remoteAreaClass: 'A' | 'B' | 'C' | 'D' | null;
   disability: boolean;
   /** Taxable pay in this month (earnings + employer retirement contribution if policy includes it). */
@@ -65,7 +67,11 @@ export function computeTds(t: TaxInput): TaxDetail {
       const ceiling = b.upTo === null ? null : D(b.upTo);
       const width = ceiling === null ? taxableAfter.minus(lower) : ceiling.minus(lower);
       const slice = Decimal.max(0, Decimal.min(taxableAfter.minus(lower), width));
-      const waived = Boolean(b.sst) && (t.regime === 'ssf' || t.regime === 'pf');
+      // SST (1% band) is waived for contributors to the SSF or to an approved retirement fund (plan §6.6). The Labour
+      // Act Sec 52 provident fund and the Citizen Investment Trust are approved retirement funds, so the waiver also
+      // applies to the pf regime and to anyone with retirement contributions in the year; regime 'none' with no
+      // contributions pays the 1%. Confirm with the CA (plan Gap G-1).
+      const waived = Boolean(b.sst) && (t.regime === 'ssf' || t.regime === 'pf' || annualRetirement.gt(0));
       const tax = waived ? ZERO : slice.times(D(b.rate));
       applied.push({ upTo: b.upTo, rate: b.rate, slice: slice.toFixed(2), tax: tax.toFixed(2), waived });
       gross = gross.plus(tax);
@@ -74,15 +80,17 @@ export function computeTds(t: TaxInput): TaxDetail {
     }
   }
 
-  const femaleRebate = t.isResident && t.gender === 'female' && t.maritalStatus !== 'couple' ? gross.times(D(d.femaleRebate)) : ZERO;
-  const medicalCredit = Decimal.min(t.medicalCost.times(D(d.medicalCreditRate)), D(d.medicalCreditCap));
+  // Female rebate: resident woman, filing individually, remuneration as sole income (plan §6.6).
+  const femaleRebate = t.isResident && t.gender === 'female' && t.maritalStatus !== 'couple' && t.remunerationOnlyIncome ? gross.times(D(d.femaleRebate)) : ZERO;
+  // Non-residents pay the flat rate on gross remuneration without deductions or credits.
+  const medicalCredit = t.isResident ? Decimal.min(t.medicalCost.times(D(d.medicalCreditRate)), D(d.medicalCreditCap)) : ZERO;
   const annualTax = max0(gross.minus(femaleRebate).minus(medicalCredit));
   const due = max0(annualTax.minus(t.ytdTdsPaid));
   const tdsThisMonth = rupee(t.deductFullTaxNow || t.isFinalSettlement ? due : due.div(remainingMonths));
 
   return {
     fiscalYearStart: t.schedule.fiscalYearStart, status,
-    monthTaxable: paisa(t.monthTaxable).toFixed(2), recurringTaxable: paisa(t.recurringTaxable).toFixed(2),
+    monthTaxable: paisa(t.monthTaxable).toFixed(2), recurringTaxable: paisa(t.recurringTaxable).toFixed(2), recurringRetirement: paisa(t.recurringRetirement).toFixed(2),
     projectedAnnualTaxable: paisa(projected).toFixed(2), retirementDeduction: paisa(retirementDeduction).toFixed(2),
     insuranceDeduction: paisa(insurance).toFixed(2), remoteAreaDeduction: remote.toFixed(2), disabilityDeduction: paisa(disability).toFixed(2),
     taxableAfterDeductions: paisa(taxableAfter).toFixed(2), bands: applied, grossTax: paisa(gross).toFixed(2),

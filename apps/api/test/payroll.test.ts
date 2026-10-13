@@ -120,7 +120,7 @@ describe('payroll run lifecycle (Bhadra 2083)', () => {
     const sita = run.body.payslips.find((p: { employee_id: string }) => p.employee_id === DEMO.sita);
     const ram = run.body.payslips.find((p: { employee_id: string }) => p.employee_id === DEMO.ram);
     // Sita: 3 absent days of 31 → BASIC 40,000 × 28/31 = 36,129.03; ALLOWANCE 18,064.52; BONUS 5,000; SSF 11% of 36,129.03 = 3,974.19 → 3,974.
-    expect(sita).toMatchObject({ paid_days: '28.00', lop_days: '3.00', gross: '59194.00', employee_statutory: '3974.00' }); // gross includes the +0.45 rounding line that makes net a whole rupee
+    expect(sita).toMatchObject({ paid_days: '28.00', lop_days: '3.00', gross: '59193.55', employee_statutory: '3974.00' }); // gross excludes the rounding adjustment
     const detail = await request(app).get(P(`/payslips/${sita.id}`)).set(auth(hr));
     const line = (code: string) => detail.body.lines.find((l: { code: string }) => l.code === code)?.amount;
     expect(line('BASIC')).toBe('36129.03');
@@ -150,6 +150,7 @@ describe('payroll run lifecycle (Bhadra 2083)', () => {
     expect((await request(app).post(P(`/runs/${runId}/approve`)).set(auth(makerFinance.token))).status).toBe(403);
     const ap = await request(app).post(P(`/runs/${runId}/approve`)).set(auth(finance));
     expect(ap.status).toBe(200);
+    expect(ap.body).toMatchObject({ approved: true, pendingSecondApproval: false });
     expect(ap.body.signature).toMatch(/^sha256:[0-9a-f]{64}$/);
     const lock = await request(app).post(P(`/runs/${runId}/lock`)).set(auth(hr));
     expect(lock.status).toBe(200);
@@ -214,6 +215,17 @@ describe('payroll run lifecycle (Bhadra 2083)', () => {
     const c = await request(app).post(P(`/runs/${sup.body.id}/compute`)).set(auth(hr));
     expect(c.status).toBe(200);
     expect(c.body.payslips).toBe(1);
+    // A supplementary run pays the one-time line only: no salary, no SSF, no loan; its projection reuses the regular run's recurring figures.
+    const sr = await request(app).get(P(`/runs/${sup.body.id}`)).set(auth(hr));
+    const sd = await request(app).get(P(`/payslips/${sr.body.payslips[0].id}`)).set(auth(hr));
+    const codes = sd.body.lines.map((l: { code: string }) => l.code);
+    expect(codes).toContain('ARREARS');
+    expect(codes).not.toContain('BASIC');
+    expect(codes).not.toContain('SSF_EE');
+    expect(codes).not.toContain('LOAN');
+    expect(sd.body.payslip.gross).toBe('1500.00');
+    expect(sd.body.tax.recurringTaxable).toBe('68000.00');   // full-month 40,000 + 20,000 + employer SSF 8,000, borrowed from the locked regular payslip
+    expect(sr.body.payslips[0].flags).not.toContain('NoRecurringReference');
   });
   it('arrears run: raised salary effective in the locked period pays the difference', async () => {
     await db.query(`UPDATE salary_assignment SET base_amounts = '{"BASIC":"45000.00","ALLOWANCE":"20000.00"}' WHERE employee_id = $1`, [DEMO.sita]);

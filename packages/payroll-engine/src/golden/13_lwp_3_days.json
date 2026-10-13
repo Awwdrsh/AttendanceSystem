@@ -394,7 +394,7 @@
     }
   },
   "expected": {
-    "gross": "54194.00",
+    "gross": "54193.55",
     "taxable": "61419.55",
     "tds": "0.00",
     "employeeStatutory": "3974.00",

@@ -76,6 +76,8 @@ export interface EmployeeInput {
   otEligible: boolean;
   /** Month (1-12) chosen for the festival allowance (Sec 37(2)); null = Ashwin. */
   festivalMonth: number | null;
+  /** Female rebate applies only when remuneration is the woman's sole income (plan §6.6). Default true. */
+  remunerationOnlyIncome?: boolean;
 }
 
 export interface PeriodInput {
@@ -126,6 +128,11 @@ export interface ExtrasInput {
   deductFullTaxNow?: boolean;
   /** Loan recovery in full at final settlement. */
   recoverLoansInFull?: boolean;
+  /**
+   * For one-off runs (supplementary, arrears, bonus) in a period whose regular run is already locked: the regular
+   * run's recurring monthly figures, so the annual projection stays correct even though this run has no salary lines.
+   */
+  recurringOverride?: { taxable: string; retirement: string };
 }
 
 export interface PayrollInput {
@@ -159,6 +166,7 @@ export interface TaxDetail {
   status: 'single' | 'couple' | 'all' | 'non_resident';
   monthTaxable: string;
   recurringTaxable: string;
+  recurringRetirement: string;
   projectedAnnualTaxable: string;
   retirementDeduction: string;
   insuranceDeduction: string;

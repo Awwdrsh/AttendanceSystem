@@ -6,7 +6,7 @@ import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { isoDate, money } from '../../validation.js';
-import { hasRole, requireRole } from '../auth/middleware.js';
+import { assertManages, hasRole, requireRole } from '../auth/middleware.js';
 import { lockAttendance } from '../attendance/service.js';
 import { buildBankFile, type BankRow } from './bank-files.js';
 import { etdsCsv, etdsRows, journal, journalCsv, ssfSheetCsv } from './exports.js';
@@ -29,7 +29,8 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
         ORDER BY rule_key, valid_from_ad DESC`, [q.key ?? null, q.asOf ?? null]);
     res.json({ rules: rows.rows.map((x) => ({ ...x, locked: STATUTORY_KEYS.has(x.rule_key) })) });
   });
-  r.post('/rules', payrollRole, async (req, res) => {
+  // Rule versions are jurisdiction-wide (not per company), so only an administrator may add them (FY rollover SOP, plan §16.6).
+  r.post('/rules', requireRole('admin'), async (req, res) => {
     const b = z.object({ ruleKey: z.string().min(1).max(60), validFromAd: isoDate, validToAd: isoDate.nullable().optional(), validFromBs: z.string(), validToBs: z.string().nullable().optional(),
       value: z.unknown(), sourceUrl: z.string().url().optional(), note: z.string().max(500).optional(), supersedesId: z.uuid().optional() }).parse(req.body);
     const rows = await db.query<{ id: string }>(
@@ -131,6 +132,8 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     const b = z.object({ employeeId: z.uuid(), structureVersionId: z.uuid(), from: isoDate, baseAmounts: z.record(z.string(), money) }).parse(req.body);
     const emp = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [b.employeeId, cid(req)]);
     if (!emp.rows[0]) throw new NotFoundError('employee not found');
+    const sv = await db.query('SELECT 1 FROM salary_structure_version v JOIN salary_structure s ON s.id = v.structure_id WHERE v.id = $1 AND s.company_id = $2', [b.structureVersionId, cid(req)]);
+    if (!sv.rows[0]) throw new NotFoundError('salary structure version not found');
     const client = await db.connect();
     try {
       await client.query('BEGIN');
@@ -151,8 +154,9 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     const q = z.object({ employeeId: z.uuid().optional(), fiscalYearStart: z.coerce.number().int() }).parse(req.query);
     const employeeId = q.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
+    await assertManages(db, req.user!, employeeId);
     if (employeeId !== req.user!.employeeId && !hasRole(req.user!, 'hr', 'finance')) throw new ForbiddenError();
-    const rows = await db.query('SELECT * FROM tax_declaration WHERE employee_id = $1 AND fiscal_year_start = $2', [employeeId, q.fiscalYearStart]);
+    const rows = await db.query('SELECT d.* FROM tax_declaration d JOIN employee e ON e.id = d.employee_id WHERE d.employee_id = $1 AND d.fiscal_year_start = $2 AND e.company_id = $3', [employeeId, q.fiscalYearStart, cid(req)]);
     res.json({ declaration: rows.rows[0] ?? null });
   });
   r.put('/declarations', async (req, res) => {
@@ -160,6 +164,7 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
       medicalCost: money.default('0'), otherRetirementAnnual: money.default('0'), submit: z.boolean().default(true) }).parse(req.body);
     const employeeId = b.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
+    await assertManages(db, req.user!, employeeId);
     if (employeeId !== req.user!.employeeId && !hasRole(req.user!, 'hr')) throw new ForbiddenError();
     await db.query(
       `INSERT INTO tax_declaration (employee_id, fiscal_year_start, life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, status)
@@ -173,7 +178,9 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
   r.post('/declarations/:employeeId/verify', payrollRole, async (req, res) => {
     const employeeId = z.uuid().parse(req.params.employeeId);
     const b = z.object({ fiscalYearStart: z.number().int(), decision: z.enum(['verified', 'rejected']) }).parse(req.body);
-    const rows = await db.query(`UPDATE tax_declaration SET status = $3, verified_by = $4, verified_at = now() WHERE employee_id = $1 AND fiscal_year_start = $2 RETURNING id`, [employeeId, b.fiscalYearStart, b.decision, req.user!.id]);
+    const rows = await db.query(
+      `UPDATE tax_declaration d SET status = $3, verified_by = $4, verified_at = now() FROM employee e
+        WHERE d.employee_id = e.id AND d.employee_id = $1 AND d.fiscal_year_start = $2 AND e.company_id = $5 RETURNING d.id`, [employeeId, b.fiscalYearStart, b.decision, req.user!.id, cid(req)]);
     if (!rows.rows[0]) throw new NotFoundError('declaration not found');
     await audit(db, { actorId: req.user!.id, action: b.decision, table: 'tax_declaration', rowId: employeeId });
     res.json({ ok: true });
@@ -205,7 +212,12 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
   });
   r.post('/periods', payrollRole, async (req, res) => {
     const b = z.object({ bsYear: z.number().int(), bsMonth: z.number().int().min(1).max(12) }).parse(req.body);
-    res.status(201).json({ period: await ensurePeriod(db, cid(req), b.bsYear, b.bsMonth) });
+    try {
+      res.status(201).json({ period: await ensurePeriod(db, cid(req), b.bsYear, b.bsMonth) });
+    } catch (e) {
+      if (e instanceof RangeError) throw new BadRequestError(`BS ${b.bsYear}-${b.bsMonth} is outside the supported calendar: ${e.message}`);
+      throw e;
+    }
   });
 
   r.get('/runs', payrollRole, async (req, res) => {
@@ -219,11 +231,21 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
       referencesRunId: z.uuid().optional(), employeeIds: z.array(z.uuid()).optional(), noticePay: money.optional(), notes: z.string().max(1000).optional() }).parse(req.body);
     const p = await getPeriod(db, cid(req), b.periodId);
     if (b.runType === 'regular') {
-      const dup = await db.query(`SELECT 1 FROM payroll_run WHERE period_id = $1 AND run_type = 'regular' AND status NOT IN ('preflight_failed') AND locked_at IS NOT NULL`, [p.id]);
-      if (dup.rows[0]) throw new ConflictError('a locked regular run already exists for this period; use a supplementary or arrears run');
+      const dup = await db.query<{ id: string; locked_at: Date | null }>(`SELECT id, locked_at FROM payroll_run WHERE period_id = $1 AND run_type = 'regular' ORDER BY created_at DESC LIMIT 1`, [p.id]);
+      if (dup.rows[0]) {
+        throw new ConflictError(dup.rows[0].locked_at
+          ? 'a locked regular run already exists for this period; use a supplementary or arrears run'
+          : `a regular run already exists for this period (${dup.rows[0].id}); continue that run instead`);
+      }
     }
     if (b.runType === 'arrears' && !b.referencesRunId) throw new BadRequestError('arrears runs need referencesRunId');
-    if (b.runType === 'final_settlement' && !(b.employeeIds?.length === 1)) throw new BadRequestError('final settlement runs need exactly one employeeId');
+    if (b.runType === 'final_settlement') {
+      if (!(b.employeeIds?.length === 1)) throw new BadRequestError('final settlement runs need exactly one employeeId');
+      const ex = await db.query<{ exit_date: string | null }>('SELECT exit_date::text FROM employee WHERE id = $1 AND company_id = $2', [b.employeeIds[0], cid(req)]);
+      if (!ex.rows[0]) throw new NotFoundError('employee not found');
+      if (!ex.rows[0].exit_date) throw new BadRequestError('final settlement needs an exit date on the employee record');
+      if (ex.rows[0].exit_date > p.end_ad) throw new BadRequestError('the exit date is after this period; pick the period containing the exit date');
+    }
     if (b.referencesRunId) { const ref = await getRun(db, cid(req), b.referencesRunId); if (!ref.locked_at) throw new BadRequestError('referenced run must be locked'); }
     const params = { ...(b.employeeIds ? { employeeIds: b.employeeIds } : {}), ...(b.noticePay ? { noticePay: b.noticePay } : {}) };
     const rows = await db.query<{ id: string }>(
@@ -267,34 +289,47 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
   });
   r.post('/runs/:id/inputs', payrollRole, async (req, res) => {
     const run = await getRun(db, cid(req), z.uuid().parse(req.params.id));
-    if (run.locked_at) throw new ConflictError('run is locked');
-    const b = z.object({ inputs: z.array(z.object({ employeeId: z.uuid(), componentCode: z.string(), amount: money, note: z.string().max(200).optional() })).min(1).max(5000) }).parse(req.body);
+    if (!['draft', 'preflight_failed', 'computed', 'reviewed'].includes(run.status)) throw new ConflictError(`run is ${run.status}; inputs can no longer change`);
+    const b = z.object({ inputs: z.array(z.object({ employeeId: z.uuid(), componentCode: z.string().regex(/^[A-Z][A-Z0-9_]{1,30}$/), amount: money, note: z.string().max(200).optional() })).min(1).max(5000) }).parse(req.body);
+    const codes = new Set((await db.query<{ code: string }>(`SELECT code FROM salary_component WHERE company_id = $1 AND active AND type IN ('earning', 'deduction')`, [cid(req)])).rows.map((x) => x.code));
+    const unknown = [...new Set(b.inputs.map((i) => i.componentCode))].filter((c) => !codes.has(c));
+    if (unknown.length) throw new BadRequestError(`unknown or inactive component code(s): ${unknown.join(', ')}`);
+    for (const i of b.inputs) if (!D(i.amount).gt(0)) throw new BadRequestError('input amounts must be positive');
     const client = await db.connect();
+    let added = 0;
     try {
       await client.query('BEGIN');
       for (const i of b.inputs) {
-        await client.query(`INSERT INTO payroll_input (run_id, employee_id, component_code, amount, note, created_by) SELECT $1, $2, $3, $4, $5, $6 FROM employee WHERE id = $2 AND company_id = $7`,
+        const ins = await client.query(`INSERT INTO payroll_input (run_id, employee_id, component_code, amount, note, created_by) SELECT $1, $2, $3, $4, $5, $6 FROM employee WHERE id = $2 AND company_id = $7`,
           [run.id, i.employeeId, i.componentCode, i.amount, i.note ?? null, req.user!.id, cid(req)]);
+        added += ins.rowCount ?? 0;
       }
-      await audit(client, { actorId: req.user!.id, action: 'inputs', table: 'payroll_run', rowId: run.id, after: { count: b.inputs.length } });
+      if (added !== b.inputs.length) throw new NotFoundError('one or more employees do not belong to this company');
+      // New inputs invalidate a maker review; the run must be recomputed and reviewed again.
+      if (run.status === 'reviewed') await client.query(`UPDATE payroll_run SET status = 'computed', reviewed_at = NULL WHERE id = $1`, [run.id]);
+      await audit(client, { actorId: req.user!.id, action: 'inputs', table: 'payroll_run', rowId: run.id, after: { count: added } });
       await client.query('COMMIT');
     } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
-    res.status(201).json({ added: b.inputs.length });
+    res.status(201).json({ added });
   });
   r.get('/runs/:id/inputs', payrollRole, async (req, res) => {
     const run = await getRun(db, cid(req), z.uuid().parse(req.params.id));
     const rows = await db.query('SELECT i.id, i.employee_id, e.emp_code, i.component_code, i.amount, i.note FROM payroll_input i JOIN employee e ON e.id = i.employee_id WHERE i.run_id = $1 ORDER BY e.emp_code', [run.id]);
     res.json({ inputs: rows.rows });
   });
-  r.post('/runs/:id/compute', payrollRole, async (req, res) => { res.json(await computeRun(db, cid(req), z.uuid().parse(req.params.id), req.user!.id)); });
+  r.post('/runs/:id/compute', payrollRole, async (req, res) => {
+    const b = z.object({ overrideReason: z.string().min(5).max(500).optional() }).parse(req.body ?? {});
+    const override = b.overrideReason ? { reason: b.overrideReason, roles: req.user!.roles } : undefined;
+    res.json(await computeRun(db, cid(req), z.uuid().parse(req.params.id), req.user!.id, override));
+  });
   r.post('/runs/:id/review', payrollRole, async (req, res) => {
     const b = z.object({ notes: z.string().max(2000).optional() }).parse(req.body ?? {});
     await reviewRun(db, cid(req), z.uuid().parse(req.params.id), req.user!.id, b.notes);
     res.json({ ok: true });
   });
   r.post('/runs/:id/approve', requireRole('finance'), async (req, res) => {
-    const signature = await approveRun(db, cid(req), z.uuid().parse(req.params.id), { id: req.user!.id, roles: req.user!.roles });
-    res.json({ ok: true, signature });
+    const result = await approveRun(db, cid(req), z.uuid().parse(req.params.id), { id: req.user!.id, roles: req.user!.roles });
+    res.json({ ok: true, ...result });
   });
   r.post('/runs/:id/lock', payrollRole, async (req, res) => { res.json(await lockRun(db, cid(req), z.uuid().parse(req.params.id), req.user!.id)); });
   r.post('/runs/:id/disburse', requireRole('finance'), async (req, res) => { await advanceRun(db, cid(req), z.uuid().parse(req.params.id), req.user!.id, 'disbursed'); res.json({ ok: true }); });
@@ -359,7 +394,8 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     const q = z.object({ employeeId: z.uuid().optional(), fiscalYearStart: z.coerce.number().int().optional() }).parse(req.query);
     const employeeId = q.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
-    if (!canSeePayslip(req.user!, employeeId)) throw new ForbiddenError();
+    await assertManages(db, req.user!, employeeId);          // 404 outside the company, 403 for unrelated employees
+    if (!canSeePayslip(req.user!, employeeId)) throw new ForbiddenError('payslips are visible to the employee and to HR/finance only');
     const onlyPublished = !hasRole(req.user!, 'hr', 'finance');
     const rows = await db.query(
       `SELECT ps.id, ps.run_id, r.run_type, p.bs_year, p.bs_month, ps.paid_days, ps.lop_days, ps.ot_hours, ps.gross, ps.tds, ps.total_deductions, ps.net, ps.published_at, r.locked_at
