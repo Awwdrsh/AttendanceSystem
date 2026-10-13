@@ -1,4 +1,5 @@
 import type { Db } from './pool.js';
+import { seedPayrollDefaults } from '../modules/payroll/seed.js';
 
 /**
  * Idempotent per-company defaults: statutory leave types (plan §6.2), approval workflows, company settings.
@@ -53,5 +54,6 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
     const r = await db.query('INSERT INTO company_setting (company_id, key, value) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [companyId, key, JSON.stringify(value)]);
     s += r.rowCount ?? 0;
   }
-  return { leaveTypes: n, workflows: w, settings: s };
+  const payroll = await seedPayrollDefaults(db, companyId);
+  return { leaveTypes: n, workflows: w, settings: s, ...payroll };
 }
