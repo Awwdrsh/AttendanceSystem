@@ -30,3 +30,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   return r.data;
 }
+
+/** Only the database URL; used by migrations, seeds and the CLI so they work before secrets are configured. */
+export function loadDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  const r = z.object({ DATABASE_URL: z.string().min(1) }).safeParse(env);
+  if (!r.success) throw new Error('DATABASE_URL is not set (apps/api/.env)');
+  return r.data.DATABASE_URL;
+}
