@@ -32,7 +32,7 @@ describe('reports', () => {
     const csv = await request(app).get('/api/v1/reports/register').set(auth(hr)).query({ bsYear: 2083, bsMonth: 5, format: 'csv' });
     expect(csv.headers['content-type']).toMatch(/text\/csv/);
     expect(csv.text.charCodeAt(0)).toBe(0xfeff);
-    expect(csv.text.split('\r\n')[0]).toBe('\uFEFFEmp code,Name,नाम,Date (BS),Date (AD),Arrival,Departure,Worked (h),Break (min),OT (h),Late (min),Leave,Status');
+    expect(csv.text.split('\r\n')[0]).toBe('\uFEFFEmp code,Name,Date (BS),Date (AD),Arrival,Departure,Worked (h),Break (min),OT (h),Late (min),Leave,Status');
   });
   it('daily, late-early, headcount, exceptions, devices and leave-balances respond; employees are denied', async () => {
     for (const [path, q] of [['daily', { date: '2026-08-17' }], ['late-early', { from: '2026-08-17', to: '2026-08-18' }], ['headcount', {}],

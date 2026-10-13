@@ -1,5 +1,5 @@
-import { amountInWordsEn, amountInWordsNe, formatNpr, toDevanagariDigits, D } from '@hajiri/payroll-engine';
-import { BS_MONTH_NAMES_EN, BS_MONTH_NAMES_NE } from '@hajiri/bs-calendar';
+import { amountInWordsEn, formatNpr, D } from '@hajiri/payroll-engine';
+import { BS_MONTH_NAMES_EN } from '@hajiri/bs-calendar';
 
 export interface PayslipView {
   company: { nameEn: string; nameNe: string | null };
@@ -16,38 +16,43 @@ export interface PayslipView {
 
 const esc = (s: string | null | undefined) => (s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
 
-/** Bilingual printable payslip (plan §13.7). Employer contributions are shown apart from deductions. */
+/** Printable payslip in English. Employer contributions are shown apart from deductions. */
 export function renderPayslipHtml(v: PayslipView): string {
-  const n = (x: string) => formatNpr(x, v.numerals);
-  const bsLabel = `${BS_MONTH_NAMES_NE[v.period.bsMonth - 1]} ${toDevanagariDigits(String(v.period.bsYear))} / ${BS_MONTH_NAMES_EN[v.period.bsMonth - 1]} ${v.period.bsYear}`;
+  const n = (x: string) => formatNpr(x, 'latin');
+  const period = `${BS_MONTH_NAMES_EN[v.period.bsMonth - 1]} ${v.period.bsYear}`;
   const block = (title: string, type: string) => {
     const rows = v.lines.filter((l) => l.type === type);
-    return `<table class="blk"><thead><tr><th colspan="2">${title}</th></tr></thead><tbody>${rows.map((l) => `<tr><td>${esc(l.nameNe)}${l.nameNe ? ' / ' : ''}${esc(l.nameEn)}</td><td class="amt">${n(l.amount)}</td></tr>`).join('')}${rows.length ? '' : '<tr><td colspan="2" class="muted">—</td></tr>'}</tbody></table>`;
+    return `<table class="blk"><thead><tr><th>${title}</th><th class="amt">NPR</th></tr></thead><tbody>${rows.map((l) => `<tr><td>${esc(l.nameEn)}</td><td class="amt">${n(l.amount)}</td></tr>`).join('')}${rows.length ? '' : '<tr><td colspan="2" class="muted">None</td></tr>'}</tbody></table>`;
   };
-  return `<!doctype html><html lang="ne"><head><meta charset="utf-8"><title>Payslip ${esc(v.employee.code)} ${esc(bsLabel)}</title>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Payslip ${esc(v.employee.code)} ${esc(period)}</title>
 <style>
-body{font-family:"Noto Sans Devanagari","Mukta",Inter,system-ui,sans-serif;font-size:13px;color:#111;margin:24px;line-height:1.7}
-h1{font-size:18px;margin:0}.hdr{display:flex;justify-content:space-between;border-bottom:2px solid #222;padding-bottom:8px}
-.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:4px 16px;margin:12px 0}.meta div span{color:#555;display:block;font-size:11px}
-.cols{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}table.blk{width:100%;border-collapse:collapse}table.blk th{text-align:left;background:#f1f1f1;padding:4px 6px}
-table.blk td{padding:3px 6px;border-bottom:1px solid #eee}.amt{text-align:right;font-variant-numeric:tabular-nums}.muted{color:#888}
-.net{margin-top:14px;padding:10px;border:2px solid #222;font-size:15px}.net b{font-size:20px}.words{font-size:12px;color:#333}
-.foot{margin-top:16px;font-size:11px;color:#555;border-top:1px solid #ccc;padding-top:6px}.explain{margin-top:12px;font-size:11px}
-@media print{body{margin:8mm}}
+body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:13px;color:#17191e;margin:32px auto;max-width:860px;line-height:1.55;padding:0 24px}
+h1{font-size:20px;margin:0;font-weight:600;letter-spacing:-.01em}.sub{color:#6b707b}
+.hdr{display:flex;justify-content:space-between;align-items:flex-end;padding-bottom:16px;border-bottom:1px solid #e6e7ea}
+.period{text-align:right}.period b{font-size:16px;font-weight:600}
+.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:12px 24px;margin:20px 0}.meta div span{color:#6b707b;display:block;font-size:11.5px}
+.cols{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}table.blk{width:100%;border-collapse:collapse}
+table.blk th{text-align:left;font-weight:500;color:#6b707b;font-size:12px;padding:6px 0;border-bottom:1px solid #e6e7ea}
+table.blk td{padding:6px 0;border-bottom:1px solid #f0f0f2}.amt{text-align:right;font-variant-numeric:tabular-nums}.muted{color:#9aa0aa}
+.totals{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:8px;font-weight:600}
+.net{margin-top:24px;padding:18px 20px;border:1px solid #e6e7ea;border-radius:12px;display:flex;justify-content:space-between;align-items:center}
+.net .label{color:#6b707b}.net b{font-size:24px;font-weight:600;letter-spacing:-.02em;color:#4048cc;font-variant-numeric:tabular-nums}.words{font-size:12px;color:#6b707b;margin-top:2px}
+.foot{margin-top:24px;font-size:11px;color:#6b707b;border-top:1px solid #e6e7ea;padding-top:10px}.explain{margin-top:16px;font-size:12px}
+@media print{body{margin:10mm auto}.net{border-color:#bbb}}
 </style></head><body>
-<div class="hdr"><div><h1>${esc(v.company.nameNe ?? '')}${v.company.nameNe ? ' / ' : ''}${esc(v.company.nameEn)}</h1><div>तलब विवरण / Payslip</div></div>
-<div><div>अवधि / Period</div><b>${esc(bsLabel)}</b><div class="muted">${esc(v.period.startAd)} – ${esc(v.period.endAd)}</div></div></div>
+<div class="hdr"><div><h1>${esc(v.company.nameEn)}</h1><div class="sub">Payslip</div></div>
+<div class="period"><div class="sub">Pay period</div><b>${esc(period)}</b><div class="muted">${esc(v.period.startAd)} to ${esc(v.period.endAd)}</div></div></div>
 <div class="meta">
-<div><span>कर्मचारी / Employee</span>${esc(v.employee.nameNe ?? '')}${v.employee.nameNe ? ' / ' : ''}${esc(v.employee.nameEn)} (${esc(v.employee.code)})</div>
-<div><span>पद / Designation</span>${esc(v.employee.designation) || '—'}</div><div><span>विभाग / Department</span>${esc(v.employee.department) || '—'}</div>
-<div><span>PAN</span>${esc(v.employee.panMasked) || '—'}</div><div><span>SSF</span>${esc(v.employee.ssfMasked) || '—'}</div><div><span>बैंक / Bank</span>${esc(v.employee.bankMasked) || '—'}</div>
-<div><span>भुक्तानी दिन / Paid days</span>${v.paidDays}</div><div><span>बेतलबी / LOP</span>${v.lopDays}</div><div><span>ओभरटाइम / OT hours</span>${v.otHours}</div>
+<div><span>Employee</span>${esc(v.employee.nameEn)} (${esc(v.employee.code)})</div>
+<div><span>Designation</span>${esc(v.employee.designation) || '—'}</div><div><span>Department</span>${esc(v.employee.department) || '—'}</div>
+<div><span>PAN</span>${esc(v.employee.panMasked) || '—'}</div><div><span>SSF</span>${esc(v.employee.ssfMasked) || '—'}</div><div><span>Bank account</span>${esc(v.employee.bankMasked) || '—'}</div>
+<div><span>Paid days</span>${v.paidDays}</div><div><span>Unpaid days</span>${v.lopDays}</div><div><span>Overtime hours</span>${v.otHours}</div>
 </div>
-<div class="cols">${block('आम्दानी / Earnings', 'earning')}${block('कट्टी / Deductions', 'deduction')}${block('रोजगारदाता योगदान / Employer contributions', 'employer_contribution')}</div>
-<div class="cols" style="margin-top:6px"><div class="amt"><b>कुल / Gross: ${n(v.gross)}</b></div><div class="amt"><b>कुल कट्टी / Total deductions: ${n(v.totalDeductions)}</b></div><div class="amt"><b>${n(v.employerStatutory)}</b></div></div>
-<div class="net">खुद तलब / Net pay: <b>रु ${n(v.net)}</b><div class="words">${esc(amountInWordsNe(v.net))}</div><div class="words">${esc(amountInWordsEn(v.net))}</div></div>
-<div class="meta"><div><span>YTD gross</span>${n(v.ytd.gross)}</div><div><span>YTD TDS</span>${n(v.ytd.tds)}</div><div><span>YTD SSF/PF</span>${n(v.ytd.statutory)}</div></div>
-<details class="explain"><summary>यो तलब किन? / Why is my salary this amount?</summary><ul>${v.explain.map((e) => `<li><b>${esc(e.code)}</b>: ${esc(e.text)}</li>`).join('')}</ul></details>
-<div class="foot">Computer-generated payslip · verification ${esc(v.payslipId)} · Figures in NPR ${D(v.net).isNegative() ? '· negative net' : ''} · आफ्नो तलब विवरणमा प्रश्न भए मानव संसाधनलाई सम्पर्क गर्नुहोस् / Contact HR to dispute this payslip.</div>
+<div class="cols">${block('Earnings', 'earning')}${block('Deductions', 'deduction')}${block('Employer contributions', 'employer_contribution')}</div>
+<div class="totals"><div class="amt">Gross ${n(v.gross)}</div><div class="amt">Total deductions ${n(v.totalDeductions)}</div><div class="amt">${n(v.employerStatutory)}</div></div>
+<div class="net"><div><div class="label">Net pay</div><div class="words">${esc(amountInWordsEn(v.net))}</div></div><b>NPR ${n(v.net)}</b></div>
+<div class="meta"><div><span>Year-to-date gross</span>${n(v.ytd.gross)}</div><div><span>Year-to-date tax (TDS)</span>${n(v.ytd.tds)}</div><div><span>Year-to-date SSF/PF</span>${n(v.ytd.statutory)}</div></div>
+<details class="explain"><summary>How was this amount calculated?</summary><ul>${v.explain.map((e) => `<li><b>${esc(e.code)}</b>: ${esc(e.text)}</li>`).join('')}</ul></details>
+<div class="foot">Computer-generated payslip. Verification code ${esc(v.payslipId)}. Figures in NPR.${D(v.net).isNegative() ? ' Net pay is negative.' : ''} Contact HR if anything on this payslip looks wrong.</div>
 </body></html>`;
 }

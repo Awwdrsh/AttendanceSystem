@@ -412,8 +412,8 @@ export async function publishRun(db: Db, companyId: string, runId: string, actor
   const rows = await db.query<{ id: string; employee_id: string }>('UPDATE payslip SET published_at = now() WHERE run_id = $1 AND published_at IS NULL RETURNING id, employee_id', [runId]);
   for (const r of rows.rows) {
     const userId = await userIdForEmployee(db, r.employee_id);
-    await notify(db, { companyId, userId, employeeId: r.employee_id, template: 'payslip.published', title: 'Payslip ready / तलब विवरण तयार',
-      body: `Your payslip for ${p.bs_year}-${String(p.bs_month).padStart(2, '0')} is ready. / ${p.bs_year}-${String(p.bs_month).padStart(2, '0')} को तलब विवरण तयार छ।`, payload: { payslipId: r.id }, channels: ['push'] });
+    await notify(db, { companyId, userId, employeeId: r.employee_id, template: 'payslip.published', title: 'Your payslip is ready',
+      body: `Your payslip for ${p.bs_year}-${String(p.bs_month).padStart(2, '0')} is ready to view.`, payload: { payslipId: r.id }, channels: ['push'] });
   }
   await audit(db, { actorId, action: 'publish', table: 'payroll_run', rowId: runId, after: { payslips: rows.rowCount } });
   return rows.rowCount ?? 0;

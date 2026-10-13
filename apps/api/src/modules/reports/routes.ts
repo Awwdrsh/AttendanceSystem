@@ -23,7 +23,7 @@ export function reportsRoutes({ db }: AppDeps): Router {
         WHERE e.company_id = $1 AND e.status = 'active' ORDER BY e.emp_code`, [req.user!.companyId, q.date]);
     const out = rows.rows.map((x) => ({ ...x, status: x.status ?? 'NotComputed', arrival: nptHHMM(x.first_in), departure: nptHHMM(x.last_out), worked_hours: hours(x.worked_min), ot_hours: hours(x.ot_min), flags: JSON.stringify(x.flags ?? []) }));
     sendReport(res, q.format, `daily-${q.date}`, [
-      { key: 'emp_code', header: 'Emp code' }, { key: 'name_en', header: 'Name' }, { key: 'name_ne', header: 'नाम' }, { key: 'branch', header: 'Branch' },
+      { key: 'emp_code', header: 'Emp code' }, { key: 'name_en', header: 'Name' }, { key: 'branch', header: 'Branch' },
       { key: 'status', header: 'Status' }, { key: 'arrival', header: 'Arrival' }, { key: 'departure', header: 'Departure' }, { key: 'worked_hours', header: 'Worked (h)' },
       { key: 'late_min', header: 'Late (min)' }, { key: 'early_min', header: 'Early out (min)' }, { key: 'ot_hours', header: 'OT (h)' }, { key: 'flags', header: 'Flags' }], out);
   });
@@ -49,7 +49,7 @@ export function reportsRoutes({ db }: AppDeps): Router {
       late_min: x.late_min ?? 0, leave: x.leave_code ?? '', status: x.status ?? '',
     }));
     sendReport(res, q.format, `register-${q.bsYear}-${String(q.bsMonth).padStart(2, '0')}`, [
-      { key: 'emp_code', header: 'Emp code' }, { key: 'name_en', header: 'Name' }, { key: 'name_ne', header: 'नाम' }, { key: 'bs_date', header: 'Date (BS)' },
+      { key: 'emp_code', header: 'Emp code' }, { key: 'name_en', header: 'Name' }, { key: 'bs_date', header: 'Date (BS)' },
       { key: 'ad_date', header: 'Date (AD)' }, { key: 'arrival', header: 'Arrival' }, { key: 'departure', header: 'Departure' }, { key: 'worked_hours', header: 'Worked (h)' },
       { key: 'break_min', header: 'Break (min)' }, { key: 'ot_hours', header: 'OT (h)' }, { key: 'late_min', header: 'Late (min)' }, { key: 'leave', header: 'Leave' }, { key: 'status', header: 'Status' }], out);
   });

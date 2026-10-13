@@ -188,7 +188,7 @@ describe('payroll run lifecycle (Bhadra 2083)', () => {
     expect((await request(app).post(P(`/runs/${runId}/disburse`)).set(auth(finance))).status).toBe(200);
     expect((await request(app).post(P(`/runs/${runId}/file`)).set(auth(finance))).status).toBe(200);
   });
-  it('publish notifies employees; employees see only their own published payslips; HTML renders bilingual', async () => {
+  it('publish notifies employees; employees see only their own published payslips; HTML renders in English', async () => {
     expect((await request(app).get(P('/payslips')).set(auth(sitaTok))).body.payslips).toHaveLength(0);
     const pub = await request(app).post(P(`/runs/${runId}/publish`)).set(auth(hr));
     expect(pub.body.published).toBe(2);
@@ -199,11 +199,11 @@ describe('payroll run lifecycle (Bhadra 2083)', () => {
     expect((await request(app).get(P('/payslips')).set(auth(ramTok)).query({ employeeId: DEMO.sita })).status).toBe(403);
     const html = await request(app).get(P(`/payslips/${id}/html`)).set(auth(sitaTok));
     expect(html.status).toBe(200);
-    expect(html.text).toContain('तलब विवरण / Payslip');
-    expect(html.text).toContain('भदौ २०८३ / Bhadra 2083');
+    expect(html.text).toContain('<div class="sub">Payslip</div>');
+    expect(html.text).toContain('Bhadra 2083');
     expect(html.text).toContain('*****6789');
     expect(html.text).toMatch(/Rupees Only/);
-    expect(html.text).toMatch(/रुपैयाँ मात्र/);
+    expect(html.text).not.toMatch(/[\u0900-\u097F]/);
     const n = await db.query(`SELECT count(*)::int AS n FROM notification_outbox WHERE template = 'payslip.published' AND employee_id = $1`, [DEMO.sita]);
     expect(n.rows[0].n).toBeGreaterThan(0);
   });
