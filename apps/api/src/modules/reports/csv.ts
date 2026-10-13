@@ -4,7 +4,9 @@ import type { Response } from 'express';
 export function toCsv(columns: Array<{ key: string; header: string }>, rows: Array<Record<string, unknown>>): string {
   const esc = (v: unknown): string => {
     if (v === null || v === undefined) return '';
-    const s = v instanceof Date ? v.toISOString() : String(v);
+    let s = v instanceof Date ? v.toISOString() : String(v);
+    // Spreadsheet formula injection: a leading = + - @ or tab/CR makes Excel evaluate the cell; neutralise it.
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const lines = [columns.map((c) => esc(c.header)).join(',')];

@@ -109,6 +109,8 @@ export type Flag =
   | { kind: 'OTPreapprovalMissing'; rawMinutes: number }
   | { kind: 'MissingOut' }
   | { kind: 'UnpaidLeave' }
+  | { kind: 'HalfDayLeave'; half: 'first_half' | 'second_half' }
+  | { kind: 'AutoClockOut' }
   | { kind: 'UnpairedPunch'; punchId: string };
 
 export interface OtResult {

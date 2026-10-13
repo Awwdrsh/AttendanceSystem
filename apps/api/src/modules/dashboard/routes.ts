@@ -23,7 +23,7 @@ export function dashboardRoutes({ db }: AppDeps): Router {
                 (SELECT count(*) FROM v_attendance_latest v JOIN employee e ON e.id = v.employee_id WHERE e.company_id = $1 AND v.local_date = $2 AND v.status = 'Absent')::int AS absent,
                 (SELECT count(*) FROM workflow_instance WHERE company_id = $1 AND state = 'pending')::int AS pending,
                 (SELECT count(*) FROM v_attendance_latest v JOIN employee e ON e.id = v.employee_id WHERE e.company_id = $1 AND v.local_date BETWEEN $3 AND $2 AND v.locked_at IS NULL
-                   AND (v.status IN ('Incomplete', 'Absent') OR v.flags::text LIKE '%OTPreapprovalMissing%' OR v.flags::text LIKE '%OTCapExceeded%'))::int AS exceptions`,
+                   AND (v.status IN ('Incomplete', 'Absent') OR v.flags @> '[{"kind":"OTPreapprovalMissing"}]' OR v.flags @> '[{"kind":"OTCapExceeded"}]'))::int AS exceptions`,
         [cid, today, monthStart]),
       db.query<{ local_date: string; present_pct: number }>(
         `SELECT v.local_date, round(100.0 * count(*) FILTER (WHERE v.status IN ('Present', 'HalfDay', 'HalfDayLeave', 'WFH')) / nullif(count(*) FILTER (WHERE v.status NOT IN ('Holiday', 'WeeklyOff', 'OffShift')), 0), 1)::float8 AS present_pct

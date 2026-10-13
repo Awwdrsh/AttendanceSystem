@@ -1,5 +1,5 @@
 import { allSupportedDays, formatBs } from '@hajiri/bs-calendar';
-import { loadConfig } from '../config.js';
+import { loadDatabaseUrl } from '../config.js';
 import { createPool, type Db } from './pool.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +22,7 @@ export async function seedBsCalendar(db: Db): Promise<number> {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const db = createPool(loadConfig().DATABASE_URL);
+  const db = createPool(loadDatabaseUrl());
   seedBsCalendar(db).then((n) => { console.log(`bs_calendar: ${n} rows upserted`); return db.end(); })
     .catch((e) => { console.error(e.message); process.exit(1); });
 }

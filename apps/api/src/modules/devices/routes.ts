@@ -4,9 +4,14 @@ import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
 import { NotFoundError } from '../../errors.js';
 import { requireRole } from '../auth/middleware.js';
-import { enqueueRecompute, recomputeDay } from '../attendance/service.js';
+import { recomputeDay } from '../attendance/service.js';
 
 import { isoDate } from '../../validation.js';
+
+/** Terminal user names travel in a tab-separated, newline-delimited command: strip every control character. */
+function deviceName(name: string): string {
+  return name.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 24);
+}
 
 export function deviceRoutes({ db }: AppDeps): Router {
   const r = Router();
@@ -37,7 +42,7 @@ export function deviceRoutes({ db }: AppDeps): Router {
 
   r.post('/:id/disable', async (req, res) => {
     const id = z.uuid().parse(req.params.id);
-    const rows = await db.query(`UPDATE device SET status = 'disabled' WHERE id = $1 AND company_id = $2 RETURNING id, serial_no, status`, [id, req.user!.companyId]);
+    const rows = await db.query(`UPDATE device SET status = 'disabled' WHERE id = $1 AND company_id = $2 AND vendor NOT IN ('mobile', 'kiosk', 'manual') RETURNING id, serial_no, status`, [id, req.user!.companyId]);
     if (!rows.rows[0]) throw new NotFoundError('device not found');
     await audit(db, { actorId: req.user!.id, action: 'disable', table: 'device', rowId: id });
     res.json(rows.rows[0]);
@@ -47,7 +52,7 @@ export function deviceRoutes({ db }: AppDeps): Router {
     const id = z.uuid().parse(req.params.id);
     const rows = await db.query(
       `SELECT m.device_user_pin, m.employee_id, e.emp_code, e.name_en, m.valid::text FROM device_user_map m JOIN employee e ON e.id = m.employee_id
-        WHERE m.device_id = $1 ORDER BY m.device_user_pin, lower(m.valid)`, [id]);
+        JOIN device d ON d.id = m.device_id WHERE m.device_id = $1 AND d.company_id = $2 ORDER BY m.device_user_pin, lower(m.valid)`, [id, req.user!.companyId]);
     res.json({ mappings: rows.rows });
   });
 
@@ -84,7 +89,7 @@ export function deviceRoutes({ db }: AppDeps): Router {
       dates = [...new Set(re.rows.map((x) => x.local_date))];
       if (b.syncToDevice && dev.rows[0].vendor === 'zkteco') {
         await client.query('INSERT INTO device_command (device_id, command) VALUES ($1, $2)',
-          [id, `DATA UPDATE USERINFO PIN=${b.pin}\tName=${emp.rows[0].name_en.replace(/[\t\n]/g, ' ').slice(0, 24)}\tPri=0`]);
+          [id, `DATA UPDATE USERINFO PIN=${b.pin}\tName=${deviceName(emp.rows[0].name_en)}\tPri=0`]);
       }
       await audit(client, { actorId: req.user!.id, action: 'map_pin', table: 'device_user_map', rowId: id, after: { pin: b.pin, employeeId: b.employeeId, from: b.from, reattributed: re.rowCount } });
       await client.query('COMMIT');
@@ -118,7 +123,9 @@ export function deviceRoutes({ db }: AppDeps): Router {
 
   r.get('/:id/commands', async (req, res) => {
     const id = z.uuid().parse(req.params.id);
-    const rows = await db.query('SELECT id, command, status, return_code, queued_at, sent_at, acked_at FROM device_command WHERE device_id = $1 ORDER BY id DESC LIMIT 100', [id]);
+    const rows = await db.query(
+      `SELECT c.id, c.command, c.status, c.return_code, c.queued_at, c.sent_at, c.acked_at FROM device_command c JOIN device d ON d.id = c.device_id
+        WHERE c.device_id = $1 AND d.company_id = $2 ORDER BY c.id DESC LIMIT 100`, [id, req.user!.companyId]);
     res.json({ commands: rows.rows });
   });
 
@@ -129,9 +136,8 @@ export function deviceRoutes({ db }: AppDeps): Router {
       `SELECT m.device_user_pin, e.name_en FROM device_user_map m JOIN employee e ON e.id = m.employee_id JOIN device d ON d.id = m.device_id
         WHERE m.device_id = $1 AND d.company_id = $2 AND m.valid @> current_date AND e.status = 'active'`, [id, req.user!.companyId]);
     for (const m of rows.rows) {
-      await db.query('INSERT INTO device_command (device_id, command) VALUES ($1, $2)', [id, `DATA UPDATE USERINFO PIN=${m.device_user_pin}\tName=${m.name_en.replace(/[\t\n]/g, ' ').slice(0, 24)}\tPri=0`]);
+      await db.query('INSERT INTO device_command (device_id, command) VALUES ($1, $2)', [id, `DATA UPDATE USERINFO PIN=${m.device_user_pin}\tName=${deviceName(m.name_en)}\tPri=0`]);
     }
-    await enqueueRecompute(db, [], 'noop');
     res.json({ queued: rows.rows.length });
   });
 

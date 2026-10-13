@@ -9,7 +9,9 @@ types.setTypeParser(types.builtins.INT8, (v) => v);
 types.setTypeParser(types.builtins.DATE, (v) => v);
 
 export function createPool(connectionString: string): pg.Pool {
-  return new Pool({ connectionString, max: 10 });
+  // Nepal has no DST, so a fixed session zone makes current_date / date arithmetic in SQL mean Nepal calendar dates.
+  // Set at connection start-up so no query can run before it applies.
+  return new Pool({ connectionString, max: 10, options: '-c TimeZone=Asia/Kathmandu' });
 }
 
 export type Db = pg.Pool;

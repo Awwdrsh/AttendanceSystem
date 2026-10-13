@@ -11,6 +11,13 @@ export const BS_MONTH_DAYS: Readonly<Record<number, readonly number[]>> = {
   2084: [31, 31, 32, 31, 31, 30, 30, 30, 29, 30, 30, 30],
 };
 
+/**
+ * Years whose month lengths are projections (no official patro yet). Independent libraries disagree on these
+ * (e.g. @remotemerge/nepali-date-converter gives Jestha 2084 = 32 days where our table has 31). Payroll periods and
+ * accruals in a projected year must be re-verified when the official calendar is published (plan §16.7).
+ */
+export const PROJECTED_BS_YEARS: readonly number[] = [2084];
+
 /** Anchor: Baishakh 1, 2082 = 14 April 2025 (plan §6.10, Merokalam). */
 export const ANCHOR = { bs: { year: 2082, month: 1, day: 1 }, adUtcMs: Date.UTC(2025, 3, 14) } as const;
 

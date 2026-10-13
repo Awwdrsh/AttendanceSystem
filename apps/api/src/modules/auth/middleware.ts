@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
-import type { Db } from '../../db/pool.js';
-import { ForbiddenError, UnauthorizedError } from '../../errors.js';
+import type { Queryable } from '../../db/pool.js';
+import { nptToday } from '@hajiri/attendance-engine';
+import { ForbiddenError, NotFoundError, UnauthorizedError } from '../../errors.js';
 import { resolveSession, type AuthUser, type Role } from './service.js';
 
 export const SESSION_COOKIE = 'hajiri_session';
@@ -20,7 +21,7 @@ function readCookie(req: Request, name: string): string | undefined {
 }
 
 /** Attaches req.user from the session cookie or a Bearer token; does not reject. */
-export function sessionLoader(db: Db) {
+export function sessionLoader(db: Queryable) {
   return async (req: Request, _res: Response, next: NextFunction) => {
     const bearer = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : undefined;
     const token = bearer ?? readCookie(req, SESSION_COOKIE);
@@ -37,6 +38,12 @@ export function requireAuth(req: Request, _res: Response, next: NextFunction): v
   next();
 }
 
+/** Users created with a temporary password must change it before using anything but /auth. */
+export function requirePasswordChanged(req: Request, _res: Response, next: NextFunction): void {
+  if (req.user?.mustChangePassword) return next(new ForbiddenError('password change required'));
+  next();
+}
+
 /** Deny by default: the user must hold at least one of the roles. Admin always passes. */
 export function requireRole(...roles: Role[]) {
   return (req: Request, _res: Response, next: NextFunction) => {
@@ -50,12 +57,24 @@ export function hasRole(user: AuthUser, ...roles: Role[]): boolean {
   return user.roles.includes('admin') || roles.some((r) => user.roles.includes(r));
 }
 
-/** Employees may only read their own records; HR/admin/finance may read anyone in their company. */
-export function canAccessEmployee(user: AuthUser, employeeId: string): boolean {
-  if (hasRole(user, 'hr', 'finance', 'manager')) return true;
-  return user.employeeId === employeeId;
+/** Manager relationship: direct reports via the assignment valid on the given Nepal date (default today). */
+export async function isManagerOf(db: Queryable, managerEmployeeId: string, employeeId: string, onDate = nptToday()): Promise<boolean> {
+  const r = await db.query('SELECT 1 FROM employee_assignment WHERE employee_id = $1 AND manager_id = $2 AND valid @> $3::date', [employeeId, managerEmployeeId, onDate]);
+  return r.rows.length > 0;
 }
 
-export function assertAccessEmployee(user: AuthUser, employeeId: string): void {
-  if (!canAccessEmployee(user, employeeId)) throw new ForbiddenError('not allowed to access this employee');
+/**
+ * Who may see or act for an employee: HR, finance and admin company-wide; a manager only for direct reports; everyone
+ * for themselves. An employee of another company is reported as not found so ids cannot be enumerated across tenants.
+ */
+export async function assertManages(db: Queryable, user: AuthUser, employeeId: string): Promise<void> {
+  const inCompany = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, user.companyId]);
+  if (inCompany.rows.length === 0) throw new NotFoundError('employee not found');
+  if (hasRole(user, 'hr', 'finance')) return;
+  if (user.employeeId === employeeId) return;
+  if (hasRole(user, 'manager') && user.employeeId && (await isManagerOf(db, user.employeeId, employeeId))) return;
+  throw new ForbiddenError('not allowed to access this employee');
 }
+
+/** Same as assertManages (kept for callers written against the earlier name). */
+export const assertEmployeeAccess = assertManages;

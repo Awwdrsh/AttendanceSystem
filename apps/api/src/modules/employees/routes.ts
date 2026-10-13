@@ -3,7 +3,8 @@ import { z } from 'zod';
 import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
 import { BadRequestError, NotFoundError } from '../../errors.js';
-import { assertAccessEmployee, hasRole, requireRole } from '../auth/middleware.js';
+import { assertManages, hasRole, requireRole } from '../auth/middleware.js';
+import { nptToday } from '@hajiri/attendance-engine';
 
 import { isoDate } from '../../validation.js';
 const PAN_RE = /^\d{9}$/;
@@ -50,24 +51,45 @@ const PUBLIC_COLS = `e.id, e.company_id, e.emp_code, e.name_en, e.name_ne, e.gen
   a.branch_id, a.org_unit_id, a.manager_id, a.employment_type,
   (SELECT s.shift_id FROM shift_assignment s WHERE s.employee_id = e.id AND s.valid @> current_date) AS shift_id`;
 
+/** Referenced records (shift, branch, org unit, manager) must belong to the caller's company; dates must be sane. */
+type EmployeeInput = z.infer<typeof employeeBody>;
+type EmployeePatch = { [K in keyof EmployeeInput]?: EmployeeInput[K] | undefined };
+
+async function validateRefs(db: AppDeps['db'], companyId: string | null, b: EmployeePatch, selfId?: string): Promise<void> {
+  const check = async (table: string, id: string | null | undefined, label: string) => {
+    if (!id) return;
+    const r = await db.query(`SELECT 1 FROM ${table} WHERE id = $1 AND company_id = $2`, [id, companyId]);
+    if (r.rows.length === 0) throw new BadRequestError(`${label} does not exist in your company`);
+  };
+  await check('shift', b.shiftId, 'shift');
+  await check('branch', b.branchId, 'branch');
+  await check('org_unit', b.orgUnitId, 'org unit');
+  await check('employee', b.managerId, 'manager');
+  if (b.managerId && selfId && b.managerId === selfId) throw new BadRequestError('an employee cannot be their own manager');
+  if (b.joinDate && b.exitDate && b.exitDate < b.joinDate) throw new BadRequestError('exit date cannot be before join date');
+  if (b.probationEnd && b.joinDate && b.probationEnd < b.joinDate) throw new BadRequestError('probation end cannot be before join date');
+}
+
 export function employeeRoutes({ db, cipher }: AppDeps): Router {
   const r = Router();
 
   r.get('/', requireRole('hr', 'finance', 'manager'), async (req, res) => {
-    const q = z.object({ status: z.enum(['active', 'exited']).optional(), search: z.string().max(100).optional(), branchId: z.uuid().optional() }).parse(req.query);
+    const q = z.object({ status: z.enum(['active', 'exited']).optional(), search: z.string().max(100).optional(), branchId: z.uuid().optional(), pan: z.string().regex(PAN_RE).optional() }).parse(req.query);
+    if (q.pan && !hasRole(req.user!, 'hr', 'finance')) return res.status(403).json({ error: 'PAN lookup requires HR or finance' });
     const rows = await db.query(
       `SELECT ${PUBLIC_COLS} FROM employee e
          LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
         WHERE e.company_id = $1 AND ($2::text IS NULL OR e.status = $2)
           AND ($3::text IS NULL OR e.emp_code ILIKE '%' || $3 || '%' OR e.name_en ILIKE '%' || $3 || '%' OR e.name_ne ILIKE '%' || $3 || '%')
-          AND ($4::uuid IS NULL OR a.branch_id = $4)
-        ORDER BY e.emp_code`, [req.user!.companyId, q.status ?? null, q.search ?? null, q.branchId ?? null]);
+          AND ($4::uuid IS NULL OR a.branch_id = $4) AND ($5::text IS NULL OR e.pan_bidx = $5)
+        ORDER BY e.emp_code`, [req.user!.companyId, q.status ?? null, q.search ?? null, q.branchId ?? null, q.pan ? cipher.blindIndex(q.pan) : null]);
+    if (q.pan) await audit(db, { actorId: req.user!.id, action: 'pan_lookup', table: 'employee', after: { matches: rows.rows.length } });
     res.json({ employees: rows.rows });
   });
 
   r.get('/:id', async (req, res) => {
     const id = z.uuid().parse(req.params.id);
-    assertAccessEmployee(req.user!, id);
+    await assertManages(db, req.user!, id);
     const rows = await db.query(
       `SELECT ${PUBLIC_COLS} FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
         WHERE e.id = $1 AND e.company_id = $2`, [id, req.user!.companyId]);
@@ -92,6 +114,7 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
 
   r.post('/', requireRole('hr'), async (req, res) => {
     const b = employeeBody.parse(req.body);
+    await validateRefs(db, req.user!.companyId, b);
     const client = await db.connect();
     try {
       await client.query('BEGIN');
@@ -106,7 +129,7 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
       const id = ins.rows[0]!.id;
       if (b.pan) await client.query('UPDATE employee SET pan_enc = $2, pan_bidx = $3 WHERE id = $1', [id, cipher.encrypt(b.pan, `employee:${id}:pan`), cipher.blindIndex(b.pan)]);
       if (b.bankAccount) await client.query('UPDATE employee SET bank_account_enc = $2, bank_account_last4 = $3 WHERE id = $1', [id, cipher.encrypt(b.bankAccount, `employee:${id}:bank`), b.bankAccount.slice(-4)]);
-      const from = b.joinDate ?? new Date().toISOString().slice(0, 10);
+      const from = b.joinDate ?? nptToday();
       await client.query(
         `INSERT INTO employee_assignment (employee_id, valid, branch_id, org_unit_id, manager_id, employment_type) VALUES ($1, daterange($2, NULL), $3, $4, $5, $6)`,
         [id, from, b.branchId ?? null, b.orgUnitId ?? null, b.managerId ?? null, b.employmentType ?? 'regular']);
@@ -120,8 +143,11 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
   r.patch('/:id', requireRole('hr'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const b = employeeBody.partial().parse(req.body);
+    await validateRefs(db, req.user!.companyId, b, id);
     const before = await db.query(`SELECT ${PUBLIC_COLS} FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date WHERE e.id = $1 AND e.company_id = $2`, [id, req.user!.companyId]);
     if (!before.rows[0]) throw new NotFoundError('employee not found');
+    const storedJoin = (before.rows[0] as { join_date: string | null }).join_date;
+    if (b.exitDate && storedJoin && !b.joinDate && b.exitDate < storedJoin) throw new BadRequestError('exit date cannot be before join date');
     const client = await db.connect();
     try {
       await client.query('BEGIN');
@@ -140,7 +166,7 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
       if (sets.length) await client.query(`UPDATE employee SET ${sets.join(', ')}, updated_at = now() WHERE id = $1`, vals);
       if (b.branchId !== undefined || b.orgUnitId !== undefined || b.managerId !== undefined || b.employmentType !== undefined) {
         // Effective-dated: close the current assignment today and open a new one (plan §9.1 decision 2).
-        const today = new Date().toISOString().slice(0, 10);
+        const today = nptToday();
         const cur = await client.query<{ valid: string; branch_id: string | null; org_unit_id: string | null; manager_id: string | null; employment_type: string }>(
           'SELECT valid, branch_id, org_unit_id, manager_id, employment_type FROM employee_assignment WHERE employee_id = $1 AND valid @> current_date', [id]);
         const c = cur.rows[0];
@@ -155,7 +181,7 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
           [id, today, next.branch_id, next.org_unit_id, next.manager_id, next.employment_type]);
       }
       if (b.shiftId) {
-        const today = new Date().toISOString().slice(0, 10);
+        const today = nptToday();
         await client.query('UPDATE shift_assignment SET valid = daterange(lower(valid), $2::date) WHERE employee_id = $1 AND valid @> current_date AND lower(valid) < $2::date', [id, today]);
         await client.query('DELETE FROM shift_assignment WHERE employee_id = $1 AND lower(valid) = $2::date', [id, today]);
         await client.query('INSERT INTO shift_assignment (employee_id, shift_id, valid) VALUES ($1, $2, daterange($3, NULL))', [id, b.shiftId, today]);
@@ -171,8 +197,9 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
   r.post('/import', requireRole('hr'), async (req, res) => {
     const text = typeof req.body === 'string' ? req.body : (req.body?.csv as string | undefined);
     if (!text) throw new BadRequestError('send CSV as text/csv body or {"csv": "..."}');
-    const rows = parseCsv(text);
+    const rows = parseCsv(text.replace(/^\uFEFF/, ''));
     if (rows.length < 2) throw new BadRequestError('CSV needs a header row and at least one data row');
+    if (rows.length > 5001) throw new BadRequestError('CSV has more than 5,000 data rows; split the file');
     const header = rows[0]!.map((h) => h.trim());
     const required = ['emp_code', 'name_en'];
     for (const h of required) if (!header.includes(h)) throw new BadRequestError(`missing column ${h}`);
@@ -209,7 +236,7 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
         if (!id) { errors.push({ row: 0, message: `emp_code ${b.empCode} already exists; skipped` }); continue; }
         if (b.pan) await client.query('UPDATE employee SET pan_enc = $2, pan_bidx = $3 WHERE id = $1', [id, cipher.encrypt(b.pan, `employee:${id}:pan`), cipher.blindIndex(b.pan)]);
         if (b.bankAccount) await client.query('UPDATE employee SET bank_account_enc = $2, bank_account_last4 = $3 WHERE id = $1', [id, cipher.encrypt(b.bankAccount, `employee:${id}:bank`), b.bankAccount.slice(-4)]);
-        await client.query('INSERT INTO employee_assignment (employee_id, valid, employment_type) VALUES ($1, daterange($2, NULL), $3)', [id, b.joinDate ?? new Date().toISOString().slice(0, 10), 'regular']);
+        await client.query('INSERT INTO employee_assignment (employee_id, valid, employment_type) VALUES ($1, daterange($2, NULL), $3)', [id, b.joinDate ?? nptToday(), 'regular']);
         imported++;
       }
       await audit(client, { actorId: req.user!.id, action: 'import', table: 'employee', after: { imported, skipped: errors.length } });
@@ -221,7 +248,7 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
   /** Effective-dated assignment history. */
   r.get('/:id/assignments', async (req, res) => {
     const id = z.uuid().parse(req.params.id);
-    assertAccessEmployee(req.user!, id);
+    await assertManages(db, req.user!, id);
     const rows = await db.query('SELECT employee_id, valid::text, branch_id, org_unit_id, manager_id, employment_type, probation_end FROM employee_assignment WHERE employee_id = $1 ORDER BY lower(valid)', [id]);
     res.json({ assignments: rows.rows });
   });
@@ -229,9 +256,9 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
   /** Employee-visible audit of their own record (plan §5.11). */
   r.get('/:id/audit', async (req, res) => {
     const id = z.uuid().parse(req.params.id);
-    if (!hasRole(req.user!, 'hr') && req.user!.employeeId !== id) return res.status(403).json({ error: 'forbidden' });
+    await assertManages(db, req.user!, id);
     const rows = await db.query(`SELECT id, occurred_at, actor_id, action, table_name, row_id FROM audit_log WHERE row_id = $1 ORDER BY id DESC LIMIT 200`, [id]);
-    return res.json({ events: rows.rows });
+    res.json({ events: rows.rows });
   });
 
   return r;

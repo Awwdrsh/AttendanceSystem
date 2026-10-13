@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Db } from '../../db/pool.js';
 import { passwordPolicyError } from '../../crypto.js';
 import { BadRequestError } from '../../errors.js';
+import { audit } from '../../audit.js';
 import { requireAuth, requireRole, SESSION_COOKIE } from './middleware.js';
 import { changePassword, createUser, login, logout, ROLES, SESSION_TTL_MS } from './service.js';
 
@@ -70,12 +71,24 @@ export function authRoutes(db: Db, opts: AuthOptions): Router {
   r.patch('/users/:id', requireRole('admin'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const b = z.object({ roles: z.array(z.enum(ROLES)).min(1).optional(), status: z.enum(['active', 'disabled']).optional(), employeeId: z.uuid().nullable().optional() }).parse(req.body);
+    if (id === req.user!.id && (b.status === 'disabled' || (b.roles && !b.roles.includes('admin')))) {
+      throw new BadRequestError('you cannot disable your own account or remove your own admin role');
+    }
+    const target = await db.query<{ roles: string[]; status: string }>('SELECT roles, status FROM app_user WHERE id = $1 AND company_id = $2', [id, req.user!.companyId]);
+    if (!target.rows[0]) return res.status(404).json({ error: 'user not found' });
+    const losesAdmin = target.rows[0].roles.includes('admin') && target.rows[0].status === 'active'
+      && ((b.roles && !b.roles.includes('admin')) || b.status === 'disabled');
+    if (losesAdmin) {
+      const others = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM app_user WHERE company_id = $1 AND status = 'active' AND 'admin' = ANY(roles) AND id <> $2`, [req.user!.companyId, id]);
+      if (others.rows[0]!.n === 0) throw new BadRequestError('this is the last active admin; add another admin first');
+    }
     const rows = await db.query(
       `UPDATE app_user SET roles = coalesce($2, roles), status = coalesce($3, status), employee_id = CASE WHEN $5 THEN $4 ELSE employee_id END
         WHERE id = $1 AND company_id = $6 RETURNING id, email, name, roles, status, employee_id`,
       [id, b.roles ?? null, b.status ?? null, b.employeeId ?? null, b.employeeId !== undefined, req.user!.companyId]);
     if (!rows.rows[0]) return res.status(404).json({ error: 'user not found' });
     if (b.status === 'disabled') await db.query('UPDATE session SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL', [id]);
+    await audit(db, { actorId: req.user!.id, action: 'update', table: 'app_user', rowId: id, before: target.rows[0], after: b });
     return res.json({ user: rows.rows[0] });
   });
 

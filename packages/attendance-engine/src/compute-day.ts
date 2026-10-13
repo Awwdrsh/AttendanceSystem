@@ -86,6 +86,8 @@ export function computeDay(input: ComputeDayInput): AttendanceDay {
     ot = computeOt({ localDate, scheduledMin, workedMin, dayType, pairs, ctx, policy: policy.ot }, flags);
   }
 
+  if (dayType === 'working' && (ctx.leave === 'first_half' || ctx.leave === 'second_half')) flags.push({ kind: 'HalfDayLeave', half: ctx.leave });
+  if (punches.some((p) => p.source === 'auto_clock_out')) flags.push({ kind: 'AutoClockOut' });
   for (const p of unpaired) flags.push({ kind: 'UnpairedPunch', punchId: p.id });
   const lastUnpaired = unpaired[unpaired.length - 1];
   if (lastUnpaired && punches.length > 0 && lastUnpaired.id === punches[punches.length - 1]!.id && lastUnpaired.direction !== 'out') {

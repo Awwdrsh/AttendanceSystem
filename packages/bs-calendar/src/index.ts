@@ -1,8 +1,11 @@
 import {
-  ANCHOR, BS_MONTH_DAYS, BS_MONTH_NAMES_EN, BS_MONTH_NAMES_NE, FISCAL_YEAR_START_MONTH, DEFAULT_WEEKLY_OFF_DAY,
+  ANCHOR, BS_MONTH_DAYS, BS_MONTH_NAMES_EN, BS_MONTH_NAMES_NE, FISCAL_YEAR_START_MONTH, DEFAULT_WEEKLY_OFF_DAY, PROJECTED_BS_YEARS,
 } from './data.js';
 
-export { BS_MONTH_DAYS, BS_MONTH_NAMES_EN, BS_MONTH_NAMES_NE, FISCAL_YEAR_START_MONTH, DEFAULT_WEEKLY_OFF_DAY };
+export { BS_MONTH_DAYS, BS_MONTH_NAMES_EN, BS_MONTH_NAMES_NE, FISCAL_YEAR_START_MONTH, DEFAULT_WEEKLY_OFF_DAY, PROJECTED_BS_YEARS };
+
+/** True when the BS year's month lengths are still a projection. */
+export function isProjectedBsYear(year: number): boolean { return PROJECTED_BS_YEARS.includes(year); }
 
 export interface BsDate { year: number; month: number; day: number }
 
@@ -109,7 +112,14 @@ export function bsMonthBounds(year: number, month: number): { startAd: string; e
   return { startAd: bsToAd({ year, month, day: 1 }), endAd: bsToAd({ year, month, day: days }), days };
 }
 
-export interface FiscalYear { startYear: number; label: string; startAd: string; endAd: string }
+export interface FiscalYear {
+  startYear: number;
+  label: string;
+  startAd: string;
+  endAd: string;
+  /** true when the following BS year is not in the table yet: endAd is then startAd + 364 days (verify each Chaitra). */
+  approximate: boolean;
+}
 
 /** Fiscal year containing a BS date, e.g. Bhadra 2083 -> FY 2083/84. */
 export function fiscalYearOf(bs: BsDate): FiscalYear {
@@ -120,12 +130,12 @@ export function fiscalYearOf(bs: BsDate): FiscalYear {
 export function fiscalYear(startYear: number): FiscalYear {
   const endYear = startYear + 1;
   const endMonth = FISCAL_YEAR_START_MONTH - 1;
-  return {
-    startYear,
-    label: `${startYear}/${String(endYear).slice(-2)}`,
-    startAd: bsToAd({ year: startYear, month: FISCAL_YEAR_START_MONTH, day: 1 }),
-    endAd: bsToAd({ year: endYear, month: endMonth, day: daysInBsMonth(endYear, endMonth) }),
-  };
+  const startAd = bsToAd({ year: startYear, month: FISCAL_YEAR_START_MONTH, day: 1 });
+  const known = Boolean(BS_MONTH_DAYS[endYear]);
+  const endAd = known
+    ? bsToAd({ year: endYear, month: endMonth, day: daysInBsMonth(endYear, endMonth) })
+    : toIsoDate(parseIsoDate(startAd) + 364 * DAY_MS);
+  return { startYear, label: `${startYear}/${String(endYear).slice(-2)}`, startAd, endAd, approximate: !known };
 }
 
 /** 0 = Sunday ... 6 = Saturday, for an AD 'YYYY-MM-DD'. */

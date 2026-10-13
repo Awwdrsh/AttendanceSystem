@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { bsMonthBounds } from '@hajiri/bs-calendar';
 import type { AppDeps } from '../../deps.js';
 import { isoDate } from '../../validation.js';
-import { assertAccessEmployee, requireRole } from '../auth/middleware.js';
+import { assertManages, requireRole } from '../auth/middleware.js';
 import { hours, nptHHMM, sendReport } from './csv.js';
 
 const fmt = z.object({ format: z.enum(['json', 'csv']).optional() });
@@ -117,7 +117,7 @@ export function reportsRoutes({ db }: AppDeps): Router {
     const q = range.parse(req.query);
     const rows = await db.query(
       `SELECT v.local_date, count(*) FILTER (WHERE v.status = 'Incomplete')::int AS incomplete, count(*) FILTER (WHERE v.status = 'Absent')::int AS absent,
-              count(*) FILTER (WHERE v.flags::text LIKE '%OTPreapprovalMissing%')::int AS ot_unapproved, count(*) FILTER (WHERE v.flags::text LIKE '%OTCapExceeded%')::int AS ot_cap,
+              count(*) FILTER (WHERE v.flags @> '[{"kind":"OTPreapprovalMissing"}]')::int AS ot_unapproved, count(*) FILTER (WHERE v.flags @> '[{"kind":"OTCapExceeded"}]')::int AS ot_cap,
               count(*) FILTER (WHERE v.late_min > 0)::int AS late
          FROM v_attendance_latest v JOIN employee e ON e.id = v.employee_id
         WHERE e.company_id = $1 AND v.local_date BETWEEN $2 AND $3 GROUP BY v.local_date ORDER BY v.local_date`, [req.user!.companyId, q.from, q.to]);
@@ -140,7 +140,7 @@ export function reportsRoutes({ db }: AppDeps): Router {
 
   r.get('/punch-audit', async (req, res) => {
     const q = range.extend({ employeeId: z.uuid() }).parse(req.query);
-    assertAccessEmployee(req.user!, q.employeeId);
+    await assertManages(db, req.user!, q.employeeId);
     const rows = await db.query(
       `SELECT p.id, p.local_date, p.punched_at, p.direction, p.verify_mode, p.source, p.device_sn, p.ingested_at, p.supersedes_id,
               (SELECT count(*) FROM punch_event s WHERE s.supersedes_id = p.id) > 0 AS superseded, p.raw->>'reason' AS reason

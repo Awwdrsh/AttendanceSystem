@@ -117,10 +117,15 @@ async function recomputeInTx(db: Queryable, employeeId: string, localDate: strin
 
 /** Queue (employee, date) pairs for the worker (plan §10.3 triggers). Idempotent. */
 export async function enqueueRecompute(db: Queryable, items: Array<{ employeeId: string; localDate: string }>, reason: string): Promise<void> {
-  for (const it of items) {
+  if (items.length === 0) return;
+  // One statement per 5,000 pairs (unnest) instead of one round trip per pair.
+  for (let i = 0; i < items.length; i += 5000) {
+    const chunk = items.slice(i, i + 5000);
     await db.query(
-      `INSERT INTO recompute_queue (employee_id, local_date, reason) VALUES ($1, $2, $3) ON CONFLICT (employee_id, local_date) DO UPDATE SET enqueued_at = now(), reason = EXCLUDED.reason`,
-      [it.employeeId, it.localDate, reason]);
+      `INSERT INTO recompute_queue (employee_id, local_date, reason)
+       SELECT e, d, $3 FROM unnest($1::uuid[], $2::date[]) AS t(e, d)
+       ON CONFLICT (employee_id, local_date) DO UPDATE SET enqueued_at = now(), reason = EXCLUDED.reason`,
+      [chunk.map((x) => x.employeeId), chunk.map((x) => x.localDate), reason]);
   }
 }
 

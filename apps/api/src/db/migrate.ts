@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from '../config.js';
+import { loadDatabaseUrl } from '../config.js';
 import { createPool, type Db } from './pool.js';
 
 /**
@@ -47,8 +47,7 @@ export async function migrate(db: Db, dir: string, log: (m: string) => void = co
 export const MIGRATIONS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../migrations');
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const cfg = loadConfig();
-  const db = createPool(cfg.DATABASE_URL);
+  const db = createPool(loadDatabaseUrl());
   migrate(db, MIGRATIONS_DIR)
     .then((ran) => { console.log(ran.length ? `${ran.length} migration(s) applied` : 'up to date'); return db.end(); })
     .catch((e) => { console.error(e.message); process.exit(1); });

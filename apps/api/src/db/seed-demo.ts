@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from '../config.js';
+import { loadDatabaseUrl } from '../config.js';
 import { createPool, type Db } from './pool.js';
 
 /** Development seed: one company, one branch, a general shift, two employees, one pending ZKTeco device mapped to them. */
@@ -36,7 +36,7 @@ export async function seedDemo(db: Db): Promise<void> {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const db = createPool(loadConfig().DATABASE_URL);
+  const db = createPool(loadDatabaseUrl());
   seedDemo(db).then(() => { console.log('demo data seeded'); return db.end(); })
     .catch((e) => { console.error(e.message); process.exit(1); });
 }

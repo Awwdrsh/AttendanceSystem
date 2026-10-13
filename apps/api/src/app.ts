@@ -4,7 +4,7 @@ import { pinoHttp } from 'pino-http';
 import { ZodError } from 'zod';
 import type { AppDeps } from './deps.js';
 import { HttpError } from './errors.js';
-import { sessionLoader, requireAuth } from './modules/auth/middleware.js';
+import { sessionLoader, requireAuth, requirePasswordChanged } from './modules/auth/middleware.js';
 import { authRoutes } from './modules/auth/routes.js';
 import { attendanceRoutes } from './modules/attendance/routes.js';
 import { deviceRoutes } from './modules/devices/routes.js';
@@ -32,7 +32,22 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 'loopback');
-  app.use(opts.webDist ? helmet() : helmet({ contentSecurityPolicy: false }));
+  app.use(opts.webDist
+    ? helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: ["'self'"],
+          styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+          fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+          imgSrc: ["'self'", 'data:', 'blob:'],
+          connectSrc: ["'self'"],
+          frameAncestors: ["'none'"],
+          objectSrc: ["'none'"],
+        },
+      },
+    })
+    : helmet({ contentSecurityPolicy: false }));
   if (logger) app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => req.url === '/health' } }));
   app.use(express.json({ limit: '2mb' }));
   app.use(express.text({ type: 'text/csv', limit: '10mb' }));
@@ -63,6 +78,7 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
   const api = express.Router();
   api.use('/auth', authRoutes(db, { secureCookie: deps.secureCookie, ...(deps.pepper ? { pepper: deps.pepper } : {}) }));
   api.use(requireAuth);                       // everything below needs a session; roles are checked per route
+  api.use(requirePasswordChanged);            // accounts flagged must_change_password can only use /auth
   api.use('/employees', employeeRoutes(deps));
   api.use('/attendance', attendanceRoutes(deps));
   api.use('/devices', deviceRoutes(deps));

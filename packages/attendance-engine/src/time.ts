@@ -35,6 +35,11 @@ export function localDateOf(epochMs: number): string {
   return new Date(epochMs + NPT_OFFSET_MIN * MIN_MS).toISOString().slice(0, 10);
 }
 
+/** Today's calendar date in Nepal (never the UTC date: between 00:00 and 05:45 NPT those differ). */
+export function nptToday(now: number = Date.now()): string {
+  return localDateOf(now);
+}
+
 /** Whole minutes from a to b (floor). Negative if b < a. */
 export function minutesBetween(aMs: number, bMs: number): number {
   return Math.floor((bMs - aMs) / MIN_MS);

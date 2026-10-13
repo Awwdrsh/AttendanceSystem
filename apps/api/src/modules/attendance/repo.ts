@@ -90,8 +90,13 @@ export async function approvedLeave(db: Queryable, employeeId: string, localDate
       WHERE lr.employee_id = $1 AND lr.status = 'approved' AND $2::date BETWEEN lr.from_date AND lr.to_date
       ORDER BY lr.decided_at DESC LIMIT 1`, [employeeId, localDate]);
   const row = r.rows[0];
-  if (!row) return { cover: 'none', paid: true, leaveTypeId: null };
-  return { cover: row.half_day ?? 'full', paid: row.paid, leaveTypeId: row.leave_type_id };
+  if (row) return { cover: row.half_day ?? 'full', paid: row.paid, leaveTypeId: row.leave_type_id };
+  // An approved half-day regularisation (plan §5.4) is a paid half day; the request does not say which half, so the
+  // afternoon is assumed (the employee worked the morning).
+  const reg = await db.query(
+    `SELECT 1 FROM regularisation_request WHERE employee_id = $1 AND local_date = $2 AND kind = 'half_day' AND status = 'approved' LIMIT 1`, [employeeId, localDate]);
+  if (reg.rows.length > 0) return { cover: 'second_half', paid: true, leaveTypeId: null };
+  return { cover: 'none', paid: true, leaveTypeId: null };
 }
 
 export async function approvedWfh(db: Queryable, employeeId: string, localDate: string): Promise<boolean> {

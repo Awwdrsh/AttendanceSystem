@@ -29,29 +29,52 @@ export function sendersFromEnv(env: NodeJS.ProcessEnv, logger: Logger): Sender[]
 }
 
 // ---------------------------------------------------------------- jobs
-/** (1) Drain recompute_queue in batches of 50 (plan §10.3). Rows that fail stay queued and are logged. */
-export async function drainRecomputeQueue(deps: WorkerDeps, batch = 50): Promise<{ processed: number; failed: number }> {
+export const MAX_RECOMPUTE_ATTEMPTS = 5;
+
+/**
+ * (1) Drain recompute_queue in batches of 50 (plan §10.3). A row that fails is re-queued with attempts + 1 and dropped
+ * after MAX_RECOMPUTE_ATTEMPTS with an HR notification, so one poisoned row can never block the queue.
+ */
+export async function drainRecomputeQueue(deps: WorkerDeps, batch = 50): Promise<{ processed: number; failed: number; dropped: number }> {
   const { db, logger } = deps;
   const client = await db.connect();
-  let rows: Array<{ employee_id: string; local_date: string }> = [];
+  let rows: Array<{ employee_id: string; local_date: string; attempts: number }> = [];
   try {
     await client.query('BEGIN');
-    const r = await client.query<{ employee_id: string; local_date: string }>(
+    const r = await client.query<{ employee_id: string; local_date: string; attempts: number }>(
       `DELETE FROM recompute_queue WHERE (employee_id, local_date) IN (
-         SELECT employee_id, local_date FROM recompute_queue ORDER BY enqueued_at LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING employee_id, local_date`, [batch]);
+         SELECT employee_id, local_date FROM recompute_queue ORDER BY enqueued_at LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING employee_id, local_date, attempts`, [batch]);
     rows = r.rows;
     await client.query('COMMIT');
   } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
-  let processed = 0, failed = 0;
+  let processed = 0, failed = 0, dropped = 0;
   for (const row of rows) {
     try { await recomputeDay(db, row.employee_id, row.local_date); processed++; }
     catch (e) {
-      failed++;
-      logger.error({ err: e, employeeId: row.employee_id, localDate: row.local_date }, 'recompute failed; re-queued');
-      await enqueueRecompute(db, [{ employeeId: row.employee_id, localDate: row.local_date }], 'retry').catch(() => undefined);
+      const attempts = row.attempts + 1;
+      const message = String((e as Error).message).slice(0, 500);
+      if (attempts >= MAX_RECOMPUTE_ATTEMPTS) {
+        dropped++;
+        logger.error({ err: e, employeeId: row.employee_id, localDate: row.local_date, attempts }, 'recompute failed repeatedly; dropped');
+        const c = await db.query<{ company_id: string }>('SELECT company_id FROM employee WHERE id = $1', [row.employee_id]).catch(() => ({ rows: [] as Array<{ company_id: string }> }));
+        if (c.rows[0]) {
+          await notifyRole(db, c.rows[0].company_id, 'hr', { template: 'attendance.recompute_failed', title: `Attendance for ${row.local_date} could not be computed`,
+            body: `Recomputing one employee's attendance for ${row.local_date} failed ${attempts} times (${message}). Check the shift and punches, then recompute from the exceptions queue.`,
+            payload: { employeeId: row.employee_id, localDate: row.local_date } }).catch(() => undefined);
+        }
+      } else {
+        failed++;
+        logger.warn({ err: e, employeeId: row.employee_id, localDate: row.local_date, attempts }, 'recompute failed; re-queued');
+        // Backoff: the row sorts after fresh work for `attempts` minutes.
+        const retryAt = new Date(Date.now() + attempts * MIN_MS);
+        await db.query(
+          `INSERT INTO recompute_queue (employee_id, local_date, reason, attempts, last_error, enqueued_at) VALUES ($1, $2, 'retry', $3::int, $4, $5::timestamptz)
+           ON CONFLICT (employee_id, local_date) DO UPDATE SET attempts = EXCLUDED.attempts, last_error = EXCLUDED.last_error, enqueued_at = EXCLUDED.enqueued_at`,
+          [row.employee_id, row.local_date, attempts, message, retryAt]).catch((err: unknown) => logger.error({ err }, 'could not re-queue recompute'));
+      }
     }
   }
-  return { processed, failed };
+  return { processed, failed, dropped };
 }
 
 /** (2) Nightly sweep: last 3 days for every active employee (plan §10.3). */

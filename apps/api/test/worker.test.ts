@@ -29,7 +29,7 @@ describe('worker', () => {
     await punch(DEMO.sita, '2026-09-21', '18:00', '1');
     await enqueueRecompute(db, [{ employeeId: DEMO.sita, localDate: '2026-09-21' }, { employeeId: DEMO.ram, localDate: '2026-09-21' }], 'test');
     const out = await runOnce(deps, ['queue']);
-    expect(out.queue).toEqual({ processed: 2, failed: 0 });
+    expect(out.queue).toEqual({ processed: 2, failed: 0, dropped: 0 });
     expect((await db.query('SELECT count(*)::int AS n FROM recompute_queue')).rows[0].n).toBe(0);
     const day = await db.query(`SELECT status, worked_min FROM v_attendance_latest WHERE employee_id = $1 AND local_date = '2026-09-21'`, [DEMO.sita]);
     expect(day.rows[0]).toMatchObject({ status: 'Present', worked_min: 480 });
