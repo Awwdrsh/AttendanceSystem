@@ -28,6 +28,7 @@ export default function RunWizardPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [addInput, setAddInput] = useState(false); const [inEmp, setInEmp] = useState<string | null>(null); const [inCode, setInCode] = useState('ALLOWANCE'); const [inAmt, setInAmt] = useState(''); const [inNote, setInNote] = useState('');
   const [notes, setNotes] = useState(''); const [bank, setBank] = useState('GENERIC');
+  const [override, setOverride] = useState(false); const [overrideReason, setOverrideReason] = useState('');
   const comps = useQuery(() => payApi.components(), []);
   const run = q.data?.run; const period = q.data?.period;
   useEffect(() => { if (run) { setStep(stepOf(run.status)); if (run.preflight) setPf(run.preflight); } }, [run?.status]);
@@ -39,6 +40,7 @@ export default function RunWizardPage() {
   const totals = run.totals ?? {};
   const varianceRows = (run.variance?.byEmployee ?? []);
   const slips = q.data?.payslips ?? [];
+  const canCompute = ['draft', 'preflight_failed', 'computed', 'reviewed'].includes(run.status);
 
   return (
     <Stack>
@@ -58,7 +60,7 @@ export default function RunWizardPage() {
           <Paper withBorder p="md" radius="md"><Text fw={600} c="red">{t('blockers')} ({pf.blockers.length})</Text>{pf.blockers.length === 0 ? <Text size="sm" c="dimmed">None. You can calculate.</Text> : pf.blockers.map((b) => <Alert key={b.code} color="red" variant="light" mt="xs" title={b.message}>{b.count !== undefined ? `${b.count} affected` : ''}{b.employees?.length ? ` · ${b.employees.slice(0, 5).join(', ')}${b.employees.length > 5 ? '…' : ''}` : ''}</Alert>)}</Paper>
           <Paper withBorder p="md" radius="md"><Text fw={600} c="orange">{t('warnings')} ({pf.warnings.length})</Text>{pf.warnings.length === 0 ? <Text size="sm" c="dimmed">None.</Text> : pf.warnings.map((w) => <Alert key={w.code} color="orange" variant="light" mt="xs" title={w.message}>{w.count !== undefined ? `${w.count} affected` : ''}{w.employees?.length ? ` · ${w.employees.slice(0, 5).join(', ')}` : ''}</Alert>)}</Paper>
         </SimpleGrid> : <Text size="sm" c="dimmed">Pre-flight checks attendance lock, unresolved exceptions, missing bank/PAN/SSF details, joiners and leavers, and unapproved overtime.</Text>}
-        <Group justify="flex-end"><Button disabled={!pf || !pf.ok} onClick={() => setStep(1)}>Next: {t('inputs')}</Button></Group>
+        <Group justify="flex-end">{pf && !pf.ok && hasRole('hr') && canCompute ? <Button variant="light" color="orange" onClick={() => setOverride(true)}>Calculate anyway (HR override)</Button> : null}<Button disabled={!pf || !pf.ok} onClick={() => setStep(1)}>Next: {t('inputs')}</Button></Group>
       </Stack> : null}
 
       {step === 1 ? <Stack>
@@ -69,7 +71,7 @@ export default function RunWizardPage() {
       </Stack> : null}
 
       {step === 2 ? <Stack>
-        <Group><Button disabled={locked} loading={busy === 'compute'} onClick={() => act('compute', () => payApi.compute(id), 'Payslips calculated.')}>{run.computed_at ? 'Recalculate' : t('compute')}</Button>
+        <Group><Button disabled={!canCompute} loading={busy === 'compute'} onClick={() => act('compute', () => payApi.compute(id), 'Payslips calculated.')}>{run.computed_at ? 'Recalculate' : t('compute')}</Button>
           {run.status === 'computed' ? <Button variant="light" loading={busy === 'review'} onClick={() => act('review', () => payApi.review(id, notes || undefined), 'Marked reviewed.')}>{t('markReviewed')}</Button> : null}</Group>
         {run.computed_at ? <SimpleGrid cols={{ base: 2, md: 5 }} spacing="sm">{[['Payslips', String(totals.payslips ?? slips.length)], [t('grossPay'), fmtMoney(totals.gross, { numerals })], ['Employer SSF/PF', fmtMoney(totals.employerStatutory ?? totals.employer_statutory, { numerals })], ['TDS', fmtMoney(totals.tds, { numerals })], [t('netPay'), fmtMoney(totals.net, { numerals })]].map(([k, v]) => <Paper key={k} withBorder p="sm" radius="md"><Text size="xs" c="dimmed">{k}</Text><Text fw={700}>{v}</Text></Paper>)}</SimpleGrid> : null}
         {run.variance ? <Text size="sm" c="dimmed">{run.variance.flagged} flagged row(s) sort first · previous run net {fmtMoney(run.variance.previousNet, { numerals })}</Text> : null}
@@ -93,7 +95,7 @@ export default function RunWizardPage() {
         {!hasRole('finance') ? <Alert variant="light" color="gray">Approval requires the finance role.</Alert> : null}
         {run.approved_at ? <Alert variant="light" color="teal" title="Approved">Signed {new Date(run.approved_at).toLocaleString()} · signature {run.approval_signature?.slice(0, 20) ?? ''}…</Alert> : null}
         <Group justify="space-between"><Button variant="default" onClick={() => setStep(2)}>Back</Button>
-          <Group>{run.status === 'reviewed' ? <Button h={48} disabled={isMaker || !hasRole('finance')} loading={busy === 'approve'} onClick={() => act('approve', () => payApi.approve(id), 'Run approved and signed.')}>{t('approve')}</Button> : null}
+          <Group>{run.status === 'reviewed' ? <Button h={48} disabled={isMaker || !hasRole('finance')} loading={busy === 'approve'} onClick={() => act('approve', async () => { const r = await payApi.approve(id); if (r.pendingSecondApproval) toast.info('Above the two-approver threshold: a second finance approver must also approve before the run can be locked.', 'First approval recorded'); }, 'Approval recorded.')}>{t('approve')}</Button> : null}
             {run.status === 'approved' ? <Button h={48} color="teal" loading={busy === 'lockrun'} onClick={() => act('lockrun', () => payApi.lock(id), 'Run locked. Attendance for the period is now immutable.')}>{t('lockRun')}</Button> : null}
             {locked ? <Button onClick={() => setStep(4)}>Next: {t('disburse')}</Button> : null}</Group></Group>
       </Stack> : null}
@@ -114,6 +116,13 @@ export default function RunWizardPage() {
             {run.status === 'disbursed' && hasRole('finance') ? <Button color="teal" loading={busy === 'file'} onClick={() => act('file', () => payApi.file(id), 'Run filed.')}>Mark filed</Button> : null}</Group></Group>
       </Stack> : null}
 
+      <Modal opened={override} onClose={() => setOverride(false)} title="Calculate despite blockers" centered>
+        <Stack>
+          <Alert variant="light" color="orange">Pre-flight found blockers. Calculating anyway is recorded in the audit log with your reason; fix the underlying data before approval.</Alert>
+          <Textarea label="Reason (at least 5 characters)" value={overrideReason} onChange={(e) => setOverrideReason(e.currentTarget.value)} autosize minRows={2} required />
+          <Group justify="flex-end"><Button variant="default" onClick={() => setOverride(false)}>Back</Button><Button color="orange" disabled={overrideReason.trim().length < 5} loading={busy === 'compute'} onClick={() => act('compute', async () => { await payApi.compute(id, overrideReason.trim()); setOverride(false); setStep(2); }, 'Payslips calculated with an override.')}>Calculate anyway</Button></Group>
+        </Stack>
+      </Modal>
       <Modal opened={addInput} onClose={() => setAddInput(false)} title="One-time input" centered>
         <Stack>
           <EmployeePicker value={inEmp} onChange={setInEmp} required />

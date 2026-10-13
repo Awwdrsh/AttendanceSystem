@@ -64,7 +64,7 @@ export function BsDatePicker({ value, onChange, label, description, holidays, mi
       <Popover opened={open} onChange={setOpen} position="bottom-start" withinPortal shadow="md" trapFocus>
         <Popover.Target>
           <TextInput
-            label={label} description={description} required={required} disabled={disabled} error={error ?? typedErr ?? undefined}
+            {...(label !== undefined ? { label } : {})} {...(description !== undefined ? { description } : {})} {...(required !== undefined ? { required } : {})} {...(disabled !== undefined ? { disabled } : {})} {...(error ?? typedErr ? { error: error ?? typedErr } : {})}
             value={open ? typed : display} placeholder={calendar === 'bs' ? 'YYYY-MM-DD (BS)' : 'YYYY-MM-DD (AD)'}
             onFocus={() => setOpen(true)} onClick={() => setOpen(true)}
             onChange={(e) => setTyped(e.currentTarget.value)}

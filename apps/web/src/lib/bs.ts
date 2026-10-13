@@ -35,11 +35,15 @@ export function safe(ad: string): BsDate | null {
   try { return adToBs(ad); } catch { return null; }
 }
 
+/** Previous month, clamped to the supported calendar (the first supported month stays put). */
 export function prevMonth(y: number, m: number): { year: number; month: number } {
-  return m === 1 ? { year: y - 1, month: 12 } : { year: y, month: m - 1 };
+  const next = m === 1 ? { year: y - 1, month: 12 } : { year: y, month: m - 1 };
+  return inRange(next.year) ? next : { year: y, month: m };
 }
+/** Next month, clamped to the supported calendar. */
 export function nextMonth(y: number, m: number): { year: number; month: number } {
-  return m === 12 ? { year: y + 1, month: 1 } : { year: y, month: m + 1 };
+  const next = m === 12 ? { year: y + 1, month: 1 } : { year: y, month: m + 1 };
+  return inRange(next.year) ? next : { year: y, month: m };
 }
 
 export function inRange(y: number): boolean {

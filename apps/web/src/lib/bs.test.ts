@@ -15,6 +15,10 @@ describe('BS month grid', () => {
     expect(prevMonth(2083, 1)).toEqual({ year: 2082, month: 12 });
     expect(nextMonth(2083, 12)).toEqual({ year: 2084, month: 1 });
   });
+  it('navigation never leaves the supported calendar', () => {
+    expect(prevMonth(2082, 1)).toEqual({ year: 2082, month: 1 });
+    expect(nextMonth(2084, 12)).toEqual({ year: 2084, month: 12 });
+  });
   it('typed fallback accepts both calendars and rejects impossible dates', () => {
     expect(parseTyped('2083-05-12', 'bs')).toBe('2026-08-28');
     expect(parseTyped('2026/08/28', 'ad')).toBe('2026-08-28');

@@ -21,7 +21,11 @@ export default function EmployeesPage() {
   const runImport = async (dryRun: boolean) => {
     setImpBusy(true);
     try { const r = await empApi.importCsv(csv, dryRun); setImpResult(r); if (!dryRun) { toast.ok(`${r.imported} employees imported.`); await q.reload(); } }
-    catch (e) { const err = e as { details?: unknown; message: string; issues?: unknown }; setImpResult({ imported: 0, errors: [{ row: 0, message: err.message }] }); }
+    catch (e) {
+      const err = e as { details?: { errors?: Array<{ row: number; message: string }>; valid?: number }; message: string };
+      if (Array.isArray(err.details?.errors)) setImpResult({ imported: 0, ...(err.details.valid !== undefined ? { valid: err.details.valid } : {}), errors: err.details.errors });
+      else setImpResult({ imported: 0, errors: [{ row: 0, message: err.message }] });
+    }
     finally { setImpBusy(false); }
   };
   return (

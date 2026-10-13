@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { auth as authApi } from '../api';
-import { onUnauthorized } from '../api/client';
+import { onPasswordChangeRequired, onUnauthorized } from '../api/client';
 import type { AuthUser, Role } from '../api/types';
 
 export interface AuthState {
@@ -24,6 +24,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => onUnauthorized(() => setUser(null)), []);
+  useEffect(() => onPasswordChangeRequired(() => setUser((u) => (u ? { ...u, mustChangePassword: true } : u))), []);
 
   const value = useMemo<AuthState>(() => ({
     user, loading, refresh,

@@ -22,6 +22,11 @@ function describeFlag(f: Flag, lang: 'en' | 'ne'): string {
     case 'OTCapExceeded': return lang === 'ne' ? `ओभरटाइम सीमा नाघ्यो (${f.minutes} मिनेट)` : `Overtime cap exceeded by ${f.minutes} min`;
     case 'HolidayWork': return lang === 'ne' ? `बिदाको दिन काम (${f.workedMin} मिनेट)` : `Worked on a holiday (${f.workedMin} min)`;
     case 'UnpaidLeave': return lang === 'ne' ? 'बेतलबी बिदा' : 'Unpaid leave';
+    case 'HalfDayLeave': return lang === 'ne' ? 'आधा दिन बिदा' : 'Half-day leave';
+    case 'AutoClockOut': return lang === 'ne' ? 'स्वतः बाहिर गरिएको; सच्याउन अनुरोध गर्नुहोस्' : 'Clocked out automatically; request a correction if wrong';
+    case 'ClockSkew': return lang === 'ne' ? 'फोनको घडी फरक थियो; सर्भरको समय प्रयोग' : 'Phone clock was off; server time used';
+    case 'OutsideLocation': return lang === 'ne' ? 'कार्यस्थल बाहिरबाट हाजिरी (फ्ल्याग)' : 'Punched outside the work location (flagged)';
+    case 'NoLocation': return lang === 'ne' ? 'स्थान उपलब्ध थिएन' : 'Location was not available';
     default: return f.kind;
   }
 }
@@ -54,13 +59,16 @@ export default function HomePage() {
 
   const doPunch = async (direction: 'in' | 'out', why?: string) => {
     setBusy(true);
-    const key = localStorage.getItem('hajiri.punchKey') ?? crypto.randomUUID();
-    localStorage.setItem('hajiri.punchKey', key);
+    // One idempotency key per attempted punch; reused only when retrying the same direction so a failed IN never swallows a later OUT.
+    let key: string = crypto.randomUUID();
+    try { const saved = JSON.parse(localStorage.getItem('hajiri.punchKey') ?? 'null') as { key: string; direction: string } | null; if (saved && saved.direction === direction) key = saved.key; } catch { /* ignore */ }
+    localStorage.setItem('hajiri.punchKey', JSON.stringify({ key, direction }));
     try {
       const pos = await getPosition();
       const res = await punchApi.create({ direction, clientTime: new Date().toISOString(), idempotencyKey: key, source: 'web', ...(pos.lat !== undefined ? { lat: pos.lat, lng: pos.lng, accuracyM: pos.accuracyM } : {}), ...(why ? { reason: why } : {}) });
       localStorage.removeItem('hajiri.punchKey');
-      toast.ok(res.message ?? `${t('punchSaved')} ${direction.toUpperCase()} ${fmtTime(res.punch.punched_at, numerals)}`);
+      if (res.duplicate) toast.info(`${lang === 'ne' ? 'यो हाजिरी पहिले नै दर्ता थियो' : 'This punch was already recorded'}: ${res.punch.direction.toUpperCase()} ${fmtTime(res.punch.punched_at, numerals)}`);
+      else toast.ok(res.message ?? `${t('punchSaved')} ${direction.toUpperCase()} ${fmtTime(res.punch.punched_at, numerals)}`);
       if (pos.denied) toast.info(t('locationUnavailable'));
       setReasonOpen(null); setReason('');
       await Promise.all([today.reload(), me.reload()]);
@@ -85,7 +93,7 @@ export default function HomePage() {
           </Button>
           <Text size="sm" c="dimmed">{last ? `${lang === 'ne' ? 'अन्तिम' : 'Last'}: ${last.direction.toUpperCase()} ${fmtTime(last.punched_at, numerals)} (${last.source})` : t('noPunchesToday')}</Text>
           <Group gap="xs">
-            <StatusBadge status={day?.status ?? 'Pending'} late={day?.late_min} />
+            <StatusBadge status={day?.status ?? 'Pending'} late={day?.late_min ?? null} />
             {day ? <Text size="sm">{t('worked')}: {minutesToHm(day.worked_min, numerals)}</Text> : null}
           </Group>
           {day?.flags?.length ? <Stack gap={2}>{day.flags.map((f, i) => <Text key={i} size="xs" c="dimmed">• {describeFlag(f, lang)}</Text>)}</Stack> : null}

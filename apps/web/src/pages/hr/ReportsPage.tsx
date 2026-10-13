@@ -16,7 +16,10 @@ export default function ReportsPage() {
   const [date, setDate] = useState<string | null>(todayNpt());
   const [from, setFrom] = useState<string | null>(addDays(todayNpt(), -30)); const [to, setTo] = useState<string | null>(todayNpt());
   const [emp, setEmp] = useState<string | null>(null);
-  const dl = (name: string, q: Record<string, string | number | null | undefined>, file: string) => repApi.csv(name, q, file).catch((e) => toast.err(e, 'Download failed'));
+  const dl = (name: string, q: Record<string, string | number | null | undefined>, file: string) => {
+    if (Object.values(q).some((v) => v === null || v === undefined || v === '')) { toast.info('Pick the date(s) first.'); return; }
+    return repApi.csv(name, q, file).catch((e) => toast.err(e, 'Download failed'));
+  };
   const card = (title: string, desc: string, controls: React.ReactNode, onDownload: () => void) => (
     <Paper withBorder p="md" radius="md"><Stack gap="xs"><Text fw={600}>{title}</Text><Text size="xs" c="dimmed">{desc}</Text>{controls}<Group justify="flex-end"><Button size="xs" onClick={onDownload}>{t('download')} {t('csv')}</Button></Group></Stack></Paper>
   );

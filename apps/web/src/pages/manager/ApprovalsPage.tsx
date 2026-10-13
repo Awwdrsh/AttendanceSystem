@@ -5,7 +5,8 @@ import type { InboxItem, WorkflowDetail } from '../../api/types';
 import { EmptyState } from '../../components/EmptyState';
 import { PageHeader } from '../../components/PageHeader';
 import { useI18n } from '../../i18n';
-import { dualDate, minutesToHm, relativeTime } from '../../lib/format';
+import { dualDate, fmtTime, minutesToHm, relativeTime } from '../../lib/format';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 
@@ -16,7 +17,7 @@ function Summary({ item }: { item: InboxItem }) {
   const s = item.summary as Record<string, unknown>;
   switch (item.objectType) {
     case 'leave_request': return <Text size="sm">{String(s.leaveTypeName ?? s.leaveType)} · {dualDate(String(s.from), lang, numerals).bs}{s.to !== s.from ? ` → ${dualDate(String(s.to), lang, numerals).bs}` : ''}{s.halfDay ? ' (half)' : ''} · {String(s.days)} days · balance {Number(s.balanceNow ?? 0).toFixed(1)} → {Number(s.balanceAfter ?? 0).toFixed(1)}{Array.isArray(s.teamOverlap) && s.teamOverlap.length ? <Text span c="orange"> · also off: {(s.teamOverlap as string[]).join(', ')}</Text> : null}{s.reason ? <Text span c="dimmed"> · {String(s.reason)}</Text> : null}</Text>;
-    case 'regularisation_request': return <Text size="sm">{String(s.kind).replace('_', ' ')} on {dualDate(String(s.local_date), lang, numerals).bs}{s.punch_time ? ` at ${new Date(String(s.punch_time)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} ${String(s.punch_direction ?? '').toUpperCase()}` : ''} · <Text span c="dimmed">{String(s.reason ?? '')}</Text></Text>;
+    case 'regularisation_request': return <Text size="sm">{String(s.kind).replace('_', ' ')} on {dualDate(String(s.local_date), lang, numerals).bs}{s.punch_time ? ` at ${fmtTime(String(s.punch_time), numerals)} ${String(s.punch_direction ?? '').toUpperCase()}` : ''} · <Text span c="dimmed">{String(s.reason ?? '')}</Text></Text>;
     case 'ot_request': return <Text size="sm">{minutesToHm(Number(s.requested_min), numerals)} on {dualDate(String(s.local_date), lang, numerals).bs} · <Text span c="dimmed">{String(s.reason ?? '')}</Text></Text>;
     case 'payroll_run': return <Text size="sm">{String(s.run_type)} {String(s.bs_year)}-{String(s.bs_month)} · {String(s.payslips)} payslips · net {String(s.total_net)}</Text>;
     default: return <Text size="sm" c="dimmed">{JSON.stringify(s)}</Text>;
@@ -29,6 +30,7 @@ export default function ApprovalsPage() {
   const [reject, setReject] = useState<InboxItem | null>(null); const [reason, setReason] = useState('');
   const [detail, setDetail] = useState<WorkflowDetail | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [confirmBulk, setConfirmBulk] = useState(false);
   const items = q.data?.items ?? [];
 
   const approve = async (it: InboxItem) => { setBusy(it.instanceId); try { await wfApi.approve(it.instanceId); toast.ok('Approved.'); await q.reload(); } catch (e) { toast.err(e); } finally { setBusy(null); } };
@@ -37,7 +39,7 @@ export default function ApprovalsPage() {
 
   return (
     <Stack>
-      <PageHeader title={t('approvals')} subtitle={`${items.length} ${lang === 'ne' ? 'विचाराधीन' : 'pending'}`} actions={items.length > 1 ? <Button variant="light" loading={busy === 'bulk'} onClick={bulk}>{lang === 'ne' ? 'सबै स्वीकृत' : 'Approve all'}</Button> : null} />
+      <PageHeader title={t('approvals')} subtitle={`${items.length} ${lang === 'ne' ? 'विचाराधीन' : 'pending'}`} actions={items.length > 1 ? <Button variant="light" loading={busy === 'bulk'} onClick={() => setConfirmBulk(true)}>{lang === 'ne' ? 'सबै स्वीकृत' : 'Approve all'}</Button> : null} />
       {!q.loading && items.length === 0 ? <EmptyState title={lang === 'ne' ? 'सबै स्वीकृति सकियो।' : 'Inbox is empty.'} hint={lang === 'ne' ? 'नयाँ अनुरोध आउँदा यहाँ देखिन्छ।' : 'New leave, correction and overtime requests will appear here.'} icon="✓" /> : null}
       {items.map((it) => (
         <Paper key={it.instanceId} withBorder p="md" radius="md">
@@ -58,6 +60,8 @@ export default function ApprovalsPage() {
         <Stack><Textarea label={t('reason')} description={t('reasonRequired')} value={reason} onChange={(e) => setReason(e.currentTarget.value)} autosize minRows={2} required />
           <Group justify="flex-end"><Button variant="default" onClick={() => setReject(null)}>{t('cancel')}</Button><Button color="red" disabled={reason.trim().length < 3} onClick={doReject}>{t('reject')}</Button></Group></Stack>
       </Modal>
+      <ConfirmDialog opened={confirmBulk} onClose={() => setConfirmBulk(false)} color="teal" title={lang === 'ne' ? 'सबै स्वीकृत गर्ने?' : 'Approve everything?'} confirmLabel={lang === 'ne' ? 'सबै स्वीकृत' : 'Approve all'}
+        message={lang === 'ne' ? `${items.length} अनुरोध स्वीकृत हुनेछन्। अस्वीकार गर्नुपर्ने छ भने पहिले त्यो गर्नुहोस्।` : `${items.length} request(s) will be approved in one go. Reject any that need it first.`} onConfirm={bulk} />
       <Modal opened={!!detail} onClose={() => setDetail(null)} title="Approval timeline" centered>
         {detail ? <Stack>
           <Text size="sm">Steps: {detail.instance.steps.map((s) => s.role).join(' → ')} · state {detail.instance.state}</Text>

@@ -84,8 +84,8 @@ export default function MyAttendancePage() {
             return (
               <button key={c.ad} type="button" onClick={() => { setSelected(c.ad); setCorrect(false); }} disabled={!c.inMonth}
                 style={{ minHeight: 64, borderRadius: 8, border: selected === c.ad ? '2px solid var(--mantine-color-teal-6)' : '1px solid var(--mantine-color-default-border)', background: c.ad === todayNpt() ? 'var(--mantine-color-teal-light)' : 'transparent', opacity: c.inMonth ? 1 : 0.3, cursor: c.inMonth ? 'pointer' : 'default', padding: 4, textAlign: 'left' }}>
-                <Text size="sm" fw={600} c={c.saturday ? 'red' : undefined}>{fmtNum(c.bs.day, numerals)} <Text span size="xs" c="dimmed">{c.ad.slice(5)}</Text></Text>
-                {d ? <Badge size="xs" variant="light" color={color}>{d.status}{d.late_min > 0 ? ' ⏱' : ''}</Badge> : hol ? <Badge size="xs" variant="light" color="gray">★</Badge> : null}
+                <Text size="sm" fw={600} {...(c.saturday ? { c: 'red' } : {})}>{fmtNum(c.bs.day, numerals)} <Text span size="xs" c="dimmed">{c.ad.slice(5)}</Text></Text>
+                {d ? <Badge size="xs" variant="light" color={color ?? 'gray'}>{d.status}{d.late_min > 0 ? ' ⏱' : ''}</Badge> : hol ? <Badge size="xs" variant="light" color="gray">★</Badge> : null}
                 {d?.first_in ? <Text size="xs" c="dimmed">{fmtTime(d.first_in, numerals)}{d.last_out ? `–${fmtTime(d.last_out, numerals)}` : ''}</Text> : null}
               </button>
             );
@@ -96,12 +96,12 @@ export default function MyAttendancePage() {
       <Modal opened={!!selected} onClose={() => setSelected(null)} title={selected ? `${dualDate(selected, lang, numerals).bsLong} · ${dualDate(selected).ad}` : ''} size="lg" centered>
         {selected ? (
           <Stack>
-            <Group gap="sm"><StatusBadge status={sel?.status ?? 'Pending'} late={sel?.late_min} />{sel ? <Text size="sm">{t('worked')}: {minutesToHm(sel.worked_min, numerals)} · {t('overtime')}: {minutesToHm(sel.ot_min, numerals)}</Text> : null}</Group>
+            <Group gap="sm"><StatusBadge status={sel?.status ?? 'Pending'} late={sel?.late_min ?? null} />{sel ? <Text size="sm">{t('worked')}: {minutesToHm(sel.worked_min, numerals)} · {t('overtime')}: {minutesToHm(sel.ot_min, numerals)}</Text> : null}</Group>
             {holidays.get(selected) ? <Text size="sm">★ {holidays.get(selected)}</Text> : null}
             {sel?.flags?.length ? <Group gap={4}>{sel.flags.map((f, i) => <Badge key={i} variant="outline" color="yellow">{f.kind}{'minutes' in f && f.minutes ? ` ${f.minutes} min` : ''}</Badge>)}</Group> : null}
             <div>
               <Text size="sm" fw={600}>{t('rawPunches')}</Text>
-              {selPunches.length ? selPunches.map((p) => <Text key={p.id} size="sm" c={p.superseded ? 'dimmed' : undefined} td={p.superseded ? 'line-through' : undefined}>{fmtTime(p.punched_at, numerals)} · {p.direction.toUpperCase()} · {p.verify_mode} · {p.source}{p.device_sn ? ` · ${p.device_sn}` : ''}</Text>) : <Text size="sm" c="dimmed">{t('noPunchesToday')}</Text>}
+              {selPunches.length ? selPunches.map((p) => <Text key={p.id} size="sm" {...(p.superseded ? { c: 'dimmed', td: 'line-through' } : {})}>{fmtTime(p.punched_at, numerals)} · {p.direction.toUpperCase()} · {p.verify_mode} · {p.source}{p.device_sn ? ` · ${p.device_sn}` : ''}</Text>) : <Text size="sm" c="dimmed">{t('noPunchesToday')}</Text>}
             </div>
             {sel?.locked_at ? <Text size="xs" c="dimmed">This day is locked by payroll; ask HR for a supplementary correction.</Text> : correct ? <CorrectionForm employeeId={employeeId} date={selected} onDone={() => { setCorrect(false); setSelected(null); }} /> : <Button variant="light" onClick={() => setCorrect(true)}>{t('requestCorrection')}</Button>}
           </Stack>

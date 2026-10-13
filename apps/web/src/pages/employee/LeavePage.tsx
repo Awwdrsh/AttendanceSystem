@@ -53,7 +53,7 @@ export function LeaveApplyForm({ employeeId, onDone }: { employeeId: string; onD
       <Select label={t('leave')} required value={typeId} onChange={setTypeId} placeholder="Choose a leave type" data={(types.data?.types ?? []).map((lt) => { const b = bal(lt.id); return { value: lt.id, label: `${lang === 'ne' && lt.name_ne ? lt.name_ne : lt.name_en}${b ? ` · ${b.available.toFixed(1)} ${t('days')}` : ''}` }; })} />
       <Group grow align="flex-start">
         <BsDatePicker label={t('from')} value={from} onChange={(d) => { setFrom(d); if (d && (!to || to < d)) setTo(d); }} holidays={holidays} required />
-        <BsDatePicker label={t('to')} value={to} onChange={setTo} holidays={holidays} minDate={from ?? undefined} required />
+        <BsDatePicker label={t('to')} value={to} onChange={setTo} holidays={holidays} {...(from ? { minDate: from } : {})} required />
       </Group>
       <Group>
         <Switch label={t('halfDay')} checked={half} onChange={(e) => setHalf(e.currentTarget.checked)} disabled={!!from && !!to && from !== to} />

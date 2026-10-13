@@ -84,7 +84,7 @@ export function EmployeeForm({ initial, onSubmit, busy, submitLabel = 'Save' }: 
           <Text size="xs" c="dimmed" mt="xs">PAN and bank account are encrypted at rest; every reveal is logged.</Text>
         </Tabs.Panel>
       </Tabs>
-      <Group justify="flex-end"><Button loading={busy} onClick={submit} disabled={!str('empCode') || !str('nameEn')} h={44}>{submitLabel || t('save')}</Button></Group>
+      <Group justify="flex-end"><Button loading={busy ?? false} onClick={submit} disabled={!str('empCode') || !str('nameEn')} h={44}>{submitLabel || t('save')}</Button></Group>
     </Stack>
   );
 }

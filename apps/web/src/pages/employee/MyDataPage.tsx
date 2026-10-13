@@ -48,7 +48,7 @@ export default function MyDataPage() {
         <Title order={5}>{t('rawPunches')} · {l === 'ne' ? 'पछिल्लो १४ दिन' : 'last 14 days'}</Title>
         <Stack gap={2} mt="xs">
           {(punches.data?.punches ?? []).length === 0 ? <Text size="sm" c="dimmed">{t('nothingHere')}</Text> : null}
-          {(punches.data?.punches ?? []).map((p) => <Text key={p.id} size="sm" c={p.superseded ? 'dimmed' : undefined}>{p.local_date} {fmtTime(p.punched_at, numerals)} · {p.direction.toUpperCase()} · {p.verify_mode} · {p.source}{p.device_sn ? ` · ${p.device_sn}` : ''}</Text>)}
+          {(punches.data?.punches ?? []).map((p) => <Text key={p.id} size="sm" {...(p.superseded ? { c: 'dimmed' } : {})}>{p.local_date} {fmtTime(p.punched_at, numerals)} · {p.direction.toUpperCase()} · {p.verify_mode} · {p.source}{p.device_sn ? ` · ${p.device_sn}` : ''}</Text>)}
         </Stack>
       </Paper>
       <ConfirmDialog opened={!!revoke} onClose={() => setRevoke(null)} title={t('withdrawConsent')} confirmLabel={t('withdrawConsent')}

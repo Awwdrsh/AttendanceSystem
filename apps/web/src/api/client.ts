@@ -1,15 +1,21 @@
-/** Typed fetch wrapper: JSON in/out, cookie session, normalised errors, 401 → login. */
+/** Typed fetch wrapper: JSON in/out, cookie session, normalised errors, 401 → login, 403 password-change → change page. */
 export class ApiError extends Error {
   constructor(readonly status: number, message: string, readonly details?: unknown, readonly issues?: Array<{ path: string; message: string }>, readonly suggestion?: unknown) {
     super(message);
   }
 }
 
-const listeners = new Set<() => void>();
+const unauthorizedListeners = new Set<() => void>();
+const passwordListeners = new Set<() => void>();
 /** AuthProvider subscribes to be told when the server says the session is gone. */
 export function onUnauthorized(fn: () => void): () => void {
-  listeners.add(fn);
-  return () => listeners.delete(fn);
+  unauthorizedListeners.add(fn);
+  return () => unauthorizedListeners.delete(fn);
+}
+/** Fired when any API call answers 403 "password change required" (account flagged after the session started). */
+export function onPasswordChangeRequired(fn: () => void): () => void {
+  passwordListeners.add(fn);
+  return () => passwordListeners.delete(fn);
 }
 
 export type Query = Record<string, string | number | boolean | null | undefined>;
@@ -22,20 +28,32 @@ export function qs(params?: Query): string {
   return s ? `?${s}` : '';
 }
 
+export const PASSWORD_CHANGE_MESSAGE = 'password change required';
+
+/** Turn an error response body into an ApiError (pure; unit-tested). */
+export function normalizeError(status: number, data: unknown): ApiError {
+  const d = (data && typeof data === 'object' ? data : {}) as { error?: string; details?: unknown; issues?: Array<{ path: string; message: string }>; suggestion?: unknown };
+  const msg = d.issues?.length ? d.issues.map((i) => `${i.path ? `${i.path}: ` : ''}${i.message}`).join('; ')
+    : d.error ?? (typeof data === 'string' && data.trim() ? data.trim() : `Request failed (${status})`);
+  // Some endpoints answer 4xx with a structured body and no `error` key (e.g. CSV import row errors); keep the body.
+  const details = d.details !== undefined ? d.details : data;
+  return new ApiError(status, msg, details, d.issues, d.suggestion);
+}
+
 export async function api<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown, opts: { raw?: boolean; headers?: Record<string, string> } = {}): Promise<T> {
+  const init: RequestInit = { method, credentials: 'include', headers: { ...(opts.headers ?? {}) } };
+  if (body !== undefined) {
+    if (typeof body === 'string' || body instanceof FormData) init.body = body;
+    else { init.body = JSON.stringify(body); init.headers = { 'Content-Type': 'application/json', ...(opts.headers ?? {}) }; }
+  }
   let res: Response;
   try {
-    res = await fetch(`/api/v1${path}`, {
-      method,
-      credentials: 'include',
-      headers: { ...(body !== undefined && !(body instanceof FormData) && typeof body !== 'string' ? { 'Content-Type': 'application/json' } : {}), ...(opts.headers ?? {}) },
-      body: body === undefined ? undefined : typeof body === 'string' || body instanceof FormData ? body : JSON.stringify(body),
-    });
+    res = await fetch(`/api/v1${path}`, init);
   } catch {
     throw new ApiError(0, 'No connection. Please check your network and try again.');
   }
   if (res.status === 401 && !path.startsWith('/auth/login')) {
-    for (const l of listeners) l();
+    for (const l of unauthorizedListeners) l();
     throw new ApiError(401, 'Your session has ended. Please sign in again.');
   }
   if (opts.raw) {
@@ -46,9 +64,9 @@ export async function api<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
   let data: unknown = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (!res.ok) {
-    const d = (data ?? {}) as { error?: string; details?: unknown; issues?: Array<{ path: string; message: string }>; suggestion?: unknown };
-    const msg = d.issues?.length ? d.issues.map((i) => `${i.path ? `${i.path}: ` : ''}${i.message}`).join('; ') : d.error ?? `Request failed (${res.status})`;
-    throw new ApiError(res.status, msg, d.details, d.issues, d.suggestion);
+    const err = normalizeError(res.status, data);
+    if (res.status === 403 && err.message === PASSWORD_CHANGE_MESSAGE) for (const l of passwordListeners) l();
+    throw err;
   }
   return data as T;
 }
@@ -62,7 +80,12 @@ export const del = <T>(path: string, body?: unknown) => api<T>('DELETE', path, b
 /** Download a CSV/text endpoint through the session and save it with a filename. */
 export async function download(path: string, filename: string): Promise<void> {
   const res = await fetch(`/api/v1${path}`, { credentials: 'include' });
-  if (!res.ok) throw new ApiError(res.status, (await res.text()) || 'Download failed');
+  if (res.status === 401) { for (const l of unauthorizedListeners) l(); throw new ApiError(401, 'Your session has ended. Please sign in again.'); }
+  if (!res.ok) {
+    const text = await res.text();
+    let data: unknown = text; try { data = JSON.parse(text); } catch { /* plain text */ }
+    throw normalizeError(res.status, data);
+  }
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

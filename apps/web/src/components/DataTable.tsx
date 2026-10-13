@@ -30,7 +30,7 @@ export function DataTable<R>({ columns, rows, rowKey, loading, error, emptyTitle
   const toggle = (k: string) => { const n = new Set(sel); if (n.has(k)) n.delete(k); else n.add(k); onSelect?.(n); };
 
   if (error) return <EmptyState title="Could not load" hint={error} />;
-  if (!loading && rows.length === 0) return <EmptyState title={emptyTitle ?? 'Nothing here yet.'} hint={emptyHint} />;
+  if (!loading && rows.length === 0) return <EmptyState title={emptyTitle ?? 'Nothing here yet.'} {...(emptyHint !== undefined ? { hint: emptyHint } : {})} />;
 
   return (
     <Paper withBorder radius="md" style={{ overflow: 'hidden' }}>
