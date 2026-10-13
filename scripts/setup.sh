@@ -154,19 +154,31 @@ fi
 
 if [ ! -f apps/gateway/.env ]; then
   SIGNING_KEY="$(node -e "console.log(require('node:crypto').generateKeyPairSync('ed25519').privateKey.export({type:'pkcs8',format:'der'}).toString('base64'))")"
+  API_DEK="$(grep '^DATA_ENCRYPTION_KEY=' apps/api/.env | head -1 | cut -d= -f2-)"
   cat > apps/gateway/.env <<ENV
 PORT=8080
 DATABASE_URL=$DATABASE_URL
 LOG_LEVEL=info
 GATEWAY_SIGNING_KEY=$SIGNING_KEY
+DATA_ENCRYPTION_KEY=$API_DEK
+GATEWAY_MAX_PENDING_DEVICES=50
+GATEWAY_MAX_CLOCK_SKEW_MIN=10
+GATEWAY_RAW_DIR=data/raw
+GATEWAY_ALLOW_DANGEROUS_COMMANDS=false
 ENV
-  ok "wrote apps/gateway/.env (new signing key generated)"
+  chmod 600 apps/gateway/.env
+  ok "wrote apps/gateway/.env (new signing key generated; encryption key shared with the API)"
 else
   if ! grep -q '^GATEWAY_SIGNING_KEY=' apps/gateway/.env; then
     SIGNING_KEY="$(node -e "console.log(require('node:crypto').generateKeyPairSync('ed25519').privateKey.export({type:'pkcs8',format:'der'}).toString('base64'))")"
     echo "GATEWAY_SIGNING_KEY=$SIGNING_KEY" >> apps/gateway/.env
-    ok "apps/gateway/.env exists; added a signing key"
-  else ok "apps/gateway/.env exists (kept)"; fi
+  fi
+  if ! grep -q '^DATA_ENCRYPTION_KEY=' apps/gateway/.env; then
+    echo "DATA_ENCRYPTION_KEY=$(grep '^DATA_ENCRYPTION_KEY=' apps/api/.env | head -1 | cut -d= -f2-)" >> apps/gateway/.env
+  fi
+  grep -q '^GATEWAY_MAX_PENDING_DEVICES=' apps/gateway/.env || echo "GATEWAY_MAX_PENDING_DEVICES=50" >> apps/gateway/.env
+  grep -q '^GATEWAY_MAX_CLOCK_SKEW_MIN=' apps/gateway/.env || echo "GATEWAY_MAX_CLOCK_SKEW_MIN=10" >> apps/gateway/.env
+  ok "apps/gateway/.env exists (kept; missing keys added)"
 fi
 
 # ------------------------------------------------------------------ dependencies + schema

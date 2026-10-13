@@ -1,19 +1,22 @@
 import pg from 'pg';
 import type { NormalizedPunch } from '../punch/event.js';
-import { assertAllowedCommand, NEAR_DUPLICATE_WINDOW_MS, type DeviceRecord, type DeviceTouch, type InsertOutcome, type Store } from './types.js';
+import {
+  assertAllowedCommand, DEFAULT_MAX_PENDING, NEAR_DUPLICATE_WINDOW_MS,
+  type DeviceRecord, type DeviceTouch, type InsertOutcome, type Store, type StoreOptions, type TemplateRecord,
+} from './types.js';
 
-interface DeviceRow { id: string; serial_no: string; vendor: string; status: DeviceRecord['status']; tz_offset_min: number; attlog_stamp: string; oplog_stamp: string }
+interface DeviceRow { id: string; serial_no: string; vendor: string; protocol: string; status: DeviceRecord['status']; tz_offset_min: number; attlog_stamp: string; oplog_stamp: string }
 
 const toRec = (r: DeviceRow): DeviceRecord => ({
-  id: r.id, serialNo: r.serial_no, vendor: r.vendor, status: r.status, tzOffsetMin: r.tz_offset_min, attlogStamp: r.attlog_stamp, oplogStamp: r.oplog_stamp,
+  id: r.id, serialNo: r.serial_no, vendor: r.vendor, protocol: r.protocol, status: r.status, tzOffsetMin: r.tz_offset_min, attlogStamp: r.attlog_stamp, oplogStamp: r.oplog_stamp,
 });
 
-const COLS = 'id, serial_no, vendor, status, tz_offset_min, attlog_stamp, oplog_stamp';
+const COLS = 'id, serial_no, vendor, protocol, status, tz_offset_min, attlog_stamp, oplog_stamp';
 
-/** Shares the schema owned by apps/api (migrations/0001_init.sql). */
+/** Shares the schema owned by apps/api (migrations/*.sql). */
 export class PostgresStore implements Store {
   readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString, max: 10 }); }
+  constructor(connectionString: string, readonly opts: StoreOptions = {}) { this.pool = new pg.Pool({ connectionString, max: 10 }); }
 
   async getDevice(serialNo: string) {
     const r = await this.pool.query<DeviceRow>(`SELECT ${COLS} FROM device WHERE serial_no = $1`, [serialNo]);
@@ -21,8 +24,12 @@ export class PostgresStore implements Store {
   }
 
   async registerPending(serialNo: string, info: { vendor: string; protocol: string; pushVersion?: string }) {
+    const existing = await this.getDevice(serialNo);
+    if (existing) return existing;
+    const pending = await this.pool.query<{ n: string }>(`SELECT count(*)::text AS n FROM device WHERE status = 'pending'`);
+    if (Number(pending.rows[0]!.n) >= (this.opts.maxPendingDevices ?? DEFAULT_MAX_PENDING)) return null;
     const r = await this.pool.query<DeviceRow>(
-      `INSERT INTO device (serial_no, vendor, protocol, status, push_version) VALUES ($1, $2, $3, 'pending', $4)
+      `INSERT INTO device (serial_no, vendor, protocol, status, push_version, last_seen_at) VALUES ($1, $2, $3, 'pending', $4, now())
        ON CONFLICT (serial_no) DO UPDATE SET last_seen_at = now() RETURNING ${COLS}`,
       [serialNo, info.vendor, info.protocol, info.pushVersion ?? null]);
     return toRec(r.rows[0]!);
@@ -32,9 +39,10 @@ export class PostgresStore implements Store {
     await this.pool.query(
       `UPDATE device SET last_seen_at = coalesce($2, last_seen_at), last_handshake_at = coalesce($3, last_handshake_at),
          push_version = coalesce($4, push_version), fw_version = coalesce($5, fw_version),
-         attlog_stamp = coalesce($6, attlog_stamp), oplog_stamp = coalesce($7, oplog_stamp)
+         attlog_stamp = coalesce($6, attlog_stamp), oplog_stamp = coalesce($7, oplog_stamp),
+         clock_drift_sec = coalesce($8, clock_drift_sec)
        WHERE serial_no = $1`,
-      [serialNo, p.lastSeenAt ?? null, p.lastHandshakeAt ?? null, p.pushVersion ?? null, p.fwVersion ?? null, p.attlogStamp ?? null, p.oplogStamp ?? null]);
+      [serialNo, p.lastSeenAt ?? null, p.lastHandshakeAt ?? null, p.pushVersion ?? null, p.fwVersion ?? null, p.attlogStamp ?? null, p.oplogStamp ?? null, p.clockDriftSec ?? null]);
   }
 
   async resolveEmployee(deviceId: string, pin: string, localDate: string) {
@@ -59,8 +67,21 @@ export class PostgresStore implements Store {
     return (r.rowCount ?? 0) > 0 ? 'inserted' : 'duplicate';
   }
 
+  async enqueueRecompute(employeeId: string, localDate: string, reason: string) {
+    await this.pool.query(
+      `INSERT INTO recompute_queue (employee_id, local_date, reason) VALUES ($1, $2, $3)
+       ON CONFLICT (employee_id, local_date) DO UPDATE SET enqueued_at = now(), reason = EXCLUDED.reason`, [employeeId, localDate, reason]);
+  }
+
+  async insertTemplate(t: TemplateRecord) {
+    await this.pool.query(
+      `INSERT INTO biometric_template (employee_id, device_user_pin, modality, vendor_format, ciphertext, key_version, aad_hash, enrolled_on_device_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [t.employeeId, t.deviceUserPin, t.modality, t.vendorFormat, t.ciphertext, t.keyVersion, t.aadHash, t.deviceId]);
+  }
+
   async enqueueCommand(deviceId: string, command: string) {
-    assertAllowedCommand(command);
+    assertAllowedCommand(command, this.opts.allowDangerousCommands);
     const r = await this.pool.query<{ id: string }>('INSERT INTO device_command (device_id, command) VALUES ($1, $2) RETURNING id', [deviceId, command]);
     return Number(r.rows[0]!.id);
   }
@@ -75,8 +96,20 @@ export class PostgresStore implements Store {
 
   async ackCommand(id: number, returnCode: number) {
     await this.pool.query(
-      `UPDATE device_command SET status = CASE WHEN $2 >= 0 THEN 'acked' ELSE 'failed' END, return_code = $2, acked_at = now() WHERE id = $1`,
+      `UPDATE device_command SET status = CASE WHEN $2::int >= 0 THEN 'acked' ELSE 'failed' END, return_code = $2::int, acked_at = now() WHERE id = $1`,
       [id, returnCode]);
+  }
+
+  async listDevices(filter: { status?: DeviceRecord['status']; protocol?: string } = {}) {
+    const r = await this.pool.query<DeviceRow>(
+      `SELECT ${COLS} FROM device WHERE ($1::text IS NULL OR status = $1) AND ($2::text IS NULL OR protocol = $2) ORDER BY serial_no`,
+      [filter.status ?? null, filter.protocol ?? null]);
+    return r.rows.map(toRec);
+  }
+
+  async countPunches(deviceId: string, localDate: string) {
+    const r = await this.pool.query<{ n: string }>('SELECT count(*)::text AS n FROM punch_event WHERE device_id = $1 AND local_date = $2', [deviceId, localDate]);
+    return Number(r.rows[0]!.n);
   }
 
   async end() { await this.pool.end(); }

@@ -9,7 +9,8 @@
     "start": "node --import tsx src/server.ts",
     "simulate": "tsx src/simulate.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "reconcile": "tsx src/reconcile.ts"
   },
   "dependencies": {
     "@hajiri/attendance-engine": "workspace:*",

@@ -19,6 +19,7 @@ export interface AttlogParseResult {
 }
 
 const TIME_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+const INT_RE = /^-?\d{1,6}$/;
 
 export function parseAttlog(body: string): AttlogParseResult {
   const records: AttlogRecord[] = [];
@@ -29,13 +30,13 @@ export function parseAttlog(body: string): AttlogParseResult {
     const cols = line.split('\t');
     const pin = cols[0]?.trim() ?? '';
     const time = cols[1]?.trim() ?? '';
-    const statusCode = Number(cols[2]);
-    const verifyCode = Number(cols[3]);
-    if (!pin || !TIME_RE.test(time) || !Number.isInteger(statusCode) || !Number.isInteger(verifyCode)) {
+    const status = cols[2]?.trim() ?? '';
+    const verify = cols[3]?.trim() ?? '';
+    if (!pin || pin.length > 24 || !TIME_RE.test(time) || !INT_RE.test(status) || !INT_RE.test(verify)) {
       malformed.push(line);
       continue;
     }
-    records.push({ pin, deviceLocalTime: time, statusCode, verifyCode, workcode: cols[4]?.trim() || null, line });
+    records.push({ pin, deviceLocalTime: time, statusCode: Number(status), verifyCode: Number(verify), workcode: cols[4]?.trim() || null, line });
   }
   return { records, malformed };
 }
@@ -69,4 +70,12 @@ export function parseDeviceCmdResults(body: string): Array<{ id: number; returnC
     out.push({ id, returnCode, cmd: p.get('CMD') ?? '' });
   }
   return out;
+}
+
+/** 'YYYY-MM-DD HH:MM:SS' device time minus server time, in seconds (positive = device ahead). */
+export function driftSeconds(deviceLocalTime: string, tzOffsetMin: number, now = Date.now()): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(deviceLocalTime);
+  if (!m) return 0;
+  const asUtc = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6])) - tzOffsetMin * 60_000;
+  return Math.round((asUtc - now) / 1000);
 }
