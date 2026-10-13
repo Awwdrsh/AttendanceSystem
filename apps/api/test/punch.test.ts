@@ -27,7 +27,7 @@ describe('POST /api/v1/punch', () => {
     expect(r.body.duplicate).toBe(false);
     expect(r.body.location.inside).toBe(true);
     expect(r.body.day.localDate).toBe(localDateOf(Date.now()));
-    expect(r.body.message).toMatch(/^Punched IN at \d\d:\d\d/);
+    expect(r.body.message).toMatch(/^Clocked in at \d\d:\d\d$/);
     const dev = await db.query(`SELECT serial_no, vendor FROM device WHERE serial_no = 'MOBILE-DEMO'`);
     expect(dev.rows[0]).toMatchObject({ vendor: 'mobile' });
   });

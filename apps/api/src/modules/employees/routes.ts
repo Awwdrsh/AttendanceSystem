@@ -23,6 +23,7 @@ const employeeBody = z.object({
   phone: z.string().max(30).optional(),
   email: z.string().email().optional(),
   otEligible: z.boolean().optional(),
+  workFromHome: z.boolean().optional(),
   weeklyOffDays: z.array(z.number().int().min(0).max(6)).optional(),
   regime: z.enum(['ssf', 'pf', 'none']).optional(),
   ssfId: z.string().max(20).optional(),
@@ -45,7 +46,7 @@ const employeeBody = z.object({
 });
 
 const PUBLIC_COLS = `e.id, e.company_id, e.emp_code, e.name_en, e.name_ne, e.gender, e.dob, e.marital_status, e.join_date, e.exit_date, e.designation, e.grade,
-  e.phone, e.email, e.ot_eligible, e.weekly_off_days, e.status, e.regime, e.ssf_id, e.pf_id, e.cit_id, e.bank_code, e.bank_branch, e.bank_account_last4,
+  e.phone, e.email, e.ot_eligible, e.work_from_home, e.weekly_off_days, e.status, e.regime, e.ssf_id, e.pf_id, e.cit_id, e.bank_code, e.bank_branch, e.bank_account_last4,
   e.is_resident, e.remote_area_class, e.disability, e.festival_month, e.probation_end, e.created_at,
   (e.pan_enc IS NOT NULL) AS has_pan,
   a.branch_id, a.org_unit_id, a.manager_id, a.employment_type,
@@ -120,12 +121,12 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
       await client.query('BEGIN');
       const ins = await client.query<{ id: string }>(
         `INSERT INTO employee (company_id, emp_code, name_en, name_ne, gender, dob, marital_status, join_date, designation, grade, phone, email,
-           ot_eligible, weekly_off_days, regime, ssf_id, pf_id, cit_id, bank_code, bank_branch, is_resident, remote_area_class, disability, festival_month, probation_end)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25) RETURNING id`,
+           ot_eligible, weekly_off_days, regime, ssf_id, pf_id, cit_id, bank_code, bank_branch, is_resident, remote_area_class, disability, festival_month, probation_end, work_from_home)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26) RETURNING id`,
         [req.user!.companyId, b.empCode, b.nameEn, b.nameNe ?? null, b.gender ?? null, b.dob ?? null, b.maritalStatus ?? null, b.joinDate ?? null,
           b.designation ?? null, b.grade ?? null, b.phone ?? null, b.email ?? null, b.otEligible ?? true, b.weeklyOffDays ?? [6], b.regime ?? 'ssf',
           b.ssfId ?? null, b.pfId ?? null, b.citId ?? null, b.bankCode ?? null, b.bankBranch ?? null, b.isResident ?? true, b.remoteAreaClass ?? null,
-          b.disability ?? false, b.festivalMonth ?? null, b.probationEnd ?? null]);
+          b.disability ?? false, b.festivalMonth ?? null, b.probationEnd ?? null, b.workFromHome ?? false]);
       const id = ins.rows[0]!.id;
       if (b.pan) await client.query('UPDATE employee SET pan_enc = $2, pan_bidx = $3 WHERE id = $1', [id, cipher.encrypt(b.pan, `employee:${id}:pan`), cipher.blindIndex(b.pan)]);
       if (b.bankAccount) await client.query('UPDATE employee SET bank_account_enc = $2, bank_account_last4 = $3 WHERE id = $1', [id, cipher.encrypt(b.bankAccount, `employee:${id}:bank`), b.bankAccount.slice(-4)]);
@@ -155,7 +156,7 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
       const map: Array<[keyof typeof b, string]> = [
         ['empCode', 'emp_code'], ['nameEn', 'name_en'], ['nameNe', 'name_ne'], ['gender', 'gender'], ['dob', 'dob'], ['maritalStatus', 'marital_status'],
         ['joinDate', 'join_date'], ['exitDate', 'exit_date'], ['designation', 'designation'], ['grade', 'grade'], ['phone', 'phone'], ['email', 'email'],
-        ['otEligible', 'ot_eligible'], ['weeklyOffDays', 'weekly_off_days'], ['regime', 'regime'], ['ssfId', 'ssf_id'], ['pfId', 'pf_id'], ['citId', 'cit_id'],
+        ['otEligible', 'ot_eligible'], ['workFromHome', 'work_from_home'], ['weeklyOffDays', 'weekly_off_days'], ['regime', 'regime'], ['ssfId', 'ssf_id'], ['pfId', 'pf_id'], ['citId', 'cit_id'],
         ['bankCode', 'bank_code'], ['bankBranch', 'bank_branch'], ['isResident', 'is_resident'], ['remoteAreaClass', 'remote_area_class'],
         ['disability', 'disability'], ['festivalMonth', 'festival_month'], ['probationEnd', 'probation_end'],
       ];
@@ -214,6 +215,7 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
         phone: rec.phone || undefined, email: rec.email || undefined, regime: rec.regime || undefined, ssfId: rec.ssf_id || undefined, pan: rec.pan || undefined,
         bankCode: rec.bank_code || undefined, bankBranch: rec.bank_branch || undefined, bankAccount: rec.bank_account || undefined,
         otEligible: rec.ot_eligible ? rec.ot_eligible.toLowerCase() === 'true' || rec.ot_eligible === '1' : undefined,
+        workFromHome: rec.work_from_home ? ['true', '1', 'yes'].includes(rec.work_from_home.toLowerCase()) : undefined,
       });
       if (!parsed.success) { for (const is of parsed.error.issues) errors.push({ row: i + 1, message: `${is.path.join('.')}: ${is.message}` }); continue; }
       valid.push(parsed.data);
@@ -228,10 +230,10 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
       await client.query('BEGIN');
       for (const b of valid) {
         const ins = await client.query<{ id: string }>(
-          `INSERT INTO employee (company_id, emp_code, name_en, name_ne, gender, dob, marital_status, join_date, designation, grade, phone, email, ot_eligible, regime, ssf_id, bank_code, bank_branch)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) ON CONFLICT (company_id, emp_code) DO NOTHING RETURNING id`,
+          `INSERT INTO employee (company_id, emp_code, name_en, name_ne, gender, dob, marital_status, join_date, designation, grade, phone, email, ot_eligible, regime, ssf_id, bank_code, bank_branch, work_from_home)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) ON CONFLICT (company_id, emp_code) DO NOTHING RETURNING id`,
           [req.user!.companyId, b.empCode, b.nameEn, b.nameNe ?? null, b.gender ?? null, b.dob ?? null, b.maritalStatus ?? null, b.joinDate ?? null, b.designation ?? null,
-            b.grade ?? null, b.phone ?? null, b.email ?? null, b.otEligible ?? true, b.regime ?? 'ssf', b.ssfId ?? null, b.bankCode ?? null, b.bankBranch ?? null]);
+            b.grade ?? null, b.phone ?? null, b.email ?? null, b.otEligible ?? true, b.regime ?? 'ssf', b.ssfId ?? null, b.bankCode ?? null, b.bankBranch ?? null, b.workFromHome ?? false]);
         const id = ins.rows[0]?.id;
         if (!id) { errors.push({ row: 0, message: `emp_code ${b.empCode} already exists; skipped` }); continue; }
         if (b.pan) await client.query('UPDATE employee SET pan_enc = $2, pan_bidx = $3 WHERE id = $1', [id, cipher.encrypt(b.pan, `employee:${id}:pan`), cipher.blindIndex(b.pan)]);

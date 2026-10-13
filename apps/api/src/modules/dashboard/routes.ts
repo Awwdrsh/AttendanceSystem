@@ -69,7 +69,7 @@ export function dashboardRoutes({ db }: AppDeps): Router {
     const today = localDateOf(Date.now());
     let monthStart = today; let monthEnd = today; let bsLabel: string | null = null;
     try { const bs = adToBs(today); const b = bsMonthBounds(bs.year, bs.month); monthStart = b.startAd; monthEnd = b.endAd; bsLabel = `${bs.year}-${String(bs.month).padStart(2, '0')}`; } catch { /* outside calendar table */ }
-    const [days, month, balances, unread, pending] = await Promise.all([
+    const [days, month, balances, unread, pending, wfh] = await Promise.all([
       listDays(db, employeeId, today, today),
       db.query<{ status: string; n: number; late: number; ot: number }>(
         `SELECT status, count(*)::int AS n, coalesce(sum(late_min), 0)::int AS late, coalesce(sum(ot_min), 0)::int AS ot FROM v_attendance_latest
@@ -85,11 +85,15 @@ export function dashboardRoutes({ db }: AppDeps): Router {
          UNION ALL SELECT 'regularisation', id, created_at, local_date::text || ' ' || kind FROM regularisation_request WHERE employee_id = $1 AND status = 'pending'
          UNION ALL SELECT 'ot', id, created_at, local_date::text || ' ' || requested_min || ' min' FROM ot_request WHERE employee_id = $1 AND status = 'pending'
          ORDER BY created_at DESC LIMIT 20`, [employeeId]),
+      db.query<{ work_from_home: boolean; approved_today: boolean }>(
+        `SELECT e.work_from_home, EXISTS (SELECT 1 FROM regularisation_request r WHERE r.employee_id = e.id AND r.kind = 'wfh' AND r.status = 'approved' AND r.local_date = $2) AS approved_today
+           FROM employee e WHERE e.id = $1`, [employeeId, today]),
     ]);
     const summary: Record<string, number> = {}; let lateMin = 0; let otMin = 0;
     for (const m of month.rows) { summary[m.status] = m.n; lateMin += m.late; otMin += m.ot; }
     res.json({ date: today, today: days[0] ?? null, month: { bs: bsLabel, from: monthStart, to: monthEnd, byStatus: summary, lateMin, otMin },
-      leaveBalances: balances.rows, unreadNotifications: unread.rows[0]!.n, pendingRequests: pending.rows });
+      leaveBalances: balances.rows, unreadNotifications: unread.rows[0]!.n, pendingRequests: pending.rows,
+      workFromHome: { allowed: wfh.rows[0]?.work_from_home ?? false, approvedToday: wfh.rows[0]?.approved_today ?? false } });
   });
 
   return r;

@@ -82,7 +82,9 @@ describe('regularisation', () => {
 
   it('enforces the back-date window, future dates, locked days and the monthly cap', async () => {
     expect((await request(app).post('/api/v1/regularisation').set(auth(sita)).send({ localDate: daysAgo(45), kind: 'wfh', reason: 'old' })).status).toBe(400);
-    expect((await request(app).post('/api/v1/regularisation').set(auth(sita)).send({ localDate: daysAgo(-2), kind: 'wfh', reason: 'future' })).status).toBe(400);
+    // Corrections are for days that have happened; only work from home can be planned ahead (and not too far).
+    expect((await request(app).post('/api/v1/regularisation').set(auth(sita)).send({ localDate: daysAgo(-2), kind: 'on_duty', reason: 'future' })).status).toBe(400);
+    expect((await request(app).post('/api/v1/regularisation').set(auth(sita)).send({ localDate: daysAgo(-61), kind: 'wfh', reason: 'too far' })).status).toBe(400);
     const dl = workdayAgo(6);
     await recomputeDay(db, DEMO.sita, dl);
     await db.query('UPDATE attendance_day SET locked_at = now() WHERE employee_id = $1 AND local_date = $2', [DEMO.sita, dl]);

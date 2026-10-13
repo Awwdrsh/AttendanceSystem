@@ -56,6 +56,18 @@ describe('regularisation guards', () => {
     expect((await request(app).post(`/api/v1/regularisation/${ok.body.id}/cancel`).set(auth(ram))).status).toBe(200);
   });
 
+  it("the team's today list shows a manager only their direct reports and themselves; HR sees everyone", async () => {
+    const day = '2026-10-07';
+    const ids = (r: request.Response) => (r.body.rows as Array<{ employee_id: string }>).map((x) => x.employee_id).sort();
+    const mine = await request(app).get('/api/v1/attendance/today').set(auth(ram)).query({ date: day });
+    expect(mine.status).toBe(200);
+    expect(ids(mine)).toEqual([DEMO.sita, DEMO.ram].sort());
+    const other = await request(app).get('/api/v1/attendance/today').set(auth(otherMgr)).query({ date: day });
+    expect(other.body.rows).toHaveLength(1);
+    const all = await request(app).get('/api/v1/attendance/today').set(auth(hr)).query({ date: day });
+    expect(all.body.rows.length).toBeGreaterThanOrEqual(3);
+  });
+
   it('approving the same missed-punch request twice never creates two punches', async () => {
     const d = '2026-10-08';
     const r = await request(app).post('/api/v1/regularisation').set(auth(sita)).send({ localDate: d, kind: 'missed_punch', punchTime: npt(d, '18:00'), punchDirection: 'out', reason: 'forgot' });

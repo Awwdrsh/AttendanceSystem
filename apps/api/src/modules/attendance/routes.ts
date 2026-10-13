@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import type { AppDeps } from '../../deps.js';
-import { assertManages, requireRole } from '../auth/middleware.js';
+import { assertManages, hasRole, requireRole } from '../auth/middleware.js';
 import { dateRange, enqueueRecompute, listDays, recomputeDay } from './service.js';
 
 import { isoDate } from '../../validation.js';
@@ -62,11 +62,16 @@ export function attendanceRoutes({ db }: AppDeps): Router {
   /** Team Today (plan §3 manager screen): everyone's latest status for one date. */
   r.get('/today', requireRole('hr', 'manager', 'finance'), async (req, res) => {
     const q = z.object({ date: isoDate }).parse(req.query);
+    // HR and finance see the whole company; a manager sees only their direct reports (as of that day) and themselves.
+    const companyWide = hasRole(req.user!, 'hr', 'finance');
     const rows = await db.query(
-      `SELECT e.id AS employee_id, e.emp_code, e.name_en, e.name_ne, v.status, v.first_in, v.last_out, v.late_min, v.worked_min, v.flags
+      `SELECT e.id AS employee_id, e.emp_code, e.name_en, e.name_ne, v.status, v.first_in, v.last_out, v.late_min, v.worked_min, v.flags,
+              coalesce(v.status = 'WFH', false) OR EXISTS (SELECT 1 FROM punch_event p WHERE p.employee_id = e.id AND p.local_date = $2 AND p.raw->>'remote' = 'true') AS remote
          FROM employee e LEFT JOIN v_attendance_latest v ON v.employee_id = e.id AND v.local_date = $2
-        WHERE e.company_id = $1 AND e.status = 'active' ORDER BY e.emp_code`,
-      [req.user!.companyId, q.date]);
+        WHERE e.company_id = $1 AND e.status = 'active'
+          AND ($3 OR e.id = $4::uuid OR EXISTS (SELECT 1 FROM employee_assignment a WHERE a.employee_id = e.id AND a.manager_id = $4::uuid AND a.valid @> $2::date))
+        ORDER BY e.emp_code`,
+      [req.user!.companyId, q.date, companyWide, req.user!.employeeId]);
     res.json({ date: q.date, rows: rows.rows });
   });
 

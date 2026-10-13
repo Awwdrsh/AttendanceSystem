@@ -95,16 +95,20 @@ export function regularisationRoutes({ db }: AppDeps): Router {
       if (diff < 0 || diff > 1) throw new BadRequestError('punchTime must be on the attendance date or the following day');
     }
     const today = nptToday();
-    if (b.localDate > today) throw new BadRequestError('cannot regularise a future date');
+    const daysAhead = Math.floor((new Date(`${b.localDate}T00:00:00Z`).getTime() - new Date(`${today}T00:00:00Z`).getTime()) / 86_400_000);
+    // Work-from-home days are planned ahead (up to 60 days); every other correction is for a day that has happened.
+    if (b.kind === 'wfh' ? daysAhead > 60 : daysAhead > 0) throw new BadRequestError(b.kind === 'wfh' ? 'work from home can be requested up to 60 days ahead' : 'cannot regularise a future date');
     const pol = await policy(emp.rows[0].company_id);
     const isHr = hasRole(u, 'hr');
     if (!isHr) {
       const ageDays = Math.floor((new Date(`${today}T00:00:00Z`).getTime() - new Date(`${b.localDate}T00:00:00Z`).getTime()) / 86_400_000);
       if (ageDays > pol.backdateDays) throw new BadRequestError(`corrections can only be requested within ${pol.backdateDays} days`);
       const month = b.localDate.slice(0, 7);
+      if (b.kind !== 'wfh') {
       // The cap limits what an employee files for themself; HR/manager corrections (device outages) do not count against it.
-      const cnt = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM regularisation_request WHERE employee_id = $1 AND to_char(local_date, 'YYYY-MM') = $2 AND status IN ('pending', 'approved') AND created_by = $3`, [employeeId, month, u.id]);
+      const cnt = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM regularisation_request WHERE employee_id = $1 AND to_char(local_date, 'YYYY-MM') = $2 AND status IN ('pending', 'approved') AND created_by = $3 AND kind <> 'wfh'`, [employeeId, month, u.id]);
       if (Number(cnt.rows[0]!.n) >= pol.monthlyCap) throw new BadRequestError(`monthly limit of ${pol.monthlyCap} corrections reached; contact HR`);
+      }
     }
     const locked = await db.query('SELECT 1 FROM v_attendance_latest WHERE employee_id = $1 AND local_date = $2 AND locked_at IS NOT NULL', [employeeId, b.localDate]);
     if (locked.rows[0]) throw new ConflictError('this day is locked by payroll; HR must raise a supplementary correction');

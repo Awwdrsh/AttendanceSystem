@@ -45,8 +45,8 @@ export function punchRoutes({ db }: AppDeps): Router {
     let at = clientMs;
     if (Math.abs(clockSkewMs) > CLOCK_TOLERANCE_MS) { at = serverNow; flags.push('ClockSkew'); }
 
-    const emp = await db.query<{ company_id: string; emp_code: string; branch_id: string | null }>(
-      `SELECT e.company_id, e.emp_code, a.branch_id FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
+    const emp = await db.query<{ company_id: string; emp_code: string; branch_id: string | null; work_from_home: boolean }>(
+      `SELECT e.company_id, e.emp_code, a.branch_id, e.work_from_home FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
         WHERE e.id = $1 AND e.status = 'active'`, [employeeId]);
     const e = emp.rows[0];
     if (!e) throw new NotFoundError('employee not found');
@@ -61,7 +61,16 @@ export function punchRoutes({ db }: AppDeps): Router {
       const any = await db.query('SELECT 1 FROM location WHERE company_id = $1 LIMIT 1', [e.company_id]);
       if (any.rows.length) { geo = { inside: false, locationId: null, distanceM: null, locationName: null }; flags.push('NoLocation'); }
     }
-    if (geo.inside === false) {
+    // Work from home: allowed for employees set up for it, and for anyone with an approved work-from-home day.
+    let remote = false;
+    if (geo.inside !== true) {
+      remote = e.work_from_home || (await db.query(
+        `SELECT 1 FROM regularisation_request WHERE employee_id = $1 AND kind = 'wfh' AND status = 'approved' AND local_date = $2 LIMIT 1`,
+        [employeeId, localDateOf(at)])).rows.length > 0;
+    }
+    if (remote) {
+      flags.push('Remote');
+    } else if (geo.inside === false) {
       flags.push('OutsideLocation');
       if (!b.reason?.trim()) throw new BadRequestError(geo.distanceM !== null
         ? `You are ${geo.distanceM} m from ${geo.locationName}. Add a short reason to punch anyway.`
@@ -80,12 +89,12 @@ export function punchRoutes({ db }: AppDeps): Router {
       `INSERT INTO punch_event (device_id, device_sn, vendor, device_user_pin, employee_id, punched_at, device_local_time, local_date, direction, verify_mode, source, raw, idempotency_key)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id, punched_at, local_date, direction`,
       [device.id, device.serialNo, device.vendor, e.emp_code, employeeId, new Date(at), nptLocalTime(at), localDate, b.direction, b.source, b.source,
-        JSON.stringify({ lat: b.lat ?? null, lng: b.lng ?? null, accuracyM: b.accuracyM ?? null, inside: geo.inside, locationId: geo.locationId, distanceM: geo.distanceM,
+        JSON.stringify({ lat: b.lat ?? null, lng: b.lng ?? null, accuracyM: b.accuracyM ?? null, inside: geo.inside, remote, locationId: geo.locationId, distanceM: geo.distanceM,
           clientTime: b.clientTime, clockSkewMs, reason: b.reason ?? null, flags, selfie: b.selfie ? 'discarded' : null, ip: req.ip ?? null }), key]);
     const result = await recomputeDay(db, employeeId, localDate);
     return res.status(201).json({
       duplicate: false, punch: ins.rows[0], flags, location: { inside: geo.inside, name: geo.locationName, distanceM: geo.distanceM },
-      day: result.day, message: `Punched ${b.direction === 'out' ? 'OUT' : 'IN'} at ${nptLocalTime(at).slice(11, 16)}${geo.inside === false ? ' (outside location, flagged)' : ''}`,
+      day: result.day, remote, message: `Clocked ${b.direction === 'out' ? 'out' : 'in'} at ${nptLocalTime(at).slice(11, 16)}${remote ? ' from home' : geo.inside === false ? ' (outside location, flagged)' : ''}`,
     });
   });
 
@@ -96,7 +105,7 @@ export function punchRoutes({ db }: AppDeps): Router {
     const today = localDateOf(Date.now());
     const [days, punches] = await Promise.all([
       listDays(db, employeeId, today, today),
-      db.query(`SELECT id, punched_at, direction, verify_mode, source, device_sn FROM punch_event WHERE employee_id = $1 AND local_date = $2
+      db.query(`SELECT id, punched_at, direction, verify_mode, source, device_sn, coalesce((raw->>'remote')::boolean, false) AS remote FROM punch_event WHERE employee_id = $1 AND local_date = $2
                   AND NOT EXISTS (SELECT 1 FROM punch_event s WHERE s.supersedes_id = punch_event.id) ORDER BY punched_at`, [employeeId, today]),
     ]);
     res.json({ date: today, day: days[0] ?? null, punches: punches.rows });
