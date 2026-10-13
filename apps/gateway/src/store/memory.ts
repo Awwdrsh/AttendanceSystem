@@ -1,0 +1,60 @@
+import { randomUUID } from 'node:crypto';
+import type { NormalizedPunch } from '../punch/event.js';
+import { assertAllowedCommand, NEAR_DUPLICATE_WINDOW_MS, type DeviceRecord, type DeviceTouch, type InsertOutcome, type Store } from './types.js';
+
+/** In-memory store for tests and simulator runs. */
+export class MemoryStore implements Store {
+  devices = new Map<string, DeviceRecord & DeviceTouch>();
+  punches: NormalizedPunch[] = [];
+  mappings = new Map<string, string>(); // `${deviceId}:${pin}` -> employeeId
+  commands: Array<{ id: number; deviceId: string; command: string; status: 'queued' | 'sent' | 'acked' | 'failed'; returnCode?: number }> = [];
+  private nextCmd = 1;
+
+  addDevice(d: Partial<DeviceRecord> & { serialNo: string }): DeviceRecord {
+    const rec: DeviceRecord = { id: randomUUID(), vendor: 'zkteco', status: 'active', tzOffsetMin: 345, attlogStamp: '0', oplogStamp: '0', ...d };
+    this.devices.set(rec.serialNo, rec);
+    return rec;
+  }
+
+  async getDevice(serialNo: string) { return this.devices.get(serialNo) ?? null; }
+
+  async registerPending(serialNo: string, info: { vendor: string; pushVersion?: string }) {
+    const existing = this.devices.get(serialNo);
+    if (existing) return existing;
+    return this.addDevice({ serialNo, vendor: info.vendor, status: 'pending', ...(info.pushVersion ? { pushVersion: info.pushVersion } : {}) });
+  }
+
+  async touch(serialNo: string, patch: DeviceTouch) {
+    const d = this.devices.get(serialNo);
+    if (d) Object.assign(d, patch);
+  }
+
+  async resolveEmployee(deviceId: string, pin: string) { return this.mappings.get(`${deviceId}:${pin}`) ?? null; }
+
+  async insertPunch(p: NormalizedPunch): Promise<InsertOutcome> {
+    if (this.punches.some((q) => q.idempotencyKey === p.idempotencyKey)) return 'duplicate';
+    const near = this.punches.some((q) => q.deviceId === p.deviceId && q.deviceUserPin === p.deviceUserPin && q.verifyMode === p.verifyMode
+      && Math.abs(q.punchedAt.getTime() - p.punchedAt.getTime()) <= NEAR_DUPLICATE_WINDOW_MS);
+    if (near) return 'near_duplicate';
+    this.punches.push(p);
+    return 'inserted';
+  }
+
+  async enqueueCommand(deviceId: string, command: string) {
+    assertAllowedCommand(command);
+    const id = this.nextCmd++;
+    this.commands.push({ id, deviceId, command, status: 'queued' });
+    return id;
+  }
+
+  async popQueuedCommands(deviceId: string) {
+    const q = this.commands.filter((c) => c.deviceId === deviceId && c.status === 'queued');
+    for (const c of q) c.status = 'sent';
+    return q.map((c) => ({ id: c.id, command: c.command }));
+  }
+
+  async ackCommand(id: number, returnCode: number) {
+    const c = this.commands.find((x) => x.id === id);
+    if (c) { c.status = returnCode >= 0 ? 'acked' : 'failed'; c.returnCode = returnCode; }
+  }
+}

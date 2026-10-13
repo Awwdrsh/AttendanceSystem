@@ -1,0 +1,33 @@
+{
+  "name": "@hajiri/gateway",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Hajiri device gateway: terminates ZKTeco ADMS push (and later Hikvision ISAPI), normalises, signs and stores punch events. The only service reachable from the biometric VLAN.",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node --import tsx src/server.ts",
+    "simulate": "tsx src/simulate.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hajiri/attendance-engine": "workspace:*",
+    "dotenv": "^18.0.7",
+    "express": "^5.3.0",
+    "pg": "^8.23.1",
+    "pino": "^10.4.0",
+    "pino-http": "^11.0.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
+    "@types/supertest": "^7.2.1",
+    "supertest": "^7.3.1",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.2",
+    "vitest": "5.0.3"
+  }
+}
