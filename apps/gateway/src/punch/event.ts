@@ -23,7 +23,10 @@ export interface NormalizedPunch {
 export function deviceTimeToUtc(deviceLocalTime: string, tzOffsetMin: number): Date {
   const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(deviceLocalTime);
   if (!m) throw new RangeError(`bad device time ${deviceLocalTime}`);
-  const asUtc = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]));
+  const [y, mo, d, h, mi, sec] = m.slice(1).map(Number) as [number, number, number, number, number, number];
+  const asUtc = Date.UTC(y, mo - 1, d, h, mi, sec);
+  const t = new Date(asUtc);
+  if (mo < 1 || mo > 12 || h > 23 || mi > 59 || sec > 59 || t.getUTCMonth() !== mo - 1 || t.getUTCDate() !== d) throw new RangeError(`invalid device time ${deviceLocalTime}`);
   return new Date(asUtc - tzOffsetMin * MIN_MS);
 }
 

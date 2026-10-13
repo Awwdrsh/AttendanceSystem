@@ -27,8 +27,9 @@ On the terminal: Menu → Comm → Cloud Server Setting (names vary by firmware:
 - Server address: the gateway host IP or name; Server port: `8080` (or 443 behind TLS)
 - Enable domain name: as needed; Proxy: off
 - The URL path is fixed by the firmware (`/iclock/...`); nothing to type.
-- Comm key: set a non-zero value on the terminal and record it in the password manager (the gateway does not yet
-  validate it; see gaps).
+- Comm key: set a non-zero value on the terminal and record it in the password manager. The PUSH protocol does not
+  carry it per request, so the gateway cannot verify it; the serial allow-list and the VLAN are the controls (see gaps).
+- Serial numbers must be 1–64 characters of letters, digits, `_ . : -`; anything else is rejected with HTTP 400.
 Endpoints served: `GET /iclock/cdata?SN=..&options=all` (handshake), `POST /iclock/cdata?SN=..&table=ATTLOG|OPERLOG|…`,
 `GET /iclock/getrequest`, `POST /iclock/devicecmd`, `POST /iclock/fdata`. Templates arriving in OPERLOG/fdata are stored
 encrypted (same key as the API) or discarded if `DATA_ENCRYPTION_KEY` is unset; photos are always discarded.
@@ -43,7 +44,7 @@ Content-Type: application/json
 
 {"HttpHostNotification": {
   "id": "1",
-  "url": "/hikvision/event?sn=<terminal serial number>",
+  "url": "/hikvision/event?sn=<terminal serial number>&key=<device secret>",
   "protocolType": "HTTP",
   "parameterFormatType": "JSON",
   "addressingFormatType": "ipaddress",
@@ -56,10 +57,15 @@ Content-Type: application/json
   "heartbeat": 30
 }}
 ```
-Older firmware only sends XML: the gateway archives XML and acknowledges it but does not parse it; switch the format to
-JSON. The gateway keeps attendance events with major 5 / minor 75 (face), 113 (fingerprint), 38 (card); heartbeats only
+Both JSON and the older `<EventNotificationAlert>` XML are parsed (XML through a minimal field extractor; prefer JSON).
+The gateway keeps attendance events with major 5 / minor 75 (face), 113 (fingerprint), 38 (card); heartbeats only
 update "last seen". Unapproved serials get 403 so the terminal re-sends after approval. Put the serial in the URL
 (`?sn=`); the JSON `serialNo` is used only as a fallback.
+
+**Per-device secret (plan §12.5).** Because anyone on the VLAN could post an event with a known serial, give each
+Hikvision terminal its own secret: store `sha256(secret)` in `device.comm_key_hash` (HR/admin, via SQL or the Devices
+screen once exposed) and put `&key=<secret>` in the listening-host URL (or send it as the `x-device-key` header). Events
+without the right key are refused with 403. ADMS terminals cannot send a key, so the check is skipped for them.
 
 Simulator: `pnpm --filter @hajiri/gateway simulate -- --vendor hikvision --sn HIK-01 --pin 1 --time "2026-09-21 10:17:03"`
 
@@ -69,10 +75,33 @@ idempotent ingest fills any gap and ignores the rest. Run it from cron at 01:00 
 pnpm --filter @hajiri/gateway --silent reconcile -- --all >> logs/reconcile.log 2>&1`). Hikvision terminals are
 reconciled through `AcsEvent` search from the API once device credentials are stored there (not yet implemented).
 
+## Commands to terminals
+Commands queued in `device_command` are delivered on the next `getrequest` poll (about every 10 s). A command that is
+not acknowledged within 10 minutes (terminal rebooted, poll lost) is re-sent once and then marked `failed`; late
+acknowledgements of failed commands are ignored. Every command must be a single line; `SHELL` is refused everywhere,
+and `CLEAR DATA`, `CONTROL DEVICE`, firmware and file-transfer verbs are refused unless
+`GATEWAY_ALLOW_DANGEROUS_COMMANDS=true`.
+
 ## Raw archive
-Every POST body is appended verbatim to `apps/gateway/data/raw/<serial>/<date>.log` (`GATEWAY_RAW_DIR`), rotating at
-50 MB per day file. It is the forensic record for disputes and protocol debugging; it contains template uploads, so
-treat the directory as sensitive and include it in the backup/retention policy (plan §12.9, §12.11).
+Every POST body from an **approved** terminal is appended verbatim to `apps/gateway/data/raw/<serial>/<date>.log`
+(`GATEWAY_RAW_DIR`), rotating at 50 MB per file with at most five files per device per day (bodies beyond that are
+dropped and counted). Unknown serials are never archived. The archive is the forensic record for disputes and protocol
+debugging; it contains template uploads, so treat the directory as sensitive and include it in the backup/retention
+policy (plan §12.9, §12.11).
+
+## Device onboarding SOP (plan §16.4)
+1. Receive the unit; check model and firmware against the acceptance checklist (plan Appendix D); update to the
+   CVE-fixed firmware before it touches the network (plan §7.6).
+2. Set the admin password and (ZKTeco) comm key from the password manager; (Hikvision) generate the device secret,
+   store its sha256 in `device.comm_key_hash` after approval.
+3. Configure the server address/port (above), time zone **UTC+05:45**, and NTP to the gateway host.
+4. Connect it to the terminal VLAN. It appears as *pending*; approve it in Devices with the branch and a name.
+5. Map PINs to employees (or import the terminal's user list), with consent recorded per employee
+   (`POST /api/v1/biometrics/consent`) before enrolling faces/fingerprints.
+6. Test punch: it must show in Team Today within 5 minutes. Record the firmware hash, a photo of the installation and
+   the serial in the asset register; add the device to monitoring (offline alert after 120 s, page at 15 min).
+7. Disposal or RMA: disable the device, `shred-all` templates for anyone enrolled only there, and wipe the terminal
+   (`CLEAR DATA` with `GATEWAY_ALLOW_DANGEROUS_COMMANDS=true`, then factory reset locally).
 
 ## Environment (apps/gateway/.env)
 | Variable | Purpose |
@@ -92,7 +121,11 @@ treat the directory as sensitive and include it in the backup/retention policy (
 - ADMS status/verify code tables, BIODATA `Type` codes, template line layouts (`FP`, `FACE`, `BIODATA`) and the time
   sync command come from community implementations, not the vendor PUSH SDK document; capture traffic from the bench
   units and adjust `apps/gateway/src/adms/*.ts`.
-- Hikvision JSON field names (`AccessControllerEvent`, `employeeNoString`, `majorEventType`, `subEventType`,
-  `attendanceStatus`) are from community captures; the official ISAPI document is under NDA. XML payloads are not parsed.
-- Per-device certificates / mTLS (plan §12.5) are not implemented; the gateway currently trusts the serial number.
+- Hikvision JSON and XML field names (`AccessControllerEvent`, `employeeNoString`, `majorEventType`, `subEventType`,
+  `attendanceStatus`) are from community captures; the official ISAPI document is under NDA.
+- Per-device certificates / mTLS (plan §12.5) are not implemented; ADMS terminals are trusted by serial number,
+  Hikvision terminals by serial plus the optional shared secret.
 - Device offline alerts (120 s silence, page at 15 min) are raised by the API worker from `device.last_seen_at`.
+- Hikvision `AcsEvent` reconciliation (Appendix C) needs device credentials stored on the API side; not implemented.
+- The database outage path returns HTTP 503 so terminals keep buffering; confirm on the bench that the firmware
+  retries on 503 as it does on timeouts.

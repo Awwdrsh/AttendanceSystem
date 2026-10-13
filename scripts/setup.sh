@@ -75,7 +75,7 @@ if [ "$OS" = mac ]; then
   if [ ! -f "$PGCONF" ]; then
     initdb --locale=C -E UTF-8 "$(brew --prefix)/var/postgresql@$PG_MAJOR" >/dev/null
   fi
-  DB_USER="$(whoami)"; DB_AUTH=""
+  DB_AUTH=""
 else
   if ! dpkg -s postgresql-$PG_MAJOR >/dev/null 2>&1; then
     sudo install -d /usr/share/postgresql-common/pgdg
@@ -87,7 +87,6 @@ else
   fi
   setup_path
   PGCONF="/etc/postgresql/$PG_MAJOR/main/postgresql.conf"
-  DB_USER="hajiri"
 fi
 
 # Pin the port in postgresql.conf (idempotent).
@@ -183,7 +182,10 @@ fi
 
 # ------------------------------------------------------------------ dependencies + schema
 step "Dependencies"
-pnpm install --frozen-lockfile 2>&1 | grep -E "^(Done|Already)" || true
+if ! pnpm install --frozen-lockfile >/tmp/hajiri-install.log 2>&1; then
+  tail -20 /tmp/hajiri-install.log
+  fail "pnpm install failed (full log: /tmp/hajiri-install.log)"
+fi
 ok "node_modules ready"
 
 step "Database schema and seeds"
@@ -191,7 +193,9 @@ pnpm --filter @hajiri/api --silent db:migrate
 pnpm --filter @hajiri/api --silent db:seed:bs
 if [ "$COMPANY_CODE" != "DEMO" ]; then
   WITH_DEMO=0
-  psql_q "insert into company (code, name_en) values ('$COMPANY_CODE', '$COMPANY_NAME') on conflict (code) do nothing" >/dev/null
+  [[ "$COMPANY_CODE" =~ ^[A-Za-z0-9_-]{1,20}$ ]] || fail "--company must be 1-20 letters, digits, _ or -"
+  COMPANY_NAME_SQL="${COMPANY_NAME//\'/\'\'}"
+  psql_q "insert into company (code, name_en) values ('$COMPANY_CODE', '$COMPANY_NAME_SQL') on conflict (code) do nothing" >/dev/null
   psql_q "insert into branch (company_id, code, name_en) select id, 'HQ', 'Head Office' from company where code = '$COMPANY_CODE' on conflict do nothing" >/dev/null
   ok "company $COMPANY_CODE ready"
 fi
@@ -201,7 +205,8 @@ ok "schema up to date; defaults seeded"
 
 step "Admin user"
 ADMIN_EMAIL="${HAJIRI_ADMIN_EMAIL:-admin@hajiri.local}"
-if psql_q "select 1 from app_user where email = '$ADMIN_EMAIL'" | grep -q 1; then
+[[ "$ADMIN_EMAIL" =~ ^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$ ]] || fail "HAJIRI_ADMIN_EMAIL is not a valid email"
+if psql_q "select 1 from app_user where email = lower('$ADMIN_EMAIL')" | grep -q 1; then
   ok "$ADMIN_EMAIL exists (reset with: pnpm --filter @hajiri/api cli reset-password --email $ADMIN_EMAIL --password <new>)"
 else
   ADMIN_PASSWORD="$(node -e "console.log(require('node:crypto').randomBytes(12).toString('base64url'))")"

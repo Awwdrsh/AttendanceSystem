@@ -84,3 +84,30 @@ describe('biometrics: consent, templates, shredding', () => {
     expect((await request(app).post('/api/v1/biometrics/retention/run').set(auth(sita)).send({})).status).toBe(403);
   });
 });
+describe('biometrics: authorisation edges', () => {
+  it('a manager cannot grant/revoke consent, list templates or export DSAR for others; cross-company ids are 404 for HR', async () => {
+    const mgr = (await loginAs(db, app, ['manager'])).token;
+    expect((await request(app).post('/api/v1/biometrics/consent').set(auth(mgr)).send({ employeeId: DEMO.sita, modality: 'face', noticeVersion: 'v1' })).status).toBe(403);
+    expect((await request(app).get('/api/v1/biometrics/templates').set(auth(mgr)).query({ employeeId: DEMO.sita })).status).toBe(403);
+    expect((await request(app).get('/api/v1/biometrics/dsar').set(auth(mgr)).query({ employeeId: DEMO.sita })).status).toBe(403);
+    expect((await request(app).get('/api/v1/biometrics/consent').set(auth(mgr)).query({ employeeId: DEMO.sita })).status).toBe(403);
+    const other = await db.query<{ id: string }>(`INSERT INTO company (code, name_en) VALUES ('OTHER', 'Other') RETURNING id`);
+    const emp = await db.query<{ id: string }>(`INSERT INTO employee (company_id, emp_code, name_en) VALUES ($1, 'X1', 'Stranger') RETURNING id`, [other.rows[0]!.id]);
+    for (const path of ['/api/v1/biometrics/templates', '/api/v1/biometrics/consent', '/api/v1/biometrics/dsar']) {
+      expect((await request(app).get(path).set(auth(hr)).query({ employeeId: emp.rows[0]!.id })).status).toBe(404);
+    }
+    expect((await request(app).post(`/api/v1/biometrics/employees/${emp.rows[0]!.id}/shred-all`).set(auth(hr))).status).toBe(404);
+  });
+  it('retention run is idempotent and only touches employees exited past the grace period', async () => {
+    const exited = await db.query<{ id: string }>(`INSERT INTO employee (company_id, emp_code, name_en, status, exit_date) VALUES ($1, 'EX1', 'Left', 'exited', current_date - 45) RETURNING id`, [DEMO.companyId]);
+    const recent = await db.query<{ id: string }>(`INSERT INTO employee (company_id, emp_code, name_en, status, exit_date) VALUES ($1, 'EX2', 'Just left', 'exited', current_date - 5) RETURNING id`, [DEMO.companyId]);
+    await insertTemplate(exited.rows[0]!.id, 'face');
+    await insertTemplate(recent.rows[0]!.id, 'face');
+    const first = await request(app).post('/api/v1/biometrics/retention/run').set(auth(hr)).send({});
+    expect(first.body).toMatchObject({ employees: 1, templatesShredded: 1 });
+    const second = await request(app).post('/api/v1/biometrics/retention/run').set(auth(hr)).send({});
+    expect(second.body).toMatchObject({ employees: 0, templatesShredded: 0 });
+    const r = await db.query(`SELECT employee_id, shredded_at IS NOT NULL AS shredded FROM biometric_template WHERE employee_id = ANY($1::uuid[]) ORDER BY employee_id`, [[exited.rows[0]!.id, recent.rows[0]!.id].sort()]);
+    expect(r.rows.map((x) => x.shredded).sort()).toEqual([false, true]);
+  });
+});

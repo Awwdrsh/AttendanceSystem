@@ -1,9 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { NormalizedPunch } from '../punch/event.js';
 import {
-  assertAllowedCommand, DEFAULT_MAX_PENDING, NEAR_DUPLICATE_WINDOW_MS,
+  assertAllowedCommand, COMMAND_ACK_TIMEOUT_MS, COMMAND_MAX_ATTEMPTS, DEFAULT_MAX_PENDING, NEAR_DUPLICATE_WINDOW_MS,
   type DeviceRecord, type DeviceTouch, type InsertOutcome, type Store, type StoreOptions, type TemplateRecord,
 } from './types.js';
+
+export interface MemoryCommand {
+  id: number; deviceId: string; command: string; status: 'queued' | 'sent' | 'acked' | 'failed'; returnCode?: number; attempts: number; sentAt?: Date;
+}
 
 /** In-memory store for tests and simulator runs. */
 export class MemoryStore implements Store {
@@ -12,13 +16,13 @@ export class MemoryStore implements Store {
   templates: TemplateRecord[] = [];
   recomputeQueue: Array<{ employeeId: string; localDate: string; reason: string }> = [];
   mappings = new Map<string, string>(); // `${deviceId}:${pin}` -> employeeId
-  commands: Array<{ id: number; deviceId: string; command: string; status: 'queued' | 'sent' | 'acked' | 'failed'; returnCode?: number }> = [];
+  commands: MemoryCommand[] = [];
   private nextCmd = 1;
 
   constructor(readonly opts: StoreOptions = {}) {}
 
   addDevice(d: Partial<DeviceRecord> & { serialNo: string }): DeviceRecord {
-    const rec: DeviceRecord = { id: randomUUID(), vendor: 'zkteco', protocol: 'adms', status: 'active', tzOffsetMin: 345, attlogStamp: '0', oplogStamp: '0', ...d };
+    const rec: DeviceRecord = { id: randomUUID(), vendor: 'zkteco', protocol: 'adms', status: 'active', tzOffsetMin: 345, attlogStamp: '0', oplogStamp: '0', commKeyHash: null, ...d };
     this.devices.set(rec.serialNo, rec);
     return rec;
   }
@@ -58,19 +62,24 @@ export class MemoryStore implements Store {
   async enqueueCommand(deviceId: string, command: string) {
     assertAllowedCommand(command, this.opts.allowDangerousCommands);
     const id = this.nextCmd++;
-    this.commands.push({ id, deviceId, command, status: 'queued' });
+    this.commands.push({ id, deviceId, command, status: 'queued', attempts: 0 });
     return id;
   }
 
-  async popQueuedCommands(deviceId: string) {
+  async popQueuedCommands(deviceId: string, now = new Date()) {
+    for (const c of this.commands) {
+      if (c.deviceId === deviceId && c.status === 'sent' && c.sentAt && now.getTime() - c.sentAt.getTime() > COMMAND_ACK_TIMEOUT_MS) {
+        c.status = c.attempts < COMMAND_MAX_ATTEMPTS ? 'queued' : 'failed';
+      }
+    }
     const q = this.commands.filter((c) => c.deviceId === deviceId && c.status === 'queued');
-    for (const c of q) c.status = 'sent';
+    for (const c of q) { c.status = 'sent'; c.sentAt = now; c.attempts++; }
     return q.map((c) => ({ id: c.id, command: c.command }));
   }
 
   async ackCommand(id: number, returnCode: number) {
     const c = this.commands.find((x) => x.id === id);
-    if (c) { c.status = returnCode >= 0 ? 'acked' : 'failed'; c.returnCode = returnCode; }
+    if (c && c.status === 'sent') { c.status = returnCode >= 0 ? 'acked' : 'failed'; c.returnCode = returnCode; }
   }
 
   async listDevices(filter: { status?: DeviceRecord['status']; protocol?: string } = {}) {

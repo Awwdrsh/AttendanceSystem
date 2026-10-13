@@ -11,7 +11,11 @@ git pull --ff-only
 ok "$(git log -1 --format='%h %s')"
 
 step "Dependencies"
-pnpm install --frozen-lockfile 2>&1 | grep -E "^(Done|Already)" || true
+if ! pnpm install --frozen-lockfile >/tmp/hajiri-install.log 2>&1; then
+  tail -20 /tmp/hajiri-install.log
+  fail "pnpm install failed (full log: /tmp/hajiri-install.log)"
+fi
+ok "node_modules ready"
 
 step "Migrations"
 DATABASE_URL="$(env_get apps/api/.env DATABASE_URL)"

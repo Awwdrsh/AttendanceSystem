@@ -1,7 +1,8 @@
 # Full stack with Docker (alternative to scripts/setup.sh on a machine that has Docker).
-#   cp infra/.env.docker.example infra/.env.docker   # fill secrets
+#   cp infra/.env.docker.example infra/.env.docker        # fill the secrets
 #   docker compose -f infra/docker-compose.yml --env-file infra/.env.docker up -d --build
-# Then run once:  docker compose -f infra/docker-compose.yml exec api sh -c "pnpm db:migrate && pnpm db:seed:bs && pnpm db:seed:defaults --company $COMPANY_CODE"
+# On every start the API container applies migrations and idempotent seeds, and creates the admin user named in
+# HAJIRI_ADMIN_EMAIL / HAJIRI_ADMIN_PASSWORD if it does not exist yet. Web app: http://<host>:3000
 services:
   postgres:
     image: postgres:18
@@ -10,7 +11,7 @@ services:
       POSTGRES_USER: hajiri
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     volumes: ["pgdata:/var/lib/postgresql"]
-    healthcheck: { test: ["CMD-SHELL", "pg_isready -U hajiri"], interval: 5s, timeout: 3s, retries: 20 }
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U hajiri -d hajiri"], interval: 5s, timeout: 3s, retries: 20 }
     restart: unless-stopped
   api:
     build: { context: .., dockerfile: infra/docker/api.Dockerfile }
@@ -19,6 +20,9 @@ services:
       DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?set DATA_ENCRYPTION_KEY}
       PASSWORD_PEPPER: ${PASSWORD_PEPPER:?set PASSWORD_PEPPER}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      COMPANY_CODE: ${COMPANY_CODE:-DEMO}
+      HAJIRI_ADMIN_EMAIL: ${HAJIRI_ADMIN_EMAIL:-}
+      HAJIRI_ADMIN_PASSWORD: ${HAJIRI_ADMIN_PASSWORD:-}
       LOG_LEVEL: info
       RUN_WORKER: "true"
     ports: ["3000:3000"]
@@ -29,11 +33,15 @@ services:
     environment:
       DATABASE_URL: postgres://hajiri:${POSTGRES_PASSWORD}@postgres:5432/hajiri
       DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY}
-      GATEWAY_SIGNING_KEY: ${GATEWAY_SIGNING_KEY}
+      GATEWAY_SIGNING_KEY: ${GATEWAY_SIGNING_KEY:?set GATEWAY_SIGNING_KEY}
+      GATEWAY_MAX_PENDING_DEVICES: ${GATEWAY_MAX_PENDING_DEVICES:-50}
+      GATEWAY_MAX_CLOCK_SKEW_MIN: ${GATEWAY_MAX_CLOCK_SKEW_MIN:-10}
       LOG_LEVEL: info
     ports: ["8080:8080"]
     volumes: ["gateway-raw:/app/apps/gateway/data"]
-    depends_on: { postgres: { condition: service_healthy } }
+    depends_on:
+      postgres: { condition: service_healthy }
+      api: { condition: service_healthy }     # migrations are applied by the API container first
     restart: unless-stopped
 volumes:
   pgdata:

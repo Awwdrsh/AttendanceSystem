@@ -35,7 +35,7 @@ if [ "$DAEMON" = 1 ]; then
   step "Starting in background"
   nohup bash -c 'cd apps/gateway && exec node --import tsx src/server.ts' >> logs/gateway.log 2>&1 & echo $! > .run/gateway.pid
   nohup bash -c 'cd apps/api && exec node --import tsx src/server.ts' >> logs/api.log 2>&1 & echo $! > .run/api.pid
-  for i in $(seq 1 40); do
+  for _ in $(seq 1 60); do
     curl -fs "http://localhost:$API_PORT/health" >/dev/null 2>&1 && curl -fs "http://localhost:$GW_PORT/health" >/dev/null 2>&1 && break
     sleep 0.5
   done
@@ -48,11 +48,10 @@ if [ "$DAEMON" = 1 ]; then
 fi
 
 step "Starting (Ctrl+C to stop)"
-pids=()
-cleanup() { trap - INT TERM; pkill -TERM -f 'node --import tsx src/server.ts' 2>/dev/null || true; wait 2>/dev/null; echo; ok "stopped"; }
+cleanup() { trap - INT TERM; pkill -TERM -f "$ROOT/apps/(gateway|api)/src/server.ts" 2>/dev/null || pkill -TERM -f 'node --import tsx src/server.ts' 2>/dev/null || true; wait 2>/dev/null; echo; ok "stopped"; }
 trap cleanup INT TERM
-(cd apps/gateway && exec node --import tsx src/server.ts) 2>&1 | sed -u 's/^/[gateway] /' & pids+=($!)
-(cd apps/api && exec node --import tsx src/server.ts) 2>&1 | sed -u 's/^/[api]     /' & pids+=($!)
+(cd apps/gateway && exec node --import tsx "$ROOT/apps/gateway/src/server.ts") 2>&1 | sed -u 's/^/[gateway] /' &
+(cd apps/api && exec node --import tsx "$ROOT/apps/api/src/server.ts") 2>&1 | sed -u 's/^/[api]     /' &
 echo "  API     http://localhost:$API_PORT/health"
 echo "  Gateway http://localhost:$GW_PORT/health"
 wait

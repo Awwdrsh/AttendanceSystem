@@ -7,7 +7,8 @@ reference its section numbers in commit messages and comments when encoding a ru
 - `packages/bs-calendar` — Bikram Sambat table + AD/BS conversion. Pure, no deps. Extend the table in `src/data.ts`.
 - `packages/attendance-engine` — `computeDay()` pure function over immutable punches (plan §10). No I/O, no clock.
 - `apps/api` — Express 5 API. Owns the DB schema (`migrations/*.sql`, forward-only, checksummed).
-- `apps/gateway` — device gateway (ZKTeco ADMS push now; Hikvision ISAPI next). The only thing terminals talk to.
+- `apps/gateway` — device gateway (ZKTeco ADMS push and Hikvision ISAPI). The only thing terminals talk to; see `docs/gateway.md`.
+- `infra/` — Dockerfiles, compose stack and the API container entrypoint (migrations + seeds on boot). Root `.dockerignore` keeps `.env`, data and logs out of images.
 - `scripts/` — install, start/stop, update and service scripts (see README).
 - `docs/adr` — decisions; ADR 0001 records deviations from plan.md.
 
@@ -26,7 +27,8 @@ Databases: `hajiri`, `hajiri_test`. Connection strings live in `apps/*/.env` (ne
 ## Rules that must not be broken
 - `punch_event` and `audit_log` are append-only (DB triggers enforce it). Corrections are new rows.
 - `attendance_day` is versioned; a new version is written only when `inputs_hash` changes; locked days are never rewritten.
-- Never emit an ADMS `SHELL` command (DB CHECK + store guard + test).
+- Never emit an ADMS `SHELL` command, and never a multi-line command (DB CHECK + store guard + tests). Dangerous verbs need `GATEWAY_ALLOW_DANGEROUS_COMMANDS`.
+- Serial numbers are validated at the gateway edge and sanitised before touching the file system.
 - Money never goes through a JS float: NUMERIC comes back as strings; use decimal/integer-paisa arithmetic (plan §11.7).
 - All statutory numbers come from `rule_version` rows (plan §6.13), never hard-coded, once the payroll module exists.
 - Biometric templates are only ever stored envelope-encrypted (plan §9.1 decision 5); until that exists, `/iclock/fdata` discards.

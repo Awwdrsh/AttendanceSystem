@@ -30,6 +30,15 @@ Point ZKTeco/eSSL terminals at `http://<this-machine>:8080/iclock` (ADMS "cloud 
 as *pending* and must be approved via `POST /api/v1/devices/:id/activate` before their punches are accepted.
 Logs are written to `logs/`.
 
+## Run with Docker instead
+On a machine with Docker, no local Node or PostgreSQL is needed:
+```sh
+cp infra/.env.docker.example infra/.env.docker     # fill POSTGRES_PASSWORD, DATA_ENCRYPTION_KEY, PASSWORD_PEPPER, GATEWAY_SIGNING_KEY, admin password
+docker compose -f infra/docker-compose.yml --env-file infra/.env.docker up -d --build
+```
+The API container applies migrations and seeds on every start and creates the admin user from the env file. The web
+app is at http://localhost:3000, the device gateway at http://localhost:8080. Terminal setup: `docs/gateway.md`.
+
 ## Try it with the simulator
 
 ```sh
@@ -44,9 +53,9 @@ curl -s -X POST localhost:3000/api/v1/attendance/recompute -H 'content-type: app
 | `packages/bs-calendar` | BS calendar table and conversion (plan §6.10) |
 | `packages/attendance-engine` | pure `computeDay` / `computeOt` with worked-example and property tests (plan §10) |
 | `apps/api` | Express API, SQL migrations (plan §9), attendance recompute, employee and device endpoints |
-| `apps/gateway` | ZKTeco ADMS push gateway with idempotent, signed punch ingest and a device simulator (plan §7, Appendix B) |
+| `apps/gateway` | ZKTeco ADMS and Hikvision ISAPI gateway: idempotent signed punch ingest, encrypted template storage, raw archive, simulator (plan §7, Appendix B/C; see `docs/gateway.md`) |
 | `scripts/` | setup, start/stop, update and service installers |
-| `infra/` | docker-compose for Postgres/Valkey/MinIO when Docker is available |
+| `infra/` | Docker images, compose stack and entrypoint for container deployments |
 
 ## Manual developer setup
 If you prefer not to use the scripts: install Node ≥ 22, pnpm 12 and PostgreSQL 18, create databases `hajiri` and

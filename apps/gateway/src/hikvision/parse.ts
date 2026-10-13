@@ -27,11 +27,19 @@ const DIRECTION: Record<string, 'in' | 'out'> = {
 export function parseIsoWithOffset(s: string): { local: string; offsetMin: number | null } | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/.exec(s.trim());
   if (!m) return null;
+  if (!isRealDateTime(Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]))) return null;
   let offsetMin: number | null = null;
   const z = m[7];
   if (z === 'Z') offsetMin = 0;
   else if (z) { const sign = z.startsWith('-') ? -1 : 1; const hh = Number(z.slice(1, 3)); const mm = Number(z.slice(-2)); offsetMin = sign * (hh * 60 + mm); }
   return { local: `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`, offsetMin };
+}
+
+/** Calendar-valid components (no 2026-13-40 roll-over). */
+export function isRealDateTime(y: number, mo: number, d: number, h: number, mi: number, sec: number): boolean {
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || sec > 59) return false;
+  const t = new Date(Date.UTC(y, mo - 1, d, h, mi, sec));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d;
 }
 
 type J = Record<string, unknown>;
@@ -73,11 +81,14 @@ export function parseMultipart(body: Buffer, contentType: string): Map<string, {
     if (body.subarray(start, start + 2).toString() === '--') break;           // closing boundary
     const next = body.indexOf(boundary, start);
     const segment = body.subarray(start, next === -1 ? body.length : next);
-    const headerEnd = segment.indexOf('\r\n\r\n');
+    // Header/body separator may be CRLF CRLF (spec) or LF LF (some firmware).
+    let headerEnd = segment.indexOf('\r\n\r\n'); let sepLen = 4;
+    if (headerEnd === -1) { headerEnd = segment.indexOf('\n\n'); sepLen = 2; }
     if (headerEnd !== -1) {
       const headers = segment.subarray(0, headerEnd).toString('utf8');
-      let data = segment.subarray(headerEnd + 4);
+      let data = segment.subarray(headerEnd + sepLen);
       if (data.subarray(data.length - 2).toString() === '\r\n') data = data.subarray(0, data.length - 2);
+      else if (data.subarray(data.length - 1).toString() === '\n') data = data.subarray(0, data.length - 1);
       const nm = /name="([^"]+)"/i.exec(headers);
       if (nm) parts.set(nm[1]!, { headers, data });
     }
@@ -93,12 +104,39 @@ export function extractEventJson(body: Buffer, contentType: string): unknown | n
     const parts = parseMultipart(body, contentType);
     for (const [name, part] of parts) {
       if (/picture|image/i.test(name) || /image\//i.test(part.headers)) continue;   // photos are discarded (plan §8.9 opt-in)
-      try { return JSON.parse(part.data.toString('utf8')); } catch { /* try next part */ }
+      const text = part.data.toString('utf8').trim();
+      if (text.startsWith('<')) return xmlEventToJson(text);
+      try { return JSON.parse(text); } catch { /* try next part */ }
     }
     return null;
   }
   const text = body.toString('utf8').trim();
   if (!text) return null;
-  if (text.startsWith('<')) return { xml: true };                                  // older firmware: XML (gap, see docs/gateway.md)
+  if (text.startsWith('<')) return xmlEventToJson(text);
   try { return JSON.parse(text); } catch { return null; }
+}
+
+const XML_FIELDS = ['ipAddress', 'dateTime', 'eventType', 'serialNo', 'deviceID'] as const;
+const XML_ACE_FIELDS = ['deviceName', 'majorEventType', 'subEventType', 'employeeNoString', 'employeeNo', 'cardNo', 'serialNo', 'deviceID', 'currentVerifyMode', 'attendanceStatus'] as const;
+
+function xmlText(xml: string, tag: string): string | null {
+  const m = new RegExp(`<${tag}(?:\\s[^>]*)?>([^<]*)</${tag}>`, 'i').exec(xml);
+  return m ? m[1]!.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").trim() : null;
+}
+
+/**
+ * Older Hikvision firmware posts <EventNotificationAlert> XML (Appendix C). Only the fields the attendance filter
+ * needs are extracted, into the same shape as the JSON payload, so one parser serves both formats.
+ */
+export function xmlEventToJson(xml: string): Record<string, unknown> | null {
+  if (!/<EventNotificationAlert[\s>]/i.test(xml)) return null;
+  const out: Record<string, unknown> = { fromXml: true };
+  for (const f of XML_FIELDS) { const v = xmlText(xml, f); if (v !== null) out[f] = v; }
+  const aceM = /<AccessControllerEvent[\s>]([\s\S]*?)<\/AccessControllerEvent>/i.exec(xml);
+  if (aceM) {
+    const ace: Record<string, unknown> = {};
+    for (const f of XML_ACE_FIELDS) { const v = xmlText(aceM[1]!, f); if (v !== null) ace[f] = v; }
+    out.AccessControllerEvent = ace;
+  }
+  return out;
 }

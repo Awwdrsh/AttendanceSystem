@@ -4,7 +4,8 @@ import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
 import { ForbiddenError, NotFoundError } from '../../errors.js';
 import { uuid } from '../../validation.js';
-import { assertAccessEmployee, hasRole, requireRole } from '../auth/middleware.js';
+import { hasRole, requireRole } from '../auth/middleware.js';
+import type { AuthUser } from '../auth/service.js';
 import type { Queryable } from '../../db/pool.js';
 
 /**
@@ -28,6 +29,16 @@ async function shredTemplates(db: Queryable, where: string, params: unknown[]): 
 async function employeeInCompany(db: Queryable, employeeId: string, companyId: string | null): Promise<boolean> {
   const r = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, companyId]);
   return r.rows.length > 0;
+}
+
+/**
+ * Consent, templates and data exports are the employee's own business or HR's: managers may see attendance, never
+ * biometric records (plan §12.11 data minimisation). Cross-company ids are indistinguishable from missing ones (404).
+ */
+async function assertSelfOrHr(db: Queryable, user: AuthUser, employeeId: string): Promise<void> {
+  if (!(await employeeInCompany(db, employeeId, user.companyId))) throw new NotFoundError('employee not found');
+  if (hasRole(user, 'hr') || user.employeeId === employeeId) return;
+  throw new ForbiddenError('not allowed to access this employee');
 }
 
 export function biometricsRoutes({ db }: AppDeps): Router {
@@ -58,8 +69,7 @@ export function biometricsRoutes({ db }: AppDeps): Router {
       employeeId: uuid, purpose: z.string().min(1).max(200).default('attendance'), modality: z.enum(['face', 'fingerprint', 'palm', 'card']),
       noticeVersion: z.string().min(1).max(40), signature: z.string().max(4000).optional(),
     }).parse(req.body);
-    assertAccessEmployee(req.user!, b.employeeId);
-    if (!(await employeeInCompany(db, b.employeeId, req.user!.companyId))) throw new NotFoundError('employee not found');
+    await assertSelfOrHr(db, req.user!, b.employeeId);
     const row = await db.query<{ id: string; granted_at: Date }>(
       `INSERT INTO consent_record (employee_id, purpose, modality, notice_version, signature, recorded_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, granted_at`,
       [b.employeeId, b.purpose, b.modality, b.noticeVersion, b.signature ?? null, req.user!.id]);
@@ -69,7 +79,7 @@ export function biometricsRoutes({ db }: AppDeps): Router {
 
   r.get('/consent', async (req, res) => {
     const q = z.object({ employeeId: uuid }).parse(req.query);
-    assertAccessEmployee(req.user!, q.employeeId);
+    await assertSelfOrHr(db, req.user!, q.employeeId);
     const rows = await db.query(
       `SELECT c.id, c.purpose, c.modality, c.notice_version, c.granted_at, c.revoked_at FROM consent_record c JOIN employee e ON e.id = c.employee_id
         WHERE c.employee_id = $1 AND e.company_id = $2 ORDER BY c.granted_at DESC`, [q.employeeId, req.user!.companyId]);
@@ -83,7 +93,7 @@ export function biometricsRoutes({ db }: AppDeps): Router {
       `SELECT c.employee_id, c.modality, c.revoked_at FROM consent_record c JOIN employee e ON e.id = c.employee_id WHERE c.id = $1 AND e.company_id = $2`, [id, req.user!.companyId]);
     const row = c.rows[0];
     if (!row) throw new NotFoundError('consent not found');
-    assertAccessEmployee(req.user!, row.employee_id);
+    await assertSelfOrHr(db, req.user!, row.employee_id);
     const client = await db.connect();
     let shredded = 0;
     try {
@@ -99,7 +109,7 @@ export function biometricsRoutes({ db }: AppDeps): Router {
   /** Metadata only; ciphertext is never returned. */
   r.get('/templates', async (req, res) => {
     const q = z.object({ employeeId: uuid }).parse(req.query);
-    assertAccessEmployee(req.user!, q.employeeId);
+    await assertSelfOrHr(db, req.user!, q.employeeId);
     const rows = await db.query(
       `SELECT t.id, t.modality, t.vendor_format, t.device_user_pin, d.serial_no AS device_sn, t.key_version, t.consent_id, t.created_at, t.shredded_at
          FROM biometric_template t JOIN employee e ON e.id = t.employee_id LEFT JOIN device d ON d.id = t.enrolled_on_device_id
@@ -139,7 +149,7 @@ export function biometricsRoutes({ db }: AppDeps): Router {
   /** Data-subject access request export: the employee's own data, nothing else (plan §12.11 DSAR). */
   r.get('/dsar', async (req, res) => {
     const q = z.object({ employeeId: uuid }).parse(req.query);
-    assertAccessEmployee(req.user!, q.employeeId);
+    await assertSelfOrHr(db, req.user!, q.employeeId);
     const emp = await db.query(
       `SELECT id, emp_code, name_en, name_ne, gender, dob, marital_status, join_date, exit_date, designation, grade, phone, email, ot_eligible, weekly_off_days,
               status, regime, ssf_id, pf_id, cit_id, bank_code, bank_branch, bank_account_last4, is_resident, remote_area_class, disability, (pan_enc IS NOT NULL) AS has_pan
@@ -181,7 +191,6 @@ export function biometricsRoutes({ db }: AppDeps): Router {
               count(*) FILTER (WHERE t.employee_id IS NULL AND t.shredded_at IS NULL)::int AS unmapped
          FROM biometric_template t LEFT JOIN employee e ON e.id = t.employee_id LEFT JOIN device d ON d.id = t.enrolled_on_device_id
         WHERE e.company_id = $1 OR d.company_id = $1 GROUP BY t.modality ORDER BY t.modality`, [req.user!.companyId]);
-    if (!hasRole(req.user!, 'hr')) throw new ForbiddenError();
     res.json({ byModality: rows.rows });
   });
 

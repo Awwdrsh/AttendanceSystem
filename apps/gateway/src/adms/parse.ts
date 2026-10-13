@@ -18,7 +18,17 @@ export interface AttlogParseResult {
   malformed: string[];
 }
 
-const TIME_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+const TIME_RE = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/;
+
+/** 'YYYY-MM-DD HH:MM:SS' that is a real calendar time (rejects 2026-13-40 24:61:00 instead of rolling over). */
+export function isValidDeviceTime(s: string): boolean {
+  const m = TIME_RE.exec(s);
+  if (!m) return false;
+  const [y, mo, d, h, mi, sec] = m.slice(1).map(Number) as [number, number, number, number, number, number];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || sec > 59) return false;
+  const t = new Date(Date.UTC(y, mo - 1, d, h, mi, sec));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d;
+}
 const INT_RE = /^-?\d{1,6}$/;
 
 export function parseAttlog(body: string): AttlogParseResult {
@@ -32,7 +42,7 @@ export function parseAttlog(body: string): AttlogParseResult {
     const time = cols[1]?.trim() ?? '';
     const status = cols[2]?.trim() ?? '';
     const verify = cols[3]?.trim() ?? '';
-    if (!pin || pin.length > 24 || !TIME_RE.test(time) || !INT_RE.test(status) || !INT_RE.test(verify)) {
+    if (!pin || pin.length > 24 || !isValidDeviceTime(time) || !INT_RE.test(status) || !INT_RE.test(verify)) {
       malformed.push(line);
       continue;
     }

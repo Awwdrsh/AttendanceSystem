@@ -7,6 +7,7 @@ import { createGatewayApp } from './app.js';
 import { TemplateCipher } from './crypto.js';
 import { Signer } from './punch/signer.js';
 import { reconcileDay } from './reconcile.js';
+import { COMMAND_ACK_TIMEOUT_MS } from './store/types.js';
 import { PostgresStore } from './store/postgres.js';
 
 const URL = process.env.DATABASE_URL_TEST ?? 'postgres://localhost:5433/hajiri_test_gateway';
@@ -72,5 +73,24 @@ describe('PostgresStore end to end', () => {
     await request(app).post('/iclock/devicecmd?SN=PG-01').set('Content-Type', 'text/plain').send(`ID=${res.commandId}&Return=0&CMD=DATA`);
     expect((await pool.query('SELECT status FROM device_command WHERE id = $1', [res.commandId])).rows[0].status).toBe('acked');
     expect((await reconcileDay(store, 'NOPE', '2026-09-21')).note).toBe('unknown device');
+  });
+
+  it('re-sends an unacknowledged command once after the ack timeout, then fails it (Postgres)', async () => {
+    const id = await store.enqueueCommand(C.device, 'INFO');
+    const t0 = new Date('2026-09-21T04:00:00Z');
+    expect(await store.popQueuedCommands(C.device, t0)).toEqual([{ id, command: 'INFO' }]);
+    expect(await store.popQueuedCommands(C.device, new Date(t0.getTime() + 1000))).toEqual([]);
+    const t1 = new Date(t0.getTime() + COMMAND_ACK_TIMEOUT_MS + 1000);
+    expect(await store.popQueuedCommands(C.device, t1)).toEqual([{ id, command: 'INFO' }]);
+    const t2 = new Date(t1.getTime() + COMMAND_ACK_TIMEOUT_MS + 1000);
+    expect(await store.popQueuedCommands(C.device, t2)).toEqual([]);
+    const row = await pool.query('SELECT status, attempts FROM device_command WHERE id = $1', [id]);
+    expect(row.rows[0]).toEqual({ status: 'failed', attempts: 2 });
+    await store.ackCommand(id, 0);
+    expect((await pool.query('SELECT status FROM device_command WHERE id = $1', [id])).rows[0].status).toBe('failed');
+  });
+
+  it('a newline-smuggled command is rejected before it reaches the database', async () => {
+    await expect(store.enqueueCommand(C.device, 'CHECK\nSHELL rm -rf /')).rejects.toThrow(/single line/);
   });
 });

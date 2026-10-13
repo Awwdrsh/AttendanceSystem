@@ -1,17 +1,17 @@
 import pg from 'pg';
 import type { NormalizedPunch } from '../punch/event.js';
 import {
-  assertAllowedCommand, DEFAULT_MAX_PENDING, NEAR_DUPLICATE_WINDOW_MS,
+  assertAllowedCommand, COMMAND_ACK_TIMEOUT_MS, COMMAND_MAX_ATTEMPTS, DEFAULT_MAX_PENDING, NEAR_DUPLICATE_WINDOW_MS,
   type DeviceRecord, type DeviceTouch, type InsertOutcome, type Store, type StoreOptions, type TemplateRecord,
 } from './types.js';
 
-interface DeviceRow { id: string; serial_no: string; vendor: string; protocol: string; status: DeviceRecord['status']; tz_offset_min: number; attlog_stamp: string; oplog_stamp: string }
+interface DeviceRow { id: string; serial_no: string; vendor: string; protocol: string; status: DeviceRecord['status']; tz_offset_min: number; attlog_stamp: string; oplog_stamp: string; comm_key_hash: string | null }
 
 const toRec = (r: DeviceRow): DeviceRecord => ({
-  id: r.id, serialNo: r.serial_no, vendor: r.vendor, protocol: r.protocol, status: r.status, tzOffsetMin: r.tz_offset_min, attlogStamp: r.attlog_stamp, oplogStamp: r.oplog_stamp,
+  id: r.id, serialNo: r.serial_no, vendor: r.vendor, protocol: r.protocol, status: r.status, tzOffsetMin: r.tz_offset_min, attlogStamp: r.attlog_stamp, oplogStamp: r.oplog_stamp, commKeyHash: r.comm_key_hash,
 });
 
-const COLS = 'id, serial_no, vendor, protocol, status, tz_offset_min, attlog_stamp, oplog_stamp';
+const COLS = 'id, serial_no, vendor, protocol, status, tz_offset_min, attlog_stamp, oplog_stamp, comm_key_hash';
 
 /** Shares the schema owned by apps/api (migrations/*.sql). */
 export class PostgresStore implements Store {
@@ -86,17 +86,23 @@ export class PostgresStore implements Store {
     return Number(r.rows[0]!.id);
   }
 
-  async popQueuedCommands(deviceId: string) {
+  async popQueuedCommands(deviceId: string, now = new Date()) {
+    // Resend policy: sent-but-unacknowledged commands older than the ack timeout go back to the queue once, then fail.
+    await this.pool.query(
+      `UPDATE device_command SET status = CASE WHEN attempts < $3::int THEN 'queued' ELSE 'failed' END
+        WHERE device_id = $1 AND status = 'sent' AND sent_at < $2::timestamptz - make_interval(secs => $4::int)`,
+      [deviceId, now, COMMAND_MAX_ATTEMPTS, COMMAND_ACK_TIMEOUT_MS / 1000]);
     const r = await this.pool.query<{ id: string; command: string }>(
-      `UPDATE device_command SET status = 'sent', sent_at = now()
+      `UPDATE device_command SET status = 'sent', sent_at = $2::timestamptz, attempts = attempts + 1
         WHERE id IN (SELECT id FROM device_command WHERE device_id = $1 AND status = 'queued' ORDER BY id FOR UPDATE SKIP LOCKED)
-        RETURNING id, command`, [deviceId]);
+        RETURNING id, command`, [deviceId, now]);
     return r.rows.map((c) => ({ id: Number(c.id), command: c.command }));
   }
 
   async ackCommand(id: number, returnCode: number) {
     await this.pool.query(
-      `UPDATE device_command SET status = CASE WHEN $2::int >= 0 THEN 'acked' ELSE 'failed' END, return_code = $2::int, acked_at = now() WHERE id = $1`,
+      `UPDATE device_command SET status = CASE WHEN $2::int >= 0 THEN 'acked' ELSE 'failed' END, return_code = $2::int, acked_at = now()
+        WHERE id = $1 AND status = 'sent'`,
       [id, returnCode]);
   }
 
