@@ -1,63 +1,79 @@
-# Hajiri
+# Hajiri · हाजिरी
 
-In-house multi-biometric attendance, HR and payroll platform for Nepal. See **plan.md** for the full master plan,
-`docs/DEVELOPMENT.md` for the developer guide and `docs/adr/` for decisions.
-Current state: **Phase 1** (attendance core, device gateway, employee master).
+Self-hosted multi-biometric attendance, HR and payroll platform for companies in Nepal. **plan.md** is the master plan
+and specification; `docs/DEVELOPMENT.md` is the developer guide; `docs/api.md` lists every endpoint; `docs/gateway.md`
+explains terminal onboarding; `docs/adr/` records decisions.
+
+## What is included
+
+| Area | Capability |
+|---|---|
+| Attendance capture | ZKTeco/eSSL ADMS push and Hikvision ISAPI push through a hardened device gateway; mobile/web punch with geofence; manual and regularised punches; immutable punch log; unmapped-punch queue; offline-device alerts |
+| Attendance processing | Pure, recomputable day engine (Frappe Shift Type semantics): pairing modes, grace, thresholds, night shifts, holidays (branch and gender aware), weekly offs, leave, WFH/on-duty, overtime detection with the Labour Act caps, versioned days, payroll locks, exceptions queue |
+| Shifts and rosters | Shifts, effective-dated assignments, week roster with copy/publish, BS holiday calendar with the 2083 default list, locations |
+| Leave | Statutory and company leave types, double-entry ledger, working-day maths with sandwich rule, LWP split suggestion, approval workflow, monthly accrual (1 per 20 worked days, sick 12/yr, caps), substitute leave expiry, encashment |
+| Approvals | Generic multi-step workflow with manager/HR/finance resolution, inbox, one-tap decisions, delegation, signed actions, SLA reminders and escalation |
+| Payroll | Formula DSL and component graph, BS-month proration, SSF 11/20 and PF/gratuity regimes, CIT, versioned income-tax schedules (FY 2082/83 and 2083/84) with TDS projection and true-up, festival allowance, loans, arrears, supplementary, final settlement, Bonus Act run, maker-checker with two-approver threshold, locked runs, bilingual payslips, bank files (NMB, Nabil, NIC Asia, Everest, Prabhu), SSF sheet, ETDS annex, journal export |
+| Self-service and management | Employee Today card, month view, leave, overtime, payslips, privacy page and data export; manager approvals, team today, calendar, roster; HR setup checklist, employees with CSV import, devices, rules in plain language with live preview, reports, users; executive dashboard |
+| Security and privacy | Sessions with lockout and idle timeout, role-based access scoped to company and direct reports, field encryption for PAN, bank accounts and biometric templates, hash-chained audit log, append-only punches, consent records, crypto-shredding, DSAR export, transparency page |
+| Operations | One-command install, start/stop, boot services, update script, Docker stack, bilingual UI (ne/en) with Bikram Sambat dates everywhere |
 
 ## Install on a new machine (macOS or Ubuntu/Debian)
 
 ```sh
 git clone <your-github-url> hajiri
 cd hajiri
-./scripts/setup.sh
+./scripts/setup.sh --company ACME --company-name "Acme Pvt. Ltd."
 ```
 
-That installs Node.js, pnpm and PostgreSQL 18 if missing, creates the databases, writes the `.env` files with a fresh
-signing key, installs dependencies, applies the schema and loads a demo company. Re-running it is safe.
-Use `--no-demo` for a real deployment and `--with-tests` to verify the install.
+That installs Node.js, pnpm and PostgreSQL 18 if missing, creates the databases and your company, generates all secrets,
+applies the schema, seeds statutory defaults, creates the admin user (credentials printed once into `.admin-credentials`)
+and builds the web app. Re-running is safe. Omit `--company` to get a demo company with sample employees.
 
 ## Run
 
 | What | Command |
 |---|---|
-| Start everything in the foreground (Ctrl+C stops) | `./scripts/start.sh` |
-| Start in the background | `./scripts/start.sh --daemon` then `./scripts/stop.sh` |
+| Start everything (foreground, Ctrl+C stops) | `./scripts/start.sh` |
+| Start in the background | `./scripts/start.sh --daemon`, stop with `./scripts/stop.sh` |
 | Auto-start on boot and restart on crash | `./scripts/install-service.sh` (remove with `--uninstall`) |
 | Update to the latest version from GitHub | `./scripts/update.sh` |
+| Run with Docker instead | see `infra/docker-compose.yml` |
 
-Services: API on http://localhost:3000 (`/health`, `/api/v1/...`) and the device gateway on http://localhost:8080.
-Point ZKTeco/eSSL terminals at `http://<this-machine>:8080/iclock` (ADMS "cloud server" setting). New terminals show up
-as *pending* and must be approved via `POST /api/v1/devices/:id/activate` before their punches are accepted.
-Logs are written to `logs/`.
-
-## Run with Docker instead
-On a machine with Docker, no local Node or PostgreSQL is needed:
-```sh
-cp infra/.env.docker.example infra/.env.docker     # fill POSTGRES_PASSWORD, DATA_ENCRYPTION_KEY, PASSWORD_PEPPER, GATEWAY_SIGNING_KEY, admin password
-docker compose -f infra/docker-compose.yml --env-file infra/.env.docker up -d --build
-```
-The API container applies migrations and seeds on every start and creates the admin user from the env file. The web
-app is at http://localhost:3000, the device gateway at http://localhost:8080. Terminal setup: `docs/gateway.md`.
-
-## Try it with the simulator
-
-```sh
-pnpm --filter @hajiri/gateway simulate -- --sn DEMO-01 --pin 1 --time "2026-09-21 10:17:03" --pin 1 --time "2026-09-21 18:40:00"
-curl -s -X POST localhost:3000/api/v1/attendance/recompute -H 'content-type: application/json' \
-  -d '{"employeeId":"00000000-0000-7000-8000-000000000011","localDate":"2026-09-21"}'
-```
+Open http://localhost:3000 and sign in with the admin credentials, then follow the setup checklist. Point terminals at
+`http://<this-machine>:8080` (ZKTeco ADMS) or `http://<this-machine>:8080/hikvision/event?sn=<serial>` (Hikvision); new
+terminals appear as pending under Devices and must be approved before their punches count.
 
 ## Repository map
+
 | Path | What |
 |---|---|
-| `packages/bs-calendar` | BS calendar table and conversion (plan §6.10) |
-| `packages/attendance-engine` | pure `computeDay` / `computeOt` with worked-example and property tests (plan §10) |
-| `apps/api` | Express API, SQL migrations (plan §9), attendance recompute, employee and device endpoints |
-| `apps/gateway` | ZKTeco ADMS and Hikvision ISAPI gateway: idempotent signed punch ingest, encrypted template storage, raw archive, simulator (plan §7, Appendix B/C; see `docs/gateway.md`) |
-| `scripts/` | setup, start/stop, update and service installers |
-| `infra/` | Docker images, compose stack and entrypoint for container deployments |
+| `packages/bs-calendar` | Bikram Sambat table (2082–2084, 2084 projected) and conversions |
+| `packages/attendance-engine` | pure `computeDay` / `computeOt` with worked-example and property tests |
+| `packages/payroll-engine` | pure payroll computation, formula DSL, tax schedules, 28 golden fixtures |
+| `apps/api` | Express API, SQL migrations, all HR/attendance/payroll modules, background worker |
+| `apps/gateway` | device gateway (ADMS, ISAPI), signed idempotent ingest, encrypted templates, simulator |
+| `apps/web` | React web app for employees, managers, HR and finance |
+| `scripts/` | setup, start/stop, run, update, service installer |
+| `infra/` | Docker images and compose stack |
 
-## Manual developer setup
-If you prefer not to use the scripts: install Node ≥ 22, pnpm 12 and PostgreSQL 18, create databases `hajiri` and
-`hajiri_test`, copy `apps/*/.env.example` to `.env`, then `pnpm install`, `pnpm --filter @hajiri/api db:migrate`,
-`db:seed:bs`, `db:seed:demo`, `pnpm test`.
+## Verification
+
+`pnpm test` runs every suite (engine, calendar, payroll engine, gateway, API integration tests against PostgreSQL).
+
+## Known gaps and assumptions
+
+These are documented in code comments and plan.md section 18, and need a decision or real hardware:
+
+- Statutory interpretation choices to confirm with a chartered accountant: employer SSF contribution counted as taxable
+  income; SST waiver for SSF, PF and CIT contributors; disability deduction; remote-area figures.
+- Golden payroll fixtures are engine snapshots, not accountant-signed; a two-cycle parallel run is still required before
+  payroll go-live (plan section 15).
+- BS 2084 month lengths are a projection and must be verified against the official calendar.
+- Terminal protocol details (ZKTeco status/verify codes, template layouts, Hikvision field names) come from community
+  sources and must be verified on purchased units; the ZKTeco comm key is not validated (VLAN and serial allow-list are
+  the controls).
+- Bank, SSF and ETDS file layouts follow a single vendor source and need confirmation from each bank and portal.
+- Email, SMS and push are delivered through webhook bridges; no built-in SMTP or SMS provider client.
+- Passkeys/FIDO2, OpenBao key management, object storage for photos and documents, and the Expo mobile app are not
+  built; the web app is responsive and covers the employee flows.
