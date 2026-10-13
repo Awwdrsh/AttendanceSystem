@@ -52,7 +52,7 @@ export default function EmployeeDetailPage() {
   const [sensitive, setSensitive] = useState<{ pan: string | null; bankAccount: string | null } | null>(null);
   const [busy, setBusy] = useState(false); const [shred, setShred] = useState(false); const [editing, setEditing] = useState(false);
   const e = emp.data?.employee;
-  const back = { to: '/hr/employees', label: 'Employees' };
+  const back = { to: '/employees', label: 'Employees' };
   if (emp.error) return <><PageHeader title="Employee not found" back={back} /><EmptyState title="We could not load this employee" hint={emp.error} /></>;
   if (!e) return null;
   const subtitle = [e.designation, `Code ${e.emp_code}`, e.join_date ? `Joined ${fmtAd(e.join_date)}` : null].filter(Boolean).join(', ');
@@ -93,6 +93,7 @@ export default function EmployeeDetailPage() {
                 <Field label="Grade">{e.grade ?? '—'}</Field>
                 <Field label="Weekly off">{e.weekly_off_days.length ? e.weekly_off_days.map((d) => DAY_NAMES[d] ?? d).join(', ') : 'None'}</Field>
                 <Field label="Overtime">{e.ot_eligible ? 'Eligible' : 'Not eligible'}</Field>
+                <Field label="Work from home">{e.work_from_home ? 'Allowed' : 'Office only'}</Field>
                 <Field label="Retirement scheme">{REGIME[e.regime] ?? e.regime}</Field>
                 <Field label="Exit date">{fmtAd(e.exit_date)}</Field>
               </SimpleGrid>

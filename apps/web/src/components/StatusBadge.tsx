@@ -15,7 +15,7 @@ const MAP: Record<string, { tone: Tone; label: string }> = {
   Holiday: { tone: 'idle', label: 'Holiday' },
   WeeklyOff: { tone: 'idle', label: 'Weekly off' },
   Incomplete: { tone: 'warn', label: 'Missing punch' },
-  WFH: { tone: 'info', label: 'Remote' },
+  WFH: { tone: 'info', label: 'Work from home' },
   OffShift: { tone: 'idle', label: 'Off shift' },
   Pending: { tone: 'accent', label: 'Pending' },
   pending: { tone: 'accent', label: 'Pending' },
@@ -70,13 +70,14 @@ function Pill({ tone, label }: { tone: Tone; label: string }) {
   );
 }
 
-export function StatusBadge({ status, late }: { status: AttendanceStatus | string | null | undefined; late?: number | null }) {
+export function StatusBadge({ status, late, remote }: { status: AttendanceStatus | string | null | undefined; late?: number | null; remote?: boolean | null | undefined }) {
   if (!status) return <Pill tone="idle" label="—" />;
   const m = MAP[status] ?? { tone: 'idle' as Tone, label: humanize(status) };
   return (
     <Group gap={4} wrap="nowrap" display="inline-flex">
       <Pill tone={m.tone} label={m.label} />
       {late && late > 0 ? <Pill tone="warn" label={`${late} min late`} /> : null}
+      {remote && status !== 'WFH' ? <Pill tone="info" label="Remote" /> : null}
     </Group>
   );
 }

@@ -18,11 +18,11 @@ export interface EngineDay {
   ot: { minutes: number; rawMinutes: number; multiplier: number; dayType: string; status: string }; flags: Flag[]; shiftCode: string | null; localDate: string;
 }
 
-export interface Punch { id: string; punched_at: string; local_date?: string; direction: 'in' | 'out' | 'unknown'; verify_mode: string; source: string; device_sn?: string; superseded?: boolean; supersedes_id?: string | null }
+export interface Punch { id: string; punched_at: string; local_date?: string; direction: 'in' | 'out' | 'unknown'; verify_mode: string; source: string; device_sn?: string; superseded?: boolean; supersedes_id?: string | null; remote?: boolean }
 
 export interface Employee {
   id: string; company_id: string; emp_code: string; name_en: string; name_ne: string | null; gender: 'male' | 'female' | 'other' | null; dob: string | null; marital_status: 'single' | 'couple' | null;
-  join_date: string | null; exit_date: string | null; designation: string | null; grade: string | null; phone: string | null; email: string | null; ot_eligible: boolean;
+  join_date: string | null; exit_date: string | null; designation: string | null; grade: string | null; phone: string | null; email: string | null; ot_eligible: boolean; work_from_home?: boolean;
   weekly_off_days: number[]; status: 'active' | 'exited'; regime: 'ssf' | 'pf' | 'none'; ssf_id: string | null; pf_id: string | null; cit_id: string | null;
   bank_code: string | null; bank_branch: string | null; bank_account_last4: string | null; is_resident: boolean; remote_area_class: string | null; disability: boolean;
   festival_month: number | null; probation_end: string | null; has_pan: boolean; branch_id: string | null; org_unit_id: string | null; manager_id: string | null;
@@ -89,6 +89,7 @@ export interface MyDashboard {
   date: string; today: AttendanceDayRow | null; month: { bs: string | null; from: string; to: string; byStatus: Record<string, number>; lateMin: number; otMin: number };
   leaveBalances: Array<{ code: string; name_en: string; name_ne: string | null; balance: string }>; unreadNotifications: number;
   pendingRequests: Array<{ kind: string; id: string; created_at: string; detail: string }>;
+  workFromHome?: { allowed: boolean; approvedToday: boolean };
 }
 export interface TodayCard { date: string; day: AttendanceDayRow | null; punches: Punch[] }
 export interface PunchResult { duplicate: boolean; punch: Punch; day: EngineDay | AttendanceDayRow | null; flags?: string[]; location?: { inside: boolean | null; name: string | null; distanceM: number | null }; message?: string }
@@ -124,6 +125,6 @@ export interface TemplateMeta { id: string; modality: string; vendor_format: str
 export interface Transparency { stored: { en: string[]; ne: string[] }; notStored: { en: string[]; ne: string[] }; retention: unknown; access: { en: string[]; ne: string[] }; withdraw: { en: string; ne: string }; legalBasis: { en: string; ne: string } }
 
 export interface ExceptionRow { id: string; employee_id: string; emp_code: string; name_en: string; name_ne: string | null; local_date: string; bs_date: string | null; status: AttendanceStatus; worked_min: number; late_min: number; early_min: number; ot_min: number; flags: Flag[] }
-export interface TeamTodayRow { employee_id: string; emp_code: string; name_en: string; name_ne: string | null; status: AttendanceStatus | null; first_in: string | null; last_out: string | null; late_min: number | null; worked_min: number | null; flags: Flag[] | null }
+export interface TeamTodayRow { employee_id: string; emp_code: string; name_en: string; name_ne: string | null; status: AttendanceStatus | null; first_in: string | null; last_out: string | null; late_min: number | null; worked_min: number | null; flags: Flag[] | null; remote?: boolean }
 export interface RosterData { employees: Array<{ id: string; emp_code: string; name_en: string; name_ne: string | null; weekly_off_days: number[]; default_shift_id: string | null }>; roster: Array<{ employee_id: string; local_date: string; shift_id: string | null }> }
 export interface AuditEvent { id: number; occurred_at: string; actor_id: string | null; action: string; table_name: string; row_id: string | null }

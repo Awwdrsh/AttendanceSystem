@@ -35,7 +35,7 @@ export function EmployeeForm({ initial, onSubmit, busy, submitLabel = 'Save chan
     if (!initial) { setD({ regime: 'ssf', otEligible: true, weeklyOffDays: [6], employmentType: 'regular', isResident: true }); return; }
     setD({ empCode: initial.emp_code, nameEn: initial.name_en, gender: initial.gender ?? undefined, dob: initial.dob ?? undefined, maritalStatus: initial.marital_status ?? undefined,
       joinDate: initial.join_date ?? undefined, exitDate: initial.exit_date ?? undefined, designation: initial.designation ?? '', grade: initial.grade ?? '', phone: initial.phone ?? '', email: initial.email ?? '',
-      otEligible: initial.ot_eligible, weeklyOffDays: initial.weekly_off_days, regime: initial.regime, ssfId: initial.ssf_id ?? '', pfId: initial.pf_id ?? '', citId: initial.cit_id ?? '',
+      otEligible: initial.ot_eligible, workFromHome: !!initial.work_from_home, weeklyOffDays: initial.weekly_off_days, regime: initial.regime, ssfId: initial.ssf_id ?? '', pfId: initial.pf_id ?? '', citId: initial.cit_id ?? '',
       bankCode: initial.bank_code ?? '', bankBranch: initial.bank_branch ?? '', isResident: initial.is_resident, remoteAreaClass: initial.remote_area_class ?? undefined, disability: initial.disability,
       festivalMonth: initial.festival_month ?? undefined, probationEnd: initial.probation_end ?? undefined, branchId: initial.branch_id ?? undefined, managerId: initial.manager_id ?? undefined,
       employmentType: initial.employment_type ?? 'regular', shiftId: initial.shift_id ?? undefined });
@@ -73,6 +73,7 @@ export function EmployeeForm({ initial, onSubmit, busy, submitLabel = 'Save chan
       <Section title="Schedule">
         <Select label="Shift" value={(d.shiftId as string) ?? null} onChange={s('shiftId')} data={shifts} clearable />
         <MultiSelect label="Weekly off days" value={((d.weeklyOffDays as number[]) ?? [6]).map(String)} onChange={(v) => s('weeklyOffDays')(v.map(Number))} data={DOW.map(([v, l]) => ({ value: v!, label: l! }))} />
+        <Switch label="Can work from home" description="Lets them clock in from anywhere without giving a reason. Their home clock-ins are tagged Remote." checked={!!d.workFromHome} onChange={(e) => s('workFromHome')(e.currentTarget.checked)} />
         <Switch label="Eligible for overtime" description="Labour Act Sec 31. Excluding someone needs a documented Sec 31(2) basis." checked={!!d.otEligible} onChange={(e) => s('otEligible')(e.currentTarget.checked)} />
       </Section>
       <Divider />

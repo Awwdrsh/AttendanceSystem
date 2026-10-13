@@ -1,16 +1,17 @@
 import { Anchor, Button, Grid, Group, Modal, Paper, Stack, Text, Textarea } from '@mantine/core';
-import { IconAlertTriangle, IconClockEdit, IconLogin2, IconLogout2 } from '@tabler/icons-react';
+import { IconAlertTriangle, IconClockEdit, IconHome, IconLogin2, IconLogout2 } from '@tabler/icons-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { dashboard as dashApi, punch as punchApi, shifts as shiftApi } from '../../api';
+import { dashboard as dashApi, punch as punchApi, regularisation as regApi, shifts as shiftApi } from '../../api';
 import { ApiError } from '../../api/client';
 import { useAuth } from '../../auth/AuthProvider';
 import { StatStrip } from '../../components/Kpi';
 import { PageHeader, SectionTitle } from '../../components/PageHeader';
 import { liveStatus, StatusBadge } from '../../components/StatusBadge';
 import { EmptyState } from '../../components/EmptyState';
+import { DateField } from '../../components/BsDatePicker';
 import { useI18n } from '../../i18n';
-import { fmtDateLong, fmtDateShort, fmtTime, greeting, minutesToHm, relativeTime, todayNpt } from '../../lib/format';
+import { addDays, fmtDateLong, fmtDateShort, fmtTime, greeting, minutesToHm, relativeTime, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import type { Flag, Punch } from '../../api/types';
@@ -69,6 +70,10 @@ export default function HomePage() {
   const [busy, setBusy] = useState(false);
   const [reasonOpen, setReasonOpen] = useState<{ direction: 'in' | 'out'; message: string } | null>(null);
   const [reason, setReason] = useState('');
+  const [wfhOpen, setWfhOpen] = useState(false);
+  const [wfhDate, setWfhDate] = useState<string | null>(todayNpt());
+  const [wfhReason, setWfhReason] = useState('');
+  const [wfhBusy, setWfhBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 30_000); return () => window.clearInterval(id); }, []);
 
@@ -88,6 +93,8 @@ export default function HomePage() {
   const last = punches[punches.length - 1];
   const nextDirection: 'in' | 'out' = !last || last.direction === 'out' ? 'in' : punches.length % 2 === 0 ? 'in' : 'out';
   const day = today.data?.day ?? null;
+  const wfhAllowed = !!me.data?.workFromHome?.allowed;
+  const wfhToday = !!me.data?.workFromHome?.approvedToday;
   // While someone is still at work, "no clock-out yet" is expected, not a problem.
   const working = liveStatus(day?.status, { date: dateIso, today: todayNpt(), lastOut: day?.last_out, firstIn: day?.first_in }) === 'Working';
   const visibleFlags = (day?.flags ?? []).filter((f) => !(working && ['MissingOut', 'UnpairedPunch'].includes(String((f as { kind?: string }).kind))));
@@ -130,7 +137,16 @@ export default function HomePage() {
   return (
     <Stack gap="xl">
       <PageHeader title={`${greeting()}, ${firstName || 'there'}`} subtitle={fmtDateLong(dateIso)}
-        actions={<Button component={Link} to="/me/attendance?correct=1" variant="default" leftSection={<IconClockEdit size={16} stroke={1.6} />}>Request correction</Button>} />
+        actions={<>
+          {!wfhAllowed ? <Button variant="default" leftSection={<IconHome size={16} stroke={1.6} />} onClick={() => { setWfhDate(todayNpt()); setWfhReason(''); setWfhOpen(true); }}>Work from home</Button> : null}
+          <Button component={Link} to="/me/attendance?correct=1" variant="default" leftSection={<IconClockEdit size={16} stroke={1.6} />}>Request correction</Button>
+        </>} />
+      {wfhAllowed || wfhToday ? (
+        <Group gap={8} wrap="nowrap" mt={-12} px={2}>
+          <IconHome size={16} stroke={1.6} color="var(--hj-info)" />
+          <Text size="sm" c="dimmed">{wfhAllowed ? 'You can clock in from home. Your clock-ins away from the office are marked Remote.' : 'Your work-from-home day is approved. Clock in from wherever you are.'}</Text>
+        </Group>
+      ) : null}
 
       <Grid gap="md">
         <Grid.Col span={{ base: 12, md: 7 }}>
@@ -188,7 +204,7 @@ export default function HomePage() {
                     <Group justify="space-between" wrap="nowrap" style={{ flex: 1 }} pb="sm">
                       <div>
                         <Text size="sm" fw={500} {...(p.superseded ? { td: 'line-through', c: 'dimmed' } : {})}>{directionLabel(p.direction)}</Text>
-                        <Text size="xs" c="dimmed">{sourceLabel(p.source)}</Text>
+                        <Text size="xs" c="dimmed">{p.remote ? 'From home' : sourceLabel(p.source)}</Text>
                       </div>
                       <Text size="sm" className="num" fw={500}>{fmtTime(p.punched_at)}</Text>
                     </Group>
@@ -253,6 +269,21 @@ export default function HomePage() {
           <Group justify="flex-end">
             <Button variant="default" onClick={() => setReasonOpen(null)}>Cancel</Button>
             <Button disabled={!reason.trim()} loading={busy} onClick={() => reasonOpen && doPunch(reasonOpen.direction, reason)}>{reasonOpen?.direction === 'out' ? 'Clock out' : 'Clock in'}</Button>
+          </Group>
+        </Stack>
+      </Modal>
+      <Modal opened={wfhOpen} onClose={() => setWfhOpen(false)} title="Work from home" centered>
+        <Stack>
+          <Text size="sm" c="dimmed">Ask your manager to approve a day at home. Once approved you can clock in from home that day, and the day counts as worked.</Text>
+          <DateField label="Day" value={wfhDate} onChange={setWfhDate} minDate={todayNpt()} maxDate={addDays(todayNpt(), 60)} required />
+          <Textarea label="Reason" placeholder="For example: waiting for a delivery, feeling unwell but able to work" value={wfhReason} onChange={(e) => setWfhReason(e.currentTarget.value)} minRows={2} autosize required />
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setWfhOpen(false)}>Cancel</Button>
+            <Button loading={wfhBusy} disabled={!wfhDate || wfhReason.trim().length < 3} onClick={async () => {
+              setWfhBusy(true);
+              try { await regApi.create({ localDate: wfhDate, kind: 'wfh', reason: wfhReason.trim() }); toast.ok('Request sent to your manager.'); setWfhOpen(false); await me.reload(); }
+              catch (e) { toast.err(e); } finally { setWfhBusy(false); }
+            }}>Send request</Button>
           </Group>
         </Stack>
       </Modal>

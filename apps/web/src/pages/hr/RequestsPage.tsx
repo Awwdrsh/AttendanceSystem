@@ -16,8 +16,8 @@ const STATUS_OPTS = [{ value: 'pending', label: 'Pending' }, { value: 'approved'
 const nameCell = (r: { name_en: string; emp_code: string }) => <><Text size="sm" fw={500}>{r.name_en}</Text><Text size="xs" c="dimmed">{r.emp_code}</Text></>;
 
 function kindLabel(r: RegularisationRequest): string {
-  const k = r.kind.replace(/_/g, ' ');
-  const base = k.charAt(0).toUpperCase() + k.slice(1);
+  const KIND: Record<string, string> = { wfh: 'Work from home', missed_punch: 'Missed punch', on_duty: 'On duty elsewhere', half_day: 'Half day', shift_change: 'Shift change' };
+  const base = KIND[r.kind] ?? r.kind.replace(/_/g, ' ');
   if (!r.punch_time) return base;
   const dir = r.punch_direction?.toLowerCase() === 'in' ? 'clock-in' : r.punch_direction ? 'clock-out' : '';
   return `${base}, ${dir ? `${dir} ` : ''}at ${fmtTime(r.punch_time)}`;
@@ -36,7 +36,7 @@ export default function RequestsPage() {
       <PageHeader title="Requests" subtitle="Every leave, attendance correction and overtime request across the company. Decisions are made from the Approvals inbox so each one is signed."
         actions={<>
           <Select value={status} onChange={setStatus} data={STATUS_OPTS} clearable placeholder="Any status" w={160} aria-label="Filter by status" />
-          <Button variant="default" onClick={() => nav('/manager/approvals')}>Open approvals</Button>
+          <Button variant="default" onClick={() => nav('/approvals')}>Open approvals</Button>
         </>} />
       <Tabs defaultValue="leave">
         <Tabs.List>

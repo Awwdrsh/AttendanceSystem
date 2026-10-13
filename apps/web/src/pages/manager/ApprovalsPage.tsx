@@ -36,7 +36,8 @@ function Summary({ item }: { item: InboxItem }) {
       break;
     }
     case 'regularisation_request': {
-      const kind = String(s.kind).replace(/_/g, ' ');
+      const KIND: Record<string, string> = { wfh: 'Working from home', missed_punch: 'Missed punch', on_duty: 'On duty elsewhere', half_day: 'Half day', shift_change: 'Shift change' };
+      const kind = KIND[String(s.kind)] ?? String(s.kind).replace(/_/g, ' ');
       main = <>{kind.charAt(0).toUpperCase() + kind.slice(1)} on {fmtDateShort(String(s.local_date))}{s.punch_time ? `, ${String(s.punch_direction ?? '').toLowerCase() === 'in' ? 'clock-in' : 'clock-out'} at ${fmtTime(String(s.punch_time))}` : ''}</>;
       if (s.reason) extra.push(<Text key="r" size="xs" c="dimmed">“{String(s.reason)}”</Text>);
       break;
@@ -103,7 +104,9 @@ export default function ApprovalsPage() {
                     <Group gap={8} wrap="wrap">
                       <Text size="sm" fw={500}>{name}</Text>
                       {it.employee ? <Text size="xs" c="dimmed">{it.employee.empCode}</Text> : null}
-                      <Badge variant="light" color={TYPE_COLOR[it.objectType] ?? 'gray'} size="sm">{TYPE_LABEL[it.objectType] ?? it.objectType}</Badge>
+                      {(it.summary as Record<string, unknown>)?.kind === 'wfh'
+                        ? <Badge variant="light" color="blue" size="sm">Work from home</Badge>
+                        : <Badge variant="light" color={TYPE_COLOR[it.objectType] ?? 'gray'} size="sm">{TYPE_LABEL[it.objectType] ?? it.objectType}</Badge>}
                     </Group>
                     <Summary item={it} />
                   </Stack>
