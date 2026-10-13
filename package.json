@@ -1,0 +1,18 @@
+{
+  "name": "hajiri",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Hajiri: in-house multi-biometric attendance, HR and payroll platform (Nepal)",
+  "packageManager": "pnpm@12.6.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "db:migrate": "pnpm --filter @hajiri/api db:migrate",
+    "gateway:test": "cd apps/gateway && go test ./...",
+    "gateway:build": "cd apps/gateway && go build -o bin/ ./cmd/..."
+  }
+}

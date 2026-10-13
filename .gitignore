@@ -1,0 +1,23 @@
+# dependencies and build output
+node_modules/
+dist/
+coverage/
+
+# local configuration and secrets (never commit)
+.env
+.env.*
+!.env.example
+
+# runtime
+logs/
+.run/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# local infra data
+infra/pgdata/
