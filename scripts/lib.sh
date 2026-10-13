@@ -67,3 +67,18 @@ wait_for_pg() {
 }
 
 node_major() { node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }
+
+# True when FILE has KEY= with a non-empty value.
+env_has_value() { local v; v="$(env_get "$1" "$2")"; [ -n "$v" ]; }
+
+# Set KEY=VALUE in FILE: replace an existing line (even an empty one) or append. Works on macOS and Linux.
+env_set() {
+  local f="$1" key="$2" val="$3" tmp
+  tmp="$(mktemp)"
+  if [ -f "$f" ] && grep -qE "^${key}=" "$f"; then
+    awk -v k="$key" -v v="$val" 'BEGIN{FS=OFS="="} $1==k && !done {print k "=" v; done=1; next} {print}' "$f" > "$tmp" && cat "$tmp" > "$f"
+  else
+    printf '%s=%s\n' "$key" "$val" >> "$f"
+  fi
+  rm -f "$tmp"
+}

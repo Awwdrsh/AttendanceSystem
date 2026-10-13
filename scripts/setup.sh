@@ -145,9 +145,9 @@ ENV
   chmod 600 apps/api/.env
   ok "wrote apps/api/.env (new encryption key and pepper generated)"
 else
-  grep -q '^DATA_ENCRYPTION_KEY=' apps/api/.env || echo "DATA_ENCRYPTION_KEY=$(gen_b64 32)" >> apps/api/.env
-  grep -q '^PASSWORD_PEPPER=' apps/api/.env || echo "PASSWORD_PEPPER=$(gen_b64 24)" >> apps/api/.env
-  grep -q '^WEB_DIST=' apps/api/.env || echo "WEB_DIST=$ROOT/apps/web/dist" >> apps/api/.env
+  env_has_value apps/api/.env DATA_ENCRYPTION_KEY || env_set apps/api/.env DATA_ENCRYPTION_KEY "$(gen_b64 32)"
+  env_has_value apps/api/.env PASSWORD_PEPPER || env_set apps/api/.env PASSWORD_PEPPER "$(gen_b64 24)"
+  env_has_value apps/api/.env WEB_DIST || env_set apps/api/.env WEB_DIST "$ROOT/apps/web/dist"
   ok "apps/api/.env exists (kept; missing secrets added)"
 fi
 
@@ -168,15 +168,16 @@ ENV
   chmod 600 apps/gateway/.env
   ok "wrote apps/gateway/.env (new signing key generated; encryption key shared with the API)"
 else
-  if ! grep -q '^GATEWAY_SIGNING_KEY=' apps/gateway/.env; then
+  if ! env_has_value apps/gateway/.env GATEWAY_SIGNING_KEY; then
     SIGNING_KEY="$(node -e "console.log(require('node:crypto').generateKeyPairSync('ed25519').privateKey.export({type:'pkcs8',format:'der'}).toString('base64'))")"
-    echo "GATEWAY_SIGNING_KEY=$SIGNING_KEY" >> apps/gateway/.env
+    env_set apps/gateway/.env GATEWAY_SIGNING_KEY "$SIGNING_KEY"
   fi
-  if ! grep -q '^DATA_ENCRYPTION_KEY=' apps/gateway/.env; then
-    echo "DATA_ENCRYPTION_KEY=$(grep '^DATA_ENCRYPTION_KEY=' apps/api/.env | head -1 | cut -d= -f2-)" >> apps/gateway/.env
-  fi
-  grep -q '^GATEWAY_MAX_PENDING_DEVICES=' apps/gateway/.env || echo "GATEWAY_MAX_PENDING_DEVICES=50" >> apps/gateway/.env
-  grep -q '^GATEWAY_MAX_CLOCK_SKEW_MIN=' apps/gateway/.env || echo "GATEWAY_MAX_CLOCK_SKEW_MIN=10" >> apps/gateway/.env
+  # The gateway must share the API's data-encryption key so templates it stores can be read by the API.
+  API_DEK="$(env_get apps/api/.env DATA_ENCRYPTION_KEY)"
+  [ -n "$API_DEK" ] || fail "apps/api/.env has no DATA_ENCRYPTION_KEY"
+  [ "$(env_get apps/gateway/.env DATA_ENCRYPTION_KEY)" = "$API_DEK" ] || env_set apps/gateway/.env DATA_ENCRYPTION_KEY "$API_DEK"
+  env_has_value apps/gateway/.env GATEWAY_MAX_PENDING_DEVICES || env_set apps/gateway/.env GATEWAY_MAX_PENDING_DEVICES 50
+  env_has_value apps/gateway/.env GATEWAY_MAX_CLOCK_SKEW_MIN || env_set apps/gateway/.env GATEWAY_MAX_CLOCK_SKEW_MIN 10
   ok "apps/gateway/.env exists (kept; missing keys added)"
 fi
 
