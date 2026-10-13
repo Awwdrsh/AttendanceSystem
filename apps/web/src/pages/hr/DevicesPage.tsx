@@ -1,19 +1,31 @@
-import { Badge, Button, Group, Modal, Paper, Select, Stack, Tabs, Text, TextInput } from '@mantine/core';
+import { ActionIcon, Button, Drawer, Group, Menu, Modal, Paper, Select, SimpleGrid, Stack, Tabs, Text, TextInput } from '@mantine/core';
+import { IconBan, IconCheck, IconDots, IconInfoCircle, IconLink, IconRefresh } from '@tabler/icons-react';
 import { useState } from 'react';
 import { devices as devApi } from '../../api';
 import type { Device, DeviceMapping, UnmappedPunch } from '../../api/types';
-import { BsDatePicker } from '../../components/BsDatePicker';
+import { DateField } from '../../components/BsDatePicker';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DataTable } from '../../components/DataTable';
 import { EmployeePicker } from '../../components/EmployeePicker';
-import { PageHeader } from '../../components/PageHeader';
-import { StatusBadge } from '../../components/StatusBadge';
-import { useI18n } from '../../i18n';
-import { fmtTime, relativeTime, todayNpt } from '../../lib/format';
+import { Field } from '../../components/Kpi';
+import { PageHeader, SectionTitle } from '../../components/PageHeader';
+import { StatusBadge, toneColor } from '../../components/StatusBadge';
+import { fmtAd, fmtTime, relativeTime, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 
+const ICON = { size: 16, stroke: 1.6 } as const;
+
+/** Active devices are shown as online/offline; pending and disabled keep their lifecycle status. */
+function liveStatus(d: Device): string {
+  if (d.status !== 'active') return d.status;
+  return d.offline ? 'offline' : 'online';
+}
+
+const VENDOR: Record<string, string> = { zkteco: 'ZKTeco', hikvision: 'Hikvision', suprema: 'Suprema' };
+const PROTOCOL: Record<string, string> = { adms: 'ADMS push', isapi: 'ISAPI' };
+
 export default function DevicesPage() {
-  const { t, lang } = useI18n();
   const q = useQuery(() => devApi.list(), []);
   const unmapped = useQuery(() => devApi.unmapped(), []);
   const [sel, setSel] = useState<Device | null>(null);
@@ -22,65 +34,155 @@ export default function DevicesPage() {
   const [map, setMap] = useState<{ deviceId: string; pin: string } | null>(null);
   const [mapEmp, setMapEmp] = useState<string | null>(null); const [mapFrom, setMapFrom] = useState<string | null>(todayNpt()); const [busy, setBusy] = useState(false);
   const [activate, setActivate] = useState<Device | null>(null); const [actName, setActName] = useState('');
+  const [disable, setDisable] = useState<Device | null>(null);
   const physical = (q.data?.devices ?? []).filter((d) => !['mobile', 'kiosk', 'manual'].includes(d.vendor));
+  const unmappedRows = unmapped.data?.punches ?? [];
+
   const doMap = async () => {
     if (!map || !mapEmp || !mapFrom) return; setBusy(true);
-    try { const r = await devApi.map(map.deviceId, { pin: map.pin, employeeId: mapEmp, from: mapFrom }); toast.ok(`PIN ${map.pin} mapped. ${r.reattributed} earlier day(s) re-attributed and recomputed.`); setMap(null); await Promise.all([unmapped.reload(), mappings.reload(), q.reload()]); }
+    try { const r = await devApi.map(map.deviceId, { pin: map.pin, employeeId: mapEmp, from: mapFrom }); toast.ok(`PIN ${map.pin} mapped. ${r.reattributed} earlier day(s) re-attributed and recalculated.`); setMap(null); await Promise.all([unmapped.reload(), mappings.reload(), q.reload()]); }
     catch (e) { toast.err(e); } finally { setBusy(false); }
   };
+  const syncUsers = async (d: Device) => {
+    try { const r = await devApi.syncUsers(d.id); toast.ok(`${r.queued} user records queued for the terminal.`); if (sel?.id === d.id) await commands.reload(); } catch (e) { toast.err(e); }
+  };
+  const openActivate = (d: Device) => { setActivate(d); setActName(d.name ?? ''); };
+
   return (
-    <Stack>
-      <PageHeader title={t('devices')} subtitle={lang === 'ne' ? 'नयाँ यन्त्र "पेन्डिङ" देखिन्छ; सक्रिय गरेपछि मात्र हाजिरी स्वीकार हुन्छ।' : 'New terminals appear as pending; punches are accepted only after activation.'} />
+    <Stack gap="lg">
+      <PageHeader title="Devices" subtitle="Biometric terminals connected to the gateway. New terminals appear as pending and only send punches after you activate them." />
       <Tabs defaultValue="devices">
-        <Tabs.List><Tabs.Tab value="devices">{t('devices')} ({physical.length})</Tabs.Tab><Tabs.Tab value="unmapped">{t('unmappedPunches')} ({unmapped.data?.punches.length ?? 0})</Tabs.Tab></Tabs.List>
+        <Tabs.List>
+          <Tabs.Tab value="devices">Terminals <Text span c="dimmed" size="sm" className="num">{physical.length}</Text></Tabs.Tab>
+          <Tabs.Tab value="unmapped">Unmapped punches <Text span c="dimmed" size="sm" className="num">{unmappedRows.length}</Text></Tabs.Tab>
+        </Tabs.List>
+
         <Tabs.Panel value="devices" pt="md">
-          <DataTable<Device> rows={physical} rowKey={(d) => d.id} loading={q.loading} error={q.error} emptyTitle="No terminals have contacted the gateway yet." emptyHint="Point a ZKTeco/eSSL or Hikvision terminal at the gateway (see docs/gateway.md). It will show up here within a minute." onRowClick={setSel}
+          <DataTable<Device> rows={physical} rowKey={(d) => d.id} loading={q.loading} error={q.error}
+            emptyTitle="No terminals have contacted the gateway yet"
+            emptyHint="Point a ZKTeco/eSSL or Hikvision terminal at the gateway (see docs/gateway.md). It shows up here within a minute."
+            onRowClick={setSel}
             columns={[
-              { key: 'sn', header: 'Serial', render: (d) => <><Text size="sm" fw={500}>{d.name ?? d.serial_no}</Text><Text size="xs" c="dimmed">{d.serial_no} · {d.vendor}/{d.protocol}</Text></> },
-              { key: 'status', header: t('status'), render: (d) => <Group gap={4}><StatusBadge status={d.status} />{d.status === 'active' ? <Badge variant="light" color={d.offline ? 'red' : 'teal'}>{d.offline ? t('offlineDevice') : t('online')}</Badge> : null}</Group> },
-              { key: 'seen', header: t('lastSeen'), render: (d) => relativeTime(d.last_seen_at) },
-              { key: 'users', header: 'Mapped', render: (d) => d.mapped_users, align: 'right' },
-              { key: 'fw', header: 'Firmware', render: (d) => d.fw_version ?? d.push_version ?? '—' },
-              { key: 'a', header: '', render: (d) => d.status === 'pending' ? <Button size="xs" onClick={(e) => { e.stopPropagation(); setActivate(d); setActName(d.name ?? ''); }}>{t('activate')}</Button> : d.status === 'active' ? <Button size="xs" variant="subtle" color="red" onClick={async (e) => { e.stopPropagation(); try { await devApi.disable(d.id); await q.reload(); } catch (err) { toast.err(err); } }}>{t('disable')}</Button> : null },
+              {
+                key: 'name', header: 'Device', render: (d) => (
+                  <Group gap={10} wrap="nowrap">
+                    <span className="hj-dot" style={{ background: toneColor(liveStatus(d)) }} aria-hidden />
+                    <div style={{ minWidth: 0 }}>
+                      <Text size="sm" fw={500} truncate>{d.name ?? 'Unnamed terminal'}</Text>
+                      <Text size="xs" c="dimmed" ff="monospace">{d.serial_no}</Text>
+                    </div>
+                  </Group>
+                ),
+              },
+              { key: 'vendor', header: 'Vendor', render: (d) => <><Text size="sm">{VENDOR[d.vendor] ?? d.vendor}</Text><Text size="xs" c="dimmed">{PROTOCOL[d.protocol] ?? d.protocol}</Text></> },
+              { key: 'status', header: 'Status', render: (d) => <StatusBadge status={liveStatus(d)} /> },
+              { key: 'seen', header: 'Last seen', render: (d) => <Text size="sm" c={d.last_seen_at ? 'inherit' : 'dimmed'}>{d.last_seen_at ? relativeTime(d.last_seen_at) : 'Never'}</Text> },
+              { key: 'users', header: 'Mapped PINs', render: (d) => <span className="num">{d.mapped_users}</span>, align: 'right' },
+              { key: 'fw', header: 'Firmware', render: (d) => <Text size="sm" c="dimmed">{d.fw_version ?? d.push_version ?? '—'}</Text> },
+              {
+                key: 'a', header: '', align: 'right', width: 90, render: (d) => (
+                  <Group gap={4} justify="flex-end" wrap="nowrap" onClick={(e) => e.stopPropagation()}>
+                    {d.status === 'pending' ? <Button size="xs" leftSection={<IconCheck {...ICON} />} onClick={() => openActivate(d)}>Activate</Button> : null}
+                    <Menu position="bottom-end" withinPortal>
+                      <Menu.Target><ActionIcon variant="subtle" color="gray" aria-label="Device actions"><IconDots {...ICON} /></ActionIcon></Menu.Target>
+                      <Menu.Dropdown>
+                        <Menu.Item leftSection={<IconInfoCircle {...ICON} />} onClick={() => setSel(d)}>View details</Menu.Item>
+                        {d.status === 'pending' ? <Menu.Item leftSection={<IconCheck {...ICON} />} onClick={() => openActivate(d)}>Activate</Menu.Item> : null}
+                        <Menu.Item leftSection={<IconLink {...ICON} />} onClick={() => setMap({ deviceId: d.id, pin: '' })}>Map a PIN</Menu.Item>
+                        <Menu.Item leftSection={<IconRefresh {...ICON} />} onClick={() => void syncUsers(d)}>Sync users to device</Menu.Item>
+                        {d.status === 'active' ? <><Menu.Divider /><Menu.Item color="red" leftSection={<IconBan {...ICON} />} onClick={() => setDisable(d)}>Disable device</Menu.Item></> : null}
+                      </Menu.Dropdown>
+                    </Menu>
+                  </Group>
+                ),
+              },
             ]} />
         </Tabs.Panel>
+
         <Tabs.Panel value="unmapped" pt="md">
-          <DataTable<UnmappedPunch> rows={unmapped.data?.punches ?? []} rowKey={(p) => p.id} loading={unmapped.loading} emptyTitle="Every punch is attributed." emptyHint="Punches from PINs that are not mapped to an employee will appear here."
+          <Text size="sm" c="dimmed" mb="sm">Punches from device PINs that are not linked to an employee. Map the PIN and earlier punches are re-attributed automatically.</Text>
+          <DataTable<UnmappedPunch> rows={unmappedRows} rowKey={(p) => p.id} loading={unmapped.loading} error={unmapped.error}
+            emptyTitle="Every punch is attributed"
+            emptyHint="Punches from PINs that are not mapped to an employee will appear here."
             columns={[
-              { key: 'sn', header: 'Device', render: (p) => p.device_sn }, { key: 'pin', header: 'PIN', render: (p) => <strong>{p.device_user_pin}</strong> },
-              { key: 'when', header: 'When', render: (p) => `${p.local_date} ${fmtTime(p.punched_at)}` }, { key: 'n', header: 'Punches for PIN', render: (p) => p.total_for_pin, align: 'right' },
-              { key: 'a', header: '', render: (p) => <Button size="xs" onClick={() => { setMap({ deviceId: p.device_id, pin: p.device_user_pin }); setMapFrom(p.local_date); }}>{t('mapPin')}</Button> },
+              { key: 'pin', header: 'PIN', render: (p) => <Text size="sm" fw={500} ff="monospace">{p.device_user_pin}</Text> },
+              { key: 'sn', header: 'Device', render: (p) => <Text size="sm" ff="monospace" c="dimmed">{p.device_sn}</Text> },
+              { key: 'when', header: 'Last punch', render: (p) => <><Text size="sm">{fmtAd(p.local_date)}</Text><Text size="xs" c="dimmed" className="num">{fmtTime(p.punched_at)}</Text></> },
+              { key: 'n', header: 'Punches for PIN', render: (p) => <span className="num">{p.total_for_pin}</span>, align: 'right' },
+              { key: 'a', header: '', align: 'right', render: (p) => <Button size="xs" variant="default" leftSection={<IconLink {...ICON} />} onClick={() => { setMap({ deviceId: p.device_id, pin: p.device_user_pin }); setMapFrom(p.local_date); }}>Map PIN</Button> },
             ]} />
         </Tabs.Panel>
       </Tabs>
 
-      <Modal opened={!!sel} onClose={() => setSel(null)} title={sel?.name ?? sel?.serial_no} size="lg" centered>
-        {sel ? <Stack>
-          <Group gap="xs"><StatusBadge status={sel.status} /><Text size="sm">{sel.serial_no} · {sel.vendor} · last seen {relativeTime(sel.last_seen_at)}</Text></Group>
-          <Group gap="xs"><Button size="xs" variant="light" onClick={() => { setMap({ deviceId: sel.id, pin: '' }); }}>{t('mapPin')}</Button><Button size="xs" variant="light" onClick={async () => { try { const r = await devApi.syncUsers(sel.id); toast.ok(`${r.queued} user records queued for the terminal.`); await commands.reload(); } catch (e) { toast.err(e); } }}>Sync users to device</Button>
-            <Select size="xs" placeholder="Send command" data={['CHECK', 'INFO', 'LOG', 'REBOOT', 'DATA QUERY USERINFO']} onChange={async (v) => { if (!v) return; try { await devApi.command(sel.id, v); toast.ok(`${v} queued.`); await commands.reload(); } catch (e) { toast.err(e); } }} /></Group>
-          <Text fw={600} size="sm">Mappings</Text>
-          <DataTable<DeviceMapping> rows={mappings.data?.mappings ?? []} rowKey={(m) => `${m.device_user_pin}-${m.valid}`} loading={mappings.loading} emptyTitle="No PIN mappings yet." maxHeight={240}
-            columns={[{ key: 'pin', header: 'PIN', render: (m) => m.device_user_pin }, { key: 'emp', header: t('employees'), render: (m) => `${m.emp_code} · ${m.name_en}` }, { key: 'valid', header: 'Valid', render: (m) => m.valid }]} />
-          <Text fw={600} size="sm">Recent commands</Text>
-          <Paper withBorder p="xs" radius="md" mah={160} style={{ overflow: 'auto' }}>{(commands.data?.commands ?? []).slice(0, 10).map((c) => <Text key={c.id} size="xs" ff="monospace">#{c.id} {c.command.slice(0, 50)} · {c.status}{c.return_code !== null ? ` (${c.return_code})` : ''}</Text>)}{!commands.data?.commands.length ? <Text size="xs" c="dimmed">None.</Text> : null}</Paper>
-        </Stack> : null}
-      </Modal>
-      <Modal opened={!!map} onClose={() => setMap(null)} title={t('mapPin')} centered>
+      <Drawer opened={!!sel} onClose={() => setSel(null)} position="right" size="lg" title={<Text fw={600}>{sel?.name ?? sel?.serial_no ?? ''}</Text>}>
+        {sel ? (
+          <Stack gap="lg">
+            <SimpleGrid cols={2} spacing="md">
+              <Field label="Status"><StatusBadge status={liveStatus(sel)} /></Field>
+              <Field label="Last seen">{sel.last_seen_at ? relativeTime(sel.last_seen_at) : 'Never'}</Field>
+              <Field label="Serial number">{sel.serial_no}</Field>
+              <Field label="Vendor">{VENDOR[sel.vendor] ?? sel.vendor} ({PROTOCOL[sel.protocol] ?? sel.protocol})</Field>
+              <Field label="Firmware">{sel.fw_version ?? sel.push_version ?? '—'}</Field>
+              <Field label="Mapped PINs">{sel.mapped_users}</Field>
+            </SimpleGrid>
+            <Group gap="xs" wrap="wrap">
+              <Button size="xs" leftSection={<IconLink {...ICON} />} onClick={() => setMap({ deviceId: sel.id, pin: '' })}>Map a PIN</Button>
+              <Button size="xs" variant="default" leftSection={<IconRefresh {...ICON} />} onClick={() => void syncUsers(sel)}>Sync users</Button>
+              <Select size="xs" w={190} placeholder="Send a command" value={null} data={['CHECK', 'INFO', 'LOG', 'REBOOT', 'DATA QUERY USERINFO']}
+                onChange={async (v) => { if (!v) return; try { await devApi.command(sel.id, v); toast.ok(`${v} queued.`); await commands.reload(); } catch (e) { toast.err(e); } }} />
+            </Group>
+            <div>
+              <SectionTitle hint="Which device PIN belongs to which employee.">PIN mappings</SectionTitle>
+              <DataTable<DeviceMapping> rows={mappings.data?.mappings ?? []} rowKey={(m) => `${m.device_user_pin}-${m.valid}`} loading={mappings.loading} error={mappings.error}
+                emptyTitle="No PIN mappings yet" emptyHint="Map a PIN to link punches from this terminal to an employee." maxHeight={260}
+                columns={[
+                  { key: 'pin', header: 'PIN', render: (m) => <Text size="sm" ff="monospace">{m.device_user_pin}</Text> },
+                  { key: 'emp', header: 'Employee', render: (m) => <><Text size="sm" fw={500}>{m.name_en}</Text><Text size="xs" c="dimmed">{m.emp_code}</Text></> },
+                  { key: 'valid', header: 'Valid', render: (m) => <Text size="sm" c="dimmed">{m.valid}</Text> },
+                ]} />
+            </div>
+            <div>
+              <SectionTitle>Recent commands</SectionTitle>
+              <Paper withBorder p="sm" mah={200} style={{ overflow: 'auto' }}>
+                {(commands.data?.commands ?? []).slice(0, 10).map((c) => (
+                  <Group key={c.id} justify="space-between" wrap="nowrap" gap="sm" py={3}>
+                    <Text size="xs" ff="monospace" truncate>#{c.id} {c.command.slice(0, 50)}</Text>
+                    <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>{c.status}{c.return_code !== null ? ` (${c.return_code})` : ''}</Text>
+                  </Group>
+                ))}
+                {!commands.data?.commands.length ? <Text size="sm" c="dimmed">No commands sent yet.</Text> : null}
+              </Paper>
+            </div>
+          </Stack>
+        ) : null}
+      </Drawer>
+
+      <Modal opened={!!map} onClose={() => setMap(null)} title="Map a device PIN" centered>
         <Stack>
-          <TextInput label="Device PIN" value={map?.pin ?? ''} onChange={(e) => map && setMap({ ...map, pin: e.currentTarget.value })} required />
+          <TextInput label="Device PIN" description="The user ID enrolled on the terminal." value={map?.pin ?? ''} onChange={(e) => map && setMap({ ...map, pin: e.currentTarget.value })} required />
           <EmployeePicker value={mapEmp} onChange={setMapEmp} required />
-          <BsDatePicker label="Valid from" value={mapFrom} onChange={setMapFrom} required description="Earlier unmapped punches from this date on are re-attributed to the employee." />
-          <Group justify="flex-end"><Button loading={busy} disabled={!map?.pin || !mapEmp || !mapFrom} onClick={doMap}>{t('save')}</Button></Group>
+          <DateField label="Valid from" value={mapFrom} onChange={setMapFrom} required description="Unmapped punches from this date on are re-attributed to the employee." />
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setMap(null)}>Cancel</Button>
+            <Button loading={busy} disabled={!map?.pin || !mapEmp || !mapFrom} onClick={doMap}>Map PIN</Button>
+          </Group>
         </Stack>
       </Modal>
-      <Modal opened={!!activate} onClose={() => setActivate(null)} title={`${t('activate')} ${activate?.serial_no ?? ''}`} centered>
+
+      <Modal opened={!!activate} onClose={() => setActivate(null)} title={`Activate ${activate?.serial_no ?? ''}`} centered>
         <Stack>
-          <Text size="sm">Only activate terminals you installed. Activation lets this device submit punches for your company.</Text>
-          <TextInput label="Name" value={actName} onChange={(e) => setActName(e.currentTarget.value)} placeholder="Front door" />
-          <Group justify="flex-end"><Button onClick={async () => { if (!activate) return; try { await devApi.activate(activate.id, actName ? { name: actName } : {}); toast.ok('Device activated.'); setActivate(null); await q.reload(); } catch (e) { toast.err(e); } }}>{t('activate')}</Button></Group>
+          <Text size="sm" c="dimmed">Only activate terminals you installed. Once active, this device can submit punches for your company.</Text>
+          <TextInput label="Name" description="Where the terminal is, so people recognise it." value={actName} onChange={(e) => setActName(e.currentTarget.value)} placeholder="Front door" />
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setActivate(null)}>Cancel</Button>
+            <Button leftSection={<IconCheck {...ICON} />} onClick={async () => { if (!activate) return; try { await devApi.activate(activate.id, actName ? { name: actName } : {}); toast.ok('Device activated.'); setActivate(null); await q.reload(); } catch (e) { toast.err(e); } }}>Activate device</Button>
+          </Group>
         </Stack>
       </Modal>
+
+      <ConfirmDialog opened={!!disable} onClose={() => setDisable(null)} title={`Disable ${disable?.name ?? disable?.serial_no ?? 'device'}?`} confirmLabel="Disable device"
+        message="Punches from this terminal will be rejected until it is activated again. Existing attendance is kept."
+        onConfirm={async () => { if (!disable) return; try { await devApi.disable(disable.id); toast.ok('Device disabled.'); await q.reload(); } catch (e) { toast.err(e); } }} />
     </Stack>
   );
 }

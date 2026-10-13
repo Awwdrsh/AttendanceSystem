@@ -13,10 +13,10 @@ explains terminal onboarding; `docs/adr/` records decisions.
 | Shifts and rosters | Shifts, effective-dated assignments, week roster with copy/publish, BS holiday calendar with the 2083 default list, locations |
 | Leave | Statutory and company leave types, double-entry ledger, working-day maths with sandwich rule, LWP split suggestion, approval workflow, monthly accrual (1 per 20 worked days, sick 12/yr, caps), substitute leave expiry, encashment |
 | Approvals | Generic multi-step workflow with manager/HR/finance resolution, inbox, one-tap decisions, delegation, signed actions, SLA reminders and escalation |
-| Payroll | Formula DSL and component graph, BS-month proration, SSF 11/20 and PF/gratuity regimes, CIT, versioned income-tax schedules (FY 2082/83 and 2083/84) with TDS projection and true-up, festival allowance, loans, arrears, supplementary, final settlement, Bonus Act run, maker-checker with two-approver threshold, locked runs, bilingual payslips, bank files (NMB, Nabil, NIC Asia, Everest, Prabhu), SSF sheet, ETDS annex, journal export |
+| Payroll | Formula DSL and component graph, BS-month proration, SSF 11/20 and PF/gratuity regimes, CIT, versioned income-tax schedules (FY 2082/83 and 2083/84) with TDS projection and true-up, festival allowance, loans, arrears, supplementary, final settlement, Bonus Act run, maker-checker with two-approver threshold, locked runs, printable payslips, bank files (NMB, Nabil, NIC Asia, Everest, Prabhu), SSF sheet, ETDS annex, journal export |
 | Self-service and management | Employee Today card, month view, leave, overtime, payslips, privacy page and data export; manager approvals, team today, calendar, roster; HR setup checklist, employees with CSV import, devices, rules in plain language with live preview, reports, users; executive dashboard |
 | Security and privacy | Sessions with lockout and idle timeout, role-based access scoped to company and direct reports, field encryption for PAN, bank accounts and biometric templates, hash-chained audit log, append-only punches, consent records, crypto-shredding, DSAR export, transparency page |
-| Operations | One-command install, start/stop, boot services, update script, Docker stack, bilingual UI (ne/en) with Bikram Sambat dates everywhere |
+| Operations | One-command install, start/stop, boot services, update script, Docker stack, English web app with a command palette (Cmd+K), light and dark mode; payroll periods follow Bikram Sambat months |
 
 ## Install on a new machine (macOS or Ubuntu/Debian)
 

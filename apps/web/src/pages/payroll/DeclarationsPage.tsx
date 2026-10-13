@@ -1,45 +1,69 @@
-import { Alert, Button, Group, NumberInput, Paper, SimpleGrid, Stack, Text } from '@mantine/core';
+import { Button, Group, NumberInput, Paper, Select, SimpleGrid, Stack, Text } from '@mantine/core';
+import { IconCheck, IconSend, IconUserSearch, IconX } from '@tabler/icons-react';
 import { useEffect, useState } from 'react';
 import { payroll as payApi } from '../../api';
 import { useAuth } from '../../auth/AuthProvider';
 import { EmployeePicker } from '../../components/EmployeePicker';
-import { PageHeader } from '../../components/PageHeader';
+import { EmptyState } from '../../components/EmptyState';
+import { PageHeader, SectionTitle } from '../../components/PageHeader';
 import { StatusBadge } from '../../components/StatusBadge';
-import { useI18n } from '../../i18n';
 import { safeAdToBs, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 
-/** Self-service tax declaration (plan §5.9) with HR/finance verification. */
+/** Self-service tax declaration with HR/finance verification. */
 export default function DeclarationsPage() {
-  const { t } = useI18n();
   const { user, hasRole } = useAuth();
   const bs = safeAdToBs(todayNpt());
-  const [fy, setFy] = useState<number | string>(bs ? (bs.month >= 4 ? bs.year : bs.year - 1) : 2083);
+  const currentFy = bs ? (bs.month >= 4 ? bs.year : bs.year - 1) : 2083;
+  const [fy, setFy] = useState<number | string>(currentFy);
   const [employeeId, setEmployeeId] = useState<string | null>(user?.employeeId ?? null);
   const q = useQuery(() => payApi.declaration(Number(fy), employeeId ?? undefined), [fy, employeeId], { enabled: !!employeeId });
   const [f, setF] = useState({ lifePremium: 0, healthPremium: 0, citMonthly: 0, medicalCost: 0, otherRetirementAnnual: 0 });
   useEffect(() => { const d = q.data?.declaration; if (d) setF({ lifePremium: Number(d.life_premium), healthPremium: Number(d.health_premium), citMonthly: Number(d.cit_monthly), medicalCost: Number(d.medical_cost), otherRetirementAnnual: Number(d.other_retirement_annual) }); else setF({ lifePremium: 0, healthPremium: 0, citMonthly: 0, medicalCost: 0, otherRetirementAnnual: 0 }); }, [q.data]);
   const [busy, setBusy] = useState(false);
-  const n = (k: keyof typeof f, label: string, hint: string) => <NumberInput label={label} description={hint} value={f[k]} onChange={(v) => setF({ ...f, [k]: Number(v) || 0 })} min={0} thousandSeparator="," />;
+  const isVerifier = hasRole('hr', 'finance');
+  const status = q.data?.declaration?.status;
+  const canVerify = isVerifier && !!employeeId && status === 'submitted';
+  const fyOptions = [currentFy - 2, currentFy - 1, currentFy, currentFy + 1].map((y) => ({ value: String(y), label: `FY ${y}/${String(y + 1).slice(-2)}` }));
+  const n = (k: keyof typeof f, label: string, hint: string) => <NumberInput label={label} description={hint} value={f[k]} onChange={(v) => setF({ ...f, [k]: Number(v) || 0 })} min={0} thousandSeparator="," leftSection={<Text size="xs" c="dimmed">NPR</Text>} leftSectionWidth={42} />;
+  const submit = async () => {
+    setBusy(true);
+    try { await payApi.saveDeclaration({ ...(employeeId !== user?.employeeId ? { employeeId } : {}), fiscalYearStart: Number(fy), lifePremium: f.lifePremium.toFixed(2), healthPremium: f.healthPremium.toFixed(2), citMonthly: f.citMonthly.toFixed(2), medicalCost: f.medicalCost.toFixed(2), otherRetirementAnnual: f.otherRetirementAnnual.toFixed(2), submit: true }); toast.ok('Declaration submitted for verification.'); await q.reload(); }
+    catch (e) { toast.err(e); } finally { setBusy(false); }
+  };
+  const verify = async (result: 'verified' | 'rejected') => {
+    if (!employeeId) return;
+    try { await payApi.verifyDeclaration(employeeId, Number(fy), result); if (result === 'verified') toast.ok('Declaration verified.'); await q.reload(); } catch (e) { toast.err(e); }
+  };
   return (
-    <Stack>
-      <PageHeader title={t('declarations')} subtitle="Declared premiums and contributions reduce taxable income within the statutory caps. Keep the receipts; HR verifies them." actions={<Group gap="xs">{hasRole('hr', 'finance') ? <EmployeePicker value={employeeId} onChange={setEmployeeId} label="" /> : null}<NumberInput value={fy} onChange={setFy} w={110} /></Group>} />
-      {q.data?.declaration ? <Group><Text size="sm">Status:</Text><StatusBadge status={q.data.declaration.status} /></Group> : null}
-      <Paper withBorder p="md" radius="md">
-        <SimpleGrid cols={{ base: 1, sm: 2 }}>
-          {n('lifePremium', 'Life insurance premium (annual)', 'Deductible up to NPR 40,000')}
-          {n('healthPremium', 'Health insurance premium (annual)', 'Deductible up to NPR 20,000')}
-          {n('citMonthly', 'CIT contribution (monthly)', 'Counts toward the retirement cap: min(1/3 of income, NPR 500,000)')}
-          {n('otherRetirementAnnual', 'Other approved retirement fund (annual)', 'Same cap as CIT')}
-          {n('medicalCost', 'Approved medical cost (annual)', '15% credit, max NPR 1,500')}
-        </SimpleGrid>
-        <Group justify="flex-end" mt="md">
-          <Button loading={busy} disabled={!employeeId} onClick={async () => { setBusy(true); try { await payApi.saveDeclaration({ ...(employeeId !== user?.employeeId ? { employeeId } : {}), fiscalYearStart: Number(fy), lifePremium: f.lifePremium.toFixed(2), healthPremium: f.healthPremium.toFixed(2), citMonthly: f.citMonthly.toFixed(2), medicalCost: f.medicalCost.toFixed(2), otherRetirementAnnual: f.otherRetirementAnnual.toFixed(2), submit: true }); toast.ok('Declaration submitted.'); await q.reload(); } catch (e) { toast.err(e); } finally { setBusy(false); } }}>{t('submit')}</Button>
-          {hasRole('hr', 'finance') && employeeId && q.data?.declaration?.status === 'submitted' ? <><Button variant="light" color="teal" onClick={async () => { try { await payApi.verifyDeclaration(employeeId, Number(fy), 'verified'); toast.ok('Verified.'); await q.reload(); } catch (e) { toast.err(e); } }}>Verify</Button><Button variant="light" color="red" onClick={async () => { try { await payApi.verifyDeclaration(employeeId, Number(fy), 'rejected'); await q.reload(); } catch (e) { toast.err(e); } }}>{t('reject')}</Button></> : null}
-        </Group>
-      </Paper>
-      {!employeeId ? <Alert variant="light" color="gray">Pick an employee to view or verify a declaration.</Alert> : null}
+    <Stack gap="lg">
+      <PageHeader title="Tax declarations" subtitle="Insurance premiums and retirement contributions you declare reduce taxable income, within the legal limits. Keep the receipts; HR verifies them."
+        actions={<>
+          {isVerifier ? <EmployeePicker value={employeeId} onChange={setEmployeeId} label="" /> : null}
+          <Select aria-label="Fiscal year" value={String(fy)} onChange={(v) => v && setFy(Number(v))} allowDeselect={false} data={fyOptions} w={140} />
+        </>} />
+      {!employeeId ? (
+        <EmptyState icon={<IconUserSearch size={20} stroke={1.6} />} title="Pick an employee" hint="Choose someone above to view, edit or verify their declaration." />
+      ) : (
+        <Paper withBorder p="lg">
+          <SectionTitle hint="Annual amounts unless marked monthly." actions={status ? <StatusBadge status={status} /> : <Text size="sm" c="dimmed">Not submitted</Text>}>Deductions</SectionTitle>
+          <SimpleGrid cols={{ base: 1, sm: 2 }} mt="sm">
+            {n('lifePremium', 'Life insurance premium', 'Deductible up to NPR 40,000 a year')}
+            {n('healthPremium', 'Health insurance premium', 'Deductible up to NPR 20,000 a year')}
+            {n('citMonthly', 'CIT contribution (monthly)', 'Counts toward the retirement limit: the lower of one third of income or NPR 500,000')}
+            {n('otherRetirementAnnual', 'Other approved retirement fund', 'Shares the CIT retirement limit')}
+            {n('medicalCost', 'Approved medical costs', '15% tax credit, up to NPR 1,500')}
+          </SimpleGrid>
+          <Group justify="flex-end" mt="lg" gap="xs">
+            {canVerify ? <>
+              <Button variant="subtle" color="red" leftSection={<IconX size={16} stroke={1.6} />} onClick={() => verify('rejected')}>Reject</Button>
+              <Button leftSection={<IconCheck size={16} stroke={1.6} />} onClick={() => verify('verified')}>Verify declaration</Button>
+            </> : null}
+            <Button variant={canVerify ? 'default' : 'filled'} leftSection={<IconSend size={16} stroke={1.6} />} loading={busy} onClick={submit}>Submit declaration</Button>
+          </Group>
+        </Paper>
+      )}
     </Stack>
   );
 }

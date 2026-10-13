@@ -1,32 +1,35 @@
-import { Alert, Badge, Button, Card, Group, Modal, Paper, SimpleGrid, Stack, Text, Textarea, Title } from '@mantine/core';
-import { useState } from 'react';
+import { Anchor, Button, Grid, Group, Modal, Paper, Stack, Text, Textarea } from '@mantine/core';
+import { IconAlertTriangle, IconClockEdit, IconLogin2, IconLogout2 } from '@tabler/icons-react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { dashboard as dashApi, punch as punchApi } from '../../api';
+import { dashboard as dashApi, punch as punchApi, shifts as shiftApi } from '../../api';
 import { ApiError } from '../../api/client';
 import { useAuth } from '../../auth/AuthProvider';
-import { StatusBadge } from '../../components/StatusBadge';
+import { StatStrip } from '../../components/Kpi';
+import { PageHeader, SectionTitle } from '../../components/PageHeader';
+import { liveStatus, StatusBadge } from '../../components/StatusBadge';
 import { EmptyState } from '../../components/EmptyState';
 import { useI18n } from '../../i18n';
-import { dualDate, fmtNum, fmtTime, minutesToHm } from '../../lib/format';
+import { fmtDateLong, fmtDateShort, fmtTime, greeting, minutesToHm, relativeTime, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
-import type { Flag } from '../../api/types';
+import type { Flag, Punch } from '../../api/types';
 
-function describeFlag(f: Flag, lang: 'en' | 'ne'): string {
+export function describeFlag(f: Flag): string {
   switch (f.kind) {
-    case 'Late': return lang === 'ne' ? `ढिलो ${f.minutes} मिनेट` : `Late by ${f.minutes} min`;
-    case 'EarlyOut': return lang === 'ne' ? `${f.minutes} मिनेट चाँडो बाहिर` : `Left ${f.minutes} min early`;
-    case 'MissingOut': return lang === 'ne' ? 'बाहिर जाने हाजिरी छैन' : 'No OUT punch yet';
-    case 'UnpairedPunch': return lang === 'ne' ? 'जोडा नमिलेको हाजिरी' : 'A punch could not be paired';
-    case 'OTPreapprovalMissing': return lang === 'ne' ? `${f.rawMinutes} मिनेट ओभरटाइम, पूर्व-स्वीकृति छैन` : `${f.rawMinutes} min overtime without pre-approval`;
-    case 'OTCapExceeded': return lang === 'ne' ? `ओभरटाइम सीमा नाघ्यो (${f.minutes} मिनेट)` : `Overtime cap exceeded by ${f.minutes} min`;
-    case 'HolidayWork': return lang === 'ne' ? `बिदाको दिन काम (${f.workedMin} मिनेट)` : `Worked on a holiday (${f.workedMin} min)`;
-    case 'UnpaidLeave': return lang === 'ne' ? 'बेतलबी बिदा' : 'Unpaid leave';
-    case 'HalfDayLeave': return lang === 'ne' ? 'आधा दिन बिदा' : 'Half-day leave';
-    case 'AutoClockOut': return lang === 'ne' ? 'स्वतः बाहिर गरिएको; सच्याउन अनुरोध गर्नुहोस्' : 'Clocked out automatically; request a correction if wrong';
-    case 'ClockSkew': return lang === 'ne' ? 'फोनको घडी फरक थियो; सर्भरको समय प्रयोग' : 'Phone clock was off; server time used';
-    case 'OutsideLocation': return lang === 'ne' ? 'कार्यस्थल बाहिरबाट हाजिरी (फ्ल्याग)' : 'Punched outside the work location (flagged)';
-    case 'NoLocation': return lang === 'ne' ? 'स्थान उपलब्ध थिएन' : 'Location was not available';
+    case 'Late': return `Late by ${f.minutes} min`;
+    case 'EarlyOut': return `Left ${f.minutes} min early`;
+    case 'MissingOut': return 'No clock-out yet';
+    case 'UnpairedPunch': return 'A clock-in or clock-out could not be paired';
+    case 'OTPreapprovalMissing': return `${f.rawMinutes} min overtime without pre-approval`;
+    case 'OTCapExceeded': return `Overtime cap exceeded by ${f.minutes} min`;
+    case 'HolidayWork': return `Worked on a holiday (${f.workedMin} min)`;
+    case 'UnpaidLeave': return 'Unpaid leave';
+    case 'HalfDayLeave': return 'Half-day leave';
+    case 'AutoClockOut': return 'Clocked out automatically; request a correction if this is wrong';
+    case 'ClockSkew': return 'Your device clock was off, so server time was used';
+    case 'OutsideLocation': return 'Clocked outside your work location (flagged for review)';
+    case 'NoLocation': return 'Location was not available';
     default: return f.kind;
   }
 }
@@ -40,22 +43,58 @@ async function getPosition(): Promise<{ lat?: number; lng?: number; accuracyM?: 
   });
 }
 
+/** Minutes between paired clock-ins and clock-outs, counting an open clock-in up to `now`. */
+function workedFromPunches(punches: Punch[], now: number): number {
+  let total = 0; let openAt: number | null = null;
+  const live = punches.filter((p) => !p.superseded).sort((a, b) => Date.parse(a.punched_at) - Date.parse(b.punched_at));
+  for (const p of live) {
+    const ms = Date.parse(p.punched_at);
+    if (p.direction === 'in' && openAt === null) openAt = ms;
+    else if (p.direction === 'out' && openAt !== null) { total += ms - openAt; openAt = null; }
+  }
+  if (openAt !== null) total += Math.max(0, now - openAt);
+  return Math.floor(total / 60_000);
+}
+
+export const directionLabel = (d: string) => (d === 'in' ? 'Clocked in' : d === 'out' ? 'Clocked out' : 'Recorded');
+export const sourceLabel = (s: string) => ({ web: 'Web', mobile: 'Mobile', device: 'Terminal', manual: 'Added by HR', regularisation: 'Correction' } as Record<string, string>)[s] ?? s;
+const requestKind = (k: string) => ({ leave: 'Time off', ot: 'Overtime', overtime: 'Overtime', regularisation: 'Attendance correction', correction: 'Attendance correction' } as Record<string, string>)[k] ?? k.charAt(0).toUpperCase() + k.slice(1).replace(/_/g, ' ');
+
 export default function HomePage() {
   const { user } = useAuth();
-  const { t, lang, numerals } = useI18n();
+  const { t } = useI18n();
   const today = useQuery(() => punchApi.today(), [], { enabled: !!user?.employeeId });
   const me = useQuery(() => dashApi.me(), [], { enabled: !!user?.employeeId });
+  const shifts = useQuery(() => shiftApi.list(), [], { enabled: !!user?.employeeId });
   const [busy, setBusy] = useState(false);
   const [reasonOpen, setReasonOpen] = useState<{ direction: 'in' | 'out'; message: string } | null>(null);
   const [reason, setReason] = useState('');
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 30_000); return () => window.clearInterval(id); }, []);
 
-  if (!user?.employeeId) return <EmptyState title={t('welcome')} hint="Your account is not linked to an employee record, so there is no Today card. Use the menu for your role." />;
+  const firstName = (user?.name ?? '').trim().split(/\s+/)[0] ?? '';
+  const dateIso = today.data?.date ?? me.data?.date ?? todayNpt();
+
+  if (!user?.employeeId) {
+    return (
+      <Stack gap="lg">
+        <PageHeader title={`${greeting()}${firstName ? `, ${firstName}` : ''}`} subtitle={fmtDateLong(dateIso)} />
+        <EmptyState title="No employee record linked" hint="Your account is not linked to an employee record, so there is nothing to clock in to. Use the menu to reach the tools for your role." />
+      </Stack>
+    );
+  }
 
   const punches = today.data?.punches ?? [];
   const last = punches[punches.length - 1];
   const nextDirection: 'in' | 'out' = !last || last.direction === 'out' ? 'in' : punches.length % 2 === 0 ? 'in' : 'out';
   const day = today.data?.day ?? null;
-  const d = dualDate(today.data?.date ?? me.data?.date, lang, numerals);
+  // While someone is still at work, "no clock-out yet" is expected, not a problem.
+  const working = liveStatus(day?.status, { date: dateIso, today: todayNpt(), lastOut: day?.last_out, firstIn: day?.first_in }) === 'Working';
+  const visibleFlags = (day?.flags ?? []).filter((f) => !(working && ['MissingOut', 'UnpairedPunch'].includes(String((f as { kind?: string }).kind))));
+  const clockedIn = nextDirection === 'out';
+  const firstIn = punches.find((p) => p.direction === 'in' && !p.superseded);
+  const worked = clockedIn ? workedFromPunches(punches, now) : (day?.worked_min ?? workedFromPunches(punches, now));
+  const shift = day?.shift_id ? shifts.data?.shifts.find((s) => s.id === day.shift_id) : undefined;
 
   const doPunch = async (direction: 'in' | 'out', why?: string) => {
     setBusy(true);
@@ -67,71 +106,154 @@ export default function HomePage() {
       const pos = await getPosition();
       const res = await punchApi.create({ direction, clientTime: new Date().toISOString(), idempotencyKey: key, source: 'web', ...(pos.lat !== undefined ? { lat: pos.lat, lng: pos.lng, accuracyM: pos.accuracyM } : {}), ...(why ? { reason: why } : {}) });
       localStorage.removeItem('hajiri.punchKey');
-      if (res.duplicate) toast.info(`${lang === 'ne' ? 'यो हाजिरी पहिले नै दर्ता थियो' : 'This punch was already recorded'}: ${res.punch.direction.toUpperCase()} ${fmtTime(res.punch.punched_at, numerals)}`);
-      else toast.ok(res.message ?? `${t('punchSaved')} ${direction.toUpperCase()} ${fmtTime(res.punch.punched_at, numerals)}`);
-      if (pos.denied) toast.info(t('locationUnavailable'));
+      if (res.duplicate) toast.info(`Already recorded: ${directionLabel(res.punch.direction).toLowerCase()} at ${fmtTime(res.punch.punched_at)}.`);
+      else toast.ok(res.message ?? `${directionLabel(direction)} at ${fmtTime(res.punch.punched_at)}.`);
+      if (pos.denied) toast.info('Location was not available, so this was recorded without it.');
       setReasonOpen(null); setReason('');
       await Promise.all([today.reload(), me.reload()]);
     } catch (e) {
       if (e instanceof ApiError && e.status === 400 && /reason/i.test(e.message)) { setReasonOpen({ direction, message: e.message }); }
-      else toast.err(e, t('punchFailed'));
+      else toast.err(e, direction === 'in' ? 'Clock-in not saved' : 'Clock-out not saved');
     } finally { setBusy(false); }
   };
 
+  const stateLine = clockedIn
+    ? `Clocked in at ${fmtTime(last?.punched_at)}`
+    : last ? `Clocked out at ${fmtTime(last.punched_at)}` : 'Not clocked in yet';
+  const stateTone = clockedIn ? 'var(--hj-ok)' : last ? 'var(--hj-idle)' : 'var(--hj-warn)';
+
+  const m = me.data?.month;
+  const by = m?.byStatus ?? {};
+  const presentDays = (by.Present ?? 0) + (by.WFH ?? 0) + (by.HalfDay ?? 0);
+  const rowBorder = (i: number) => (i > 0 ? { borderTop: '1px solid var(--hj-line-soft)' } : undefined);
+
   return (
-    <Stack>
-      <Group justify="space-between" align="flex-end">
+    <Stack gap="xl">
+      <PageHeader title={`${greeting()}, ${firstName || 'there'}`} subtitle={fmtDateLong(dateIso)}
+        actions={<Button component={Link} to="/me/attendance?correct=1" variant="default" leftSection={<IconClockEdit size={16} stroke={1.6} />}>Request correction</Button>} />
+
+      <Grid gap="md">
+        <Grid.Col span={{ base: 12, md: 7 }}>
+          <Paper withBorder p="lg" h="100%">
+            <Stack gap="lg" h="100%" justify="space-between">
+              <Group justify="space-between" align="flex-start" wrap="wrap" gap="sm">
+                <Group gap={8} wrap="nowrap">
+                  <span className="hj-dot" style={{ background: stateTone }} aria-hidden />
+                  <Text size="sm" fw={500}>{stateLine}</Text>
+                </Group>
+                {day ? <StatusBadge status={liveStatus(day.status, { date: dateIso, today: todayNpt(), lastOut: day.last_out, firstIn: day.first_in })} late={day.late_min} /> : null}
+              </Group>
+
+              <div>
+                <Text size="sm" c="dimmed">{clockedIn ? 'Worked so far' : 'Worked today'}</Text>
+                <Text className="num" fz={40} fw={600} lh={1.1} style={{ letterSpacing: '-0.03em' }}>{minutesToHm(worked)}</Text>
+                <Text size="sm" c="dimmed" mt={6}>
+                  {shift ? `${shift.name_en || shift.code} shift, ${shift.start.slice(0, 5)} to ${shift.end.slice(0, 5)}` : 'No shift assigned for today'}
+                  {firstIn && punches.length > 1 ? `. First clock-in ${fmtTime(firstIn.punched_at)}` : ''}
+                </Text>
+              </div>
+
+              {visibleFlags.length ? (
+                <Stack gap={4}>
+                  {visibleFlags.map((f, i) => (
+                    <Group key={i} gap={6} wrap="nowrap" align="flex-start">
+                      <IconAlertTriangle size={16} stroke={1.6} color="var(--hj-warn)" style={{ flex: 'none', marginTop: 1 }} />
+                      <Text size="sm" c="dimmed">{describeFlag(f)}</Text>
+                    </Group>
+                  ))}
+                </Stack>
+              ) : null}
+
+              <Button size="lg" fullWidth loading={busy} onClick={() => doPunch(nextDirection)}
+                leftSection={nextDirection === 'in' ? <IconLogin2 size={18} stroke={1.6} /> : <IconLogout2 size={18} stroke={1.6} />}>
+                {nextDirection === 'in' ? 'Clock in' : 'Clock out'}
+              </Button>
+            </Stack>
+          </Paper>
+        </Grid.Col>
+
+        <Grid.Col span={{ base: 12, md: 5 }}>
+          <Paper withBorder p="lg" h="100%">
+            <Text fw={600} mb="md">Today's activity</Text>
+            {punches.length === 0 ? (
+              <Text size="sm" c="dimmed">Nothing yet. Your clock-ins and clock-outs for today will show here.</Text>
+            ) : (
+              <Stack gap={0}>
+                {punches.map((p, i) => (
+                  <Group key={p.id} gap="sm" wrap="nowrap" align="stretch">
+                    <Stack gap={0} align="center" w={10} style={{ flex: 'none' }}>
+                      <span className="hj-dot" style={{ marginTop: 7, background: p.direction === 'in' ? 'var(--hj-ok)' : 'var(--hj-idle)' }} aria-hidden />
+                      {i < punches.length - 1 ? <div style={{ width: 1, flex: 1, background: 'var(--hj-line)', marginTop: 4 }} /> : null}
+                    </Stack>
+                    <Group justify="space-between" wrap="nowrap" style={{ flex: 1 }} pb="sm">
+                      <div>
+                        <Text size="sm" fw={500} {...(p.superseded ? { td: 'line-through', c: 'dimmed' } : {})}>{directionLabel(p.direction)}</Text>
+                        <Text size="xs" c="dimmed">{sourceLabel(p.source)}</Text>
+                      </div>
+                      <Text size="sm" className="num" fw={500}>{fmtTime(p.punched_at)}</Text>
+                    </Group>
+                  </Group>
+                ))}
+              </Stack>
+            )}
+          </Paper>
+        </Grid.Col>
+      </Grid>
+
+      {m ? (
         <div>
-          <Title order={2}>{t('today')}</Title>
-          <Text c="dimmed" size="sm">{d.bsLong} · {d.ad}</Text>
+          <SectionTitle hint={`${fmtDateShort(m.from)} to ${fmtDateShort(m.to)}`} actions={<Anchor component={Link} to="/me/attendance" size="sm">View attendance</Anchor>}>This month</SectionTitle>
+          <StatStrip stats={[
+            { key: 'present', label: 'Present days', value: presentDays },
+            { key: 'late', label: 'Late', value: minutesToHm(m.lateMin), ...(m.lateMin > 0 ? { tone: 'warn' as const } : {}) },
+            { key: 'ot', label: 'Overtime', value: minutesToHm(m.otMin) },
+            { key: 'absent', label: 'Absent days', value: by.Absent ?? 0, ...((by.Absent ?? 0) > 0 ? { tone: 'bad' as const } : {}) },
+          ]} />
         </div>
-      </Group>
-      <Card withBorder radius="lg" p="lg">
-        <Stack align="center" gap="sm">
-          <Button size="xl" h={96} w="100%" maw={420} radius="xl" loading={busy} color={nextDirection === 'in' ? 'teal' : 'orange'} onClick={() => doPunch(nextDirection)} style={{ fontSize: 24 }}>
-            {nextDirection === 'in' ? t('punchIn') : t('punchOut')}
-          </Button>
-          <Text size="sm" c="dimmed">{last ? `${lang === 'ne' ? 'अन्तिम' : 'Last'}: ${last.direction.toUpperCase()} ${fmtTime(last.punched_at, numerals)} (${last.source})` : t('noPunchesToday')}</Text>
-          <Group gap="xs">
-            <StatusBadge status={day?.status ?? 'Pending'} late={day?.late_min ?? null} />
-            {day ? <Text size="sm">{t('worked')}: {minutesToHm(day.worked_min, numerals)}</Text> : null}
-          </Group>
-          {day?.flags?.length ? <Stack gap={2}>{day.flags.map((f, i) => <Text key={i} size="xs" c="dimmed">• {describeFlag(f, lang)}</Text>)}</Stack> : null}
-          {punches.length ? <Group gap={6} wrap="wrap" justify="center">{punches.map((p) => <Badge key={p.id} variant="outline" color={p.direction === 'out' ? 'orange' : 'teal'}>{p.direction.toUpperCase()} {fmtTime(p.punched_at, numerals)}</Badge>)}</Group> : null}
-        </Stack>
-      </Card>
-
-      <SimpleGrid cols={{ base: 2, sm: 4 }} spacing="sm">
-        <Button component={Link} to="/me/leave" variant="light" h={56}>{t('leave')}</Button>
-        <Button component={Link} to="/me/attendance" variant="light" h={56}>{t('myAttendance')}</Button>
-        <Button component={Link} to="/me/payslips" variant="light" h={56}>{t('payslips')}</Button>
-        <Button component={Link} to="/me/attendance?correct=1" variant="light" h={56}>{t('requestCorrection')}</Button>
-      </SimpleGrid>
-
-      {me.data ? (
-        <SimpleGrid cols={{ base: 1, md: 2 }}>
-          <Paper withBorder p="md" radius="md">
-            <Text fw={600} mb="xs">{lang === 'ne' ? 'यो महिना' : 'This month'} {me.data.month.bs ? `(${fmtNum(me.data.month.bs, numerals)})` : ''}</Text>
-            <Group gap="md" wrap="wrap">
-              {Object.entries(me.data.month.byStatus).map(([s, n]) => <Group key={s} gap={4}><StatusBadge status={s} /><Text size="sm" fw={600}>{fmtNum(n, numerals)}</Text></Group>)}
-            </Group>
-            <Text size="sm" mt="xs">{t('late')}: {minutesToHm(me.data.month.lateMin, numerals)} · {t('overtime')}: {minutesToHm(me.data.month.otMin, numerals)}</Text>
-          </Paper>
-          <Paper withBorder p="md" radius="md">
-            <Text fw={600} mb="xs">{t('balance')} · {t('leave')}</Text>
-            <Group gap="md" wrap="wrap">
-              {me.data.leaveBalances.map((b) => <div key={b.code}><Text size="xs" c="dimmed">{lang === 'ne' && b.name_ne ? b.name_ne : b.name_en}</Text><Text fw={700}>{fmtNum(Number(b.balance).toFixed(1), numerals)} {t('days')}</Text></div>)}
-            </Group>
-            {me.data.pendingRequests.length ? <Alert mt="sm" variant="light" color="violet">{me.data.pendingRequests.length} {lang === 'ne' ? 'अनुरोध विचाराधीन' : 'request(s) awaiting approval'}</Alert> : null}
-          </Paper>
-        </SimpleGrid>
       ) : null}
 
-      <Modal opened={!!reasonOpen} onClose={() => setReasonOpen(null)} title={lang === 'ne' ? 'स्थान बाहिर' : 'Outside your work location'} centered>
+      {me.data ? (
+        <Grid gap="md">
+          <Grid.Col span={{ base: 12, md: 6 }}>
+            <SectionTitle actions={<Anchor component={Link} to="/me/leave" size="sm">Request time off</Anchor>}>Time off balance</SectionTitle>
+            {me.data.leaveBalances.length === 0 ? <EmptyState compact title="No balances yet" hint="Balances appear once HR sets up your leave policy." /> : (
+              <Paper withBorder>
+                {me.data.leaveBalances.map((b, i) => (
+                  <Group key={b.code} justify="space-between" px="md" py={12} style={rowBorder(i)}>
+                    <Text size="sm">{b.name_en}</Text>
+                    <Text size="sm"><Text span fw={600} className="num">{Number(b.balance).toFixed(1)}</Text> <Text span c="dimmed" size="sm">days</Text></Text>
+                  </Group>
+                ))}
+              </Paper>
+            )}
+          </Grid.Col>
+          <Grid.Col span={{ base: 12, md: 6 }}>
+            <SectionTitle>Pending requests</SectionTitle>
+            {me.data.pendingRequests.length === 0 ? <EmptyState compact title="Nothing waiting" hint="Requests you send for approval show here until they are decided." /> : (
+              <Paper withBorder>
+                {me.data.pendingRequests.map((r, i) => (
+                  <Group key={`${r.kind}-${r.id}`} justify="space-between" wrap="nowrap" px="md" py={12} style={rowBorder(i)}>
+                    <div style={{ minWidth: 0 }}>
+                      <Text size="sm" fw={500}>{requestKind(r.kind)}</Text>
+                      {r.detail ? <Text size="xs" c="dimmed" truncate>{r.detail}</Text> : null}
+                    </div>
+                    <Text size="xs" c="dimmed" style={{ flex: 'none' }}>{relativeTime(r.created_at)}</Text>
+                  </Group>
+                ))}
+              </Paper>
+            )}
+          </Grid.Col>
+        </Grid>
+      ) : null}
+
+      <Modal opened={!!reasonOpen} onClose={() => setReasonOpen(null)} title="You're outside your work location" centered>
         <Stack>
           <Text size="sm">{reasonOpen?.message}</Text>
-          <Textarea label={t('reason')} value={reason} onChange={(e) => setReason(e.currentTarget.value)} autosize minRows={2} required />
-          <Group justify="flex-end"><Button variant="default" onClick={() => setReasonOpen(null)}>{t('cancel')}</Button><Button disabled={!reason.trim()} loading={busy} onClick={() => reasonOpen && doPunch(reasonOpen.direction, reason)}>{t('submit')}</Button></Group>
+          <Textarea label={t('reason')} description="Your manager sees this with the record." value={reason} onChange={(e) => setReason(e.currentTarget.value)} autosize minRows={2} required />
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setReasonOpen(null)}>Cancel</Button>
+            <Button disabled={!reason.trim()} loading={busy} onClick={() => reasonOpen && doPunch(reasonOpen.direction, reason)}>{reasonOpen?.direction === 'out' ? 'Clock out' : 'Clock in'}</Button>
+          </Group>
         </Stack>
       </Modal>
     </Stack>

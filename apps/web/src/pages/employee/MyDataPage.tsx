@@ -1,59 +1,118 @@
-import { Button, Group, List, Paper, SimpleGrid, Stack, Text, Title } from '@mantine/core';
+import { Badge, Button, Group, List, Paper, ScrollArea, SimpleGrid, Stack, Table, Tabs, Text } from '@mantine/core';
+import { IconDownload } from '@tabler/icons-react';
 import { useState } from 'react';
 import { attendance as attApi, biometrics as bioApi } from '../../api';
 import { useAuth } from '../../auth/AuthProvider';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { EmptyState } from '../../components/EmptyState';
 import { PageHeader } from '../../components/PageHeader';
-import { useI18n } from '../../i18n';
-import { addDays, fmtTime, todayNpt } from '../../lib/format';
+import { StatusBadge } from '../../components/StatusBadge';
+import { addDays, fmtAd, fmtDateShort, fmtTime, NPT_OFFSET_MIN, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
+import { sourceLabel } from './HomePage';
 
-/** Transparency page (plan §13.13): what is stored, who sees it, how to withdraw; DSAR export; own punch log. */
+const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, ' ') : s);
+const nptDate = (iso: string) => fmtAd(new Date(Date.parse(iso) + NPT_OFFSET_MIN * 60_000).toISOString());
+
+/** Transparency page: what is stored, who sees it, how to withdraw; data export; own clock-in log. */
 export default function MyDataPage() {
   const { user } = useAuth();
-  const { t, lang, numerals } = useI18n();
   const employeeId = user?.employeeId ?? '';
   const tr = useQuery(() => bioApi.transparency(), []);
   const consents = useQuery(() => bioApi.consents(employeeId), [employeeId], { enabled: !!employeeId });
   const templates = useQuery(() => bioApi.templates(employeeId), [employeeId], { enabled: !!employeeId });
   const punches = useQuery(() => attApi.punches(employeeId, addDays(todayNpt(), -14), todayNpt()), [employeeId], { enabled: !!employeeId });
   const [revoke, setRevoke] = useState<string | null>(null);
-  const l = lang;
+  const consentRows = consents.data?.consents ?? [];
+  const punchRows = punches.data?.punches ?? [];
+  const activeTemplates = (templates.data?.templates ?? []).filter((x) => !x.shredded_at).length;
+
   return (
-    <Stack>
-      <PageHeader title={t('myData')} actions={employeeId ? <Button variant="light" onClick={() => bioApi.dsar(employeeId).catch((e) => toast.err(e))}>{t('exportMyData')}</Button> : null} />
-      {tr.data ? (
-        <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
-          <Paper withBorder p="md" radius="md"><Title order={5}>{t('transparencyTitle')}</Title><List size="sm" mt="xs">{tr.data.stored[l].map((s) => <List.Item key={s}>{s}</List.Item>)}</List>
-            <Text size="sm" fw={600} mt="sm">{l === 'ne' ? 'के राखिँदैन' : 'Not stored'}</Text><List size="sm">{tr.data.notStored[l].map((s) => <List.Item key={s}>{s}</List.Item>)}</List></Paper>
-          <Paper withBorder p="md" radius="md"><Title order={5}>{l === 'ne' ? 'कसले देख्छ' : 'Who can see it'}</Title><List size="sm" mt="xs">{tr.data.access[l].map((s) => <List.Item key={s}>{s}</List.Item>)}</List>
-            <Text size="sm" mt="sm">{tr.data.withdraw[l]}</Text><Text size="xs" c="dimmed" mt="xs">{tr.data.legalBasis[l]}</Text></Paper>
-        </SimpleGrid>
-      ) : null}
-      <Paper withBorder p="md" radius="md">
-        <Title order={5}>{l === 'ne' ? 'बायोमेट्रिक सहमति' : 'Biometric consent'}</Title>
-        {(consents.data?.consents ?? []).length === 0 ? <Text size="sm" c="dimmed" mt="xs">{l === 'ne' ? 'कुनै सहमति रेकर्ड छैन।' : 'No consent recorded. HR records consent when enrolling you on a terminal.'}</Text> : null}
-        <Stack gap="xs" mt="xs">
-          {(consents.data?.consents ?? []).map((c) => (
-            <Group key={c.id} justify="space-between">
-              <Text size="sm">{c.modality} · {c.purpose} · v{c.notice_version} · {new Date(c.granted_at).toLocaleDateString()}{c.revoked_at ? ` · ${l === 'ne' ? 'फिर्ता लिइएको' : 'withdrawn'}` : ''}</Text>
-              {!c.revoked_at ? <Button size="xs" variant="light" color="red" onClick={() => setRevoke(c.id)}>{t('withdrawConsent')}</Button> : null}
-            </Group>
-          ))}
-        </Stack>
-        <Text size="sm" mt="sm">{l === 'ne' ? 'भण्डारण गरिएका टेम्प्लेट' : 'Stored templates'}: {(templates.data?.templates ?? []).filter((x) => !x.shredded_at).length}</Text>
-      </Paper>
-      <Paper withBorder p="md" radius="md">
-        <Title order={5}>{t('rawPunches')} · {l === 'ne' ? 'पछिल्लो १४ दिन' : 'last 14 days'}</Title>
-        <Stack gap={2} mt="xs">
-          {(punches.data?.punches ?? []).length === 0 ? <Text size="sm" c="dimmed">{t('nothingHere')}</Text> : null}
-          {(punches.data?.punches ?? []).map((p) => <Text key={p.id} size="sm" {...(p.superseded ? { c: 'dimmed' } : {})}>{p.local_date} {fmtTime(p.punched_at, numerals)} · {p.direction.toUpperCase()} · {p.verify_mode} · {p.source}{p.device_sn ? ` · ${p.device_sn}` : ''}</Text>)}
-        </Stack>
-      </Paper>
-      <ConfirmDialog opened={!!revoke} onClose={() => setRevoke(null)} title={t('withdrawConsent')} confirmLabel={t('withdrawConsent')}
-        message={l === 'ne' ? 'तपाईंका टेम्प्लेट तुरुन्त नष्ट गरिनेछ। त्यसपछि कार्ड वा पिनबाट हाजिरी गर्नुहोस्।' : 'Your templates for this modality will be shredded immediately. You will punch with a card or PIN afterwards.'}
-        onConfirm={async () => { if (!revoke) return; try { const r = await bioApi.revoke(revoke); toast.ok(`Consent withdrawn; ${r.templatesShredded} template(s) shredded.`); await Promise.all([consents.reload(), templates.reload()]); } catch (e) { toast.err(e); } }} />
+    <Stack gap="lg">
+      <PageHeader title="My data and privacy" subtitle="What Hajiri stores about you, who can see it, and how to take it with you."
+        actions={employeeId ? <Button variant="default" leftSection={<IconDownload size={16} stroke={1.6} />} onClick={() => bioApi.dsar(employeeId).catch((e) => toast.err(e, 'Download failed'))}>Download my data</Button> : null} />
+
+      <Tabs defaultValue="privacy">
+        <Tabs.List mb="md">
+          <Tabs.Tab value="privacy">What we store</Tabs.Tab>
+          <Tabs.Tab value="consent">Biometric consent</Tabs.Tab>
+          <Tabs.Tab value="log">Clock-in log</Tabs.Tab>
+        </Tabs.List>
+
+        <Tabs.Panel value="privacy">
+          {tr.data ? (
+            <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
+              <Paper withBorder p="lg">
+                <Text fw={600}>Stored</Text>
+                <List size="sm" mt="xs" spacing={4}>{tr.data.stored.en.map((s) => <List.Item key={s}>{s}</List.Item>)}</List>
+                <Text fw={600} mt="lg">Never stored</Text>
+                <List size="sm" mt="xs" spacing={4}>{tr.data.notStored.en.map((s) => <List.Item key={s}>{s}</List.Item>)}</List>
+              </Paper>
+              <Paper withBorder p="lg">
+                <Text fw={600}>Who can see it</Text>
+                <List size="sm" mt="xs" spacing={4}>{tr.data.access.en.map((s) => <List.Item key={s}>{s}</List.Item>)}</List>
+                <Text fw={600} mt="lg">Withdrawing consent</Text>
+                <Text size="sm" mt="xs">{tr.data.withdraw.en}</Text>
+                <Text size="xs" c="dimmed" mt="md">{tr.data.legalBasis.en}</Text>
+              </Paper>
+            </SimpleGrid>
+          ) : tr.error ? <EmptyState title="Could not load the privacy notice" hint={tr.error} /> : null}
+        </Tabs.Panel>
+
+        <Tabs.Panel value="consent">
+          <Stack gap="md">
+            {consentRows.length === 0 ? (
+              <EmptyState title="No consent recorded" hint="HR records your consent when they enrol your fingerprint or face on a terminal." />
+            ) : (
+              <Paper withBorder style={{ overflow: 'hidden' }}>
+                {consentRows.map((c, i) => (
+                  <Group key={c.id} justify="space-between" wrap="wrap" px="lg" py="sm" style={i > 0 ? { borderTop: '1px solid var(--hj-line-soft)' } : undefined}>
+                    <div>
+                      <Text size="sm" fw={500}>{cap(c.modality)}, {c.purpose}</Text>
+                      <Text size="xs" c="dimmed">Granted {nptDate(c.granted_at)}, notice version {c.notice_version}{c.revoked_at ? `. Withdrawn ${nptDate(c.revoked_at)}` : ''}</Text>
+                    </div>
+                    <Group gap="sm">
+                      <StatusBadge status={c.revoked_at ? 'cancelled' : 'active'} />
+                      {!c.revoked_at ? <Button size="xs" variant="subtle" color="red" onClick={() => setRevoke(c.id)}>Withdraw consent</Button> : null}
+                    </Group>
+                  </Group>
+                ))}
+              </Paper>
+            )}
+            <Text size="sm" c="dimmed">Biometric templates stored for you: <Text span fw={600} c="var(--mantine-color-text)" className="num">{activeTemplates}</Text></Text>
+          </Stack>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="log">
+          <Text size="sm" c="dimmed" mb="sm">Every clock-in and clock-out recorded for you in the last 14 days, including replaced entries.</Text>
+          {punchRows.length === 0 ? <EmptyState title="Nothing recorded in the last 14 days" /> : (
+            <Paper withBorder style={{ overflow: 'hidden' }}>
+              <ScrollArea type="auto">
+                <Table miw={560}>
+                  <Table.Thead><Table.Tr><Table.Th>Date</Table.Th><Table.Th style={{ textAlign: 'right' }}>Time</Table.Th><Table.Th>Entry</Table.Th><Table.Th>Method</Table.Th><Table.Th>Source</Table.Th><Table.Th>Device</Table.Th></Table.Tr></Table.Thead>
+                  <Table.Tbody>
+                    {punchRows.map((p) => (
+                      <Table.Tr key={p.id} {...(p.superseded ? { c: 'dimmed' } : {})}>
+                        <Table.Td>{fmtDateShort(p.local_date)}</Table.Td>
+                        <Table.Td ta="right" className="num">{fmtTime(p.punched_at)}</Table.Td>
+                        <Table.Td>{p.direction === 'in' ? 'Clock-in' : p.direction === 'out' ? 'Clock-out' : 'Unpaired'}{p.superseded ? <Badge ml={6} size="sm" variant="light" color="gray">Replaced</Badge> : null}</Table.Td>
+                        <Table.Td>{cap(p.verify_mode)}</Table.Td>
+                        <Table.Td>{sourceLabel(p.source)}</Table.Td>
+                        <Table.Td c="dimmed">{p.device_sn ?? '—'}</Table.Td>
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </ScrollArea>
+            </Paper>
+          )}
+        </Tabs.Panel>
+      </Tabs>
+
+      <ConfirmDialog opened={!!revoke} onClose={() => setRevoke(null)} title="Withdraw consent?" confirmLabel="Withdraw consent"
+        message="Your stored templates for this method are deleted immediately. You'll clock in with a card or PIN afterwards."
+        onConfirm={async () => { if (!revoke) return; try { const r = await bioApi.revoke(revoke); toast.ok(`Consent withdrawn. ${r.templatesShredded} template(s) deleted.`); await Promise.all([consents.reload(), templates.reload()]); } catch (e) { toast.err(e, 'Could not withdraw consent'); } }} />
     </Stack>
   );
 }

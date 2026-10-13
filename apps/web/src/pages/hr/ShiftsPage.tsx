@@ -1,70 +1,128 @@
-import { Button, Group, Modal, NumberInput, Select, SimpleGrid, Stack, Text, TextInput } from '@mantine/core';
+import { ActionIcon, Button, Drawer, Group, Menu, Modal, NumberInput, Select, SimpleGrid, Stack, Text, TextInput } from '@mantine/core';
+import { IconDots, IconPencil, IconPlus, IconTrash, IconUserPlus } from '@tabler/icons-react';
 import { useState } from 'react';
 import { shifts as shiftApi } from '../../api';
 import type { Shift } from '../../api/types';
+import { DateField } from '../../components/BsDatePicker';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DataTable } from '../../components/DataTable';
 import { EmployeePicker } from '../../components/EmployeePicker';
-import { BsDatePicker } from '../../components/BsDatePicker';
-import { PageHeader } from '../../components/PageHeader';
-import { useI18n } from '../../i18n';
-import { todayNpt } from '../../lib/format';
+import { PageHeader, SectionTitle } from '../../components/PageHeader';
+import { minutesToHm, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 
+const ICON = { size: 16, stroke: 1.6 } as const;
+
 const blank = { code: '', nameEn: '', nameNe: '', start: '10:00', end: '18:00', graceInMin: 15, graceOutMin: 0, earlyInWindowMin: 60, lateOutWindowMin: 120, breakMinutes: 0, halfDayThresholdMin: 240, absentThresholdMin: 120, pairingMode: 'alternating', roundingMin: 0, roundingDirection: 'nearest' };
 
+const toForm = (s: Shift): typeof blank & { id: string } => ({ id: s.id, code: s.code, nameEn: s.name_en, nameNe: s.name_ne ?? '', start: s.start.slice(0, 5), end: s.end.slice(0, 5), graceInMin: s.grace_in_min, graceOutMin: s.grace_out_min, earlyInWindowMin: s.early_in_window_min, lateOutWindowMin: s.late_out_window_min, breakMinutes: s.break_minutes, halfDayThresholdMin: s.half_day_threshold_min, absentThresholdMin: s.absent_threshold_min, pairingMode: s.pairing_mode, roundingMin: s.rounding_min, roundingDirection: s.rounding_direction });
+
 export default function ShiftsPage() {
-  const { t } = useI18n();
   const q = useQuery(() => shiftApi.list(), []);
   const [edit, setEdit] = useState<(typeof blank & { id?: string }) | null>(null);
   const [del, setDel] = useState<Shift | null>(null);
   const [assign, setAssign] = useState<Shift | null>(null); const [assignEmp, setAssignEmp] = useState<string | null>(null); const [assignFrom, setAssignFrom] = useState<string | null>(todayNpt());
   const [busy, setBusy] = useState(false);
-  const n = (k: keyof typeof blank) => ({ value: edit?.[k] as number, onChange: (v: number | string) => setEdit((e) => e && ({ ...e, [k]: Number(v) })), min: 0 });
+  const n = (k: keyof typeof blank) => ({ value: edit?.[k] as number, onChange: (v: number | string) => setEdit((e) => e && ({ ...e, [k]: Number(v) })), min: 0, suffix: ' min' });
   const save = async () => {
     if (!edit) return; setBusy(true);
     try { const { id, ...body } = edit; if (id) await shiftApi.update(id, body); else await shiftApi.create(body); toast.ok('Shift saved.'); setEdit(null); await q.reload(); }
     catch (e) { toast.err(e); } finally { setBusy(false); }
   };
   return (
-    <Stack>
-      <PageHeader title={t('shifts')} subtitle="Shift rules follow the attendance engine: grace, early-in/late-out windows, half-day and absent thresholds (plan §10.2)." actions={<Button onClick={() => setEdit({ ...blank })}>{t('create')}</Button>} />
-      <DataTable<Shift> rows={q.data?.shifts ?? []} rowKey={(s) => s.id} loading={q.loading} error={q.error} emptyTitle="No shifts yet." emptyHint="Create your first shift. Most companies start with General 10:00–18:00." onRowClick={(s) => setEdit({ id: s.id, code: s.code, nameEn: s.name_en, nameNe: s.name_ne ?? '', start: s.start.slice(0, 5), end: s.end.slice(0, 5), graceInMin: s.grace_in_min, graceOutMin: s.grace_out_min, earlyInWindowMin: s.early_in_window_min, lateOutWindowMin: s.late_out_window_min, breakMinutes: s.break_minutes, halfDayThresholdMin: s.half_day_threshold_min, absentThresholdMin: s.absent_threshold_min, pairingMode: s.pairing_mode, roundingMin: s.rounding_min, roundingDirection: s.rounding_direction })}
+    <Stack gap="lg">
+      <PageHeader title="Shifts" subtitle="Working hours and the rules used to mark people late, half day or absent."
+        actions={<Button leftSection={<IconPlus {...ICON} />} onClick={() => setEdit({ ...blank })}>New shift</Button>} />
+      <DataTable<Shift> rows={q.data?.shifts ?? []} rowKey={(s) => s.id} loading={q.loading} error={q.error}
+        emptyTitle="No shifts yet" emptyHint="Create your first shift. Most companies start with a general 10:00 – 18:00 shift."
+        onRowClick={(s) => setEdit(toForm(s))}
         columns={[
-          { key: 'code', header: t('code'), render: (s) => <><Text size="sm" fw={500}>{s.code}</Text><Text size="xs" c="dimmed">{s.name_en}</Text></> },
-          { key: 'time', header: 'Hours', render: (s) => `${s.start.slice(0, 5)}–${s.end.slice(0, 5)}${s.crosses_midnight ? ' (+1 day)' : ''}` },
-          { key: 'grace', header: 'Grace', render: (s) => `${s.grace_in_min} / ${s.grace_out_min} min` },
-          { key: 'thr', header: 'Half / absent', render: (s) => `${s.half_day_threshold_min} / ${s.absent_threshold_min} min` },
-          { key: 'n', header: 'Employees', render: (s) => s.assigned_employees, align: 'right' },
-          { key: 'a', header: '', render: (s) => <Group gap={4}><Button size="xs" variant="light" onClick={(e) => { e.stopPropagation(); setAssign(s); }}>Assign</Button><Button size="xs" variant="subtle" color="red" onClick={(e) => { e.stopPropagation(); setDel(s); }}>{t('delete')}</Button></Group> },
+          { key: 'name', header: 'Shift', render: (s) => <><Text size="sm" fw={500}>{s.name_en}</Text><Text size="xs" c="dimmed" ff="monospace">{s.code}</Text></> },
+          {
+            key: 'time', header: 'Hours', render: (s) => (
+              <>
+                <Text size="sm" className="num" fw={500}>{s.start.slice(0, 5)} – {s.end.slice(0, 5)}{s.crosses_midnight ? <Text span size="xs" c="dimmed"> next day</Text> : null}</Text>
+                <Text size="xs" c="dimmed">{s.grace_in_min} min grace{s.break_minutes > 0 ? `, ${s.break_minutes} min break` : ''}</Text>
+              </>
+            ),
+          },
+          { key: 'thr', header: 'Half day / absent under', render: (s) => <Text size="sm" c="dimmed" className="num">{minutesToHm(s.half_day_threshold_min)} / {minutesToHm(s.absent_threshold_min)}</Text> },
+          { key: 'n', header: 'Employees', render: (s) => <span className="num">{s.assigned_employees}</span>, align: 'right' },
+          {
+            key: 'a', header: '', align: 'right', width: 56, render: (s) => (
+              <Group justify="flex-end" onClick={(e) => e.stopPropagation()}>
+                <Menu position="bottom-end" withinPortal>
+                  <Menu.Target><ActionIcon variant="subtle" color="gray" aria-label="Shift actions"><IconDots {...ICON} /></ActionIcon></Menu.Target>
+                  <Menu.Dropdown>
+                    <Menu.Item leftSection={<IconPencil {...ICON} />} onClick={() => setEdit(toForm(s))}>Edit shift</Menu.Item>
+                    <Menu.Item leftSection={<IconUserPlus {...ICON} />} onClick={() => setAssign(s)}>Assign to employee</Menu.Item>
+                    <Menu.Divider />
+                    <Menu.Item color="red" leftSection={<IconTrash {...ICON} />} onClick={() => setDel(s)}>Delete shift</Menu.Item>
+                  </Menu.Dropdown>
+                </Menu>
+              </Group>
+            ),
+          },
         ]} />
-      <Modal opened={!!edit} onClose={() => setEdit(null)} title={edit?.id ? `${t('edit')} ${edit.code}` : 'New shift'} size="lg" centered>
-        {edit ? <Stack>
-          <SimpleGrid cols={{ base: 1, sm: 2 }}>
-            <TextInput label={t('code')} value={edit.code} onChange={(e) => setEdit({ ...edit, code: e.currentTarget.value.toUpperCase() })} required />
-            <TextInput label="Name" value={edit.nameEn} onChange={(e) => setEdit({ ...edit, nameEn: e.currentTarget.value })} required />
-            <TextInput label="Start (HH:MM)" value={edit.start} onChange={(e) => setEdit({ ...edit, start: e.currentTarget.value })} />
-            <TextInput label="End (HH:MM)" description="End earlier than start = night shift crossing midnight" value={edit.end} onChange={(e) => setEdit({ ...edit, end: e.currentTarget.value })} />
-            <NumberInput label="Grace in (min)" description="Mark Late if IN is after start + grace" {...n('graceInMin')} />
-            <NumberInput label="Grace out (min)" {...n('graceOutMin')} />
-            <NumberInput label="Early-in window (min)" {...n('earlyInWindowMin')} />
-            <NumberInput label="Late-out window (min)" {...n('lateOutWindowMin')} />
-            <NumberInput label="Fixed break (min)" description="30 min after 5 h (Sec 28(2)); 0 = measured from punches" {...n('breakMinutes')} />
-            <NumberInput label="Half-day if worked under (min)" {...n('halfDayThresholdMin')} />
-            <NumberInput label="Absent if worked under (min)" {...n('absentThresholdMin')} />
-            <Select label="Pairing" value={edit.pairingMode} onChange={(v) => v && setEdit({ ...edit, pairingMode: v })} allowDeselect={false} data={[{ value: 'alternating', label: 'Alternating IN/OUT' }, { value: 'strict_log_type', label: 'Use device direction' }, { value: 'first_last', label: 'First IN to last OUT' }]} />
-            <NumberInput label="Round worked minutes to" {...n('roundingMin')} />
-            <Select label="Rounding direction" value={edit.roundingDirection} onChange={(v) => v && setEdit({ ...edit, roundingDirection: v })} allowDeselect={false} data={['nearest', 'down', 'up']} />
-          </SimpleGrid>
-          <Group justify="flex-end"><Button loading={busy} onClick={save}>{t('save')}</Button></Group>
-        </Stack> : null}
+
+      <Drawer opened={!!edit} onClose={() => setEdit(null)} position="right" size="md" title={<Text fw={600}>{edit?.id ? `Edit ${edit.nameEn || edit.code}` : 'New shift'}</Text>}>
+        {edit ? (
+          <Stack gap="lg">
+            <div>
+              <SectionTitle>Basics</SectionTitle>
+              <SimpleGrid cols={{ base: 1, sm: 2 }}>
+                <TextInput label="Code" value={edit.code} onChange={(e) => setEdit({ ...edit, code: e.currentTarget.value.toUpperCase() })} required />
+                <TextInput label="Name" value={edit.nameEn} onChange={(e) => setEdit({ ...edit, nameEn: e.currentTarget.value })} required />
+                <TextInput label="Starts at" placeholder="HH:MM" value={edit.start} onChange={(e) => setEdit({ ...edit, start: e.currentTarget.value })} />
+                <TextInput label="Ends at" placeholder="HH:MM" description="Earlier than the start means a night shift" value={edit.end} onChange={(e) => setEdit({ ...edit, end: e.currentTarget.value })} />
+              </SimpleGrid>
+            </div>
+            <div>
+              <SectionTitle>Grace and windows</SectionTitle>
+              <SimpleGrid cols={{ base: 1, sm: 2 }}>
+                <NumberInput label="Grace on arrival" description="Late if clock-in is after start plus grace" {...n('graceInMin')} />
+                <NumberInput label="Grace on leaving" {...n('graceOutMin')} />
+                <NumberInput label="Early clock-in window" description="How early a clock-in still counts" {...n('earlyInWindowMin')} />
+                <NumberInput label="Late clock-out window" description="How late a clock-out still counts" {...n('lateOutWindowMin')} />
+                <NumberInput label="Fixed break" description="30 min after 5 h (Sec 28(2)); 0 measures it from punches" {...n('breakMinutes')} />
+              </SimpleGrid>
+            </div>
+            <div>
+              <SectionTitle>Thresholds</SectionTitle>
+              <SimpleGrid cols={{ base: 1, sm: 2 }}>
+                <NumberInput label="Half day if worked under" {...n('halfDayThresholdMin')} />
+                <NumberInput label="Absent if worked under" {...n('absentThresholdMin')} />
+              </SimpleGrid>
+            </div>
+            <div>
+              <SectionTitle>Punch handling</SectionTitle>
+              <SimpleGrid cols={{ base: 1, sm: 2 }}>
+                <Select label="Pairing" description="How punches become in/out pairs" value={edit.pairingMode} onChange={(v) => v && setEdit({ ...edit, pairingMode: v })} allowDeselect={false} data={[{ value: 'alternating', label: 'Alternating in/out' }, { value: 'strict_log_type', label: 'Use device direction' }, { value: 'first_last', label: 'First in to last out' }]} />
+                <NumberInput label="Round worked time to" description="0 turns rounding off" {...n('roundingMin')} />
+                <Select label="Rounding direction" value={edit.roundingDirection} onChange={(v) => v && setEdit({ ...edit, roundingDirection: v })} allowDeselect={false} data={[{ value: 'nearest', label: 'Nearest' }, { value: 'down', label: 'Down' }, { value: 'up', label: 'Up' }]} />
+              </SimpleGrid>
+            </div>
+            <Group justify="flex-end">
+              <Button variant="default" onClick={() => setEdit(null)}>Cancel</Button>
+              <Button loading={busy} onClick={save}>Save shift</Button>
+            </Group>
+          </Stack>
+        ) : null}
+      </Drawer>
+
+      <Modal opened={!!assign} onClose={() => setAssign(null)} title={`Assign ${assign?.name_en ?? ''}`} centered>
+        <Stack>
+          <EmployeePicker value={assignEmp} onChange={setAssignEmp} required />
+          <DateField label="Starting from" value={assignFrom} onChange={setAssignFrom} required />
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setAssign(null)}>Cancel</Button>
+            <Button disabled={!assignEmp || !assignFrom} onClick={async () => { if (!assign || !assignEmp || !assignFrom) return; try { await shiftApi.assign(assignEmp, assign.id, assignFrom); toast.ok('Shift assigned.'); setAssign(null); await q.reload(); } catch (e) { toast.err(e); } }}>Assign shift</Button>
+          </Group>
+        </Stack>
       </Modal>
-      <Modal opened={!!assign} onClose={() => setAssign(null)} title={`Assign ${assign?.code ?? ''}`} centered>
-        <Stack><EmployeePicker value={assignEmp} onChange={setAssignEmp} required /><BsDatePicker label="From" value={assignFrom} onChange={setAssignFrom} required />
-          <Group justify="flex-end"><Button disabled={!assignEmp || !assignFrom} onClick={async () => { if (!assign || !assignEmp || !assignFrom) return; try { await shiftApi.assign(assignEmp, assign.id, assignFrom); toast.ok('Shift assigned.'); setAssign(null); await q.reload(); } catch (e) { toast.err(e); } }}>{t('save')}</Button></Group></Stack>
-      </Modal>
-      <ConfirmDialog opened={!!del} onClose={() => setDel(null)} title={`Delete shift ${del?.code ?? ''}?`} confirmLabel={t('delete')} message={Number(del?.assigned_employees ?? 0) > 0 ? `${del?.assigned_employees} employee(s) are assigned — reassign them first; deletion will be refused.` : 'This shift is not assigned to anyone. Historical attendance keeps its data.'}
+      <ConfirmDialog opened={!!del} onClose={() => setDel(null)} title={`Delete ${del?.name_en ?? 'shift'}?`} confirmLabel="Delete shift"
+        message={Number(del?.assigned_employees ?? 0) > 0 ? `${del?.assigned_employees} employee(s) are on this shift. Move them to another shift first, otherwise the delete is refused.` : 'Nobody is on this shift. Past attendance keeps its data.'}
         onConfirm={async () => { if (!del) return; try { await shiftApi.remove(del.id); toast.ok('Shift deleted.'); await q.reload(); } catch (e) { toast.err(e); } }} />
     </Stack>
   );

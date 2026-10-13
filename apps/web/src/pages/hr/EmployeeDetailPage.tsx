@@ -1,4 +1,5 @@
-import { Button, Group, Paper, SimpleGrid, Stack, Tabs, Text } from '@mantine/core';
+import { Avatar, Button, Drawer, Group, Paper, SimpleGrid, Stack, Table, Tabs, Text } from '@mantine/core';
+import { IconEye, IconFingerprint, IconLock, IconPencil, IconReceipt, IconTrash } from '@tabler/icons-react';
 import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { biometrics as bioApi, employees as empApi, leave as leaveApi, payroll as payApi } from '../../api';
@@ -7,17 +8,39 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DataTable } from '../../components/DataTable';
 import { EmployeeForm } from '../../components/EmployeeForm';
 import { EmptyState } from '../../components/EmptyState';
-import { PageHeader } from '../../components/PageHeader';
+import { Field } from '../../components/Kpi';
+import { PageHeader, SectionTitle } from '../../components/PageHeader';
 import { StatusBadge } from '../../components/StatusBadge';
-import { useI18n } from '../../i18n';
-import { fmtMoney, fmtNum, dualDate } from '../../lib/format';
+import { bsMonthLabel, fmtAd, fmtMoney, fmtTime, NPT_OFFSET_MIN } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import { LeaveApplyForm } from '../employee/LeavePage';
 
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const EMPLOYMENT: Record<string, string> = { regular: 'Regular', work_based: 'Work-based', time_based: 'Time-based', casual: 'Casual', part_time: 'Part-time' };
+const REGIME: Record<string, string> = { ssf: 'SSF', pf: 'PF and gratuity', none: 'None' };
+
+/** Calendar date in Nepal time for an ISO instant. */
+function nptDate(iso: string): string {
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? iso : new Date(ms + NPT_OFFSET_MIN * 60_000).toISOString().slice(0, 10);
+}
+
+/** Postgres daterange "[2026-01-01,2026-06-30)" becomes "1 Jan 2026 to 30 Jun 2026". */
+function fmtRange(v: unknown): string {
+  const m = /^[[(]([\d-]*),([\d-]*)[\])]$/.exec(String(v ?? ''));
+  if (!m) return String(v ?? '—');
+  return `${m[1] ? fmtAd(m[1]) : 'Start'} to ${m[2] ? fmtAd(m[2]) : 'present'}`;
+}
+
+function humanize(v: unknown): string {
+  if (v === null || v === undefined || v === '') return '—';
+  const s = String(v).replace(/_/g, ' ');
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 export default function EmployeeDetailPage() {
   const { id = '' } = useParams();
-  const { t, lang, numerals } = useI18n();
   const { hasRole } = useAuth();
   const emp = useQuery(() => empApi.get(id), [id]);
   const balances = useQuery(() => leaveApi.balances(id), [id]);
@@ -27,61 +50,172 @@ export default function EmployeeDetailPage() {
   const consents = useQuery(() => bioApi.consents(id), [id]);
   const payslips = useQuery(() => payApi.payslips({ employeeId: id }), [id], { enabled: hasRole('hr', 'finance') });
   const [sensitive, setSensitive] = useState<{ pan: string | null; bankAccount: string | null } | null>(null);
-  const [busy, setBusy] = useState(false); const [shred, setShred] = useState(false);
+  const [busy, setBusy] = useState(false); const [shred, setShred] = useState(false); const [editing, setEditing] = useState(false);
   const e = emp.data?.employee;
-  if (emp.error) return <EmptyState title="Employee not found" hint={emp.error} />;
+  const back = { to: '/hr/employees', label: 'Employees' };
+  if (emp.error) return <><PageHeader title="Employee not found" back={back} /><EmptyState title="We could not load this employee" hint={emp.error} /></>;
   if (!e) return null;
+  const subtitle = [e.designation, `Code ${e.emp_code}`, e.join_date ? `Joined ${fmtAd(e.join_date)}` : null].filter(Boolean).join(', ');
+  const recordConsent = async (modality: 'face' | 'fingerprint') => {
+    try { await bioApi.consent({ employeeId: id, modality, noticeVersion: '2026-10' }); toast.ok('Consent recorded.'); await consents.reload(); } catch (err) { toast.err(err); }
+  };
   return (
-    <Stack>
-      <PageHeader title={`${e.name_en}${e.name_ne ? ` / ${e.name_ne}` : ''}`} subtitle={`${e.emp_code} · ${e.designation ?? ''} · joined ${e.join_date ? dualDate(e.join_date, lang, numerals).bsLong : '—'}`}
-        actions={<Group gap="xs"><StatusBadge status={e.status} /><Button component={Link} to={`/me/payslips?employeeId=${id}`} variant="light" size="xs">{t('payslips')}</Button></Group>} />
-      <Tabs defaultValue="profile" keepMounted={false}>
+    <Stack gap="md">
+      <PageHeader back={back}
+        title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 12 }}><Avatar component="span" name={e.name_en} size={40} radius="xl" color="brand" variant="light" />{e.name_en}</span>}
+        subtitle={subtitle}
+        actions={<>
+          <StatusBadge status={e.status} />
+          <Button component={Link} to={`/me/payslips?employeeId=${id}`} variant="default" leftSection={<IconReceipt size={16} stroke={1.6} />}>Payslips</Button>
+          <Button leftSection={<IconPencil size={16} stroke={1.6} />} onClick={() => setEditing(true)}>Edit profile</Button>
+        </>} />
+      <Tabs defaultValue="overview" keepMounted={false}>
         <Tabs.List>
-          <Tabs.Tab value="profile">{t('profile')}</Tabs.Tab><Tabs.Tab value="leave">{t('leave')}</Tabs.Tab><Tabs.Tab value="assignments">History</Tabs.Tab>
-          <Tabs.Tab value="pay">Pay</Tabs.Tab><Tabs.Tab value="biometrics">Biometrics</Tabs.Tab><Tabs.Tab value="audit">Audit</Tabs.Tab>
+          <Tabs.Tab value="overview">Overview</Tabs.Tab>
+          <Tabs.Tab value="leave">Leave</Tabs.Tab>
+          <Tabs.Tab value="history">Employment history</Tabs.Tab>
+          <Tabs.Tab value="pay">Pay</Tabs.Tab>
+          <Tabs.Tab value="biometrics">Biometrics</Tabs.Tab>
+          <Tabs.Tab value="audit">Audit</Tabs.Tab>
         </Tabs.List>
-        <Tabs.Panel value="profile" pt="md">
-          <Paper withBorder p="md" radius="md" mb="md">
-            <Group justify="space-between"><Text fw={600}>Sensitive fields</Text>
-              {sensitive ? <Text size="sm">PAN {sensitive.pan ?? '—'} · Bank account {sensitive.bankAccount ?? '—'}</Text> : <Button size="xs" variant="light" onClick={async () => { try { setSensitive(await empApi.sensitive(id)); } catch (err) { toast.err(err); } }}>Reveal (logged)</Button>}
-            </Group>
-          </Paper>
-          <EmployeeForm initial={e} busy={busy} onSubmit={async (draft) => { setBusy(true); try { await empApi.update(id, draft); toast.ok('Saved.'); await emp.reload(); } catch (err) { toast.err(err); } finally { setBusy(false); } }} />
-        </Tabs.Panel>
-        <Tabs.Panel value="leave" pt="md">
-          <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="sm" mb="md">
-            {(balances.data?.balances ?? []).map((b) => <Paper key={b.leaveTypeId} withBorder p="sm" radius="md"><Text size="xs" c="dimmed">{b.nameEn}</Text><Text fw={700}>{fmtNum(b.available.toFixed(1), numerals)} {t('days')}</Text><Text size="xs" c="dimmed">{b.explanation}</Text></Paper>)}
-          </SimpleGrid>
-          <Paper withBorder p="md" radius="md"><Text fw={600} mb="sm">Apply on behalf</Text><LeaveApplyForm employeeId={id} onDone={() => { void balances.reload(); }} /></Paper>
-        </Tabs.Panel>
-        <Tabs.Panel value="assignments" pt="md">
-          <DataTable rows={(assignments.data?.assignments ?? []) as Array<Record<string, unknown>>} rowKey={(r) => String(r.valid)} loading={assignments.loading} emptyTitle="No assignment history."
-            columns={[{ key: 'valid', header: 'Period', render: (r) => String(r.valid) }, { key: 'branch_id', header: 'Branch', render: (r) => String(r.branch_id ?? '—') }, { key: 'employment_type', header: 'Type', render: (r) => String(r.employment_type) }, { key: 'manager_id', header: 'Manager', render: (r) => String(r.manager_id ?? '—') }]} />
-        </Tabs.Panel>
-        <Tabs.Panel value="pay" pt="md">
-          <Group mb="sm"><Button component={Link} to={`/payroll/assignments?employeeId=${id}`} variant="light" size="xs">{t('assignments')}</Button><Button component={Link} to={`/payroll/loans?employeeId=${id}`} variant="light" size="xs">{t('loans')}</Button></Group>
-          <DataTable rows={payslips.data?.payslips ?? []} rowKey={(r) => r.id} loading={payslips.loading} emptyTitle="No payslips yet."
-            columns={[{ key: 'p', header: t('month'), render: (r) => `${r.bs_year}-${String(r.bs_month).padStart(2, '0')} ${r.run_type ?? ''}` }, { key: 'net', header: t('netPay'), render: (r) => fmtMoney(r.net, { numerals }), align: 'right' }, { key: 'pub', header: 'Published', render: (r) => r.published_at ? 'yes' : 'no' }, { key: 'open', header: '', render: (r) => <Button component={Link} to={`/me/payslips/${r.id}`} size="xs" variant="subtle">Open</Button> }]} />
-        </Tabs.Panel>
-        <Tabs.Panel value="biometrics" pt="md">
-          <Stack>
-            <Group><Button size="xs" variant="light" onClick={async () => { try { await bioApi.consent({ employeeId: id, modality: 'face', noticeVersion: '2026-10' }); toast.ok('Consent recorded.'); await consents.reload(); } catch (err) { toast.err(err); } }}>Record face consent</Button>
-              <Button size="xs" variant="light" onClick={async () => { try { await bioApi.consent({ employeeId: id, modality: 'fingerprint', noticeVersion: '2026-10' }); toast.ok('Consent recorded.'); await consents.reload(); } catch (err) { toast.err(err); } }}>Record fingerprint consent</Button>
-              <Button size="xs" color="red" variant="light" onClick={() => setShred(true)}>Shred all templates</Button></Group>
-            <Text size="sm" fw={600}>Consents</Text>
-            {(consents.data?.consents ?? []).map((c) => <Text key={c.id} size="sm">{c.modality} v{c.notice_version} · {new Date(c.granted_at).toLocaleDateString()}{c.revoked_at ? ' · withdrawn' : ''}</Text>)}
-            <Text size="sm" fw={600}>Templates</Text>
-            <DataTable rows={templates.data?.templates ?? []} rowKey={(r) => r.id} loading={templates.loading} emptyTitle="No templates stored."
-              columns={[{ key: 'modality', header: 'Modality' }, { key: 'vendor_format', header: 'Format' }, { key: 'device_sn', header: 'Device', render: (r) => r.device_sn ?? '—' }, { key: 'created_at', header: 'Enrolled', render: (r) => new Date(r.created_at).toLocaleDateString() }, { key: 'shredded_at', header: 'Shredded', render: (r) => r.shredded_at ? new Date(r.shredded_at).toLocaleDateString() : '—' }]} />
+
+        <Tabs.Panel value="overview" pt="lg">
+          <Stack gap="lg">
+            <Paper withBorder p="lg">
+              <SimpleGrid cols={{ base: 1, xs: 2, md: 4 }} spacing="lg" verticalSpacing="md">
+                <Field label="Email">{e.email ?? '—'}</Field>
+                <Field label="Phone">{e.phone ?? '—'}</Field>
+                <Field label="Gender">{humanize(e.gender)}</Field>
+                <Field label="Date of birth">{fmtAd(e.dob)}</Field>
+                <Field label="Join date">{fmtAd(e.join_date)}</Field>
+                <Field label="Probation ends">{fmtAd(e.probation_end)}</Field>
+                <Field label="Employment type">{e.employment_type ? EMPLOYMENT[e.employment_type] ?? humanize(e.employment_type) : '—'}</Field>
+                <Field label="Grade">{e.grade ?? '—'}</Field>
+                <Field label="Weekly off">{e.weekly_off_days.length ? e.weekly_off_days.map((d) => DAY_NAMES[d] ?? d).join(', ') : 'None'}</Field>
+                <Field label="Overtime">{e.ot_eligible ? 'Eligible' : 'Not eligible'}</Field>
+                <Field label="Retirement scheme">{REGIME[e.regime] ?? e.regime}</Field>
+                <Field label="Exit date">{fmtAd(e.exit_date)}</Field>
+              </SimpleGrid>
+            </Paper>
+            <Paper withBorder p="lg">
+              <Group justify="space-between" wrap="wrap" gap="sm">
+                <Group gap="sm" wrap="nowrap">
+                  <IconLock size={18} stroke={1.6} color="var(--hj-muted)" />
+                  <div>
+                    <Text fw={600} size="sm">Sensitive fields</Text>
+                    <Text size="xs" c="dimmed">PAN and bank account are encrypted. Revealing them is logged.</Text>
+                  </div>
+                </Group>
+                {sensitive
+                  ? <Group gap="xl"><Field label="PAN">{sensitive.pan ?? '—'}</Field><Field label="Bank account">{sensitive.bankAccount ?? '—'}</Field></Group>
+                  : <Button variant="default" leftSection={<IconEye size={16} stroke={1.6} />} onClick={async () => { try { setSensitive(await empApi.sensitive(id)); } catch (err) { toast.err(err); } }}>Reveal</Button>}
+              </Group>
+            </Paper>
           </Stack>
         </Tabs.Panel>
-        <Tabs.Panel value="audit" pt="md">
-          <DataTable rows={audit.data?.events ?? []} rowKey={(r) => String(r.id)} loading={audit.loading} emptyTitle="No audit events."
-            columns={[{ key: 'occurred_at', header: 'When', render: (r) => new Date(r.occurred_at).toLocaleString() }, { key: 'action', header: 'Action' }, { key: 'table_name', header: 'Record' }, { key: 'actor_id', header: 'Actor', render: (r) => r.actor_id ?? 'system' }]} />
+
+        <Tabs.Panel value="leave" pt="lg">
+          <Stack gap="lg">
+            <div>
+              <SectionTitle>Balances</SectionTitle>
+              <DataTable rows={balances.data?.balances ?? []} rowKey={(b) => b.leaveTypeId} loading={balances.loading} error={balances.error} emptyTitle="No leave balances" emptyHint="Balances appear once leave types are set up."
+                columns={[
+                  { key: 'type', header: 'Leave type', render: (b) => <Text size="sm" fw={500}>{b.nameEn}</Text> },
+                  { key: 'available', header: 'Available', align: 'right', render: (b) => <span className="num">{b.available.toFixed(1)} days</span> },
+                  { key: 'explanation', header: 'How it adds up', render: (b) => <Text size="xs" c="dimmed">{b.explanation}</Text> },
+                ]} />
+            </div>
+            <Paper withBorder p="lg">
+              <SectionTitle hint="Files a leave request for this employee.">Apply on their behalf</SectionTitle>
+              <LeaveApplyForm employeeId={id} onDone={() => { void balances.reload(); }} />
+            </Paper>
+          </Stack>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="history" pt="lg">
+          <DataTable rows={assignments.data?.assignments ?? []} rowKey={(r) => String(r.valid)} loading={assignments.loading} error={assignments.error} emptyTitle="No employment history yet" emptyHint="Changes to branch, manager or employment type are recorded here."
+            columns={[
+              { key: 'valid', header: 'Period', render: (r) => <span className="num">{fmtRange(r.valid)}</span> },
+              { key: 'employment_type', header: 'Type', render: (r) => EMPLOYMENT[String(r.employment_type)] ?? humanize(r.employment_type) },
+              { key: 'branch_id', header: 'Branch', render: (r) => String(r.branch_id ?? '—') },
+              { key: 'manager_id', header: 'Manager', render: (r) => String(r.manager_id ?? '—') },
+            ]} />
+        </Tabs.Panel>
+
+        <Tabs.Panel value="pay" pt="lg">
+          <Stack gap="md">
+            <Group gap="xs">
+              <Button component={Link} to={`/payroll/assignments?employeeId=${id}`} variant="default">Salary assignments</Button>
+              <Button component={Link} to={`/payroll/loans?employeeId=${id}`} variant="default">Loans</Button>
+            </Group>
+            <DataTable rows={payslips.data?.payslips ?? []} rowKey={(r) => r.id} loading={payslips.loading} error={payslips.error} emptyTitle="No payslips yet" emptyHint="Payslips appear here after a payroll run is calculated."
+              columns={[
+                { key: 'p', header: 'Month', render: (r) => <Text size="sm" fw={500}>{r.bs_year && r.bs_month ? bsMonthLabel(r.bs_year, r.bs_month) : '—'}{r.run_type && r.run_type !== 'regular' ? <Text span size="xs" c="dimmed"> {humanize(r.run_type)}</Text> : null}</Text> },
+                { key: 'net', header: 'Net pay', align: 'right', render: (r) => <span className="num">{fmtMoney(r.net)}</span> },
+                { key: 'pub', header: 'Status', render: (r) => <StatusBadge status={r.published_at ? 'published' : 'draft'} /> },
+                { key: 'open', header: '', align: 'right', render: (r) => <Button component={Link} to={`/me/payslips/${r.id}`} size="xs" variant="subtle">Open</Button> },
+              ]} />
+          </Stack>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="biometrics" pt="lg">
+          <Stack gap="lg">
+            <Group gap="xs" wrap="wrap">
+              <Button variant="default" leftSection={<IconFingerprint size={16} stroke={1.6} />} onClick={() => recordConsent('face')}>Record face consent</Button>
+              <Button variant="default" leftSection={<IconFingerprint size={16} stroke={1.6} />} onClick={() => recordConsent('fingerprint')}>Record fingerprint consent</Button>
+              <Button variant="subtle" color="red" leftSection={<IconTrash size={16} stroke={1.6} />} onClick={() => setShred(true)} ml="auto">Shred all templates</Button>
+            </Group>
+            <div>
+              <SectionTitle>Consents</SectionTitle>
+              {(consents.data?.consents ?? []).length ? (
+                <Paper withBorder style={{ overflow: 'hidden' }}>
+                  <Table>
+                    <Table.Thead><Table.Tr><Table.Th>Modality</Table.Th><Table.Th>Notice version</Table.Th><Table.Th>Granted</Table.Th><Table.Th>Status</Table.Th></Table.Tr></Table.Thead>
+                    <Table.Tbody>
+                      {(consents.data?.consents ?? []).map((c) => (
+                        <Table.Tr key={c.id}>
+                          <Table.Td>{humanize(c.modality)}</Table.Td>
+                          <Table.Td className="num">{c.notice_version}</Table.Td>
+                          <Table.Td className="num">{fmtAd(nptDate(c.granted_at))}</Table.Td>
+                          <Table.Td><StatusBadge status={c.revoked_at ? 'cancelled' : 'active'} /></Table.Td>
+                        </Table.Tr>
+                      ))}
+                    </Table.Tbody>
+                  </Table>
+                </Paper>
+              ) : <EmptyState compact title="No consent recorded" hint="Record consent before enrolling a face or fingerprint." icon={<IconFingerprint size={20} stroke={1.6} />} />}
+            </div>
+            <div>
+              <SectionTitle>Templates</SectionTitle>
+              <DataTable rows={templates.data?.templates ?? []} rowKey={(r) => r.id} loading={templates.loading} error={templates.error} emptyTitle="No templates stored" emptyHint="Templates appear after the employee enrols on a terminal."
+                columns={[
+                  { key: 'modality', header: 'Modality', render: (r) => humanize(r.modality) },
+                  { key: 'vendor_format', header: 'Format' },
+                  { key: 'device_sn', header: 'Device', render: (r) => r.device_sn ?? '—' },
+                  { key: 'created_at', header: 'Enrolled', render: (r) => <span className="num">{fmtAd(nptDate(r.created_at))}</span> },
+                  { key: 'shredded_at', header: 'Shredded', render: (r) => <span className="num">{r.shredded_at ? fmtAd(nptDate(r.shredded_at)) : '—'}</span> },
+                ]} />
+            </div>
+          </Stack>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="audit" pt="lg">
+          <DataTable rows={audit.data?.events ?? []} rowKey={(r) => String(r.id)} loading={audit.loading} error={audit.error} emptyTitle="No changes recorded yet"
+            columns={[
+              { key: 'occurred_at', header: 'When', render: (r) => <span className="num">{fmtAd(nptDate(r.occurred_at))}, {fmtTime(r.occurred_at)}</span> },
+              { key: 'action', header: 'Action', render: (r) => humanize(r.action) },
+              { key: 'table_name', header: 'Record', render: (r) => <Text size="sm" ff="monospace" c="dimmed">{r.table_name}</Text> },
+              { key: 'actor_id', header: 'By', render: (r) => r.actor_id ?? 'System' },
+            ]} />
         </Tabs.Panel>
       </Tabs>
-      <ConfirmDialog opened={shred} onClose={() => setShred(false)} title="Shred all biometric templates" confirmLabel="Shred" message={`All stored templates for ${e.name_en} will be cryptographically destroyed and consents withdrawn. The employee will need re-enrolment to use face or fingerprint again.`}
-        onConfirm={async () => { try { const r = await bioApi.shredAll(id); toast.ok(`${r.shredded} template(s) shredded.`); await Promise.all([templates.reload(), consents.reload()]); } catch (err) { toast.err(err); } }} />
+
+      <Drawer opened={editing} onClose={() => setEditing(false)} title="Edit profile" position="right" size="lg">
+        <EmployeeForm initial={e} busy={busy} onSubmit={async (draft) => { setBusy(true); try { await empApi.update(id, draft); toast.ok('Changes saved.'); setEditing(false); await emp.reload(); } catch (err) { toast.err(err); } finally { setBusy(false); } }} />
+      </Drawer>
+      <ConfirmDialog opened={shred} onClose={() => setShred(false)} title="Shred all biometric templates?" confirmLabel="Shred templates"
+        message={`Every stored template for ${e.name_en} will be permanently destroyed and their consents withdrawn. They will need to enrol again to use face or fingerprint.`}
+        onConfirm={async () => { try { const r = await bioApi.shredAll(id); toast.ok(`${r.shredded} ${r.shredded === 1 ? 'template' : 'templates'} shredded.`); await Promise.all([templates.reload(), consents.reload()]); } catch (err) { toast.err(err); } }} />
     </Stack>
   );
 }

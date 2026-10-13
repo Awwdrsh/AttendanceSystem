@@ -1,41 +1,60 @@
-import { Button, Group, Paper, SegmentedControl, SimpleGrid, Stack, Text, Title } from '@mantine/core';
+import { Avatar, Button, Group, Paper, SimpleGrid, Stack, Text } from '@mantine/core';
+import { IconKey } from '@tabler/icons-react';
 import { Link } from 'react-router-dom';
 import { employees as empApi } from '../../api';
 import { useAuth } from '../../auth/AuthProvider';
-import { PageHeader } from '../../components/PageHeader';
-import { useI18n } from '../../i18n';
-import { dualDate } from '../../lib/format';
+import { Field } from '../../components/Kpi';
+import { PageHeader, SectionTitle } from '../../components/PageHeader';
+import { fmtAd } from '../../lib/format';
 import { useQuery } from '../../lib/useQuery';
+
+const ROLE: Record<string, string> = { admin: 'Admin', hr: 'HR', finance: 'Finance', manager: 'Manager', employee: 'Employee' };
+const REGIME: Record<string, string> = { ssf: 'Social Security Fund (SSF)', pf: 'Provident Fund (PF)', none: 'None' };
+
+function initials(name: string | undefined): string {
+  const parts = (name ?? '').trim().split(/\s+/).filter(Boolean);
+  return ((parts[0]?.[0] ?? '') + (parts.length > 1 ? parts[parts.length - 1]![0] : '')).toUpperCase() || '?';
+}
 
 export default function ProfilePage() {
   const { user } = useAuth();
-  const { t, lang, setLang, numerals, setNumerals } = useI18n();
   const emp = useQuery(() => empApi.get(user!.employeeId!), [user?.employeeId], { enabled: !!user?.employeeId });
   const e = emp.data?.employee;
-  const row = (k: string, v: string | null | undefined) => <div><Text size="xs" c="dimmed">{k}</Text><Text>{v || '—'}</Text></div>;
   return (
-    <Stack>
-      <PageHeader title={t('profile')} actions={<Button component={Link} to="/change-password" variant="light">{t('changePassword')}</Button>} />
-      <Paper withBorder p="md" radius="md">
-        <Title order={5} mb="sm">{user?.name}</Title>
-        <SimpleGrid cols={{ base: 2, md: 4 }}>
-          {row(t('email'), user?.email)}
-          {row('Roles', user?.roles.join(', '))}
-          {e ? row('Employee code', e.emp_code) : null}
-          {e ? row('नाम', e.name_ne) : null}
-          {e ? row('Designation', e.designation) : null}
-          {e ? row('Joined', e.join_date ? `${dualDate(e.join_date, lang, numerals).bs} · ${dualDate(e.join_date).ad}` : null) : null}
-          {e ? row('Regime', e.regime.toUpperCase()) : null}
-          {e ? row('Bank', e.bank_code ? `${e.bank_code} ****${e.bank_account_last4 ?? ''}` : null) : null}
+    <Stack gap="lg">
+      <PageHeader title="Profile" subtitle="Your account and employment details. Ask HR if anything here is wrong." />
+
+      <Paper withBorder p="lg">
+        <Group gap="md" wrap="nowrap" mb="lg">
+          <Avatar color="brand" radius="xl" size={48}>{initials(user?.name)}</Avatar>
+          <div style={{ minWidth: 0 }}>
+            <Text fw={600} size="lg" truncate>{user?.name}</Text>
+            <Text size="sm" c="dimmed" truncate>{[e?.designation, user?.email].filter(Boolean).join(', ')}</Text>
+          </div>
+        </Group>
+        <SimpleGrid cols={{ base: 1, xs: 2, md: 4 }} spacing="lg">
+          <Field label="Email">{user?.email || '—'}</Field>
+          <Field label="Roles">{user?.roles.map((r) => ROLE[r] ?? r).join(', ') || '—'}</Field>
+          {e ? <Field label="Employee code">{e.emp_code}</Field> : null}
+          {e ? <Field label="Designation">{e.designation || '—'}</Field> : null}
+          {e ? <Field label="Joined">{fmtAd(e.join_date)}</Field> : null}
+          {e ? <Field label="Retirement scheme">{REGIME[e.regime] ?? e.regime}</Field> : null}
+          {e ? <Field label="Bank account">{e.bank_code ? `${e.bank_code}, ending ${e.bank_account_last4 ?? '—'}` : '—'}</Field> : null}
         </SimpleGrid>
       </Paper>
-      <Paper withBorder p="md" radius="md">
-        <Group gap="xl" wrap="wrap">
-          <div><Text size="sm" fw={600}>{t('language')}</Text><SegmentedControl value={lang} onChange={(v) => setLang(v as 'en' | 'ne')} data={[{ value: 'ne', label: 'नेपाली' }, { value: 'en', label: 'English' }]} /></div>
-          <div><Text size="sm" fw={600}>{t('numerals')}</Text><SegmentedControl value={numerals} onChange={(v) => setNumerals(v as 'latin' | 'devanagari')} data={[{ value: 'latin', label: '0-9' }, { value: 'devanagari', label: '०-९' }]} /></div>
-        </Group>
-        <Text size="xs" c="dimmed" mt="sm">IDs, PAN, bank accounts and phone numbers are always shown in Latin digits.</Text>
-      </Paper>
+
+      <div>
+        <SectionTitle>Security</SectionTitle>
+        <Paper withBorder p="lg">
+          <Group justify="space-between" wrap="wrap" gap="sm">
+            <div>
+              <Text size="sm" fw={500}>Password</Text>
+              <Text size="sm" c="dimmed">Changing it signs you out on every device.</Text>
+            </div>
+            <Button component={Link} to="/change-password" variant="default" leftSection={<IconKey size={16} stroke={1.6} />}>Change password</Button>
+          </Group>
+        </Paper>
+      </div>
     </Stack>
   );
 }
