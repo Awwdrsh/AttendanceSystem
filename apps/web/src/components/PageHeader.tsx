@@ -2,9 +2,21 @@ import { Anchor, Group, Stack, Text, Title } from '@mantine/core';
 import { IconChevronLeft } from '@tabler/icons-react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
+import { useEmbedded } from './embedded';
 
 /** Page title, one line of context, and the page's actions on the right. */
 export function PageHeader({ title, subtitle, actions, back }: { title: ReactNode; subtitle?: ReactNode; actions?: ReactNode; back?: { to: string; label: string } }) {
+  const embedded = useEmbedded();
+  if (embedded) {
+    // Inside a hub tab: the hub already shows the title; keep the tab's description and actions on one row.
+    if (!subtitle && !actions) return null;
+    return (
+      <Group justify="space-between" align="center" wrap="wrap" gap="md" mb="lg">
+        {subtitle ? <Text c="dimmed" size="sm" maw={680}>{subtitle}</Text> : <span />}
+        {actions ? <Group gap="xs" wrap="wrap">{actions}</Group> : null}
+      </Group>
+    );
+  }
   return (
     <Stack gap={10} mb={24}>
       {back ? (

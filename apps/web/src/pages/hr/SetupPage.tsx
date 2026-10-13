@@ -23,17 +23,17 @@ export default function SetupPage() {
   }, []);
   const d = q.data;
   const steps: Step[] = d ? [
-    { title: 'Company profile', done: !!d.company.company.nameEn, detail: d.company.company.nameEn || 'Add your company name, PAN and address.', go: '/hr/settings', cta: 'Open settings' },
-    { title: 'Branches', done: d.branches > 0, detail: d.branches > 0 ? plural(d.branches, 'branch', 'branches') : 'Add at least one branch or office.', go: '/hr/settings', cta: 'Open settings' },
-    { title: 'Holiday calendar', done: d.holidays > 0, detail: d.holidays > 0 ? plural(d.holidays, 'holiday', 'holidays') : 'Load the public holidays for this year.', go: '/hr/holidays', cta: 'Open holidays',
+    { title: 'Company profile', done: !!d.company.company.nameEn, detail: d.company.company.nameEn || 'Add your company name, PAN and address.', go: '/settings', cta: 'Open settings' },
+    { title: 'Branches', done: d.branches > 0, detail: d.branches > 0 ? plural(d.branches, 'branch', 'branches') : 'Add at least one branch or office.', go: '/settings', cta: 'Open settings' },
+    { title: 'Holiday calendar', done: d.holidays > 0, detail: d.holidays > 0 ? plural(d.holidays, 'holiday', 'holidays') : 'Load the public holidays for this year.', go: '/settings/holidays', cta: 'Open holidays',
       auto: { label: 'Add public holidays', run: async () => { const r = await shiftApi.importHolidays(2083); toast.ok(`${r.inserted} holidays added.`); } } },
-    { title: 'Shifts', done: d.shifts > 0, detail: d.shifts > 0 ? plural(d.shifts, 'shift', 'shifts') : 'Define working hours and grace periods.', go: '/hr/shifts', cta: 'Open shifts',
+    { title: 'Shifts', done: d.shifts > 0, detail: d.shifts > 0 ? plural(d.shifts, 'shift', 'shifts') : 'Define working hours and grace periods.', go: '/settings/shifts', cta: 'Open shifts',
       auto: d.shifts === 0 ? { label: 'Create 10:00 to 18:00 shift', run: async () => { await shiftApi.create({ code: 'GEN', nameEn: 'General 10:00–18:00', start: '10:00', end: '18:00', graceInMin: 15, graceOutMin: 0, earlyInWindowMin: 60, lateOutWindowMin: 120, breakMinutes: 0, halfDayThresholdMin: 240, absentThresholdMin: 120, pairingMode: 'alternating', roundingMin: 0, roundingDirection: 'nearest' }); toast.ok('General shift created.'); } } : undefined },
-    { title: 'Leave policies', done: d.types > 0, detail: d.types > 0 ? `${plural(d.types, 'leave type', 'leave types')}, statutory defaults included` : 'Review the statutory leave types.', go: '/hr/leave-types', cta: 'Open leave types' },
+    { title: 'Leave policies', done: d.types > 0, detail: d.types > 0 ? `${plural(d.types, 'leave type', 'leave types')}, statutory defaults included` : 'Review the statutory leave types.', go: '/leave/policies', cta: 'Open leave types' },
     { title: 'Pay components and statutory rules', done: d.comps > 0, detail: d.comps > 0 ? plural(d.comps, 'component', 'components') : 'Set up basic pay, allowances and deductions.', go: '/payroll/structures', cta: 'Open salary structures' },
-    { title: 'Employees', done: d.emps > 0, detail: d.emps > 0 ? `${d.emps} active` : 'Add people one by one or import a CSV.', go: '/hr/employees', cta: 'Open employees' },
-    { title: 'Attendance terminals', done: d.devs > 0 && d.pending === 0, detail: d.devs > 0 ? `${plural(d.devs, 'terminal', 'terminals')}, ${d.pending} waiting for approval` : 'Connect your biometric terminals.', go: '/hr/devices', cta: 'Open devices' },
-    { title: 'Pilot, then go live', done: false, detail: 'Run one department for two pay cycles alongside your current method before switching everyone over.', go: '/hr/dashboard', cta: 'Open overview' },
+    { title: 'Employees', done: d.emps > 0, detail: d.emps > 0 ? `${d.emps} active` : 'Add people one by one or import a CSV.', go: '/employees', cta: 'Open employees' },
+    { title: 'Attendance terminals', done: d.devs > 0 && d.pending === 0, detail: d.devs > 0 ? `${plural(d.devs, 'terminal', 'terminals')}, ${d.pending} waiting for approval` : 'Connect your biometric terminals.', go: '/settings/devices', cta: 'Open devices' },
+    { title: 'Pilot, then go live', done: false, detail: 'Run one department for two pay cycles alongside your current method before switching everyone over.', go: '/overview', cta: 'Open overview' },
   ] : [];
   const doneCount = steps.filter((s) => s.done).length;
   const nextIdx = steps.findIndex((s) => !s.done);

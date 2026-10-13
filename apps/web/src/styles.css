@@ -67,3 +67,10 @@ body { background: var(--hj-canvas); -webkit-font-smoothing: antialiased; font-f
 .mantine-Spotlight-action[data-selected] .mantine-Spotlight-actionDescription { color: var(--hj-muted); }
 .mantine-Spotlight-action mark { background: transparent; color: var(--mantine-color-brand-7); font-weight: 600; }
 .mantine-Spotlight-actionSection[data-position='left'] { color: var(--hj-muted); }
+
+/* Tabs inside a hub tab render as quiet pills so the two levels read differently. */
+.hj-embedded .mantine-Tabs-list { gap: 4px; flex-wrap: wrap; }
+.hj-embedded .mantine-Tabs-list::before { display: none; }
+.hj-embedded .mantine-Tabs-tab { border: 0; border-radius: 6px; padding: 6px 12px; font-size: 13.5px; color: var(--hj-muted); }
+.hj-embedded .mantine-Tabs-tab:hover { background: var(--hj-line-soft); }
+.hj-embedded .mantine-Tabs-tab[data-active] { background: var(--hj-line-soft); color: inherit; font-weight: 500; }

@@ -1,57 +1,48 @@
 import { lazy } from 'react';
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useParams } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { RequireRole } from './auth/RequireRole';
 import { useAuth } from './auth/AuthProvider';
+import { AttendanceHub, LeaveHub, PayrollHub, ProfileHub, SettingsHub } from './pages/hubs';
 
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const ChangePasswordPage = lazy(() => import('./pages/ChangePasswordPage'));
 const HomePage = lazy(() => import('./pages/employee/HomePage'));
 const MyAttendancePage = lazy(() => import('./pages/employee/MyAttendancePage'));
 const LeavePage = lazy(() => import('./pages/employee/LeavePage'));
-const OvertimePage = lazy(() => import('./pages/employee/OvertimePage'));
 const PayslipsPage = lazy(() => import('./pages/employee/PayslipsPage'));
 const PayslipDetailPage = lazy(() => import('./pages/employee/PayslipDetailPage'));
-const MyDataPage = lazy(() => import('./pages/employee/MyDataPage'));
 const NotificationsPage = lazy(() => import('./pages/employee/NotificationsPage'));
-const ProfilePage = lazy(() => import('./pages/employee/ProfilePage'));
 const ApprovalsPage = lazy(() => import('./pages/manager/ApprovalsPage'));
-const TeamTodayPage = lazy(() => import('./pages/manager/TeamTodayPage'));
-const TeamCalendarPage = lazy(() => import('./pages/manager/TeamCalendarPage'));
-const FixPunchPage = lazy(() => import('./pages/manager/FixPunchPage'));
-const RosterPage = lazy(() => import('./pages/manager/RosterPage'));
-const SetupPage = lazy(() => import('./pages/hr/SetupPage'));
 const DashboardPage = lazy(() => import('./pages/hr/DashboardPage'));
 const EmployeesPage = lazy(() => import('./pages/hr/EmployeesPage'));
 const EmployeeDetailPage = lazy(() => import('./pages/hr/EmployeeDetailPage'));
-const DevicesPage = lazy(() => import('./pages/hr/DevicesPage'));
-const ShiftsPage = lazy(() => import('./pages/hr/ShiftsPage'));
-const HolidaysPage = lazy(() => import('./pages/hr/HolidaysPage'));
-const LocationsPage = lazy(() => import('./pages/hr/LocationsPage'));
-const LeaveTypesPage = lazy(() => import('./pages/hr/LeaveTypesPage'));
-const LeaveAdjustPage = lazy(() => import('./pages/hr/LeaveAdjustPage'));
-const ExceptionsPage = lazy(() => import('./pages/hr/ExceptionsPage'));
-const RequestsPage = lazy(() => import('./pages/hr/RequestsPage'));
-const OtSlipsPage = lazy(() => import('./pages/hr/OtSlipsPage'));
-const SettingsPage = lazy(() => import('./pages/hr/SettingsPage'));
 const ReportsPage = lazy(() => import('./pages/hr/ReportsPage'));
-const UsersPage = lazy(() => import('./pages/hr/UsersPage'));
-const PayrollHubPage = lazy(() => import('./pages/payroll/PayrollHubPage'));
 const RunWizardPage = lazy(() => import('./pages/payroll/RunWizardPage'));
-const StructuresPage = lazy(() => import('./pages/payroll/StructuresPage'));
-const AssignmentsPage = lazy(() => import('./pages/payroll/AssignmentsPage'));
-const DeclarationsPage = lazy(() => import('./pages/payroll/DeclarationsPage'));
-const LoansPage = lazy(() => import('./pages/payroll/LoansPage'));
-const RulesPage = lazy(() => import('./pages/payroll/RulesPage'));
 
-/** Home depends on who you are: employees land on Today; everyone else on the dashboard they can see. */
+/** Everyone lands where their work is: employees on their own day, HR on the overview, finance on payroll, managers on approvals. */
 function Home() {
   const { user, hasRole } = useAuth();
   if (user?.employeeId) return <HomePage />;
-  if (hasRole('hr', 'finance')) return <Navigate to="/hr/dashboard" replace />;
-  if (hasRole('manager')) return <Navigate to="/manager/approvals" replace />;
+  if (hasRole('hr')) return <Navigate to="/overview" replace />;
+  if (hasRole('finance')) return <Navigate to="/payroll" replace />;
+  if (hasRole('manager')) return <Navigate to="/approvals" replace />;
   return <HomePage />;
 }
+
+function EmployeeRedirect() {
+  const { id } = useParams();
+  return <Navigate to={`/employees/${id ?? ''}`} replace />;
+}
+
+/** Addresses from the earlier layout keep working. */
+const LEGACY: Array<[string, string]> = [
+  ['/hr/dashboard', '/overview'], ['/hr/employees', '/employees'], ['/manager/approvals', '/approvals'], ['/manager/team', '/attendance'],
+  ['/hr/exceptions', '/attendance/exceptions'], ['/hr/ot-slips', '/attendance/overtime'], ['/manager/fix-punch', '/attendance/fix'],
+  ['/manager/calendar', '/leave'], ['/hr/requests', '/leave/history'], ['/hr/leave-adjust', '/leave/balances'], ['/hr/leave-types', '/leave/policies'],
+  ['/hr/reports', '/reports'], ['/hr/settings', '/settings'], ['/hr/shifts', '/settings/shifts'], ['/hr/holidays', '/settings/holidays'],
+  ['/hr/devices', '/settings/devices'], ['/hr/users', '/settings/users'], ['/hr/setup', '/settings/setup'], ['/me/data', '/me/profile/privacy'],
+];
 
 export function App() {
   return (
@@ -63,46 +54,28 @@ export function App() {
           <Route path="/" element={<Home />} />
           <Route path="/me/attendance" element={<MyAttendancePage />} />
           <Route path="/me/leave" element={<LeavePage />} />
-          <Route path="/me/overtime" element={<OvertimePage />} />
           <Route path="/me/payslips" element={<PayslipsPage />} />
           <Route path="/me/payslips/:id" element={<PayslipDetailPage />} />
-          <Route path="/me/data" element={<MyDataPage />} />
           <Route path="/me/notifications" element={<NotificationsPage />} />
-          <Route path="/me/profile" element={<ProfilePage />} />
+          <Route path="/me/profile/*" element={<ProfileHub />} />
           <Route element={<RequireRole roles={['manager', 'hr']} />}>
-            <Route path="/manager/approvals" element={<ApprovalsPage />} />
-            <Route path="/manager/team" element={<TeamTodayPage />} />
-            <Route path="/manager/calendar" element={<TeamCalendarPage />} />
-            <Route path="/manager/fix-punch" element={<FixPunchPage />} />
-            <Route path="/manager/roster" element={<RosterPage />} />
+            <Route path="/approvals" element={<ApprovalsPage />} />
+            <Route path="/attendance/*" element={<AttendanceHub />} />
+            <Route path="/leave/*" element={<LeaveHub />} />
           </Route>
           <Route element={<RequireRole roles={['hr']} />}>
-            <Route path="/hr/setup" element={<SetupPage />} />
-            <Route path="/hr/dashboard" element={<DashboardPage />} />
-            <Route path="/hr/employees" element={<EmployeesPage />} />
-            <Route path="/hr/employees/:id" element={<EmployeeDetailPage />} />
-            <Route path="/hr/devices" element={<DevicesPage />} />
-            <Route path="/hr/shifts" element={<ShiftsPage />} />
-            <Route path="/hr/holidays" element={<HolidaysPage />} />
-            <Route path="/hr/locations" element={<LocationsPage />} />
-            <Route path="/hr/leave-types" element={<LeaveTypesPage />} />
-            <Route path="/hr/leave-adjust" element={<LeaveAdjustPage />} />
-            <Route path="/hr/exceptions" element={<ExceptionsPage />} />
-            <Route path="/hr/requests" element={<RequestsPage />} />
-            <Route path="/hr/ot-slips" element={<OtSlipsPage />} />
-            <Route path="/hr/settings" element={<SettingsPage />} />
-            <Route path="/hr/reports" element={<ReportsPage />} />
-            <Route path="/hr/users" element={<UsersPage />} />
+            <Route path="/overview" element={<DashboardPage />} />
+            <Route path="/employees" element={<EmployeesPage />} />
+            <Route path="/employees/:id" element={<EmployeeDetailPage />} />
+            <Route path="/reports" element={<ReportsPage />} />
+            <Route path="/settings/*" element={<SettingsHub />} />
           </Route>
           <Route element={<RequireRole roles={['finance', 'hr']} />}>
-            <Route path="/payroll" element={<PayrollHubPage />} />
             <Route path="/payroll/runs/:id" element={<RunWizardPage />} />
-            <Route path="/payroll/structures" element={<StructuresPage />} />
-            <Route path="/payroll/assignments" element={<AssignmentsPage />} />
-            <Route path="/payroll/declarations" element={<DeclarationsPage />} />
-            <Route path="/payroll/loans" element={<LoansPage />} />
-            <Route path="/payroll/rules" element={<RulesPage />} />
+            <Route path="/payroll/*" element={<PayrollHub />} />
           </Route>
+          <Route path="/hr/employees/:id" element={<EmployeeRedirect />} />
+          {LEGACY.map(([from, to]) => <Route key={from} path={from} element={<Navigate to={to} replace />} />)}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Route>

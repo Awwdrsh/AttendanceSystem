@@ -2,74 +2,68 @@ import { ActionIcon, AppShell, Avatar, Badge, Box, Burger, Center, Group, Indica
 import { useDisclosure, useHotkeys, useMediaQuery } from '@mantine/hooks';
 import { Spotlight, spotlight, type SpotlightActionData } from '@mantine/spotlight';
 import {
-  IconAdjustmentsHorizontal, IconBell, IconBuildingBank, IconCalendarEvent, IconCalendarStats, IconCalendarTime, IconChecklist,
-  IconChevronDown, IconClockEdit, IconClockHour4, IconCoin, IconDeviceDesktopAnalytics, IconFileInvoice, IconFingerprint, IconGavel, IconHome,
-  IconLayoutDashboard, IconLogout, IconMapPin, IconMoon, IconReceipt2, IconReportAnalytics, IconSearch, IconSelector, IconShieldLock, IconSun,
-  IconUserCircle, IconUserShield, IconUsers, IconUsersGroup, IconAlertTriangle, IconInbox, IconListCheck, IconBeach, IconCash, IconFileCertificate,
-  IconAdjustments, IconHourglass, type Icon,
+  IconAdjustmentsHorizontal, IconBell, IconBuildingBank, IconCalendarEvent, IconCalendarStats, IconChecklist,
+  IconClockEdit, IconClockHour4, IconCoin, IconFileInvoice, IconFingerprint, IconGavel, IconHome,
+  IconLayoutDashboard, IconLogout, IconMoon, IconReceipt2, IconReportAnalytics, IconSearch, IconSelector, IconSun,
+  IconUserCircle, IconUserShield, IconUsers, IconAlertTriangle, IconListCheck, IconBeach, IconCash, IconFileCertificate,
+  IconAdjustments, IconSettings, type Icon,
 } from '@tabler/icons-react';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthProvider';
-import { notifications as notifApi, settings as settingsApi } from '../api';
+import { notifications as notifApi, settings as settingsApi, workflow as workflowApi } from '../api';
 import type { Role } from '../api/types';
 
-interface NavItem { to: string; label: string; icon: Icon; roles?: Role[]; employeeOnly?: boolean; keywords?: string[] }
-interface NavGroup { id: string; title: string; items: NavItem[]; roles?: Role[]; collapsible?: boolean }
+interface NavItem { to: string; label: string; icon: Icon; roles?: Role[]; employeeOnly?: boolean; keywords?: string[]; match?: string[]; badge?: 'approvals' }
+interface NavGroup { id: string; title: string; items: NavItem[]; roles?: Role[] }
 
 const NAV: NavGroup[] = [
-  { id: 'me', title: 'You', items: [
-    { to: '/', label: 'Home', icon: IconHome, keywords: ['today', 'clock in', 'punch'] },
+  { id: 'me', title: 'My work', items: [
+    { to: '/', label: 'Home', icon: IconHome, employeeOnly: true, keywords: ['today', 'clock in', 'clock out', 'punch'] },
     { to: '/me/attendance', label: 'My attendance', icon: IconCalendarStats, employeeOnly: true },
-    { to: '/me/leave', label: 'Time off', icon: IconBeach, employeeOnly: true, keywords: ['leave', 'holiday', 'vacation'] },
-    { to: '/me/overtime', label: 'Overtime', icon: IconHourglass, employeeOnly: true },
+    { to: '/me/leave', label: 'Time off', icon: IconBeach, employeeOnly: true, keywords: ['leave', 'holiday', 'vacation', 'apply'] },
     { to: '/me/payslips', label: 'Payslips', icon: IconReceipt2, employeeOnly: true, keywords: ['salary', 'pay'] },
   ] },
-  { id: 'team', title: 'Team', roles: ['manager', 'hr'], items: [
-    { to: '/manager/approvals', label: 'Approvals', icon: IconListCheck, keywords: ['approve', 'requests'] },
-    { to: '/manager/team', label: "Who's in", icon: IconUsersGroup, keywords: ['team today', 'present'] },
-    { to: '/manager/calendar', label: 'Team calendar', icon: IconCalendarEvent },
-    { to: '/manager/roster', label: 'Roster', icon: IconCalendarTime, keywords: ['schedule', 'shifts'] },
-    { to: '/manager/fix-punch', label: 'Fix a punch', icon: IconClockEdit, keywords: ['correct', 'missing'] },
+  { id: 'manage', title: 'Manage', roles: ['manager', 'hr', 'finance'], items: [
+    { to: '/overview', label: 'Overview', icon: IconLayoutDashboard, roles: ['hr'], keywords: ['dashboard'] },
+    { to: '/approvals', label: 'Approvals', icon: IconListCheck, roles: ['manager', 'hr'], keywords: ['approve', 'requests', 'inbox'], badge: 'approvals' },
+    { to: '/employees', label: 'Employees', icon: IconUsers, roles: ['hr'], keywords: ['staff', 'people', 'add employee'] },
+    { to: '/attendance', label: 'Attendance', icon: IconClockHour4, roles: ['manager', 'hr'], keywords: ["who's in", 'today', 'exceptions', 'overtime', 'fix punch'] },
+    { to: '/leave', label: 'Leave', icon: IconCalendarEvent, roles: ['manager', 'hr'], keywords: ['calendar', 'balances', 'policies', 'time off'] },
+    { to: '/payroll', label: 'Payroll', icon: IconCash, roles: ['finance', 'hr'], keywords: ['pay run', 'salary', 'tax', 'loans', 'ssf'] },
+    { to: '/reports', label: 'Reports', icon: IconReportAnalytics, roles: ['hr'], keywords: ['export', 'csv', 'register'] },
   ] },
-  { id: 'people', title: 'People', roles: ['hr'], items: [
-    { to: '/hr/dashboard', label: 'Overview', icon: IconLayoutDashboard, keywords: ['dashboard'] },
-    { to: '/hr/employees', label: 'Employees', icon: IconUsers, keywords: ['staff', 'people'] },
-    { to: '/hr/requests', label: 'Requests', icon: IconInbox },
-    { to: '/hr/exceptions', label: 'Exceptions', icon: IconAlertTriangle, keywords: ['missing punch', 'absent'] },
-    { to: '/hr/ot-slips', label: 'Overtime review', icon: IconClockHour4, keywords: ['ot slips'] },
-    { to: '/hr/reports', label: 'Reports', icon: IconReportAnalytics, keywords: ['export', 'csv'] },
-  ] },
-  { id: 'payroll', title: 'Payroll', roles: ['finance', 'hr'], items: [
-    { to: '/payroll', label: 'Pay runs', icon: IconCash, keywords: ['run payroll', 'salary'] },
-    { to: '/payroll/structures', label: 'Salary structures', icon: IconCoin },
-    { to: '/payroll/assignments', label: 'Salary assignments', icon: IconFileInvoice },
-    { to: '/payroll/declarations', label: 'Tax declarations', icon: IconFileCertificate },
-    { to: '/payroll/loans', label: 'Loans & advances', icon: IconBuildingBank },
-    { to: '/payroll/rules', label: 'Statutory rules', icon: IconGavel, keywords: ['tax', 'ssf'] },
-  ] },
-  { id: 'settings', title: 'Workspace', roles: ['hr'], collapsible: true, items: [
-    { to: '/hr/setup', label: 'Setup checklist', icon: IconChecklist },
-    { to: '/hr/devices', label: 'Devices', icon: IconFingerprint, keywords: ['terminal', 'biometric'] },
-    { to: '/hr/shifts', label: 'Shifts', icon: IconClockHour4 },
-    { to: '/hr/holidays', label: 'Holidays', icon: IconCalendarEvent },
-    { to: '/hr/locations', label: 'Locations', icon: IconMapPin, keywords: ['geofence'] },
-    { to: '/hr/leave-types', label: 'Leave policies', icon: IconAdjustmentsHorizontal, keywords: ['leave types'] },
-    { to: '/hr/leave-adjust', label: 'Leave adjustments', icon: IconAdjustments },
-    { to: '/hr/settings', label: 'Attendance rules', icon: IconDeviceDesktopAnalytics, keywords: ['settings', 'grace', 'late'] },
-    { to: '/hr/users', label: 'Users & roles', icon: IconUserShield, keywords: ['permissions', 'access'] },
-  ] },
+];
+
+const SETTINGS: NavItem = { to: '/settings', label: 'Settings', icon: IconSettings, roles: ['hr'], keywords: ['shifts', 'holidays', 'devices', 'users', 'rules', 'setup'] };
+
+/** Extra jump targets for the command palette: tabs inside pages. */
+const JUMPS: Array<{ to: string; label: string; group: string; roles?: Role[]; icon: Icon }> = [
+  { to: '/attendance/exceptions', label: 'Attendance exceptions', group: 'Attendance', roles: ['hr'], icon: IconAlertTriangle },
+  { to: '/attendance/overtime', label: 'Overtime review', group: 'Attendance', roles: ['hr'], icon: IconClockHour4 },
+  { to: '/attendance/fix', label: 'Fix a punch', group: 'Attendance', roles: ['manager', 'hr'], icon: IconClockEdit },
+  { to: '/leave/history', label: 'Request history', group: 'Leave', roles: ['hr'], icon: IconListCheck },
+  { to: '/leave/balances', label: 'Leave balances', group: 'Leave', roles: ['hr'], icon: IconAdjustments },
+  { to: '/leave/policies', label: 'Leave policies', group: 'Leave', roles: ['hr'], icon: IconAdjustmentsHorizontal },
+  { to: '/payroll/structures', label: 'Salary structures', group: 'Payroll', roles: ['finance', 'hr'], icon: IconCoin },
+  { to: '/payroll/assignments', label: 'Employee salaries', group: 'Payroll', roles: ['finance', 'hr'], icon: IconFileInvoice },
+  { to: '/payroll/declarations', label: 'Tax declarations', group: 'Payroll', roles: ['finance', 'hr'], icon: IconFileCertificate },
+  { to: '/payroll/loans', label: 'Loans & advances', group: 'Payroll', roles: ['finance', 'hr'], icon: IconBuildingBank },
+  { to: '/payroll/rules', label: 'Tax & SSF rules', group: 'Payroll', roles: ['finance', 'hr'], icon: IconGavel },
+  { to: '/settings/shifts', label: 'Shifts', group: 'Settings', roles: ['hr'], icon: IconClockHour4 },
+  { to: '/settings/holidays', label: 'Holidays', group: 'Settings', roles: ['hr'], icon: IconCalendarEvent },
+  { to: '/settings/devices', label: 'Devices', group: 'Settings', roles: ['hr'], icon: IconFingerprint },
+  { to: '/settings/users', label: 'Users & roles', group: 'Settings', roles: ['hr'], icon: IconUserShield },
+  { to: '/settings/setup', label: 'Setup checklist', group: 'Settings', roles: ['hr'], icon: IconChecklist },
 ];
 
 const ACCOUNT: NavItem[] = [
   { to: '/me/notifications', label: 'Notifications', icon: IconBell },
-  { to: '/me/profile', label: 'Profile', icon: IconUserCircle },
-  { to: '/me/data', label: 'Privacy & my data', icon: IconShieldLock, employeeOnly: true },
+  { to: '/me/profile', label: 'Profile & privacy', icon: IconUserCircle },
 ];
 
 function isActive(path: string, to: string): boolean {
   if (to === '/') return path === '/';
-  if (to === '/payroll') return path === '/payroll' || path.startsWith('/payroll/runs');
   return path === to || path.startsWith(`${to}/`);
 }
 
@@ -82,7 +76,7 @@ export function Layout() {
   const nav = useNavigate();
   const [unread, setUnread] = useState(0);
   const [company, setCompany] = useState<string | null>(null);
-  const [workspaceOpen, setWorkspaceOpen] = useState(() => localStorage.getItem('hajiri.nav.workspace') === 'open');
+  const [pendingApprovals, setPendingApprovals] = useState(0);
 
   useEffect(() => { close(); }, [loc.pathname, close]);
   useEffect(() => {
@@ -91,18 +85,25 @@ export function Layout() {
     void load();
     const id = setInterval(load, 60_000);
     settingsApi.company().then((c) => { if (alive) setCompany(c.company.nameEn); }).catch(() => undefined);
+    if (hasRole('manager', 'hr')) workflowApi.inbox().then((r) => { if (alive) setPendingApprovals(r.items.length); }).catch(() => undefined);
     return () => { alive = false; clearInterval(id); };
   }, [loc.pathname]);
 
   const visible = (i: NavItem) => (!i.roles || hasRole(...i.roles)) && (!i.employeeOnly || !!user?.employeeId);
   const groups = NAV.filter((g) => !g.roles || hasRole(...g.roles)).map((g) => ({ ...g, items: g.items.filter(visible) })).filter((g) => g.items.length > 0);
   const account = ACCOUNT.filter(visible);
-  const workspaceHasActive = groups.find((g) => g.id === 'settings')?.items.some((i) => isActive(loc.pathname, i.to)) ?? false;
+  const settings = visible(SETTINGS) ? SETTINGS : null;
+  const jumps = JUMPS.filter((j) => !j.roles || hasRole(...j.roles));
 
-  const actions: SpotlightActionData[] = useMemo(() => [...groups.flatMap((g) => g.items.map((i) => ({ ...i, group: g.title }))), ...account.map((i) => ({ ...i, group: 'Account' }))].map((i) => {
+  const actions: SpotlightActionData[] = useMemo(() => [
+    ...groups.flatMap((g) => g.items.map((i) => ({ ...i, group: g.title }))),
+    ...(settings ? [{ ...settings, group: 'Settings' }] : []),
+    ...jumps.map((j) => ({ ...j, keywords: [] as string[] })),
+    ...account.map((i) => ({ ...i, group: 'Account' })),
+  ].map((i) => {
     const Ico = i.icon;
     return { id: i.to, label: i.label, description: i.group, keywords: i.keywords ?? [], onClick: () => nav(i.to), leftSection: <Ico size={18} stroke={1.6} /> };
-  }), [groups.length, account.length, user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [groups.length, account.length, jumps.length, user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useHotkeys([['mod+K', () => spotlight.open()]]);
 
@@ -113,7 +114,7 @@ export function Layout() {
     return (
       <NavLink key={i.to} component={Link} to={i.to} className="hj-nav-link" label={i.label} active={isActive(loc.pathname, i.to)}
         leftSection={<Ico size={17} stroke={1.6} />}
-        rightSection={i.to === '/me/notifications' && unread > 0 ? <Badge size="xs" circle variant="filled">{unread > 99 ? '99+' : unread}</Badge> : null} />
+        rightSection={i.badge === 'approvals' && pendingApprovals > 0 ? <Badge size="sm" variant="light" radius="xl">{pendingApprovals > 99 ? '99+' : pendingApprovals}</Badge> : null} />
     );
   };
 
@@ -152,22 +153,15 @@ export function Layout() {
         </AppShell.Section>
 
         <AppShell.Section grow component={ScrollArea} type="scroll" mt={6} mx={-4} px={4}>
-          {groups.map((g) => {
-            const collapsed = g.collapsible && !workspaceOpen && !workspaceHasActive;
-            return (
-              <Box key={g.id}>
-                {g.collapsible ? (
-                  <UnstyledButton className="hj-nav-section" style={{ display: 'flex', alignItems: 'center', gap: 4, width: '100%' }}
-                    onClick={() => { const n = !workspaceOpen; setWorkspaceOpen(n); localStorage.setItem('hajiri.nav.workspace', n ? 'open' : 'closed'); }} aria-expanded={!collapsed}>
-                    {g.title}<IconChevronDown size={13} style={{ transform: collapsed ? 'rotate(-90deg)' : undefined, transition: 'transform 120ms' }} />
-                  </UnstyledButton>
-                ) : <div className="hj-nav-section">{g.title}</div>}
-                {collapsed ? null : <Stack gap={1}>{g.items.map(link)}</Stack>}
-              </Box>
-            );
-          })}
+          {groups.map((g) => (
+            <Box key={g.id}>
+              {groups.length > 1 ? <div className="hj-nav-section">{g.title}</div> : <Box h={8} />}
+              <Stack gap={1}>{g.items.map(link)}</Stack>
+            </Box>
+          ))}
         </AppShell.Section>
 
+        {settings ? <AppShell.Section pb={6}>{link(settings)}</AppShell.Section> : null}
         <AppShell.Section pt={8} style={{ borderTop: '1px solid var(--hj-line)' }}>
           <Menu position="top-start" width={232} shadow="md" offset={6}>
             <Menu.Target>

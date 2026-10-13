@@ -49,7 +49,7 @@ export default function EmployeesPage() {
       <DataTable<Employee> rows={rows} rowKey={(r) => r.id} loading={q.loading} error={q.error}
         emptyTitle={filtered ? 'No employees match your search' : status === 'exited' ? 'No exited employees' : 'No employees yet'}
         emptyHint={filtered ? 'Try a different name or code.' : status === 'exited' ? 'People appear here once an exit date is set on their profile.' : 'Add your first employee, or import a CSV with emp_code and name_en columns.'}
-        onRowClick={(r) => nav(`/hr/employees/${r.id}`)}
+        onRowClick={(r) => nav(`/employees/${r.id}`)}
         columns={[
           { key: 'name', header: 'Name', render: (r) => (
             <Group gap="sm" wrap="nowrap">
@@ -65,13 +65,13 @@ export default function EmployeesPage() {
           { key: 'status', header: 'Status', render: (r) => <StatusBadge status={r.status} /> },
         ]} />
       <Drawer opened={create} onClose={() => setCreate(false)} title="Add employee" position="right" size="lg">
-        <EmployeeForm busy={busy} submitLabel="Add employee" onSubmit={async (draft) => { setBusy(true); try { const r = await empApi.create(draft); toast.ok('Employee added.'); setCreate(false); nav(`/hr/employees/${r.id}`); } catch (e) { toast.err(e); } finally { setBusy(false); } }} />
+        <EmployeeForm busy={busy} submitLabel="Add employee" onSubmit={async (draft) => { setBusy(true); try { const r = await empApi.create(draft); toast.ok('Employee added.'); setCreate(false); nav(`/employees/${r.id}`); } catch (e) { toast.err(e); } finally { setBusy(false); } }} />
       </Drawer>
       <Modal opened={imp} onClose={closeImport} title="Import employees from CSV" size="lg" centered>
         <Stack gap="sm">
           <Text size="sm">Paste a CSV with a header row. Required columns: <Code>emp_code</Code> and <Code>name_en</Code>.</Text>
           <Text size="xs" c="dimmed">Optional columns: gender, dob, marital_status, join_date, designation, grade, phone, email, regime, ssf_id, pan, bank_code, bank_branch, bank_account, ot_eligible. Dates use YYYY-MM-DD.</Text>
-          <Textarea value={csv} onChange={(e) => { setCsv(e.currentTarget.value); setImpResult(null); }} autosize minRows={6} maxRows={14} placeholder={'emp_code,name_en,join_date,designation\nE010,Hari Lal,2026-01-01,Accountant'} ff="monospace" fz="xs" aria-label="CSV contents" />
+          <Textarea value={csv} onChange={(e) => { setCsv(e.currentTarget.value); setImpResult(null); }} autosize minRows={6} maxRows={14} placeholder={'emp_code,name_en,join_date,designation,work_from_home\nE010,Hari Lal,2026-01-01,Accountant,yes'} ff="monospace" fz="xs" aria-label="CSV contents" />
           {impResult ? (
             errCount ? (
               <Alert color="red" variant="light" title={`${errCount} ${errCount === 1 ? 'row needs' : 'rows need'} fixing before you can import`}>

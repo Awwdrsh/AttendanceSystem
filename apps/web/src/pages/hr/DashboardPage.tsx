@@ -11,10 +11,10 @@ import { bsMonthLabel, fmtDateLong, fmtMoney, fmtTime, greeting, minutesToHm, to
 import { useQuery } from '../../lib/useQuery';
 
 const ATTENTION: Record<string, { to: string; icon: typeof IconInbox; action: string }> = {
-  device_offline: { to: '/hr/devices', icon: IconFingerprint, action: 'Check device' },
-  unmapped_punches: { to: '/hr/devices', icon: IconFingerprint, action: 'Map PINs' },
-  ot_unapproved: { to: '/hr/ot-slips', icon: IconClockHour4, action: 'Review' },
-  leave_overdue: { to: '/manager/approvals', icon: IconInbox, action: 'Open approvals' },
+  device_offline: { to: '/settings/devices', icon: IconFingerprint, action: 'Check device' },
+  unmapped_punches: { to: '/settings/devices', icon: IconFingerprint, action: 'Map PINs' },
+  ot_unapproved: { to: '/attendance/overtime', icon: IconClockHour4, action: 'Review' },
+  leave_overdue: { to: '/approvals', icon: IconInbox, action: 'Open approvals' },
 };
 
 export default function DashboardPage() {
@@ -36,8 +36,8 @@ export default function DashboardPage() {
     <Stack gap="lg">
       <PageHeader title={`${greeting()}${firstName ? `, ${firstName}` : ''}`} subtitle={fmtDateLong(today)}
         actions={<>
-          <Button variant="default" component={Link} to="/hr/reports">Reports</Button>
-          <Button component={Link} to="/manager/team" leftSection={<IconUsersGroup size={16} stroke={1.8} />}>See who's in</Button>
+          <Button variant="default" component={Link} to="/reports">Reports</Button>
+          <Button component={Link} to="/attendance" leftSection={<IconUsersGroup size={16} stroke={1.8} />}>See who's in</Button>
         </>} />
 
       {d ? (
@@ -56,7 +56,7 @@ export default function DashboardPage() {
             <Text fw={600} size="sm">Arrivals today</Text>
             <Text size="xs" c="dimmed">Each mark is one person's first clock-in.</Text>
           </div>
-          <Anchor component={Link} to="/manager/team" size="sm">Open list</Anchor>
+          <Anchor component={Link} to="/attendance" size="sm">Open list</Anchor>
         </Group>
         {team.loading && !team.data ? <Skeleton h={90} /> : <ArrivalsRibbon arrivals={arrivals} shiftStart={shift?.start?.slice(0, 5) ?? '10:00'} grace={shift?.grace_in_min ?? 15} />}
       </Paper>
@@ -73,7 +73,7 @@ export default function DashboardPage() {
             ) : null}
             <Stack gap="sm">
               {(d?.needsAttention ?? []).map((n, i) => {
-                const a = ATTENTION[n.kind] ?? { to: '/hr/dashboard', icon: IconAlertTriangle, action: 'Open' };
+                const a = ATTENTION[n.kind] ?? { to: '/overview', icon: IconAlertTriangle, action: 'Open' };
                 const Ico = a.icon;
                 return (
                   <Group key={i} gap="sm" wrap="nowrap" align="flex-start">
@@ -103,10 +103,10 @@ export default function DashboardPage() {
                   <Group key={r.employee_id} justify="space-between" py={8} wrap="nowrap" style={{ borderTop: '1px solid var(--hj-line-soft)' }}>
                     <Group gap="sm" wrap="nowrap" style={{ minWidth: 0 }}>
                       <Avatar size={28} radius="xl" color="brand" variant="light">{r.name_en.split(' ').map((p) => p[0]).slice(0, 2).join('')}</Avatar>
-                      <Anchor component={Link} to={`/hr/employees/${r.employee_id}`} c="inherit" size="sm" fw={500} truncate>{r.name_en}</Anchor>
+                      <Anchor component={Link} to={`/employees/${r.employee_id}`} c="inherit" size="sm" fw={500} truncate>{r.name_en}</Anchor>
                     </Group>
                     <Group gap="md" wrap="nowrap">
-                      <StatusBadge status={liveStatus(r.status, { date: today, today, lastOut: r.last_out, firstIn: r.first_in }) ?? 'NotComputed'} late={r.late_min} />
+                      <StatusBadge status={liveStatus(r.status, { date: today, today, lastOut: r.last_out, firstIn: r.first_in }) ?? 'NotComputed'} late={r.late_min} remote={r.remote} />
                       <Text size="sm" className="num" w={44} ta="right">{fmtTime(r.first_in)}</Text>
                     </Group>
                   </Group>
