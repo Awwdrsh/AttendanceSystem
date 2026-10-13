@@ -5,12 +5,12 @@ import type { Queryable } from '../../db/pool.js';
 import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { isoDate } from '../../validation.js';
-import { assertAccessEmployee, hasRole, requireRole } from '../auth/middleware.js';
+import { hasRole, requireRole } from '../auth/middleware.js';
 import { dateRange, enqueueRecompute } from '../attendance/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
-import { cancelWorkflow, registerHandler, startWorkflow, type DecisionContext } from '../workflow/service.js';
+import { assertManages, cancelWorkflow, nptToday, registerHandler, startWorkflow, type DecisionContext } from '../workflow/service.js';
 import {
-  assertNoOverlap, balances, computeLeaveDays, getEmployeeLite, getLeaveType, ledgerBalance, pendingDays, type LeaveTypeRow,
+  assertNoOverlap, balances, computeLeaveDays, getEmployeeLite, getLeaveType, hasLockedDay, ledgerBalance, pendingDays, type LeaveTypeRow,
 } from './service.js';
 
 export { creditCompOff, encashableBalances, postEncashment } from './service.js';
@@ -23,6 +23,9 @@ export async function applyLeaveDecision(db: Queryable, requestId: string, state
   const lr = r.rows[0];
   if (!lr) throw new NotFoundError('leave request not found');
   if (lr.status !== 'pending') throw new ConflictError(`leave request already ${lr.status}`);
+  if (state === 'approved' && (await hasLockedDay(db, lr.employee_id, lr.from_date, lr.to_date))) {
+    throw new ConflictError('the leave falls in a payroll-locked period; reject it and let HR raise an adjustment');
+  }
   await db.query('UPDATE leave_request SET status = $2, decided_at = now() WHERE id = $1', [requestId, state]);
   if (state === 'approved') {
     await db.query(
@@ -115,10 +118,10 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const q = z.object({ employeeId: z.uuid().optional(), asOf: isoDate.optional() }).parse(req.query);
     const employeeId = q.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
-    assertAccessEmployee(req.user!, employeeId);
     const emp = await getEmployeeLite(db, employeeId);
     if (!emp || emp.company_id !== req.user!.companyId) throw new NotFoundError('employee not found');
-    res.json({ employeeId, balances: await balances(db, emp, q.asOf ?? new Date().toISOString().slice(0, 10)) });
+    await assertManages(db, req.user!, employeeId);
+    res.json({ employeeId, balances: await balances(db, emp, q.asOf ?? nptToday()) });
   });
 
   /** Preview the deduction before submitting (plan §13.5 computed line). */
@@ -126,10 +129,10 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const q = z.object({ employeeId: z.uuid().optional(), leaveTypeId: z.uuid(), from: isoDate, to: isoDate, halfDay: z.enum(['first_half', 'second_half']).optional() }).parse(req.query);
     const employeeId = q.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
-    assertAccessEmployee(req.user!, employeeId);
     const emp = await getEmployeeLite(db, employeeId);
     const type = await getLeaveType(db, q.leaveTypeId);
-    if (!emp || !type || emp.company_id !== type.company_id) throw new NotFoundError('employee or leave type not found');
+    if (!emp || !type || emp.company_id !== type.company_id || emp.company_id !== req.user!.companyId) throw new NotFoundError('employee or leave type not found');
+    await assertManages(db, req.user!, employeeId);
     const policy = await leavePolicy(emp.company_id);
     const calc = await computeLeaveDays(db, emp, type, q.from, q.to, q.halfDay ?? null, policy.sandwichRule);
     const bal = await ledgerBalance(db, employeeId, type.id);
@@ -146,11 +149,14 @@ export function leaveRoutes({ db }: AppDeps): Router {
     if (b.to < b.from) throw new BadRequestError('to must be on or after from');
     const employeeId = b.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
-    if (employeeId !== req.user!.employeeId && !hasRole(req.user!, 'hr', 'manager')) throw new ForbiddenError('cannot request leave for another employee');
     const emp = await getEmployeeLite(db, employeeId);
     const type = await getLeaveType(db, b.leaveTypeId);
     if (!emp || !type || emp.company_id !== type.company_id || emp.company_id !== req.user!.companyId) throw new NotFoundError('employee or leave type not found');
+    await assertManages(db, req.user!, employeeId);
     if (emp.status !== 'active') throw new BadRequestError('employee is not active');
+    if (emp.join_date && b.from < emp.join_date) throw new BadRequestError(`leave cannot start before the joining date ${emp.join_date}`);
+    if (emp.exit_date && b.to > emp.exit_date) throw new BadRequestError(`leave cannot end after the exit date ${emp.exit_date}`);
+    if (await hasLockedDay(db, employeeId, b.from, b.to)) throw new ConflictError('part of this range is locked by payroll; ask HR for an adjustment');
     if (type.gender_scope !== 'all' && type.gender_scope !== emp.gender) throw new BadRequestError(`${type.name_en} is not available for this employee`);
     const policy = await leavePolicy(emp.company_id);
     if (emp.join_date) {
@@ -166,7 +172,6 @@ export function leaveRoutes({ db }: AppDeps): Router {
     if (type.certificate_after_days !== null && calc.days > type.certificate_after_days && !b.attachmentKey) {
       throw new BadRequestError(`a medical certificate is required for more than ${type.certificate_after_days} consecutive days of ${type.name_en} (Sec 44(2))`);
     }
-    await assertNoOverlap(db, employeeId, b.from, b.to);
     if (type.paid) {
       const available = (await ledgerBalance(db, employeeId, type.id)) - (await pendingDays(db, employeeId, type.id));
       if (calc.days > available + Number(type.negative_balance_limit)) {
@@ -185,6 +190,9 @@ export function leaveRoutes({ db }: AppDeps): Router {
     let requestId = '';
     try {
       await client.query('BEGIN');
+      // Serialise per employee so two concurrent requests for the same dates cannot both pass the overlap check.
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`leave:${employeeId}`]);
+      await assertNoOverlap(client, employeeId, b.from, b.to);
       const ins = await client.query<{ id: string }>(
         `INSERT INTO leave_request (employee_id, leave_type_id, from_date, to_date, half_day, days_requested, reason, attachment_key, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
         [employeeId, type.id, b.from, b.to, b.halfDay ?? null, calc.days, b.reason ?? null, b.attachmentKey ?? null, req.user!.id]);
@@ -205,7 +213,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const u = req.user!;
     const scope = q.scope ?? (hasRole(u, 'hr', 'finance') ? 'all' : hasRole(u, 'manager') ? 'team' : 'own');
     if (scope === 'all' && !hasRole(u, 'hr', 'finance')) throw new ForbiddenError('scope all requires HR');
-    if (q.employeeId) assertAccessEmployee(u, q.employeeId);
+    if (q.employeeId) await assertManages(db, u, q.employeeId);
     const rows = await db.query(
       `SELECT lr.id, lr.employee_id, e.emp_code, e.name_en, e.name_ne, lr.leave_type_id, lt.code AS type_code, lt.name_en AS type_name, lt.paid,
               lr.from_date, lr.to_date, lr.half_day, lr.days_requested, lr.reason, lr.attachment_key, lr.status, lr.workflow_instance_id, lr.created_at, lr.decided_at
@@ -231,7 +239,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
         `SELECT lr.employee_id, lr.leave_type_id, lr.from_date, lr.to_date, lr.days_requested, lr.status, e.company_id FROM leave_request lr JOIN employee e ON e.id = lr.employee_id WHERE lr.id = $1 FOR UPDATE`, [id]);
       const lr = r0.rows[0];
       if (!lr || lr.company_id !== req.user!.companyId) throw new NotFoundError('leave request not found');
-      assertAccessEmployee(req.user!, lr.employee_id);
+      await assertManages(client, req.user!, lr.employee_id);
       if (lr.status === 'cancelled' || lr.status === 'rejected') throw new ConflictError(`request is already ${lr.status}`);
       if (lr.status === 'approved') {
         const locked = await client.query('SELECT 1 FROM v_attendance_latest WHERE employee_id = $1 AND local_date BETWEEN $2 AND $3 AND locked_at IS NOT NULL LIMIT 1', [lr.employee_id, lr.from_date, lr.to_date]);
@@ -257,7 +265,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
     if (!emp || !type || emp.company_id !== req.user!.companyId || type.company_id !== emp.company_id) throw new NotFoundError('employee or leave type not found');
     const ins = await db.query<{ id: string }>(
       `INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, note, posted_by) VALUES ($1, $2, $3, $4, $5, 'hr_adjustment', $6, $7) RETURNING id`,
-      [b.employeeId, b.leaveTypeId, b.effectiveDate ?? new Date().toISOString().slice(0, 10), b.deltaDays, b.kind, b.reason, req.user!.id]);
+      [b.employeeId, b.leaveTypeId, b.effectiveDate ?? nptToday(), b.deltaDays, b.kind, b.reason, req.user!.id]);
     await audit(db, { actorId: req.user!.id, action: 'adjust', table: 'leave_ledger', rowId: ins.rows[0]!.id, after: b });
     res.status(201).json({ id: ins.rows[0]!.id, balance: await ledgerBalance(db, b.employeeId, b.leaveTypeId) });
   });
@@ -266,7 +274,9 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const q = z.object({ employeeId: z.uuid().optional(), leaveTypeId: z.uuid().optional() }).parse(req.query);
     const employeeId = q.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
-    assertAccessEmployee(req.user!, employeeId);
+    const own = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, req.user!.companyId]);
+    if (!own.rows[0]) throw new NotFoundError('employee not found');
+    await assertManages(db, req.user!, employeeId);
     const rows = await db.query(
       `SELECT l.id, l.leave_type_id, t.code, l.posted_at, l.effective_date, l.delta_days, l.reason, l.ref_type, l.ref_id, l.expires_on, l.note
          FROM leave_ledger l JOIN leave_type t ON t.id = l.leave_type_id WHERE l.employee_id = $1 AND ($2::uuid IS NULL OR l.leave_type_id = $2) ORDER BY l.effective_date DESC, l.posted_at DESC LIMIT 500`,

@@ -7,10 +7,10 @@ import type { Queryable } from '../../db/pool.js';
 import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { isoDate } from '../../validation.js';
-import { assertAccessEmployee, hasRole } from '../auth/middleware.js';
+import { hasRole } from '../auth/middleware.js';
 import { enqueueRecompute } from '../attendance/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
-import { act, cancelWorkflow, registerHandler, startWorkflow, type DecisionContext } from '../workflow/service.js';
+import { act, assertManages, cancelWorkflow, nptToday, registerHandler, startWorkflow, type DecisionContext } from '../workflow/service.js';
 
 const KINDS = ['missed_punch', 'wfh', 'on_duty', 'half_day', 'shift_change'] as const;
 
@@ -79,17 +79,22 @@ export function regularisationRoutes({ db }: AppDeps): Router {
     const employeeId = b.employeeId ?? u.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
     const onBehalf = employeeId !== u.employeeId;
-    if (onBehalf && !hasRole(u, 'hr', 'manager')) throw new ForbiddenError('cannot file for another employee');
     const emp = await db.query<{ company_id: string; status: string }>('SELECT company_id, status FROM employee WHERE id = $1', [employeeId]);
     if (!emp.rows[0] || emp.rows[0].company_id !== u.companyId) throw new NotFoundError('employee not found');
+    if (onBehalf) await assertManages(db, u, employeeId);
     if (b.kind === 'missed_punch' && (!b.punchTime || !b.punchDirection)) throw new BadRequestError('punchTime and punchDirection are required for a missed punch');
-    if (b.kind === 'shift_change' && !b.shiftId) throw new BadRequestError('shiftId is required for a shift change');
-    if (b.punchTime && localDateOf(new Date(b.punchTime).getTime()) !== b.localDate) {
-      // Night shifts: the punch may fall on the next calendar day; allow ±1 day.
-      const diff = Math.abs(new Date(`${b.localDate}T00:00:00Z`).getTime() - new Date(`${localDateOf(new Date(b.punchTime).getTime())}T00:00:00Z`).getTime());
-      if (diff > 86_400_000) throw new BadRequestError('punchTime must be on the attendance date or the following day');
+    if (b.kind === 'shift_change') {
+      if (!b.shiftId) throw new BadRequestError('shiftId is required for a shift change');
+      const sh = await db.query('SELECT 1 FROM shift WHERE id = $1 AND company_id = $2', [b.shiftId, u.companyId]);
+      if (!sh.rows[0]) throw new NotFoundError('shift not found');
     }
-    const today = new Date().toISOString().slice(0, 10);
+    if (b.punchTime) {
+      // Night shifts: the OUT punch may fall on the next calendar day (plan §10.1 attribution to the start date); never earlier.
+      const punchDay = localDateOf(new Date(b.punchTime).getTime());
+      const diff = (new Date(`${punchDay}T00:00:00Z`).getTime() - new Date(`${b.localDate}T00:00:00Z`).getTime()) / 86_400_000;
+      if (diff < 0 || diff > 1) throw new BadRequestError('punchTime must be on the attendance date or the following day');
+    }
+    const today = nptToday();
     if (b.localDate > today) throw new BadRequestError('cannot regularise a future date');
     const pol = await policy(emp.rows[0].company_id);
     const isHr = hasRole(u, 'hr');
@@ -135,7 +140,7 @@ export function regularisationRoutes({ db }: AppDeps): Router {
     const u = req.user!;
     const scope = q.scope ?? (hasRole(u, 'hr') ? 'all' : hasRole(u, 'manager') ? 'team' : 'own');
     if (scope === 'all' && !hasRole(u, 'hr')) throw new ForbiddenError('scope all requires HR');
-    if (q.employeeId) assertAccessEmployee(u, q.employeeId);
+    if (q.employeeId) await assertManages(db, u, q.employeeId);
     const rows = await db.query(
       `SELECT rr.id, rr.employee_id, e.emp_code, e.name_en, rr.local_date, rr.kind, rr.punch_time, rr.punch_direction, rr.shift_id, rr.reason, rr.attachment_key, rr.status,
               rr.workflow_instance_id, rr.resulting_punch_id, rr.created_by, rr.created_at, rr.decided_at
@@ -152,7 +157,8 @@ export function regularisationRoutes({ db }: AppDeps): Router {
     const r0 = await db.query<{ employee_id: string; status: string; company_id: string }>('SELECT rr.employee_id, rr.status, e.company_id FROM regularisation_request rr JOIN employee e ON e.id = rr.employee_id WHERE rr.id = $1', [id]);
     const rr = r0.rows[0];
     if (!rr || rr.company_id !== req.user!.companyId) throw new NotFoundError('request not found');
-    assertAccessEmployee(req.user!, rr.employee_id);
+    await assertManages(db, req.user!, rr.employee_id);
+    // Approved corrections already produced a punch/decision; they cannot be undone here (a new request or HR adjustment supersedes).
     if (rr.status !== 'pending') throw new ConflictError(`only pending requests can be cancelled (status ${rr.status})`);
     await db.query(`UPDATE regularisation_request SET status = 'cancelled', decided_at = now() WHERE id = $1`, [id]);
     await cancelWorkflow(db, 'regularisation_request', id);

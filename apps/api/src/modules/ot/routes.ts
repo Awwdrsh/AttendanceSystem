@@ -5,11 +5,11 @@ import type { Queryable } from '../../db/pool.js';
 import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { isoDate } from '../../validation.js';
-import { assertAccessEmployee, hasRole, requireRole } from '../auth/middleware.js';
+import { hasRole, requireRole } from '../auth/middleware.js';
 import { enqueueRecompute } from '../attendance/service.js';
 import { creditCompOff } from '../leave/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
-import { cancelWorkflow, registerHandler, startWorkflow, type DecisionContext } from '../workflow/service.js';
+import { assertManages, cancelWorkflow, nptToday, registerHandler, startWorkflow, type DecisionContext } from '../workflow/service.js';
 
 /** Labour Act 2074 Sec 30(1): 4 h/day, 24 h/week. Never relaxed by settings. */
 const CAP_DAY_MIN = 240;
@@ -46,9 +46,9 @@ export function otRoutes({ db }: AppDeps): Router {
     const u = req.user!;
     const employeeId = b.employeeId ?? u.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
-    if (employeeId !== u.employeeId && !hasRole(u, 'hr', 'manager')) throw new ForbiddenError('cannot request overtime for another employee');
     const emp = await db.query<{ company_id: string; ot_eligible: boolean }>('SELECT company_id, ot_eligible FROM employee WHERE id = $1', [employeeId]);
     if (!emp.rows[0] || emp.rows[0].company_id !== u.companyId) throw new NotFoundError('employee not found');
+    if (employeeId !== u.employeeId) await assertManages(db, u, employeeId);
     if (!emp.rows[0].ot_eligible) throw new BadRequestError('employee grade is not overtime-eligible (Sec 31(2) basis must be documented)');
     if (b.requestedMin > CAP_DAY_MIN) throw new BadRequestError(`overtime may not exceed ${CAP_DAY_MIN} minutes (4 hours) per day (Sec 30(1))`);
     const ws = weekStart(b.localDate);
@@ -60,7 +60,7 @@ export function otRoutes({ db }: AppDeps): Router {
     if (used + b.requestedMin > CAP_WEEK_MIN) throw new BadRequestError(`weekly overtime cap of 24 hours would be exceeded (${used} minutes already this week)`);
     const pol = await db.query<{ value: Record<string, unknown> }>(`SELECT value FROM company_setting WHERE company_id = $1 AND key = 'attendance.policy'`, [u.companyId]);
     const pastWindow = typeof pol.rows[0]?.value.otPastDatedDays === 'number' ? (pol.rows[0].value.otPastDatedDays as number) : 7;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = nptToday();
     const age = Math.floor((new Date(`${today}T00:00:00Z`).getTime() - new Date(`${b.localDate}T00:00:00Z`).getTime()) / 86_400_000);
     if (age > pastWindow && !hasRole(u, 'hr')) throw new BadRequestError(`past-dated overtime requests are limited to ${pastWindow} days`);
     const dup = await db.query(`SELECT 1 FROM ot_request WHERE employee_id = $1 AND local_date = $2 AND status IN ('pending', 'approved')`, [employeeId, b.localDate]);
@@ -86,7 +86,7 @@ export function otRoutes({ db }: AppDeps): Router {
     const u = req.user!;
     const scope = q.scope ?? (hasRole(u, 'hr', 'finance') ? 'all' : hasRole(u, 'manager') ? 'team' : 'own');
     if (scope === 'all' && !hasRole(u, 'hr', 'finance')) throw new ForbiddenError('scope all requires HR');
-    if (q.employeeId) assertAccessEmployee(u, q.employeeId);
+    if (q.employeeId) await assertManages(db, u, q.employeeId);
     const rows = await db.query(
       `SELECT o.id, o.employee_id, e.emp_code, e.name_en, o.local_date, o.requested_min, o.approved_min, o.reason, o.status, o.workflow_instance_id, o.created_at, o.decided_at
          FROM ot_request o JOIN employee e ON e.id = o.employee_id LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
@@ -102,7 +102,7 @@ export function otRoutes({ db }: AppDeps): Router {
     const r0 = await db.query<{ employee_id: string; status: string; company_id: string }>('SELECT o.employee_id, o.status, e.company_id FROM ot_request o JOIN employee e ON e.id = o.employee_id WHERE o.id = $1', [id]);
     const o = r0.rows[0];
     if (!o || o.company_id !== req.user!.companyId) throw new NotFoundError('request not found');
-    assertAccessEmployee(req.user!, o.employee_id);
+    await assertManages(db, req.user!, o.employee_id);
     if (o.status !== 'pending') throw new ConflictError(`only pending requests can be cancelled (status ${o.status})`);
     await db.query(`UPDATE ot_request SET status = 'cancelled', decided_at = now() WHERE id = $1`, [id]);
     await cancelWorkflow(db, 'ot_request', id);
@@ -124,20 +124,22 @@ export function otRoutes({ db }: AppDeps): Router {
     res.json({ slips: rows.rows });
   });
 
-  const slipFor = async (id: string, companyId: string | null) => {
+  const slipFor = async (id: string, user: import('../auth/service.js').AuthUser) => {
     const r0 = await db.query<{ id: string; employee_id: string; local_date: string; detected_min: number; approved_min: number | null; status: string; company_id: string; day_type: string }>(
       'SELECT s.*, e.company_id FROM ot_slip s JOIN employee e ON e.id = s.employee_id WHERE s.id = $1', [id]);
     const s = r0.rows[0];
-    if (!s || s.company_id !== companyId) throw new NotFoundError('OT slip not found');
+    if (!s || s.company_id !== user.companyId) throw new NotFoundError('OT slip not found');
+    if (user.employeeId === s.employee_id) throw new ForbiddenError('cannot decide your own overtime');
+    await assertManages(db, user, s.employee_id);
     if (s.status === 'posted') throw new ConflictError('slip already posted to payroll');
+    if (s.status === 'comp_off') throw new ConflictError('slip already converted to substitute leave; the credit cannot be reversed here');
     return s;
   };
 
   r.post('/slips/:id/approve', requireRole('hr', 'manager'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const b = z.object({ approvedMin: z.number().int().min(0).max(CAP_DAY_MIN).optional() }).parse(req.body ?? {});
-    const s = await slipFor(id, req.user!.companyId);
-    if (req.user!.employeeId === s.employee_id) throw new ForbiddenError('cannot approve your own overtime');
+    const s = await slipFor(id, req.user!);
     const approved = Math.min(b.approvedMin ?? s.detected_min, s.detected_min, CAP_DAY_MIN);
     await db.query(`UPDATE ot_slip SET status = 'approved', approved_min = $2, reviewed_by = $3, reviewed_at = now() WHERE id = $1`, [id, approved, req.user!.id]);
     await audit(db, { actorId: req.user!.id, action: 'approve', table: 'ot_slip', rowId: id, after: { approvedMin: approved } });
@@ -147,7 +149,7 @@ export function otRoutes({ db }: AppDeps): Router {
   r.post('/slips/:id/reject', requireRole('hr', 'manager'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const b = z.object({ reason: z.string().min(3).max(500) }).parse(req.body);
-    const s = await slipFor(id, req.user!.companyId);
+    const s = await slipFor(id, req.user!);
     await db.query(`UPDATE ot_slip SET status = 'rejected', approved_min = 0, reviewed_by = $2, reviewed_at = now() WHERE id = $1`, [id, req.user!.id]);
     await audit(db, { actorId: req.user!.id, action: 'reject', table: 'ot_slip', rowId: id, after: { reason: b.reason, employeeId: s.employee_id } });
     res.json({ ok: true });
@@ -156,8 +158,7 @@ export function otRoutes({ db }: AppDeps): Router {
   /** Convert to substitute leave instead of pay (Sec 42: must be used within 21 days). */
   r.post('/slips/:id/comp-off', requireRole('hr', 'manager'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
-    const s = await slipFor(id, req.user!.companyId);
-    if (s.status === 'comp_off') throw new ConflictError('already converted');
+    const s = await slipFor(id, req.user!);
     const minutes = s.approved_min ?? s.detected_min;
     const days = Math.round((minutes / 480) * 100) / 100;
     const expires = new Date(new Date(`${s.local_date}T00:00:00Z`).getTime() + 21 * 86_400_000).toISOString().slice(0, 10);
@@ -182,7 +183,7 @@ export function otRoutes({ db }: AppDeps): Router {
     if (q.format === 'csv') {
       const cols = ['emp_code', 'name_en', 'local_date', 'bs_date', 'day_type', 'detected_min', 'approved_min', 'multiplier', 'status'];
       const esc = (v: unknown) => { const s = v === null || v === undefined ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-      res.type('text/csv').send([cols.join(','), ...rows.rows.map((r0) => cols.map((c) => esc(r0[c])).join(','))].join('\n') + '\n');
+      res.type('text/csv').send('\uFEFF' + [cols.join(','), ...rows.rows.map((r0) => cols.map((c) => esc(r0[c])).join(','))].join('\r\n') + '\r\n');
       return;
     }
     res.json({ register: rows.rows });

@@ -4,9 +4,10 @@ import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
 import { ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { hhmm, isoDate } from '../../validation.js';
-import { requireRole } from '../auth/middleware.js';
+import { hasRole, requireRole } from '../auth/middleware.js';
 import { dateRange, enqueueRecompute } from '../attendance/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
+import { assertManages, nptToday } from '../workflow/service.js';
 import { weekdayOf } from '@hajiri/bs-calendar';
 
 const shiftBody = z.object({
@@ -93,6 +94,9 @@ export function shiftsRoutes({ db }: AppDeps): Router {
 
   r.post('/holidays', requireRole('hr'), async (req, res) => {
     const b = holidayBody.parse(req.body);
+    // The UNIQUE constraint treats NULL branch_id as distinct, so company-wide duplicates must be refused explicitly.
+    const dup = await db.query('SELECT 1 FROM holiday WHERE company_id = $1 AND branch_id IS NOT DISTINCT FROM $2 AND local_date = $3 AND name_en = $4', [req.user!.companyId, b.branchId ?? null, b.localDate, b.nameEn]);
+    if (dup.rows[0]) throw new ConflictError('this holiday already exists for that date');
     const bs = await db.query<{ bs_date: string }>('SELECT bs_date FROM bs_calendar WHERE ad_date = $1', [b.localDate]);
     const ins = await db.query<{ id: string }>(
       `INSERT INTO holiday (company_id, branch_id, local_date, bs_date, name_en, name_ne, gender_scope, optional) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
@@ -135,21 +139,19 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     const b = z.object({ bsYear: z.number().int() }).parse(req.body);
     if (b.bsYear !== 2083) return res.status(400).json({ error: 'default list available for BS 2083 only; add others via POST /shifts/holidays' });
     let inserted = 0;
+    const insertedDates: string[] = [];
     for (const [ad, en, ne, scope] of HOLIDAYS_2083) {
-      const bs = await db.query<{ bs_date: string }>('SELECT bs_date FROM bs_calendar WHERE ad_date = $1', [ad]);
+      // UNIQUE with a NULL branch_id never conflicts in SQL, so idempotency is an explicit existence check.
       const ins = await db.query(
-        `INSERT INTO holiday (company_id, branch_id, local_date, bs_date, name_en, name_ne, gender_scope) VALUES ($1, NULL, $2, $3, $4, $5, $6)
-         ON CONFLICT (company_id, branch_id, local_date, name_en) DO NOTHING`, [req.user!.companyId, ad, bs.rows[0]?.bs_date ?? null, en, ne, scope]);
-      // UNIQUE with a NULL branch_id never conflicts in SQL, so guard explicitly.
-      if ((ins.rowCount ?? 0) > 0) {
-        const dup = await db.query<{ n: string }>('SELECT count(*)::text AS n FROM holiday WHERE company_id = $1 AND branch_id IS NULL AND local_date = $2 AND name_en = $3', [req.user!.companyId, ad, en]);
-        if (Number(dup.rows[0]!.n) > 1) { await db.query('DELETE FROM holiday WHERE id IN (SELECT id FROM holiday WHERE company_id = $1 AND branch_id IS NULL AND local_date = $2 AND name_en = $3 ORDER BY id OFFSET 1)', [req.user!.companyId, ad, en]); }
-        else inserted++;
-      }
+        `INSERT INTO holiday (company_id, branch_id, local_date, bs_date, name_en, name_ne, gender_scope)
+         SELECT $1, NULL, $2, (SELECT bs_date FROM bs_calendar WHERE ad_date = $2), $3, $4, $5
+          WHERE NOT EXISTS (SELECT 1 FROM holiday WHERE company_id = $1 AND branch_id IS NULL AND local_date = $2 AND name_en = $3)`,
+        [req.user!.companyId, ad, en, ne, scope]);
+      if ((ins.rowCount ?? 0) > 0) { inserted++; insertedDates.push(ad); }
     }
     if (inserted) {
       const ids = await activeEmployeeIds(companyOf(req));
-      await enqueueRecompute(db, ids.flatMap((e) => HOLIDAYS_2083.map(([ad]) => ({ employeeId: e, localDate: ad }))), 'holiday_import');
+      await enqueueRecompute(db, ids.flatMap((e) => insertedDates.map((ad) => ({ employeeId: e, localDate: ad }))), 'holiday_import');
     }
     await audit(db, { actorId: req.user!.id, action: 'import', table: 'holiday', after: { bsYear: b.bsYear, inserted } });
     return res.json({ inserted, total: HOLIDAYS_2083.length });
@@ -208,14 +210,20 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   // ---------------------------------------------------------------- roster (plan §5.3)
   r.get('/roster', requireRole('hr', 'manager'), async (req, res) => {
     const q = z.object({ from: isoDate, to: isoDate, branchId: z.uuid().optional() }).parse(req.query);
+    // Line managers roster their own reports only; HR/finance see the company.
+    const teamOnly = !hasRole(req.user!, 'hr', 'finance');
     const emps = await db.query(
       `SELECT e.id, e.emp_code, e.name_en, e.name_ne, e.weekly_off_days,
               (SELECT s.shift_id FROM shift_assignment s WHERE s.employee_id = e.id AND s.valid @> $2::date) AS default_shift_id
          FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
-        WHERE e.company_id = $1 AND e.status = 'active' AND ($3::uuid IS NULL OR a.branch_id = $3) ORDER BY e.emp_code`, [req.user!.companyId, q.from, q.branchId ?? null]);
+        WHERE e.company_id = $1 AND e.status = 'active' AND ($3::uuid IS NULL OR a.branch_id = $3)
+          AND (NOT $4 OR a.manager_id = $5::uuid OR e.id = $5::uuid) ORDER BY e.emp_code`,
+      [req.user!.companyId, q.from, q.branchId ?? null, teamOnly, req.user!.employeeId]);
     const rows = await db.query(
       `SELECT r.employee_id, r.local_date, r.shift_id FROM roster r JOIN employee e ON e.id = r.employee_id
-        WHERE e.company_id = $1 AND r.local_date BETWEEN $2 AND $3`, [req.user!.companyId, q.from, q.to]);
+        LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
+        WHERE e.company_id = $1 AND r.local_date BETWEEN $2 AND $3 AND (NOT $4 OR a.manager_id = $5::uuid OR e.id = $5::uuid)`,
+      [req.user!.companyId, q.from, q.to, teamOnly, req.user!.employeeId]);
     res.json({ employees: emps.rows, roster: rows.rows });
   });
 
@@ -224,9 +232,20 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     const client = await db.connect();
     try {
       await client.query('BEGIN');
+      const checkedEmployees = new Set<string>();
+      const checkedShifts = new Set<string>();
       for (const row of b.rows) {
-        const own = await client.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [row.employeeId, req.user!.companyId]);
-        if (!own.rows[0]) throw new NotFoundError(`employee ${row.employeeId} not found`);
+        if (!checkedEmployees.has(row.employeeId)) {
+          const own = await client.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [row.employeeId, req.user!.companyId]);
+          if (!own.rows[0]) throw new NotFoundError(`employee ${row.employeeId} not found`);
+          await assertManages(client, req.user!, row.employeeId);
+          checkedEmployees.add(row.employeeId);
+        }
+        if (row.shiftId && !checkedShifts.has(row.shiftId)) {
+          const sh = await client.query('SELECT 1 FROM shift WHERE id = $1 AND company_id = $2', [row.shiftId, req.user!.companyId]);
+          if (!sh.rows[0]) throw new NotFoundError(`shift ${row.shiftId} not found`);
+          checkedShifts.add(row.shiftId);
+        }
         const locked = await client.query(`SELECT 1 FROM v_attendance_latest WHERE employee_id = $1 AND local_date = $2 AND locked_at IS NOT NULL`, [row.employeeId, row.localDate]);
         if (locked.rows[0]) throw new ConflictError(`attendance for ${row.localDate} is locked by payroll`);
         await client.query(
@@ -242,6 +261,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
 
   r.delete('/roster', requireRole('hr', 'manager'), async (req, res) => {
     const b = z.object({ employeeId: z.uuid(), localDate: isoDate }).parse(req.body);
+    await assertManages(db, req.user!, b.employeeId);
     const d = await db.query('DELETE FROM roster r USING employee e WHERE e.id = r.employee_id AND r.employee_id = $1 AND r.local_date = $2 AND e.company_id = $3', [b.employeeId, b.localDate, req.user!.companyId]);
     if (d.rowCount) await enqueueRecompute(db, [b], 'roster_removed');
     res.json({ deleted: d.rowCount ?? 0 });
@@ -250,18 +270,25 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   /** Copy last week's roster rows onto the week starting weekStart (plan §5.3 "copy last week"). */
   r.post('/roster/copy-week', requireRole('hr', 'manager'), async (req, res) => {
     const b = z.object({ weekStart: isoDate }).parse(req.body);
+    const teamOnly = !hasRole(req.user!, 'hr', 'finance');
     const rows = await db.query<{ employee_id: string; local_date: string; shift_id: string | null }>(
       `SELECT r.employee_id, r.local_date, r.shift_id FROM roster r JOIN employee e ON e.id = r.employee_id
-        WHERE e.company_id = $1 AND r.local_date >= $2::date - 7 AND r.local_date < $2::date`, [req.user!.companyId, b.weekStart]);
+        LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
+        WHERE e.company_id = $1 AND r.local_date >= $2::date - 7 AND r.local_date < $2::date AND (NOT $3 OR a.manager_id = $4::uuid)`,
+      [req.user!.companyId, b.weekStart, teamOnly, req.user!.employeeId]);
     const items: Array<{ employeeId: string; localDate: string }> = [];
+    let skippedLocked = 0;
     for (const row of rows.rows) {
       const target = new Date(new Date(`${row.local_date}T00:00:00Z`).getTime() + 7 * 86_400_000).toISOString().slice(0, 10);
+      const locked = await db.query('SELECT 1 FROM v_attendance_latest WHERE employee_id = $1 AND local_date = $2 AND locked_at IS NOT NULL', [row.employee_id, target]);
+      if (locked.rows[0]) { skippedLocked++; continue; }
       await db.query('INSERT INTO roster (employee_id, local_date, shift_id) VALUES ($1, $2, $3) ON CONFLICT (employee_id, local_date) DO UPDATE SET shift_id = EXCLUDED.shift_id',
         [row.employee_id, target, row.shift_id]);
       items.push({ employeeId: row.employee_id, localDate: target });
     }
     await enqueueRecompute(db, items, 'roster_copied');
-    res.json({ copied: items.length });
+    await audit(db, { actorId: req.user!.id, action: 'copy_week', table: 'roster', after: { weekStart: b.weekStart, copied: items.length, skippedLocked } });
+    res.json({ copied: items.length, skippedLocked });
   });
 
   /** Publish: tell each rostered employee their shifts for the range. */
@@ -293,7 +320,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
       await audit(client, { actorId: req.user!.id, action: 'assign', table: 'shift_assignment', rowId: b.employeeId, after: b });
       await client.query('COMMIT');
     } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
-    const today = new Date().toISOString().slice(0, 10);
+    const today = nptToday();
     if (b.from <= today) await enqueueRecompute(db, dateRange(b.from < today ? today : b.from, today).map((d) => ({ employeeId: b.employeeId, localDate: d })), 'shift_assigned');
     res.status(201).json({ ok: true });
   });
@@ -339,7 +366,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     if (sets.length) await db.query(`UPDATE shift SET ${sets.join(', ')} WHERE id = $1`, vals);
     // Rule changes apply going forward: recompute unlocked days of this month for assigned employees.
     const emps = await db.query<{ employee_id: string }>('SELECT employee_id FROM shift_assignment WHERE shift_id = $1 AND valid @> current_date', [id]);
-    const today = new Date().toISOString().slice(0, 10);
+    const today = nptToday();
     const monthStart = `${today.slice(0, 8)}01`;
     await enqueueRecompute(db, emps.rows.flatMap((e) => dateRange(monthStart, today).map((d) => ({ employeeId: e.employee_id, localDate: d }))), 'shift_rules_changed');
     await audit(db, { actorId: req.user!.id, action: 'update', table: 'shift', rowId: id, before: before.rows[0], after: b });

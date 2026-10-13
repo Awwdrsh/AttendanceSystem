@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { localDateOf } from '@hajiri/attendance-engine';
 import type { Queryable } from '../../db/pool.js';
 import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
@@ -37,6 +38,27 @@ export type DecisionHandler = (db: Queryable, objectId: string, state: 'approved
 
 const handlers = new Map<string, DecisionHandler>();
 
+/** Today's calendar date in Nepal (UTC+05:45). Never use new Date().toISOString() for "today": between 00:00 and 05:45 NPT it is still yesterday in UTC. */
+export function nptToday(): string { return localDateOf(Date.now()); }
+
+/** True when managerEmployeeId is the line manager of employeeId on `asOf` (default today, NPT). */
+export async function isManagerOf(db: Queryable, managerEmployeeId: string, employeeId: string, asOf = nptToday()): Promise<boolean> {
+  const r = await db.query('SELECT 1 FROM employee_assignment WHERE employee_id = $1 AND manager_id = $2 AND valid @> $3::date', [employeeId, managerEmployeeId, asOf]);
+  return r.rows.length > 0;
+}
+
+/**
+ * Team-scoped access (plan §12.4 ABAC "own record only" / direct reports): HR, finance and admin may act for anyone in
+ * their company; a manager only for direct reports (and self); everyone for themselves. Throws ForbiddenError otherwise.
+ * Callers must separately verify the employee belongs to the user's company (404 for other companies).
+ */
+export async function assertManages(db: Queryable, user: AuthUser, employeeId: string): Promise<void> {
+  if (hasRole(user, 'hr', 'finance')) return;
+  if (user.employeeId === employeeId) return;
+  if (hasRole(user, 'manager') && user.employeeId && (await isManagerOf(db, user.employeeId, employeeId))) return;
+  throw new ForbiddenError('not allowed to act for this employee');
+}
+
 /** Each request module registers how an approved/rejected decision is applied to its object. */
 export function registerHandler(objectType: string, fn: DecisionHandler): void {
   handlers.set(objectType, fn);
@@ -63,7 +85,16 @@ export async function instanceForObject(db: Queryable, objectType: string, objec
 }
 
 /** Users who may act on a step: manager → the subject's line manager (falls back to HR); other roles → role holders. */
-export async function approversFor(db: Queryable, companyId: string, employeeId: string | null, role: string): Promise<string[]> {
+export async function approversFor(db: Queryable, companyId: string, employeeId: string | null, role: string, cache?: Map<string, string[]>): Promise<string[]> {
+  const cacheKey = `${companyId}|${employeeId ?? ''}|${role}`;
+  const hit = cache?.get(cacheKey);
+  if (hit) return hit;
+  const ids = await approversUncached(db, companyId, employeeId, role);
+  cache?.set(cacheKey, ids);
+  return ids;
+}
+
+async function approversUncached(db: Queryable, companyId: string, employeeId: string | null, role: string): Promise<string[]> {
   if (role === 'manager') {
     if (employeeId) {
       const r = await db.query<{ id: string }>(
@@ -77,7 +108,7 @@ export async function approversFor(db: Queryable, companyId: string, employeeId:
 }
 
 /** Admins may act anywhere, nobody may decide their own request. */
-export async function canAct(db: Queryable, user: AuthUser, inst: WorkflowInstance): Promise<boolean> {
+export async function canAct(db: Queryable, user: AuthUser, inst: WorkflowInstance, cache?: Map<string, string[]>): Promise<boolean> {
   if (inst.state !== 'pending') return false;
   if (inst.employee_id && user.employeeId === inst.employee_id) return false;
   if (user.companyId !== inst.company_id) return false;
@@ -86,7 +117,7 @@ export async function canAct(db: Queryable, user: AuthUser, inst: WorkflowInstan
   if (!step) return false;
   // HR supervises line managers: it may decide any manager step (plan §3 HR "fix punch on behalf", delegation).
   if (step.role === 'manager' && hasRole(user, 'hr')) return true;
-  const ids = await approversFor(db, inst.company_id, inst.employee_id, step.role);
+  const ids = await approversFor(db, inst.company_id, inst.employee_id, step.role, cache);
   return ids.includes(user.id);
 }
 
@@ -137,6 +168,13 @@ export async function act(db: Queryable, input: ActInput): Promise<WorkflowState
   if (!(await canAct(db, input.user, inst))) throw new ForbiddenError('you are not an approver for this step');
   const reason = input.reason?.trim() || null;
   if (input.decision === 'reject' && !reason) throw new BadRequestError('a reason is required to reject');
+  if (input.onBehalfOf) {
+    // Delegation is recorded, never assumed: only HR/admin may act on behalf of someone, and only for a real approver of this step.
+    if (!hasRole(input.user, 'hr')) throw new ForbiddenError('only HR may act on behalf of another approver');
+    const step = inst.steps[inst.current_step];
+    const ids = step ? await approversFor(db, inst.company_id, inst.employee_id, step.role) : [];
+    if (!ids.includes(input.onBehalfOf) || input.onBehalfOf === input.user.id) throw new BadRequestError('onBehalfOf must be an approver for this step');
+  }
 
   const actedAt = new Date();
   const signature = createHash('sha256')
@@ -200,8 +238,9 @@ export async function inboxFor(db: Queryable, user: AuthUser): Promise<InboxItem
     `SELECT w.*, e.emp_code, e.name_en, e.name_ne FROM workflow_instance w LEFT JOIN employee e ON e.id = w.employee_id
       WHERE w.company_id = $1 AND w.state = 'pending' ORDER BY w.created_at`, [user.companyId]);
   const items: InboxItem[] = [];
+  const cache = new Map<string, string[]>();
   for (const row of r.rows) {
-    if (!(await canAct(db, user, row))) continue;
+    if (!(await canAct(db, user, row, cache))) continue;
     items.push({
       instanceId: row.id, objectType: row.object_type, objectId: row.object_id, step: row.current_step, totalSteps: row.steps.length,
       createdAt: row.created_at,

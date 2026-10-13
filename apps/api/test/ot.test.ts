@@ -73,7 +73,7 @@ describe('overtime slips', () => {
     const sub = (await leaveTypeByCode(db, DEMO.companyId, 'SUBSTITUTE'))!.id;
     expect(await ledgerBalance(db, DEMO.ram, sub)).toBe(0.5);
     const csv = await request(app).get('/api/v1/ot/register').set(auth(hr)).query({ from: '2026-09-01', to: '2026-09-30', format: 'csv' });
-    expect(csv.text.split('\n')[0]).toBe('emp_code,name_en,local_date,bs_date,day_type,detected_min,approved_min,multiplier,status');
+    expect(csv.text.split('\r\n')[0]).toBe('\uFEFFemp_code,name_en,local_date,bs_date,day_type,detected_min,approved_min,multiplier,status');
     expect(csv.text).toContain('E002,Ram Thapa,2026-09-26');
   });
 });

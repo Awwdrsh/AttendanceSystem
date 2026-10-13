@@ -3,6 +3,7 @@ import { weekdayOf } from '@hajiri/bs-calendar';
 import type { Queryable } from '../../db/pool.js';
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors.js';
 import { dateRange } from '../attendance/service.js';
+import { nptToday } from '../workflow/service.js';
 
 export interface LeaveTypeRow {
   id: string; company_id: string; code: string; name_en: string; name_ne: string | null; paid: boolean; statutory: boolean;
@@ -127,8 +128,8 @@ export async function creditCompOff(db: Queryable, employeeId: string, days: num
   if (!type) throw new NotFoundError('SUBSTITUTE leave type is not configured');
   const r = await db.query<{ id: string }>(
     `INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, ref_id, expires_on, note, posted_by)
-     VALUES ($1, $2, current_date, $3, 'comp_off', $4, $5, $6, $7, $8) RETURNING id`,
-    [employeeId, type.id, days, ref.refType, ref.refId, expiresOn, ref.note ?? null, ref.postedBy ?? null]);
+     VALUES ($1, $2, $9::date, $3, 'comp_off', $4, $5, $6, $7, $8) RETURNING id`,
+    [employeeId, type.id, days, ref.refType, ref.refId, expiresOn, ref.note ?? null, ref.postedBy ?? null, nptToday()]);
   return r.rows[0]!.id;
 }
 
@@ -148,8 +149,8 @@ export async function encashableBalances(db: Queryable, employeeId: string): Pro
 /** Post the encashment rows (payroll final settlement calls this once the run is locked). */
 export async function postEncashment(db: Queryable, employeeId: string, leaveTypeId: string, days: number, ref: { refType: string; refId: string; postedBy?: string | null }): Promise<void> {
   await db.query(
-    `INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, ref_id, posted_by) VALUES ($1, $2, current_date, $3, 'encashment', $4, $5, $6)`,
-    [employeeId, leaveTypeId, -days, ref.refType, ref.refId, ref.postedBy ?? null]);
+    `INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, ref_id, posted_by) VALUES ($1, $2, $7::date, $3, 'encashment', $4, $5, $6)`,
+    [employeeId, leaveTypeId, -days, ref.refType, ref.refId, ref.postedBy ?? null, nptToday()]);
 }
 
 export async function assertNoOverlap(db: Queryable, employeeId: string, from: string, to: string, excludeId?: string): Promise<void> {
@@ -157,6 +158,12 @@ export async function assertNoOverlap(db: Queryable, employeeId: string, from: s
     `SELECT 1 FROM leave_request WHERE employee_id = $1 AND status IN ('pending', 'approved') AND from_date <= $3::date AND to_date >= $2::date AND ($4::uuid IS NULL OR id <> $4) LIMIT 1`,
     [employeeId, from, to, excludeId ?? null]);
   if (r.rows[0]) throw new ConflictError('an existing leave request already covers part of this range');
+}
+
+/** Any latest attendance day in [from, to] already locked by payroll? Such days can never be changed by leave decisions (plan §10.3). */
+export async function hasLockedDay(db: Queryable, employeeId: string, from: string, to: string): Promise<boolean> {
+  const r = await db.query('SELECT 1 FROM v_attendance_latest WHERE employee_id = $1 AND local_date BETWEEN $2 AND $3 AND locked_at IS NOT NULL LIMIT 1', [employeeId, from, to]);
+  return r.rows.length > 0;
 }
 
 export { bsToAd, addBsDays };

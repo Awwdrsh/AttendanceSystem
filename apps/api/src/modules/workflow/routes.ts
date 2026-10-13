@@ -22,6 +22,9 @@ export function workflowRoutes({ db }: AppDeps): Router {
   const decide = (decision: 'approve' | 'reject') => async (req: import('express').Request, res: import('express').Response) => {
     const id = z.uuid().parse(req.params.id);
     const b = z.object({ reason: z.string().max(1000).optional(), approvedMin: z.number().int().min(0).max(240).optional(), onBehalfOf: z.uuid().optional() }).parse(req.body ?? {});
+    // Other companies' approvals do not exist from this user's point of view (no IDOR probing via 403 vs 404).
+    const existing = await getInstance(db, id);
+    if (!existing || existing.company_id !== req.user!.companyId) throw new NotFoundError('approval not found');
     const client = await db.connect();
     try {
       await client.query('BEGIN');
@@ -40,6 +43,8 @@ export function workflowRoutes({ db }: AppDeps): Router {
     const b = z.object({ ids: z.array(z.uuid()).min(1).max(200) }).parse(req.body);
     const results: Array<{ id: string; state?: string; error?: string }> = [];
     for (const id of b.ids) {
+      const existing = await getInstance(db, id);
+      if (!existing || existing.company_id !== req.user!.companyId) { results.push({ id, error: 'approval not found' }); continue; }
       const client = await db.connect();
       try {
         await client.query('BEGIN');
