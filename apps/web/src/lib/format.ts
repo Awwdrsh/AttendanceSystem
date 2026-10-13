@@ -1,5 +1,7 @@
-import { adToBs, formatBs, toDevanagariNumerals, BS_MONTH_NAMES_EN, BS_MONTH_NAMES_NE, type BsDate } from '@hajiri/bs-calendar';
-import type { Lang, Numerals } from '../i18n';
+import { adToBs, formatBs, BS_MONTH_NAMES_EN, type BsDate } from '@hajiri/bs-calendar';
+
+type Lang = 'en';
+type Numerals = 'latin';
 
 export const NPT_OFFSET_MIN = 345;
 
@@ -20,14 +22,12 @@ export function fmtMoney(value: string | number | null | undefined, opts: { nume
   const neg = n.startsWith('-');
   const [i, f] = n.replace('-', '').split('.');
   let s = groupDigits(i ?? '0', opts.style ?? 'lakh') + (decimals > 0 ? `.${f ?? ''}` : '');
-  if (opts.numerals === 'devanagari') s = toDevanagariNumerals(s);
-  const cur = opts.currency === false ? '' : opts.numerals === 'devanagari' ? 'रु ' : 'NPR ';
+  const cur = opts.currency === false ? '' : 'NPR ';
   return `${neg ? '−' : ''}${cur}${s}`;
 }
 
-export function fmtNum(value: number | string, numerals: Numerals = 'latin'): string {
-  const s = String(value);
-  return numerals === 'devanagari' ? toDevanagariNumerals(s) : s;
+export function fmtNum(value: number | string, _numerals: Numerals = 'latin'): string {
+  return typeof value === 'number' ? value.toLocaleString('en-US') : String(value);
 }
 
 /** 503 → "8 h 23 m"; 0 → "0 m". */
@@ -76,13 +76,14 @@ export function dualDate(ad: string | null | undefined, lang: Lang = 'en', numer
   const iso = ad.slice(0, 10);
   const bs = safeAdToBs(iso);
   if (!bs) return { bs: iso, bsLong: iso, ad: fmtAd(iso) };
-  const month = lang === 'ne' ? BS_MONTH_NAMES_NE[bs.month - 1] : BS_MONTH_NAMES_EN[bs.month - 1];
-  return { bs: formatBs(bs, { numerals }), bsLong: `${fmtNum(bs.day, numerals)} ${month} ${fmtNum(bs.year, numerals)}`, ad: fmtAd(iso) };
+  void lang; void numerals;
+  const month = BS_MONTH_NAMES_EN[bs.month - 1];
+  return { bs: formatBs(bs), bsLong: `${bs.day} ${month} ${bs.year}`, ad: fmtAd(iso) };
 }
 
 export function bsMonthLabel(bsYear: number, bsMonth: number, lang: Lang = 'en', numerals: Numerals = 'latin'): string {
-  const month = lang === 'ne' ? BS_MONTH_NAMES_NE[bsMonth - 1] : BS_MONTH_NAMES_EN[bsMonth - 1];
-  return `${month} ${fmtNum(bsYear, numerals)}`;
+  void lang; void numerals;
+  return `${BS_MONTH_NAMES_EN[bsMonth - 1]} ${bsYear}`;
 }
 
 /** Fiscal year label from an AD date: "2083/84". */
@@ -112,4 +113,29 @@ export function relativeTime(iso: string | Date | null | undefined): string {
 export function truncate(s: string | null | undefined, n = 40): string {
   if (!s) return '';
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+}
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/** "Tue, 13 Oct 2026" */
+export function fmtDateLong(ad: string | null | undefined): string {
+  if (!ad) return '—';
+  const iso = ad.slice(0, 10);
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return ad;
+  return `${WEEKDAYS[d.getUTCDay()]}, ${fmtAd(iso)}`;
+}
+
+/** "13 Oct" (same year as today) or "13 Oct 2025". */
+export function fmtDateShort(ad: string | null | undefined): string {
+  if (!ad) return '—';
+  const iso = ad.slice(0, 10);
+  const full = fmtAd(iso);
+  return iso.slice(0, 4) === todayNpt().slice(0, 4) ? full.replace(/ \d{4}$/, '') : full;
+}
+
+/** "Good morning" etc. in Nepal time. */
+export function greeting(): string {
+  const h = new Date(Date.now() + NPT_OFFSET_MIN * 60_000).getUTCHours();
+  return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
 }

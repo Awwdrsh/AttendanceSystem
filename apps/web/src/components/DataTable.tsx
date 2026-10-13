@@ -22,7 +22,7 @@ export interface DataTableProps<R> {
 }
 
 /** Dense data table with sticky header, optional row selection and a bulk action bar (plan §13.2). */
-export function DataTable<R>({ columns, rows, rowKey, loading, error, emptyTitle, emptyHint, selectable, selected, onSelect, bulkBar, onRowClick, maxHeight = '70vh', highlight }: DataTableProps<R>) {
+export function DataTable<R>({ columns, rows, rowKey, loading, error, emptyTitle, emptyHint, selectable, selected, onSelect, bulkBar, onRowClick, maxHeight, highlight }: DataTableProps<R>) {
   const sel = selected ?? new Set<string>();
   const allKeys = rows.map(rowKey);
   const allSelected = allKeys.length > 0 && allKeys.every((k) => sel.has(k));
@@ -33,9 +33,9 @@ export function DataTable<R>({ columns, rows, rowKey, loading, error, emptyTitle
   if (!loading && rows.length === 0) return <EmptyState title={emptyTitle ?? 'Nothing here yet.'} {...(emptyHint !== undefined ? { hint: emptyHint } : {})} />;
 
   return (
-    <Paper withBorder radius="md" style={{ overflow: 'hidden' }}>
+    <Paper withBorder radius="lg" style={{ overflow: 'hidden' }}>
       {selectable && sel.size > 0 ? (
-        <Group p="xs" bg="var(--mantine-color-teal-light)" justify="space-between">
+        <Group p="xs" bg="var(--mantine-color-brand-light)" justify="space-between">
           <Text size="sm" fw={500}>{sel.size} selected</Text>
           <Group gap="xs">{bulkBar}</Group>
         </Group>
