@@ -8,16 +8,19 @@
 #   --no-demo      do not load the demo company/employees/device
 #   --with-tests   run the full test suite at the end
 #   --pg-port N    PostgreSQL port (default 5433 on macOS, 5432 on Linux)
+#   --company CODE --company-name "Name"   create your real company instead of the demo one (implies --no-demo)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$ROOT"
 
-WITH_DEMO=1; WITH_TESTS=0; PG_PORT="${HAJIRI_PG_PORT:-$DEFAULT_PG_PORT}"
+WITH_DEMO=1; WITH_TESTS=0; PG_PORT="${HAJIRI_PG_PORT:-$DEFAULT_PG_PORT}"; COMPANY_CODE="${HAJIRI_COMPANY_CODE:-DEMO}"; COMPANY_NAME="${HAJIRI_COMPANY_NAME:-My Company}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-demo) WITH_DEMO=0 ;;
     --with-tests) WITH_TESTS=1 ;;
     --pg-port) PG_PORT="$2"; shift ;;
+    --company) COMPANY_CODE="$2"; shift ;;
+    --company-name) COMPANY_NAME="$2"; shift ;;
     -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) fail "unknown option $1" ;;
   esac
@@ -121,19 +124,33 @@ else
 fi
 DATABASE_URL="postgres://${DB_AUTH}localhost:$PG_PORT/hajiri"
 DATABASE_URL_TEST="postgres://${DB_AUTH}localhost:$PG_PORT/hajiri_test"
+psql_q() { psql "$DATABASE_URL" -Atc "$1" 2>/dev/null; }
 ok "hajiri, hajiri_test"
 
 # ------------------------------------------------------------------ env files
 step "Environment files"
+gen_b64() { node -e "console.log(require('node:crypto').randomBytes($1).toString('base64'))"; }
 if [ ! -f apps/api/.env ]; then
   cat > apps/api/.env <<ENV
 PORT=3000
 DATABASE_URL=$DATABASE_URL
 DATABASE_URL_TEST=$DATABASE_URL_TEST
 LOG_LEVEL=info
+DATA_ENCRYPTION_KEY=$(gen_b64 32)
+PASSWORD_PEPPER=$(gen_b64 24)
+COOKIE_SECURE=false
+RUN_WORKER=true
+CORS_ORIGINS=http://localhost:5173
+WEB_DIST=$ROOT/apps/web/dist
 ENV
-  ok "wrote apps/api/.env"
-else ok "apps/api/.env exists (kept)"; fi
+  chmod 600 apps/api/.env
+  ok "wrote apps/api/.env (new encryption key and pepper generated)"
+else
+  grep -q '^DATA_ENCRYPTION_KEY=' apps/api/.env || echo "DATA_ENCRYPTION_KEY=$(gen_b64 32)" >> apps/api/.env
+  grep -q '^PASSWORD_PEPPER=' apps/api/.env || echo "PASSWORD_PEPPER=$(gen_b64 24)" >> apps/api/.env
+  grep -q '^WEB_DIST=' apps/api/.env || echo "WEB_DIST=$ROOT/apps/web/dist" >> apps/api/.env
+  ok "apps/api/.env exists (kept; missing secrets added)"
+fi
 
 if [ ! -f apps/gateway/.env ]; then
   SIGNING_KEY="$(node -e "console.log(require('node:crypto').generateKeyPairSync('ed25519').privateKey.export({type:'pkcs8',format:'der'}).toString('base64'))")"
@@ -160,8 +177,29 @@ ok "node_modules ready"
 step "Database schema and seeds"
 pnpm --filter @hajiri/api --silent db:migrate
 pnpm --filter @hajiri/api --silent db:seed:bs
+if [ "$COMPANY_CODE" != "DEMO" ]; then
+  WITH_DEMO=0
+  psql_q "insert into company (code, name_en) values ('$COMPANY_CODE', '$COMPANY_NAME') on conflict (code) do nothing" >/dev/null
+  psql_q "insert into branch (company_id, code, name_en) select id, 'HQ', 'Head Office' from company where code = '$COMPANY_CODE' on conflict do nothing" >/dev/null
+  ok "company $COMPANY_CODE ready"
+fi
 if [ "$WITH_DEMO" = 1 ]; then pnpm --filter @hajiri/api --silent db:seed:demo; ok "demo data loaded"; fi
-ok "schema up to date"
+pnpm --filter @hajiri/api --silent db:seed:defaults --company "$COMPANY_CODE" >/dev/null
+ok "schema up to date; defaults seeded"
+
+step "Admin user"
+ADMIN_EMAIL="${HAJIRI_ADMIN_EMAIL:-admin@hajiri.local}"
+if psql_q "select 1 from app_user where email = '$ADMIN_EMAIL'" | grep -q 1; then
+  ok "$ADMIN_EMAIL exists (reset with: pnpm --filter @hajiri/api cli reset-password --email $ADMIN_EMAIL --password <new>)"
+else
+  ADMIN_PASSWORD="$(node -e "console.log(require('node:crypto').randomBytes(12).toString('base64url'))")"
+  pnpm --filter @hajiri/api --silent cli create-admin --email "$ADMIN_EMAIL" --password "$ADMIN_PASSWORD" --company "$COMPANY_CODE" >/dev/null
+  printf 'email=%s\npassword=%s\n' "$ADMIN_EMAIL" "$ADMIN_PASSWORD" > .admin-credentials; chmod 600 .admin-credentials
+  ok "created $ADMIN_EMAIL  (password saved once in .admin-credentials; change it after first login)"
+fi
+
+step "Web app"
+if [ -d apps/web ]; then pnpm --filter @hajiri/web --silent build >/dev/null 2>&1 && ok "built apps/web/dist" || warn "web build failed; API still works (run: pnpm --filter @hajiri/web build)"; fi
 
 if [ "$WITH_TESTS" = 1 ]; then
   step "Tests"
@@ -174,5 +212,6 @@ echo "  Run in the background:    ./scripts/start.sh --daemon   (stop with ./scr
 echo "  Auto-start on boot:       ./scripts/install-service.sh"
 echo "  Update from GitHub:       ./scripts/update.sh"
 echo
+echo "  Web app:  http://localhost:3000  (login with .admin-credentials)"
 echo "  API:      http://localhost:3000/health"
 echo "  Gateway:  http://localhost:8080/health   (point terminals at http://<this-machine>:8080/iclock)"

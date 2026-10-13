@@ -108,6 +108,7 @@ export type Flag =
   | { kind: 'OTCapExceeded'; minutes: number }
   | { kind: 'OTPreapprovalMissing'; rawMinutes: number }
   | { kind: 'MissingOut' }
+  | { kind: 'UnpaidLeave' }
   | { kind: 'UnpairedPunch'; punchId: string };
 
 export interface OtResult {

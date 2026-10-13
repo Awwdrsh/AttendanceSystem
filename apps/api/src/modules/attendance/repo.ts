@@ -1,14 +1,15 @@
-import type { Punch, Shift } from '@hajiri/attendance-engine';
+import type { LeaveCover, Punch, Shift } from '@hajiri/attendance-engine';
 import { localMidnightMs, DAY_MIN, MIN_MS } from '@hajiri/attendance-engine';
 import type { Queryable } from '../../db/pool.js';
 
 export interface EmployeeRow {
   id: string; company_id: string; gender: string | null; ot_eligible: boolean; weekly_off_days: number[];
+  join_date: string | null; exit_date: string | null;
 }
 
 export async function getEmployee(db: Queryable, employeeId: string): Promise<EmployeeRow | null> {
   const r = await db.query<EmployeeRow>(
-    'SELECT id, company_id, gender, ot_eligible, weekly_off_days FROM employee WHERE id = $1', [employeeId]);
+    'SELECT id, company_id, gender, ot_eligible, weekly_off_days, join_date, exit_date FROM employee WHERE id = $1', [employeeId]);
   return r.rows[0] ?? null;
 }
 
@@ -37,15 +38,21 @@ function toShift(r: ShiftRow): Shift & { id: string } {
   };
 }
 
-/** roster row (even if its shift is NULL) > shift_assignment > none (plan §10.1). */
+/** approved shift_change regularisation > roster row (even if its shift is NULL) > shift_assignment > none (plan §10.1). */
 export async function resolveShift(db: Queryable, employeeId: string, localDate: string): Promise<(Shift & { id: string }) | null> {
-  const roster = await db.query<{ shift_id: string | null }>(
-    'SELECT shift_id FROM roster WHERE employee_id = $1 AND local_date = $2', [employeeId, localDate]);
-  let shiftId: string | null | undefined = roster.rows[0]?.shift_id;
-  if (roster.rows.length === 0) {
-    const sa = await db.query<{ shift_id: string }>(
-      'SELECT shift_id FROM shift_assignment WHERE employee_id = $1 AND valid @> $2::date', [employeeId, localDate]);
-    shiftId = sa.rows[0]?.shift_id ?? null;
+  const reg = await db.query<{ shift_id: string | null }>(
+    `SELECT shift_id FROM regularisation_request WHERE employee_id = $1 AND local_date = $2 AND kind = 'shift_change' AND status = 'approved'
+      ORDER BY decided_at DESC LIMIT 1`, [employeeId, localDate]);
+  let shiftId: string | null | undefined = reg.rows[0]?.shift_id;
+  if (reg.rows.length === 0) {
+    const roster = await db.query<{ shift_id: string | null }>(
+      'SELECT shift_id FROM roster WHERE employee_id = $1 AND local_date = $2', [employeeId, localDate]);
+    shiftId = roster.rows[0]?.shift_id;
+    if (roster.rows.length === 0) {
+      const sa = await db.query<{ shift_id: string }>(
+        'SELECT shift_id FROM shift_assignment WHERE employee_id = $1 AND valid @> $2::date', [employeeId, localDate]);
+      shiftId = sa.rows[0]?.shift_id ?? null;
+    }
   }
   if (!shiftId) return null;
   const s = await db.query<ShiftRow>(`SELECT ${SHIFT_COLS} FROM shift WHERE id = $1`, [shiftId]);
@@ -76,24 +83,48 @@ export async function isHoliday(db: Queryable, companyId: string, branchId: stri
   return r.rows.length > 0;
 }
 
-/** OT minutes already recorded this week (Sun-Sat) on other days, from the latest version of each day. */
+/** Approved leave covering the date: full day, or a half (plan §10.1 ctx.leave). */
+export async function approvedLeave(db: Queryable, employeeId: string, localDate: string): Promise<{ cover: LeaveCover; paid: boolean; leaveTypeId: string | null }> {
+  const r = await db.query<{ half_day: 'first_half' | 'second_half' | null; paid: boolean; leave_type_id: string }>(
+    `SELECT lr.half_day, lt.paid, lr.leave_type_id FROM leave_request lr JOIN leave_type lt ON lt.id = lr.leave_type_id
+      WHERE lr.employee_id = $1 AND lr.status = 'approved' AND $2::date BETWEEN lr.from_date AND lr.to_date
+      ORDER BY lr.decided_at DESC LIMIT 1`, [employeeId, localDate]);
+  const row = r.rows[0];
+  if (!row) return { cover: 'none', paid: true, leaveTypeId: null };
+  return { cover: row.half_day ?? 'full', paid: row.paid, leaveTypeId: row.leave_type_id };
+}
+
+export async function approvedWfh(db: Queryable, employeeId: string, localDate: string): Promise<boolean> {
+  const r = await db.query(
+    `SELECT 1 FROM regularisation_request WHERE employee_id = $1 AND local_date = $2 AND kind IN ('wfh', 'on_duty') AND status = 'approved' LIMIT 1`,
+    [employeeId, localDate]);
+  return r.rows.length > 0;
+}
+
+export async function approvedOtMinutes(db: Queryable, employeeId: string, localDate: string): Promise<number | null> {
+  const r = await db.query<{ approved_min: number | null }>(
+    `SELECT approved_min FROM ot_request WHERE employee_id = $1 AND local_date = $2 AND status = 'approved' ORDER BY decided_at DESC LIMIT 1`,
+    [employeeId, localDate]);
+  return r.rows[0]?.approved_min ?? null;
+}
+
+/** OT minutes already recorded this week (Sunday..Saturday) on other days, from the latest version of each day. */
 export async function otMinutesThisWeek(db: Queryable, employeeId: string, localDate: string): Promise<number> {
   const r = await db.query<{ total: string }>(
-    `SELECT coalesce(sum(ot_min), 0)::text AS total FROM (
-       SELECT DISTINCT ON (local_date) ot_min FROM attendance_day
-        WHERE employee_id = $1 AND local_date <> $2::date
-          AND local_date >= date_trunc('week', $2::date + 1)::date - 1
-          AND local_date <  date_trunc('week', $2::date + 1)::date + 6
+    `WITH wk AS (SELECT ($2::date - extract(dow from $2::date)::int) AS start)
+     SELECT coalesce(sum(ot_min), 0)::text AS total FROM (
+       SELECT DISTINCT ON (local_date) ot_min FROM attendance_day, wk
+        WHERE employee_id = $1 AND local_date <> $2::date AND local_date >= wk.start AND local_date < wk.start + 7
         ORDER BY local_date, version DESC) d`,
     [employeeId, localDate]);
   return Number(r.rows[0]?.total ?? 0);
 }
 
-export interface LatestVersion { version: number; inputs_hash: string; locked_at: Date | null }
+export interface LatestVersion { id: string; version: number; inputs_hash: string; locked_at: Date | null }
 
 export async function latestVersion(db: Queryable, employeeId: string, localDate: string): Promise<LatestVersion | null> {
   const r = await db.query<LatestVersion>(
-    'SELECT version, inputs_hash, locked_at FROM attendance_day WHERE employee_id = $1 AND local_date = $2 ORDER BY version DESC LIMIT 1',
+    'SELECT id, version, inputs_hash, locked_at FROM attendance_day WHERE employee_id = $1 AND local_date = $2 ORDER BY version DESC LIMIT 1',
     [employeeId, localDate]);
   return r.rows[0] ?? null;
 }
@@ -101,4 +132,9 @@ export async function latestVersion(db: Queryable, employeeId: string, localDate
 export async function bsDateFor(db: Queryable, localDate: string): Promise<string | null> {
   const r = await db.query<{ bs_date: string }>('SELECT bs_date FROM bs_calendar WHERE ad_date = $1', [localDate]);
   return r.rows[0]?.bs_date ?? null;
+}
+
+export async function attendancePolicy(db: Queryable, companyId: string): Promise<Record<string, unknown>> {
+  const r = await db.query<{ value: Record<string, unknown> }>(`SELECT value FROM company_setting WHERE company_id = $1 AND key = 'attendance.policy'`, [companyId]);
+  return r.rows[0]?.value ?? {};
 }

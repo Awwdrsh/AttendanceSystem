@@ -1,22 +1,69 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import type { Db } from '../../db/pool.js';
-import { listDays, recomputeDay } from './service.js';
+import type { AppDeps } from '../../deps.js';
+import { assertAccessEmployee, requireRole } from '../auth/middleware.js';
+import { dateRange, enqueueRecompute, listDays, recomputeDay } from './service.js';
 
-const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD');
+import { isoDate } from '../../validation.js';
 
-export function attendanceRoutes(db: Db): Router {
+export function attendanceRoutes({ db }: AppDeps): Router {
   const r = Router();
 
-  r.post('/recompute', async (req, res) => {
+  r.post('/recompute', requireRole('hr', 'manager'), async (req, res) => {
     const body = z.object({ employeeId: z.uuid(), localDate: isoDate }).parse(req.body);
-    const result = await recomputeDay(db, body.employeeId, body.localDate);
-    res.json(result);
+    res.json(await recomputeDay(db, body.employeeId, body.localDate));
+  });
+
+  /** Bulk: queue a range for the worker (e.g. after a holiday edit). */
+  r.post('/recompute-range', requireRole('hr'), async (req, res) => {
+    const b = z.object({ employeeIds: z.array(z.uuid()).min(1).max(5000), from: isoDate, to: isoDate }).parse(req.body);
+    const dates = dateRange(b.from, b.to);
+    if (dates.length > 62) return res.status(400).json({ error: 'range too long (max 62 days)' });
+    await enqueueRecompute(db, b.employeeIds.flatMap((e) => dates.map((d) => ({ employeeId: e, localDate: d }))), 'manual');
+    return res.json({ queued: b.employeeIds.length * dates.length });
   });
 
   r.get('/days', async (req, res) => {
     const q = z.object({ employeeId: z.uuid(), from: isoDate, to: isoDate }).parse(req.query);
+    assertAccessEmployee(req.user!, q.employeeId);
     res.json({ days: await listDays(db, q.employeeId, q.from, q.to) });
+  });
+
+  /** Raw punches an employee may see for themselves (plan §13.13 "My punches"). */
+  r.get('/punches', async (req, res) => {
+    const q = z.object({ employeeId: z.uuid(), from: isoDate, to: isoDate }).parse(req.query);
+    assertAccessEmployee(req.user!, q.employeeId);
+    const rows = await db.query(
+      `SELECT p.id, p.punched_at, p.local_date, p.direction, p.verify_mode, p.source, p.device_sn, p.supersedes_id,
+              (SELECT count(*) FROM punch_event s WHERE s.supersedes_id = p.id) > 0 AS superseded
+         FROM punch_event p WHERE p.employee_id = $1 AND p.local_date BETWEEN $2 AND $3 ORDER BY p.punched_at`,
+      [q.employeeId, q.from, q.to]);
+    res.json({ punches: rows.rows });
+  });
+
+  /** Exceptions queue (plan §5.4): latest days with anomalies in a range, company-wide. */
+  r.get('/exceptions', requireRole('hr', 'manager'), async (req, res) => {
+    const q = z.object({ from: isoDate, to: isoDate, status: z.string().optional() }).parse(req.query);
+    const rows = await db.query(
+      `SELECT v.id, v.employee_id, e.emp_code, e.name_en, e.name_ne, v.local_date, v.bs_date, v.status, v.worked_min, v.late_min, v.early_min, v.ot_min, v.flags
+         FROM v_attendance_latest v JOIN employee e ON e.id = v.employee_id
+        WHERE e.company_id = $1 AND v.local_date BETWEEN $2 AND $3 AND v.locked_at IS NULL
+          AND (v.status IN ('Incomplete', 'Absent') OR v.flags::text LIKE '%OTCapExceeded%' OR v.flags::text LIKE '%OTPreapprovalMissing%' OR v.flags::text LIKE '%UnpairedPunch%')
+          AND ($4::text IS NULL OR v.status = $4)
+        ORDER BY v.local_date DESC, e.emp_code LIMIT 1000`,
+      [req.user!.companyId, q.from, q.to, q.status ?? null]);
+    res.json({ exceptions: rows.rows });
+  });
+
+  /** Team Today (plan §3 manager screen): everyone's latest status for one date. */
+  r.get('/today', requireRole('hr', 'manager', 'finance'), async (req, res) => {
+    const q = z.object({ date: isoDate }).parse(req.query);
+    const rows = await db.query(
+      `SELECT e.id AS employee_id, e.emp_code, e.name_en, e.name_ne, v.status, v.first_in, v.last_out, v.late_min, v.worked_min, v.flags
+         FROM employee e LEFT JOIN v_attendance_latest v ON v.employee_id = e.id AND v.local_date = $2
+        WHERE e.company_id = $1 AND e.status = 'active' ORDER BY e.emp_code`,
+      [req.user!.companyId, q.date]);
+    res.json({ date: q.date, rows: rows.rows });
   });
 
   return r;
