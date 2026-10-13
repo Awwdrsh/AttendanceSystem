@@ -1,24 +1,40 @@
-# Local infrastructure for when Docker is available (plan §8.4). Today's dev setup uses Homebrew PostgreSQL 18 on :5433 instead.
+# Full stack with Docker (alternative to scripts/setup.sh on a machine that has Docker).
+#   cp infra/.env.docker.example infra/.env.docker   # fill secrets
+#   docker compose -f infra/docker-compose.yml --env-file infra/.env.docker up -d --build
+# Then run once:  docker compose -f infra/docker-compose.yml exec api sh -c "pnpm db:migrate && pnpm db:seed:bs && pnpm db:seed:defaults --company $COMPANY_CODE"
 services:
   postgres:
     image: postgres:18
     environment:
       POSTGRES_DB: hajiri
       POSTGRES_USER: hajiri
-      POSTGRES_PASSWORD: hajiri
-    ports: ["5433:5432"]
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     volumes: ["pgdata:/var/lib/postgresql"]
-  valkey:
-    image: valkey/valkey:9
-    ports: ["6379:6379"]
-  minio:
-    image: minio/minio
-    command: server /data --console-address ":9001"
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U hajiri"], interval: 5s, timeout: 3s, retries: 20 }
+    restart: unless-stopped
+  api:
+    build: { context: .., dockerfile: infra/docker/api.Dockerfile }
     environment:
-      MINIO_ROOT_USER: hajiri
-      MINIO_ROOT_PASSWORD: hajiri-dev-secret
-    ports: ["9000:9000", "9001:9001"]
-    volumes: ["minio:/data"]
+      DATABASE_URL: postgres://hajiri:${POSTGRES_PASSWORD}@postgres:5432/hajiri
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?set DATA_ENCRYPTION_KEY}
+      PASSWORD_PEPPER: ${PASSWORD_PEPPER:?set PASSWORD_PEPPER}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      LOG_LEVEL: info
+      RUN_WORKER: "true"
+    ports: ["3000:3000"]
+    depends_on: { postgres: { condition: service_healthy } }
+    restart: unless-stopped
+  gateway:
+    build: { context: .., dockerfile: infra/docker/gateway.Dockerfile }
+    environment:
+      DATABASE_URL: postgres://hajiri:${POSTGRES_PASSWORD}@postgres:5432/hajiri
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY}
+      GATEWAY_SIGNING_KEY: ${GATEWAY_SIGNING_KEY}
+      LOG_LEVEL: info
+    ports: ["8080:8080"]
+    volumes: ["gateway-raw:/app/apps/gateway/data"]
+    depends_on: { postgres: { condition: service_healthy } }
+    restart: unless-stopped
 volumes:
   pgdata:
-  minio:
+  gateway-raw:

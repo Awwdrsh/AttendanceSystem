@@ -21,6 +21,9 @@ pnpm --filter @hajiri/api --silent db:migrate
 pnpm --filter @hajiri/api --silent db:seed:bs
 ok "schema up to date"
 
+step "Web app build"
+pnpm --filter @hajiri/web --silent build >/dev/null 2>&1 && ok "apps/web/dist rebuilt" || warn "web build failed (run: pnpm --filter @hajiri/web build)"
+
 step "Restarting services"
 if [ "$OS" = mac ] && [ -f "$HOME/Library/LaunchAgents/com.hajiri.api.plist" ]; then
   for s in gateway api; do launchctl kickstart -k "gui/$(id -u)/com.hajiri.$s"; done
