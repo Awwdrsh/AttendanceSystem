@@ -61,6 +61,20 @@ export const directionLabel = (d: string) => (d === 'in' ? 'Clocked in' : d === 
 export const sourceLabel = (s: string) => ({ web: 'Web', mobile: 'Mobile', device: 'Terminal', manual: 'Added by HR', regularisation: 'Correction' } as Record<string, string>)[s] ?? s;
 const requestKind = (k: string) => ({ leave: 'Time off', ot: 'Overtime', overtime: 'Overtime', regularisation: 'Attendance correction', correction: 'Attendance correction' } as Record<string, string>)[k] ?? k.charAt(0).toUpperCase() + k.slice(1).replace(/_/g, ' ');
 
+const CORRECTION: Record<string, string> = { wfh: 'Work from home', missed_punch: 'Missed punch', on_duty: 'On duty elsewhere', half_day: 'Half day', shift_change: 'Shift change' };
+
+/** Server details look like "2026-10-15 wfh", "2026-10-15 to 2026-10-17" or "2026-10-15 120 min"; say them in words. */
+function describeRequest(r: { kind: string; detail: string }): { title: string; detail: string } {
+  const dates = (r.detail.match(/\d{4}-\d{2}-\d{2}/g) ?? []).map(fmtDateLong);
+  if (r.kind === 'regularisation') {
+    const k = r.detail.replace(/^\d{4}-\d{2}-\d{2}\s*/, '');
+    return { title: CORRECTION[k] ?? requestKind(r.kind), detail: dates[0] ?? r.detail };
+  }
+  if (r.kind === 'leave') return { title: 'Time off', detail: dates.length === 2 && dates[0] !== dates[1] ? `${dates[0]} to ${dates[1]}` : dates[0] ?? r.detail };
+  if (r.kind === 'ot') { const m = /(\d+)\s*min/.exec(r.detail); return { title: 'Overtime', detail: `${dates[0] ?? ''}${m ? `, ${minutesToHm(Number(m[1]))}` : ''}` }; }
+  return { title: requestKind(r.kind), detail: r.detail };
+}
+
 export default function HomePage() {
   const { user } = useAuth();
   const { t } = useI18n();
@@ -250,8 +264,8 @@ export default function HomePage() {
                 {me.data.pendingRequests.map((r, i) => (
                   <Group key={`${r.kind}-${r.id}`} justify="space-between" wrap="nowrap" px="md" py={12} style={rowBorder(i)}>
                     <div style={{ minWidth: 0 }}>
-                      <Text size="sm" fw={500}>{requestKind(r.kind)}</Text>
-                      {r.detail ? <Text size="xs" c="dimmed" truncate>{r.detail}</Text> : null}
+                      <Text size="sm" fw={500}>{describeRequest(r).title}</Text>
+                      {r.detail ? <Text size="xs" c="dimmed" truncate>{describeRequest(r).detail}</Text> : null}
                     </div>
                     <Text size="xs" c="dimmed" style={{ flex: 'none' }}>{relativeTime(r.created_at)}</Text>
                   </Group>

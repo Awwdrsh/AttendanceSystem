@@ -117,8 +117,8 @@ export default function MyAttendancePage() {
               <button key={c.ad} type="button" onClick={() => { setSelected(c.ad); setCorrect(false); }} disabled={!c.inMonth} aria-label={fmtDateLong(c.ad)}
                 style={{
                   minHeight: 72, borderRadius: 8, padding: '6px 8px', textAlign: 'left', font: 'inherit', color: 'inherit',
-                  border: isSel ? '1px solid var(--mantine-color-brand-6)' : '1px solid var(--hj-line-soft)',
-                  boxShadow: isSel ? '0 0 0 1px var(--mantine-color-brand-6)' : undefined,
+                  border: isSel ? '1px solid var(--hj-hydro)' : '1px solid var(--hj-line-soft)',
+                  boxShadow: isSel ? '0 0 0 1px var(--hj-hydro)' : undefined,
                   background: c.saturday || hol ? 'var(--hj-canvas)' : 'var(--hj-surface)',
                   opacity: c.inMonth ? 1 : 0.35, cursor: c.inMonth ? 'pointer' : 'default',
                   display: 'flex', flexDirection: 'column', gap: 2,

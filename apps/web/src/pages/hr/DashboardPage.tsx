@@ -69,7 +69,7 @@ export default function DashboardPage() {
           <Paper withBorder p="lg" h="100%">
             <Text fw={600} size="sm" mb="md">Needs attention</Text>
             {d && d.needsAttention.length === 0 ? (
-              <Group gap="sm" wrap="nowrap"><ThemeIcon variant="light" color="teal" radius="xl"><IconCircleCheck size={16} /></ThemeIcon><Text size="sm" c="dimmed">All clear. Nothing is waiting on you.</Text></Group>
+              <Group gap="sm" wrap="nowrap"><ThemeIcon variant="light" color="brand" radius="xl"><IconCircleCheck size={16} /></ThemeIcon><Text size="sm" c="dimmed">All clear. Nothing is waiting on you.</Text></Group>
             ) : null}
             <Stack gap="sm">
               {(d?.needsAttention ?? []).map((n, i) => {

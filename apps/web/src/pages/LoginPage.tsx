@@ -1,9 +1,10 @@
-import { Alert, Box, Button, Center, PasswordInput, Stack, Text, TextInput, Title } from '@mantine/core';
-import { IconAlertCircle, IconClockHour4 } from '@tabler/icons-react';
+import { Alert, Box, Button, Center, Group, PasswordInput, Stack, Text, TextInput, Title } from '@mantine/core';
+import { IconAlertCircle, IconArrowRight } from '@tabler/icons-react';
 import { useMemo, useState, type FormEvent } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthProvider';
 import { errorMessage } from '../api/client';
+import { Brand } from '../components/Brand';
 
 /** A fixed, made-up morning used as the login illustration: arrivals cluster just before a 10:00 start. */
 function useSampleMorning() {
@@ -26,14 +27,14 @@ function MorningIllustration() {
   const stacks = new Map<number, number>();
   return (
     <div style={{ position: 'relative', height: 150 }}>
-      <div style={{ position: 'absolute', left: `${((10 * 60 - from) / span) * 100}%`, top: 0, bottom: 22, width: `${(15 / span) * 100}%`, background: 'rgba(255,255,255,.08)', borderLeft: '1.5px solid rgba(255,255,255,.7)' }} />
+      <div style={{ position: 'absolute', left: `${((10 * 60 - from) / span) * 100}%`, top: 0, bottom: 22, width: `${(15 / span) * 100}%`, background: 'var(--hj-hydro-soft)', borderLeft: '1.5px solid var(--hj-hydro)' }} />
       {marks.map((k, i) => {
         const b = Math.floor(k.m / 4); const level = stacks.get(b) ?? 0; stacks.set(b, level + 1);
-        return <div key={i} style={{ position: 'absolute', left: `${((b * 4 - from) / span) * 100}%`, bottom: 28 + level * 10, width: 8, height: 8, borderRadius: 2, background: k.late ? '#ffb454' : 'rgba(255,255,255,.92)' }} />;
+        return <div key={i} style={{ position: 'absolute', left: `${((b * 4 - from) / span) * 100}%`, bottom: 28 + level * 10, width: 8, height: 8, borderRadius: 2, background: k.late ? 'var(--hj-warn)' : 'var(--hj-hydro)', opacity: k.late ? 0.9 : 0.55 + (level % 4) * 0.12 }} />;
       })}
-      <div style={{ position: 'absolute', left: 0, right: 0, bottom: 22, borderTop: '1px solid rgba(255,255,255,.25)' }} />
+      <div style={{ position: 'absolute', left: 0, right: 0, bottom: 22, borderTop: '1px solid var(--hj-line-strong)' }} />
       {[9, 10, 11].map((h) => (
-        <span key={h} className="num" style={{ position: 'absolute', bottom: 0, left: `${((h * 60 - from) / span) * 100}%`, transform: 'translateX(-50%)', fontSize: 12, color: 'rgba(255,255,255,.65)' }}>{`${String(h).padStart(2, '0')}:00`}</span>
+        <span key={h} className="num" style={{ position: 'absolute', bottom: 0, left: `${((h * 60 - from) / span) * 100}%`, transform: 'translateX(-50%)', fontSize: 11, color: 'var(--hj-muted)', fontFamily: 'var(--hj-mono)' }}>{`${String(h).padStart(2, '0')}:00`}</span>
       ))}
     </div>
   );
@@ -61,29 +62,35 @@ export default function LoginPage() {
       <style>{'@media (max-width: 62em){ .hj-login{ grid-template-columns: 1fr !important } .hj-login-art{ display:none !important } }'}</style>
       <Center p="xl">
         <Stack w="100%" maw={360} gap="xl" component="form" onSubmit={submit}>
-          <Center w={36} h={36} style={{ borderRadius: 9, background: 'var(--mantine-color-brand-6)', color: 'white' }}><IconClockHour4 size={21} stroke={2} /></Center>
+          <Brand height={24} />
           <div>
-            <Title order={1} fz={26} fw={600} style={{ letterSpacing: '-0.02em' }}>Sign in to Hajiri</Title>
-            <Text c="dimmed" size="sm" mt={6}>Use the work email your HR team set up for you.</Text>
+            <Title order={1} fz={28} fw={700} style={{ letterSpacing: '-0.03em' }}>Sign in</Title>
+            <Text c="dimmed" size="sm" mt={6}>Use your CoreValley work email.</Text>
           </div>
           <Stack gap="md">
             {error ? <Alert color="red" variant="light" icon={<IconAlertCircle size={18} />}>{error}</Alert> : null}
-            <TextInput label="Email" type="email" placeholder="you@company.com" autoComplete="username" value={email} onChange={(e) => setEmail(e.currentTarget.value)} required autoFocus size="md" />
+            <TextInput label="Email" type="email" placeholder="you@corevalley.ai" autoComplete="username" value={email} onChange={(e) => setEmail(e.currentTarget.value)} required autoFocus size="md" />
             <PasswordInput label="Password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.currentTarget.value)} required size="md" />
-            <Button type="submit" loading={busy} size="md" fullWidth mt={4}>Sign in</Button>
+            <Button type="submit" loading={busy} size="md" fullWidth mt={4} rightSection={<IconArrowRight size={17} />}>Sign in</Button>
           </Stack>
-          <Text size="xs" c="dimmed">Forgot your password? Ask your HR admin to reset it.</Text>
+          <Text size="xs" c="dimmed">Forgot your password? Ask People Ops to reset it.</Text>
         </Stack>
       </Center>
-      <Box className="hj-login-art" p={56} style={{ background: 'var(--mantine-color-brand-8)', color: 'white', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-        <Text size="sm" fw={500} c="rgba(255,255,255,.75)">Hajiri</Text>
+      <Box className="hj-login-art" p={56} style={{ background: 'var(--hj-canvas)', borderLeft: '1px solid var(--hj-line)', display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+        backgroundImage: 'radial-gradient(rgba(21,128,61,.16) 1px, transparent 1px)', backgroundSize: '18px 18px' }}>
+        <Group gap={12} wrap="nowrap">
+          <span style={{ width: 40, height: 1, background: 'var(--hj-hydro)', opacity: 0.6 }} />
+          <Text className="hj-eyebrow">Internal · People ops</Text>
+        </Group>
         <div>
-          <Title order={2} fz={34} fw={600} lh={1.15} maw={460} style={{ letterSpacing: '-0.025em', color: 'white' }}>Attendance, time off and payroll for the whole team.</Title>
-          <Text mt="md" maw={440} c="rgba(255,255,255,.75)">Clock-ins from fingerprint and face terminals land here in seconds, and payroll reads straight from them.</Text>
+          <Title order={2} fz={46} fw={700} lh={1.05} maw={520} style={{ letterSpacing: '-0.035em' }}>
+            Everything about working at CoreValley, <span style={{ color: 'var(--hj-hydro)' }}>in one place.</span>
+          </Title>
+          <Text mt="lg" maw={460} c="dimmed" size="md">Clock in, take time off, see your payslips. Clock-ins from the office terminals arrive in seconds, and payroll reads straight from them.</Text>
         </div>
         <div>
           <MorningIllustration />
-          <Text size="xs" mt="sm" c="rgba(255,255,255,.6)">A typical morning: every square is one clock-in, amber ones came in after the grace period.</Text>
+          <Text className="mono" fz={11} mt="sm" c="dimmed" style={{ letterSpacing: '0.08em', textTransform: 'uppercase' }}>A typical morning. Each square is one clock-in; amber came in after grace.</Text>
         </div>
       </Box>
     </Box>

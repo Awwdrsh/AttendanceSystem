@@ -45,12 +45,12 @@ const MAP: Record<string, { tone: Tone; label: string }> = {
 };
 
 const TONE: Record<Tone, { color: string; dot: string }> = {
-  ok: { color: 'teal', dot: 'var(--hj-ok)' },
+  ok: { color: 'brand', dot: 'var(--hj-ok)' },
   warn: { color: 'orange', dot: 'var(--hj-warn)' },
   bad: { color: 'red', dot: 'var(--hj-bad)' },
   info: { color: 'blue', dot: 'var(--hj-info)' },
   idle: { color: 'gray', dot: 'var(--hj-idle)' },
-  accent: { color: 'brand', dot: 'var(--mantine-color-brand-6)' },
+  accent: { color: 'yellow', dot: '#ca8a04' },
 };
 
 /** Today's "Incomplete" just means the person has not clocked out yet. */

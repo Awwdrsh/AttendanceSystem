@@ -232,7 +232,7 @@ export default function RunWizardPage() {
         <StatStrip stats={summary} />
         {isMaker ? <Alert variant="light" color="orange" icon={<IconAlertTriangle {...ICON} />}>You prepared this run, so someone else in finance has to approve it.</Alert> : null}
         {!hasRole('finance') ? <Alert variant="light" color="gray" icon={<IconInfoCircle {...ICON} />}>Approval needs the finance role. Ask a finance user to approve this run.</Alert> : null}
-        {run.approved_at ? <Alert variant="light" color="teal" icon={<IconCircleCheck {...ICON} />} title="Approved">Signed {stamp(run.approved_at)}. Signature <Text span ff="monospace" size="xs">{run.approval_signature?.slice(0, 20) ?? ''}</Text></Alert> : null}
+        {run.approved_at ? <Alert variant="light" color="brand" icon={<IconCircleCheck {...ICON} />} title="Approved">Signed {stamp(run.approved_at)}. Signature <Text span ff="monospace" size="xs">{run.approval_signature?.slice(0, 20) ?? ''}</Text></Alert> : null}
         <StepNav onBack={() => setStep(2)}>
           {run.status === 'reviewed' ? <Button leftSection={<IconCheck {...ICON} />} disabled={isMaker || !hasRole('finance')} loading={busy === 'approve'} onClick={() => act('approve', async () => { const r = await payApi.approve(id); if (r.pendingSecondApproval) toast.info('This run is above the two-approver threshold. A second finance user must also approve it before it can be locked.', 'First approval recorded'); }, 'Approval recorded.')}>Approve run</Button> : null}
           {['approved', 'locked', 'disbursed', 'filed'].includes(run.status) ? <Button onClick={() => setStep(4)}>Continue to lock</Button> : null}
@@ -243,7 +243,7 @@ export default function RunWizardPage() {
         <SectionTitle hint="Locking freezes the payslips and makes attendance for the period read-only. Later corrections go in a supplementary run.">Lock</SectionTitle>
         <StatStrip stats={summary} />
         {locked
-          ? <Alert variant="light" color="teal" icon={<IconLock {...ICON} />} title="Locked">Locked {stamp(run.locked_at!)}. Bank and statutory files can now be generated.</Alert>
+          ? <Alert variant="light" color="brand" icon={<IconLock {...ICON} />} title="Locked">Locked {stamp(run.locked_at!)}. Bank and statutory files can now be generated.</Alert>
           : run.status !== 'approved' ? <Alert variant="light" color="gray" icon={<IconInfoCircle {...ICON} />}>Approve the run before locking it.</Alert> : null}
         <StepNav onBack={() => setStep(3)}>
           {run.status === 'approved' ? <Button leftSection={<IconLock {...ICON} />} loading={busy === 'lockrun'} onClick={() => act('lockrun', () => payApi.lock(id), 'Run locked. Attendance for the period is now read-only.')}>Lock run</Button> : null}

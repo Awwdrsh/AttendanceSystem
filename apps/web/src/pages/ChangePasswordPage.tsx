@@ -1,9 +1,10 @@
 import { Alert, Anchor, Button, Center, Group, Paper, PasswordInput, Stack, Text, Title } from '@mantine/core';
-import { IconAlertCircle, IconClockHour4 } from '@tabler/icons-react';
+import { IconAlertCircle } from '@tabler/icons-react';
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { auth as authApi } from '../api';
 import { errorMessage } from '../api/client';
+import { Brand } from '../components/Brand';
 import { useAuth } from '../auth/AuthProvider';
 import { toast } from '../lib/toast';
 
@@ -23,10 +24,7 @@ export default function ChangePasswordPage() {
   return (
     <Center mih="100vh" p="md" bg="var(--hj-canvas)">
       <Stack w="100%" maw={400} gap="lg">
-        <Group gap={10} justify="center">
-          <Center w={28} h={28} style={{ borderRadius: 7, background: 'var(--mantine-color-brand-6)', color: 'white', flex: 'none' }}><IconClockHour4 size={17} stroke={2} /></Center>
-          <Text fw={600}>Hajiri</Text>
-        </Group>
+        <Group justify="center"><Brand height={24} /></Group>
         <Paper withBorder p="xl" bg="var(--hj-surface)" component="form" onSubmit={submit}>
           <Stack>
             <div>

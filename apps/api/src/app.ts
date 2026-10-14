@@ -38,8 +38,8 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
         directives: {
           defaultSrc: ["'self'"],
           scriptSrc: ["'self'"],
-          styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-          fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          fontSrc: ["'self'", 'data:'],
           imgSrc: ["'self'", 'data:', 'blob:'],
           connectSrc: ["'self'"],
           frameAncestors: ["'none'"],

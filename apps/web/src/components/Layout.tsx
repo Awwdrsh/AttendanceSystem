@@ -11,7 +11,8 @@ import {
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthProvider';
-import { notifications as notifApi, settings as settingsApi, workflow as workflowApi } from '../api';
+import { notifications as notifApi, workflow as workflowApi } from '../api';
+import { Brand } from './Brand';
 import type { Role } from '../api/types';
 
 interface NavItem { to: string; label: string; icon: Icon; roles?: Role[]; employeeOnly?: boolean; keywords?: string[]; match?: string[]; badge?: 'approvals' }
@@ -75,7 +76,6 @@ export function Layout() {
   const loc = useLocation();
   const nav = useNavigate();
   const [unread, setUnread] = useState(0);
-  const [company, setCompany] = useState<string | null>(null);
   const [pendingApprovals, setPendingApprovals] = useState(0);
 
   useEffect(() => { close(); }, [loc.pathname, close]);
@@ -84,7 +84,6 @@ export function Layout() {
     const load = async () => { try { const r = await notifApi.list({ limit: 1 }); if (alive) setUnread(r.unread); } catch { /* ignore */ } };
     void load();
     const id = setInterval(load, 60_000);
-    settingsApi.company().then((c) => { if (alive) setCompany(c.company.nameEn); }).catch(() => undefined);
     if (hasRole('manager', 'hr')) workflowApi.inbox().then((r) => { if (alive) setPendingApprovals(r.items.length); }).catch(() => undefined);
     return () => { alive = false; clearInterval(id); };
   }, [loc.pathname]);
@@ -124,7 +123,7 @@ export function Layout() {
         <Group h="100%" px="sm" justify="space-between" wrap="nowrap">
           <Group gap="xs" wrap="nowrap">
             <Burger opened={opened} onClick={toggle} size="sm" aria-label="Open menu" />
-            <Text fw={600}>{company ?? 'Hajiri'}</Text>
+            <Brand height={18} />
           </Group>
           <ActionIcon variant="subtle" color="gray" onClick={() => spotlight.open()} aria-label="Search"><IconSearch size={18} /></ActionIcon>
         </Group>
@@ -133,13 +132,7 @@ export function Layout() {
       <AppShell.Navbar className="hj-nav" p={10}>
         <AppShell.Section>
           <Group justify="space-between" wrap="nowrap" px={4} pt={2} pb={10}>
-            <Group gap={10} wrap="nowrap" style={{ minWidth: 0 }}>
-              <Center w={28} h={28} style={{ borderRadius: 7, background: 'var(--mantine-color-brand-6)', color: 'white', flex: 'none' }}><IconClockHour4 size={17} stroke={2} /></Center>
-              <div style={{ minWidth: 0 }}>
-                <Text fw={600} size="sm" truncate lh={1.2}>{company ?? 'Hajiri'}</Text>
-                <Text size="xs" c="dimmed" lh={1.2}>Hajiri</Text>
-              </div>
-            </Group>
+            <Link to="/" aria-label="Home" style={{ display: 'inline-flex', minWidth: 0, textDecoration: 'none' }}><Brand height={20} /></Link>
             <Tooltip label="Notifications">
               <Indicator disabled={unread === 0} size={8} offset={6} color="red">
                 <ActionIcon variant="subtle" color="gray" component={Link} to="/me/notifications" aria-label="Notifications"><IconBell size={18} stroke={1.6} /></ActionIcon>

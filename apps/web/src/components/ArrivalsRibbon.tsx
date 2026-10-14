@@ -35,11 +35,11 @@ export function ArrivalsRibbon({ arrivals, shiftStart = '10:00', grace = 15 }: {
   return (
     <div>
       <div style={{ position: 'relative', height, borderBottom: '1px solid var(--hj-line)' }}>
-        <div style={{ position: 'absolute', left: pos(start), width: `${(grace / span) * 100}%`, top: 0, bottom: 0, background: 'var(--mantine-color-brand-light)', borderLeft: '1.5px solid var(--mantine-color-brand-6)' }} />
+        <div style={{ position: 'absolute', left: pos(start), width: `${(grace / span) * 100}%`, top: 0, bottom: 0, background: 'var(--hj-hydro-soft)', borderLeft: '1.5px solid var(--hj-hydro)' }} />
         {marks.map((m) => (
           <Tooltip key={m.id} label={`${m.name}, ${fmtTime(m.at)}${m.late ? ' (late)' : ''}`}>
             <div style={{ position: 'absolute', left: `calc(${pos(Math.floor(m.m / bucket) * bucket)} + 1px)`, bottom: 4 + m.level * rowH, width: 9, height: 9, borderRadius: 2,
-              background: m.late ? 'var(--hj-warn)' : 'var(--mantine-color-brand-6)' }} />
+              background: m.late ? 'var(--hj-warn)' : 'var(--hj-hydro)' }} />
           </Tooltip>
         ))}
       </div>
@@ -47,9 +47,9 @@ export function ArrivalsRibbon({ arrivals, shiftStart = '10:00', grace = 15 }: {
         {hours.map((h) => <Text key={h} size="xs" c="dimmed" className="num" style={{ position: 'absolute', left: pos(h), transform: 'translateX(-50%)', top: 4 }}>{hhmm(h)}</Text>)}
       </div>
       <Group gap="lg" mt={6}>
-        <Group gap={6}><span style={{ width: 9, height: 9, borderRadius: 2, background: 'var(--mantine-color-brand-6)' }} /><Text size="xs" c="dimmed">On time</Text></Group>
+        <Group gap={6}><span style={{ width: 9, height: 9, borderRadius: 2, background: 'var(--hj-hydro)' }} /><Text size="xs" c="dimmed">On time</Text></Group>
         <Group gap={6}><span style={{ width: 9, height: 9, borderRadius: 2, background: 'var(--hj-warn)' }} /><Text size="xs" c="dimmed">Late</Text></Group>
-        <Group gap={6}><span style={{ width: 10, height: 10, background: 'var(--mantine-color-brand-light)', borderLeft: '1.5px solid var(--mantine-color-brand-6)' }} /><Text size="xs" c="dimmed">Shift start {shiftStart} and grace</Text></Group>
+        <Group gap={6}><span style={{ width: 10, height: 10, background: 'var(--hj-hydro-soft)', borderLeft: '1.5px solid var(--hj-hydro)' }} /><Text size="xs" c="dimmed">Shift start {shiftStart} and grace</Text></Group>
       </Group>
     </div>
   );

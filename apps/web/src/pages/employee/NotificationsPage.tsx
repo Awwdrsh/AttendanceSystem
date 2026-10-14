@@ -30,7 +30,7 @@ export default function NotificationsPage() {
             <UnstyledButton key={n.id} w="100%" px="lg" py="sm" onClick={() => { if (!n.read_at) void markRead(n.id); }}
               style={{ display: 'block', borderTop: i > 0 ? '1px solid var(--hj-line-soft)' : undefined, cursor: n.read_at ? 'default' : 'pointer' }}>
               <Group wrap="nowrap" align="flex-start" gap="sm">
-                <span className="hj-dot" aria-label={n.read_at ? undefined : 'Unread'} style={{ marginTop: 7, background: n.read_at ? 'transparent' : 'var(--mantine-color-brand-6)' }} />
+                <span className="hj-dot" aria-label={n.read_at ? undefined : 'Unread'} style={{ marginTop: 7, background: n.read_at ? 'transparent' : 'var(--hj-hydro)' }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <Group justify="space-between" wrap="nowrap" gap="sm">
                     <Text size="sm" fw={n.read_at ? 400 : 600} truncate>{n.title}</Text>

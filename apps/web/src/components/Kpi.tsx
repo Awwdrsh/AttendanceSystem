@@ -12,7 +12,7 @@ export function StatStrip({ stats }: { stats: Stat[] }) {
         <div className="hj-stat" key={s.key}>
           <Group gap={6} wrap="nowrap">
             {s.tone ? <span className="hj-dot" style={{ background: `var(--hj-${s.tone})` }} aria-hidden /> : null}
-            <Text size="sm" c="dimmed" truncate>{s.label}</Text>
+            <Text size="sm" c="dimmed" truncate className="hj-stat-label">{s.label}</Text>
           </Group>
           <div className="hj-stat-value">{typeof s.value === 'number' ? s.value.toLocaleString('en-US') : s.value}</div>
           {s.hint ? <Text size="xs" c="dimmed" mt={4}>{s.hint}</Text> : null}
@@ -61,7 +61,7 @@ export function TrendBars({ points, label, max = 100, suffix = '%', height = 160
           const bwInner = Math.max(2, bw * 0.64);
           if (p.value === null) return <rect key={p.date} x={x} y={top + plotH - 2} width={bwInner} height={2} rx={1} fill="var(--hj-line)"><title>{`${fmtAd(p.date)}: no working day`}</title></rect>;
           const bh = Math.max(2, (plotH * p.value) / max);
-          return <rect key={p.date} x={x} y={top + plotH - bh} width={bwInner} height={bh} rx={3} fill="var(--mantine-color-brand-5)" opacity={i === points.length - 1 ? 1 : 0.78}><title>{`${fmtAd(p.date)}: ${p.value}${suffix}`}</title></rect>;
+          return <rect key={p.date} x={x} y={top + plotH - bh} width={bwInner} height={bh} rx={3} fill="var(--hj-hydro)" opacity={i === points.length - 1 ? 1 : 0.78}><title>{`${fmtAd(p.date)}: ${p.value}${suffix}`}</title></rect>;
         })}
         {points.map((p, i) => (i % Math.ceil(n / 6) === 0 || i === n - 1)
           ? <text key={`l${p.date}`} x={left + i * bw + bw / 2} y={h - 4} textAnchor="middle" fontSize="11" fill="var(--hj-muted)">{fmtAd(p.date).replace(/ \d{4}$/, '')}</text> : null)}

@@ -79,7 +79,7 @@ export default function EmployeesPage() {
                 {errCount > 20 ? <Text size="xs" c="dimmed" mt={4}>and {errCount - 20} more</Text> : null}
               </Alert>
             ) : (
-              <Alert color="teal" variant="light" icon={<IconCheck size={16} stroke={1.6} />} title={`${impResult.valid ?? impResult.imported} ${(impResult.valid ?? impResult.imported) === 1 ? 'row' : 'rows'} valid`} />
+              <Alert color="brand" variant="light" icon={<IconCheck size={16} stroke={1.6} />} title={`${impResult.valid ?? impResult.imported} ${(impResult.valid ?? impResult.imported) === 1 ? 'row' : 'rows'} valid`} />
             )
           ) : null}
           <Group justify="space-between" wrap="wrap">

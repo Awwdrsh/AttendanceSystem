@@ -46,7 +46,7 @@ export default function SetupPage() {
         <Paper withBorder>
           <Group justify="space-between" px="lg" py="md" gap="md" wrap="wrap" style={{ borderBottom: '1px solid var(--hj-line)' }}>
             <Text size="sm" fw={500} className="num">{doneCount} of {steps.length} steps done</Text>
-            <Progress value={(doneCount / steps.length) * 100} w={{ base: '100%', sm: 220 }} size="sm" color="teal" aria-label="Setup progress" />
+            <Progress value={(doneCount / steps.length) * 100} w={{ base: '100%', sm: 220 }} size="sm" color="brand" aria-label="Setup progress" />
           </Group>
           {steps.map((s, i) => {
             const isNext = i === nextIdx;
@@ -55,7 +55,7 @@ export default function SetupPage() {
                 <Group justify="space-between" wrap="wrap" gap="md">
                   <Group gap="md" wrap="nowrap" align="flex-start" style={{ flex: '1 1 360px', minWidth: 0 }}>
                     {s.done
-                      ? <ThemeIcon radius="xl" size={26} color="teal" variant="light" aria-label="Done"><IconCheck size={15} stroke={2} /></ThemeIcon>
+                      ? <ThemeIcon radius="xl" size={26} color="brand" variant="light" aria-label="Done"><IconCheck size={15} stroke={2} /></ThemeIcon>
                       : <ThemeIcon radius="xl" size={26} color={isNext ? 'brand' : 'gray'} variant={isNext ? 'filled' : 'light'}><Text size="xs" fw={600} className="num">{i + 1}</Text></ThemeIcon>}
                     <div style={{ minWidth: 0 }}>
                       <Text fw={500} size="sm" c={s.done ? 'dimmed' : 'inherit'}>{s.title}</Text>

@@ -74,7 +74,7 @@ export default function TeamCalendarPage() {
                   }}>
                     <Group gap={6} wrap="nowrap">
                       <Text size="xs" fw={isToday ? 600 : 500} className="num" c={isToday ? 'white' : 'inherit'}
-                        style={isToday ? { background: 'var(--mantine-color-brand-6)', borderRadius: 999, minWidth: 22, height: 22, lineHeight: '22px', textAlign: 'center' } : {}}>
+                        style={isToday ? { background: 'var(--hj-hydro)', borderRadius: 999, minWidth: 22, height: 22, lineHeight: '22px', textAlign: 'center' } : {}}>
                         {i === 0 || dayNum === 1 ? fmtDateShort(d) : dayNum}
                       </Text>
                     </Group>

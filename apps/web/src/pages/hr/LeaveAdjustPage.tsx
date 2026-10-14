@@ -71,7 +71,7 @@ export default function LeaveAdjustPage() {
             columns={[
               { key: 'effective_date', header: 'Date', render: (r) => <Text size="sm" className="num">{fmtAd(String(r.effective_date))}</Text> },
               { key: 'code', header: 'Leave', render: (r) => <Text size="sm" ff="monospace">{String(r.code)}</Text> },
-              { key: 'delta_days', header: 'Days', align: 'right', render: (r) => { const v = Number(r.delta_days); return <Text size="sm" fw={500} className="num" c={v < 0 ? 'red' : v > 0 ? 'teal' : 'inherit'}>{v > 0 ? '+' : ''}{String(r.delta_days)}</Text>; } },
+              { key: 'delta_days', header: 'Days', align: 'right', render: (r) => { const v = Number(r.delta_days); return <Text size="sm" fw={500} className="num" c={v < 0 ? 'red' : v > 0 ? 'brand' : 'inherit'}>{v > 0 ? '+' : ''}{String(r.delta_days)}</Text>; } },
               { key: 'reason', header: 'Reason', render: (r) => <Text size="sm">{String(r.reason ?? '')}</Text> },
               { key: 'note', header: 'Note', render: (r) => <Text size="sm" c="dimmed">{String(r.note ?? '')}</Text> },
             ]} />
