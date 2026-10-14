@@ -3,6 +3,7 @@ import type { DayContext, DayType, Flag, OtPolicy, OtResult, Pair } from './type
 
 export interface OtInput {
   localDate: string;
+  /** Minutes the employee is expected to work (shift span minus break). */
   scheduledMin: number;
   workedMin: number;
   dayType: DayType;

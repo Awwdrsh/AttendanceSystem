@@ -11,6 +11,9 @@ const STATUTORY_PHASE = new Set(['SSF_EE', 'SSF_ER', 'PF_EE', 'PF_ER', 'GRATUITY
 
 export class PayrollError extends Error {}
 
+/** One below the numeric(14,2) ceiling of payslip lines. */
+export const MAX_LINE_AMOUNT = new Decimal('1e12');
+
 /** Payable fraction of the month (plan §11.3). unpaid = days in month − paid days; basis days = 29–32 | 30 | 26. */
 export function payableFraction(paidDays: Decimal, daysInMonth: number, basis: ProrationBasis): Decimal {
   const basisDays = basis === 'fixed_30' ? 30 : basis === '26_day' ? 26 : daysInMonth;
@@ -131,8 +134,9 @@ export function computePayslip(input: PayrollInput): PayrollResult {
         const days = D(extras.leaveEncashDays ?? 0);
         if (days.isZero()) return null;
         const divisor = extras.leaveEncashDivisor ?? period.daysInMonth;
-        const amt = paisa(days.times(basicFull).div(divisor));
-        return { amount: amt, basis: { days: days.toFixed(2), lastBasic: basicFull.toFixed(2), divisor }, text: `${days.toFixed(2)} days × last basic ${basicFull.toFixed(2)} ÷ ${divisor} = ${amt.toFixed(2)} (Sec 49(2))` };
+        const last = extras.lastBasic !== undefined ? D(extras.lastBasic) : basicFull;
+        const amt = paisa(days.times(last).div(divisor));
+        return { amount: amt, basis: { days: days.toFixed(2), lastBasic: last.toFixed(2), divisor }, text: `${days.toFixed(2)} days × last basic ${last.toFixed(2)} ÷ ${divisor} = ${amt.toFixed(2)} (Sec 49(2))` };
       }
       case 'SSF_EE': return employee.regime === 'ssf' ? { amount: basic.times(D(ssf.employee)), basis: { basic: basic.toFixed(2), rate: ssf.employee }, text: `${D(ssf.employee).times(100)}% of basic ${basic.toFixed(2)} (CBSS Act Sec 4)` } : null;
       case 'SSF_ER': return employee.regime === 'ssf' ? { amount: basic.times(D(ssf.employer)), basis: { basic: basic.toFixed(2), rate: ssf.employer }, text: `${D(ssf.employer).times(100)}% of basic ${basic.toFixed(2)} employer share (CBSS Act Sec 4)` } : null;
@@ -226,6 +230,8 @@ export function computePayslip(input: PayrollInput): PayrollResult {
       }
       if (amount.isNegative() && c.type !== 'statistical') { flags.push(`NegativeAmount:${c.code}`); amount = ZERO; }
       if (!amount.isFinite()) throw new PayrollError(`${c.code}: amount is not finite`);
+      // Payslip amounts are stored as numeric(14,2); anything larger is a formula or input mistake, not a salary.
+      if (amount.abs().gte(MAX_LINE_AMOUNT)) throw new PayrollError(`${c.code}: amount ${amount.toFixed(2)} is too large (limit ${MAX_LINE_AMOUNT.toFixed(0)})`);
       amount = roundLine(c, amount);
       // Withholding cannot exceed the pay it is withheld from: TDS (Sec 87 applies to amounts paid) and the Sec 38
       // (c)-(i) deductions are capped at the pay remaining after the statutory shares, so net never goes below zero.

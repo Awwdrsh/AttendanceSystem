@@ -27,7 +27,11 @@ export function computeDay(input: ComputeDayInput): AttendanceDay {
   const startMs = midnight + startMin * MIN_MS;
   const endMs = midnight + (endMinRaw + (crossesMidnight ? DAY_MIN : 0)) * MIN_MS;
   const scheduledMin = (endMs - startMs) / MIN_MS;
-  const window = { startMs: startMs - shift.earlyInWindowMin * MIN_MS, endMs: endMs + shift.lateOutWindowMin * MIN_MS };
+  // An overtime punch-out must still belong to this day: the late-out window always reaches past the daily OT cap,
+  // but never so far that it would overlap the next day's early-in window.
+  const otReach = Math.min(policy.ot.capDayMin + 120, DAY_MIN - scheduledMin - shift.earlyInWindowMin - 1);
+  const lateOutMin = Math.max(shift.lateOutWindowMin, otReach);
+  const window = { startMs: startMs - shift.earlyInWindowMin * MIN_MS, endMs: endMs + lateOutMin * MIN_MS };
 
   // Only punches inside the window belong to this day; everything else is off-shift for this date.
   const punches = input.punches
@@ -49,6 +53,8 @@ export function computeDay(input: ComputeDayInput): AttendanceDay {
   // With one pair the fixed break is deducted; with several pairs the gaps are already excluded from gross.
   const net = pairs.length === 1 ? gross - breakMin : gross;
   const workedMin = roundMinutes(net, shift.roundingMin, shift.roundingDirection);
+  // Worked minutes exclude the break, so overtime compares them with the scheduled span minus the break.
+  const expectedWorkMin = Math.max(0, scheduledMin - shift.breakMinutes);
 
   const firstInMs = pairs[0]?.inMs ?? punches[0]?.at ?? null;
   const lastOutMs = pairs.length > 0 ? pairs[pairs.length - 1]!.outMs : null;
@@ -64,7 +70,7 @@ export function computeDay(input: ComputeDayInput): AttendanceDay {
     status = ctx.holiday ? 'Holiday' : 'WeeklyOff';
     if (punches.length > 0) {
       flags.push({ kind: 'HolidayWork', workedMin });
-      ot = computeOt({ localDate, scheduledMin, workedMin, dayType, pairs, ctx, policy: policy.ot }, flags);
+      ot = computeOt({ localDate, scheduledMin: expectedWorkMin, workedMin, dayType, pairs, ctx, policy: policy.ot }, flags);
     }
   } else if (ctx.leave === 'full') {
     status = 'OnLeave';
@@ -83,7 +89,7 @@ export function computeDay(input: ComputeDayInput): AttendanceDay {
 
     if (lateMin > 0) flags.push({ kind: 'Late', minutes: lateMin });
     if (earlyMin > 0) flags.push({ kind: 'EarlyOut', minutes: earlyMin });
-    ot = computeOt({ localDate, scheduledMin, workedMin, dayType, pairs, ctx, policy: policy.ot }, flags);
+    ot = computeOt({ localDate, scheduledMin: expectedWorkMin, workedMin, dayType, pairs, ctx, policy: policy.ot }, flags);
   }
 
   if (dayType === 'working' && (ctx.leave === 'first_half' || ctx.leave === 'second_half')) flags.push({ kind: 'HalfDayLeave', half: ctx.leave });

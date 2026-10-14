@@ -17,11 +17,12 @@ const run = (shift: Shift | null, punches: Punch[], c = ctx(), localDate = D) =>
 
 describe('window boundaries', () => {
   it('punches exactly at the window edges are included; one millisecond outside is excluded', () => {
-    const start = p(D, '09:00'); const end = p(D, '20:00');
+    // The late-out edge is max(configured 120 min, OT cap 240 + 120) = 6 h after the 18:00 end, i.e. midnight.
+    const start = p(D, '09:00'); const end = p(D, '00:00', 1);
     const day = run(general, [start, end]);
     expect(day.punchIds).toEqual([start.id, end.id]);
     const before = { ...p(D, '09:00'), at: localTimeMs(D, '09:00') - 1 };
-    const after = { ...p(D, '20:00'), at: localTimeMs(D, '20:00') + 1 };
+    const after = { ...p(D, '00:00', 1), at: localTimeMs(D, '00:00', 1) + 1 };
     expect(run(general, [before, after]).punchIds).toEqual([]);
   });
   it('a night shift OUT from the previous day never lands in the next day of the same shift', () => {

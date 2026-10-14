@@ -156,7 +156,7 @@ describe('inputs hash', () => {
   it('is stable across calls and ignores off-window punches', () => {
     const inWindow = [punch(D, '10:00'), punch(D, '18:00')];
     const a = run(general, inWindow);
-    const b = run(general, [...inWindow, punch(D, '03:00'), punch(D, '23:30')]);
+    const b = run(general, [...inWindow, punch(D, '03:00'), punch(D, '00:30', 1)]);
     expect(a.inputsHash).toBe(b.inputsHash);
     expect(a).toEqual(b);
   });

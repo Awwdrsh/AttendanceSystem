@@ -122,6 +122,8 @@ export interface ExtrasInput {
   /** Final settlement: encash this many leave days at last basic / divisor. */
   leaveEncashDays?: string;
   leaveEncashDivisor?: number;
+  /** Basic at the latest rate when a salary revision was day-weighted this period; encashment uses the last basic, not the blend. */
+  lastBasic?: string;
   /** Final settlement: positive = notice pay to employee, negative = deduction in lieu of notice. */
   noticePay?: string;
   isFinalSettlement?: boolean;
