@@ -60,10 +60,10 @@ export function attendanceRoutes({ db }: AppDeps): Router {
   });
 
   /** Team Today (plan §3 manager screen): everyone's latest status for one date. */
-  r.get('/today', requireRole('hr', 'manager', 'finance'), async (req, res) => {
+  r.get('/today', requireRole('hr', 'manager'), async (req, res) => {
     const q = z.object({ date: isoDate }).parse(req.query);
-    // HR and finance see the whole company; a manager sees only their direct reports (as of that day) and themselves.
-    const companyWide = hasRole(req.user!, 'hr', 'finance');
+    // HR sees the whole company; a manager sees only their direct reports (as of that day) and themselves.
+    const companyWide = hasRole(req.user!, 'hr');
     const rows = await db.query(
       `SELECT e.id AS employee_id, e.emp_code, e.name_en, e.name_ne, v.status, v.first_in, v.last_out, v.late_min, v.worked_min, v.flags,
               coalesce(v.status = 'WFH', false) OR EXISTS (SELECT 1 FROM punch_event p WHERE p.employee_id = e.id AND p.local_date = $2 AND p.raw->>'remote' = 'true') AS remote

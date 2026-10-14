@@ -30,7 +30,7 @@ Databases: `hajiri`, `hajiri_test`. Connection strings live in `apps/*/.env` (ne
 
 ## Conventions
 - Every route validates input with zod, scopes every query by `req.user.companyId`, checks employee access with
-  `assertManages` (HR/finance company-wide, managers only direct reports, self), and calls `audit()` for mutations.
+  `assertManages` (HR company-wide, managers only direct reports, self), and calls `audit()` for mutations.
 - Dates are `YYYY-MM-DD` strings; "today" is the Nepal date (`nptToday()`); the DB session timezone is Asia/Kathmandu.
 - Money is `numeric` in SQL and `Decimal`/strings in code; never a JS float.
 - Tests: `apps/api/test/*.test.ts` use `freshDb()` from `test/setup-db.ts`; set `DATABASE_URL_TEST` to use another database.

@@ -12,8 +12,8 @@ explains terminal onboarding; `docs/adr/` records decisions.
 | Attendance processing | Pure, recomputable day engine (Frappe Shift Type semantics): pairing modes, grace, thresholds, night shifts, holidays (branch and gender aware), weekly offs, leave, WFH/on-duty, overtime detection with the Labour Act caps, versioned days, payroll locks, exceptions queue |
 | Shifts and holidays | Shifts, effective-dated assignments, BS holiday calendar with the 2083 default list (roster and geofence APIs exist; the web app keeps them out of the menu) |
 | Leave | Statutory and company leave types, double-entry ledger, working-day maths with sandwich rule, LWP split suggestion, approval workflow, monthly accrual (1 per 20 worked days, sick 12/yr, caps), substitute leave expiry, encashment |
-| Approvals | Generic multi-step workflow with manager/HR/finance resolution, inbox, one-tap decisions, delegation, signed actions, SLA reminders and escalation |
-| Payroll | Formula DSL and component graph, BS-month proration, SSF 11/20 and PF/gratuity regimes, CIT, versioned income-tax schedules (FY 2082/83 and 2083/84) with TDS projection and true-up, festival allowance, loans, arrears, supplementary, final settlement, Bonus Act run, maker-checker with two-approver threshold, locked runs, printable payslips, bank files (NMB, Nabil, NIC Asia, Everest, Prabhu), SSF sheet, ETDS annex, journal export |
+| Approvals | Generic multi-step workflow with manager/HR resolution, inbox, one-tap decisions, delegation, signed actions, SLA reminders and escalation |
+| Payroll | Formula DSL and component graph, BS-month proration, SSF 11/20 and PF/gratuity regimes, CIT, versioned income-tax schedules (FY 2082/83 and 2083/84) with TDS projection and true-up, festival allowance, loans, arrears, supplementary, final settlement, Bonus Act run, HR approval (optionally by a second HR user), locked runs, salary sheet (on screen, Excel download and printable with sign-off lines), printable payslips, SSF sheet. Payroll is run entirely by HR; there is no finance role and no bank or accounting export |
 | Self-service and management | Eight-item menu. Employees: Home (clock in/out, request work from home), My attendance, Time off, Payslips, Profile and privacy. Managers: Approvals, Attendance (who's in, fix a punch), Leave calendar. HR: Overview, Employees with CSV import, Attendance (exceptions, overtime), Leave (balances, policies, history), Payroll, Reports, Settings (rules, shifts, holidays, devices, users, setup checklist) |
 | Security and privacy | Sessions with lockout and idle timeout, role-based access scoped to company and direct reports, field encryption for PAN, bank accounts and biometric templates, hash-chained audit log, append-only punches, consent records, crypto-shredding, DSAR export, transparency page |
 | Operations | One-command install, start/stop, boot services, update script, Docker stack, English web app in the CoreValley visual identity (logo, hydro green, Manrope and JetBrains Mono, all assets self-hosted) with a command palette (Cmd+K), light and dark mode; every date is shown in Bikram Sambat (English month names) with a Nepali-month date picker and calendars |
@@ -53,7 +53,7 @@ terminals appear as pending under Devices and must be approved before their punc
 | `packages/payroll-engine` | pure payroll computation, formula DSL, tax schedules, 28 golden fixtures |
 | `apps/api` | Express API, SQL migrations, all HR/attendance/payroll modules, background worker |
 | `apps/gateway` | device gateway (ADMS, ISAPI), signed idempotent ingest, encrypted templates, simulator |
-| `apps/web` | React web app for employees, managers, HR and finance |
+| `apps/web` | React web app for employees, managers and HR |
 | `scripts/` | setup, start/stop, run, update, service installer |
 | `infra/` | Docker images and compose stack |
 
@@ -73,7 +73,7 @@ These are documented in code comments and plan.md section 18, and need a decisio
 - Terminal protocol details (ZKTeco status/verify codes, template layouts, Hikvision field names) come from community
   sources and must be verified on purchased units; the ZKTeco comm key is not validated (VLAN and serial allow-list are
   the controls).
-- Bank, SSF and ETDS file layouts follow a single vendor source and need confirmation from each bank and portal.
+- The SSF sheet layout follows a single vendor source and needs confirmation against the SSF portal.
 - Email, SMS and push are delivered through webhook bridges; no built-in SMTP or SMS provider client.
 - Passkeys/FIDO2, OpenBao key management, object storage for photos and documents, and the Expo mobile app are not
   built; the web app is responsive and covers the employee flows.

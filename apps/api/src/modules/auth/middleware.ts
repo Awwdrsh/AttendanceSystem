@@ -64,13 +64,13 @@ export async function isManagerOf(db: Queryable, managerEmployeeId: string, empl
 }
 
 /**
- * Who may see or act for an employee: HR, finance and admin company-wide; a manager only for direct reports; everyone
+ * Who may see or act for an employee: HR and admin company-wide; a manager only for direct reports; everyone
  * for themselves. An employee of another company is reported as not found so ids cannot be enumerated across tenants.
  */
 export async function assertManages(db: Queryable, user: AuthUser, employeeId: string): Promise<void> {
   const inCompany = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, user.companyId]);
   if (inCompany.rows.length === 0) throw new NotFoundError('employee not found');
-  if (hasRole(user, 'hr', 'finance')) return;
+  if (hasRole(user, 'hr')) return;
   if (user.employeeId === employeeId) return;
   if (hasRole(user, 'manager') && user.employeeId && (await isManagerOf(db, user.employeeId, employeeId))) return;
   throw new ForbiddenError('not allowed to access this employee');

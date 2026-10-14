@@ -74,9 +74,9 @@ async function validateRefs(db: AppDeps['db'], companyId: string | null, b: Empl
 export function employeeRoutes({ db, cipher }: AppDeps): Router {
   const r = Router();
 
-  r.get('/', requireRole('hr', 'finance', 'manager'), async (req, res) => {
+  r.get('/', requireRole('hr', 'manager'), async (req, res) => {
     const q = z.object({ status: z.enum(['active', 'exited']).optional(), search: z.string().max(100).optional(), branchId: z.uuid().optional(), pan: z.string().regex(PAN_RE).optional() }).parse(req.query);
-    if (q.pan && !hasRole(req.user!, 'hr', 'finance')) return res.status(403).json({ error: 'PAN lookup requires HR or finance' });
+    if (q.pan && !hasRole(req.user!, 'hr')) return res.status(403).json({ error: 'PAN lookup requires HR' });
     const rows = await db.query(
       `SELECT ${PUBLIC_COLS} FROM employee e
          LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
@@ -99,8 +99,8 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
     res.json({ employee: emp });
   });
 
-  /** Sensitive fields (PAN, full bank account) decrypted on demand, HR/finance only, audited. */
-  r.get('/:id/sensitive', requireRole('hr', 'finance'), async (req, res) => {
+  /** Sensitive fields (PAN, full bank account) decrypted on demand, HR only, audited. */
+  r.get('/:id/sensitive', requireRole('hr'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const rows = await db.query<{ pan_enc: Buffer | null; bank_account_enc: Buffer | null }>(
       'SELECT pan_enc, bank_account_enc FROM employee WHERE id = $1 AND company_id = $2', [id, req.user!.companyId]);

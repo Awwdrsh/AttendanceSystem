@@ -6,7 +6,7 @@ import { createUser } from '../src/modules/auth/service.js';
 import { auth, DEMO, freshDb, loginAs, testApp, testCipher, TEST_PEPPER } from './setup-db.js';
 
 let db: Db; let app: ReturnType<typeof testApp>;
-let hr: string; let financeA: string; let financeB: string; let financeAId: string; let admin: string;
+let hr: string; let hrB: string; let hrBId: string; let admin: string;
 let otherHr: string; let otherCompanyId: string;
 let stdVersionId: string; let periodId: string; let runId: string;
 const P = (path: string) => `/api/v1/payroll${path}`;
@@ -24,8 +24,7 @@ async function attendanceFor(employeeId: string, from: string, to: string, locke
 beforeAll(async () => {
   db = await freshDb(); app = testApp(db);
   hr = (await loginAs(db, app, ['hr'])).token;
-  const a = await loginAs(db, app, ['finance']); financeA = a.token; financeAId = a.userId;
-  financeB = (await loginAs(db, app, ['finance'])).token;
+  const b = await loginAs(db, app, ['hr']); hrB = b.token; hrBId = b.userId;
   admin = (await loginAs(db, app, ['admin'])).token;
   for (const [id, code] of [[DEMO.sita, 'E001'], [DEMO.ram, 'E002']] as const) {
     await db.query(`UPDATE employee SET pan_enc = $2, pan_bidx = 'x', bank_account_enc = $3, bank_account_last4 = '0012', bank_code = 'NMB', bank_branch = '7', ssf_id = '10000000001', join_date = '2026-01-01' WHERE id = $1`,
@@ -34,7 +33,7 @@ beforeAll(async () => {
   // A second company with its own HR user, for cross-tenant checks.
   const c = await db.query<{ id: string }>(`INSERT INTO company (code, name_en) VALUES ('OTHER', 'Other Co') RETURNING id`);
   otherCompanyId = c.rows[0]!.id;
-  await createUser(db, { companyId: otherCompanyId, email: 'hr@other.local', name: 'Other HR', password: PASS, roles: ['hr', 'finance'], pepper: TEST_PEPPER });
+  await createUser(db, { companyId: otherCompanyId, email: 'hr@other.local', name: 'Other HR', password: PASS, roles: ['hr'], pepper: TEST_PEPPER });
   otherHr = (await request(app).post('/api/v1/auth/login').send({ email: 'hr@other.local', password: PASS })).body.token;
   const s = await request(app).get(P('/structures')).set(auth(hr));
   stdVersionId = s.body.structures[0].versions[0].id;
@@ -56,10 +55,17 @@ describe('tenant isolation and authorisation', () => {
     const fv = await db.query<{ id: string }>(`INSERT INTO salary_structure_version (structure_id, version, components) VALUES ($1, 1, '[{"code":"BASIC"}]') RETURNING id`, [foreign.rows[0]!.id]);
     expect((await request(app).post(P('/assignments')).set(auth(hr)).send({ employeeId: DEMO.sita, structureVersionId: fv.rows[0]!.id, from: '2026-02-01', baseAmounts: { BASIC: '1.00' } })).status).toBe(404);
   });
-  it('rule versions are jurisdiction-wide: HR cannot add them, admin can', async () => {
+  it('rule versions are jurisdiction-wide: HR cannot add them, admin can; HR signs them off', async () => {
     const body = { ruleKey: 'test.rule', validFromAd: '2026-01-01', validFromBs: '2082-09-17', value: { x: 1 } };
     expect((await request(app).post(P('/rules')).set(auth(hr)).send(body)).status).toBe(403);
-    expect((await request(app).post(P('/rules')).set(auth(admin)).send(body)).status).toBe(201);
+    const created = await request(app).post(P('/rules')).set(auth(admin)).send(body);
+    expect(created.status).toBe(201);
+    const emp = (await loginAs(db, app, ['employee'])).token;
+    expect((await request(app).post(P(`/rules/${created.body.id}/approve`)).set(auth(emp))).status).toBe(403);
+    expect((await request(app).post(P(`/rules/${created.body.id}/approve`)).set(auth(hr))).status).toBe(200);
+    const row = await db.query('SELECT approved_by, approved_at FROM rule_version WHERE id = $1', [created.body.id]);
+    expect(row.rows[0].approved_at).not.toBeNull();
+    expect((await request(app).post(P('/rules/00000000-0000-7000-8000-00000000ffff/approve')).set(auth(hr))).status).toBe(404);
   });
   it('period creation outside the calendar table is a 400, not a crash', async () => {
     const r = await request(app).post(P('/periods')).set(auth(hr)).send({ bsYear: 2099, bsMonth: 1 });
@@ -92,7 +98,6 @@ describe('run lifecycle guards', () => {
     await attendanceFor(DEMO.sita, '2026-08-17', '2026-09-16', false);
     await attendanceFor(DEMO.ram, '2026-08-17', '2026-09-16', false);
     expect((await request(app).post(P(`/runs/${runId}/compute`)).set(auth(hr))).status).toBe(409);
-    expect((await request(app).post(P(`/runs/${runId}/compute`)).set(auth(financeA)).send({ overrideReason: 'month-end rush, lock follows' })).status).toBe(409);
     const ok = await request(app).post(P(`/runs/${runId}/compute`)).set(auth(hr)).send({ overrideReason: 'month-end rush, lock follows' });
     expect(ok.status).toBe(200);
     expect(ok.body.payslips).toBe(2);
@@ -103,33 +108,32 @@ describe('run lifecycle guards', () => {
     expect((await request(app).post(P(`/runs/${runId}/review`)).set(auth(hr))).status).toBe(200);
     expect((await request(app).post(P(`/runs/${runId}/inputs`)).set(auth(hr)).send({ inputs: [{ employeeId: DEMO.sita, componentCode: 'BONUS', amount: '1000.00' }] })).status).toBe(201);
     expect((await db.query('SELECT status FROM payroll_run WHERE id = $1', [runId])).rows[0].status).toBe('computed');
-    expect((await request(app).post(P(`/runs/${runId}/approve`)).set(auth(financeA))).status).toBe(409);
+    expect((await request(app).post(P(`/runs/${runId}/approve`)).set(auth(hr))).status).toBe(409);
     await request(app).post(P(`/runs/${runId}/compute`)).set(auth(hr)).send({ overrideReason: 'month-end rush, lock follows' });
     await request(app).post(P(`/runs/${runId}/review`)).set(auth(hr));
   });
-  it('two-approver threshold: above the limit a second, different finance user must approve', async () => {
-    await db.query(`UPDATE company_setting SET value = value || '{"twoApproverThreshold": 1000}' WHERE company_id = $1 AND key = 'payroll.policy'`, [DEMO.companyId]);
-    const first = await request(app).post(P(`/runs/${runId}/approve`)).set(auth(financeA));
-    expect(first.status).toBe(200);
-    expect(first.body).toMatchObject({ approved: false, pendingSecondApproval: true });
+  it('separate-approver policy: when on, the HR user who prepared the run cannot approve it; another HR user can', async () => {
+    await db.query(`UPDATE company_setting SET value = value || '{"separateApprover": true}' WHERE company_id = $1 AND key = 'payroll.policy'`, [DEMO.companyId]);
+    const own = await request(app).post(P(`/runs/${runId}/approve`)).set(auth(hr));
+    expect(own.status).toBe(403);
+    expect(own.body.error).toMatch(/different HR user/);
     expect((await db.query('SELECT status FROM payroll_run WHERE id = $1', [runId])).rows[0].status).toBe('reviewed');
-    expect((await request(app).post(P(`/runs/${runId}/approve`)).set(auth(financeA))).status).toBe(409);
-    const second = await request(app).post(P(`/runs/${runId}/approve`)).set(auth(financeB));
-    expect(second.status).toBe(200);
-    expect(second.body).toMatchObject({ approved: true });
-    const run = await db.query('SELECT status, checker_id, params FROM payroll_run WHERE id = $1', [runId]);
-    expect(run.rows[0].status).toBe('approved');
-    expect(run.rows[0].params.firstApproval.checkerId).toBe(financeAId);
+    const other = await request(app).post(P(`/runs/${runId}/approve`)).set(auth(hrB));
+    expect(other.status).toBe(200);
+    expect(other.body).toMatchObject({ approved: true });
+    const run = await db.query('SELECT status, checker_id FROM payroll_run WHERE id = $1', [runId]);
+    expect(run.rows[0]).toMatchObject({ status: 'approved', checker_id: hrBId });
+    await db.query(`UPDATE company_setting SET value = value || '{"separateApprover": false}' WHERE company_id = $1 AND key = 'payroll.policy'`, [DEMO.companyId]);
     expect((await request(app).post(P(`/runs/${runId}/inputs`)).set(auth(hr)).send({ inputs: [{ employeeId: DEMO.sita, componentCode: 'BONUS', amount: '1.00' }] })).status).toBe(409);
   });
   it('locking a regular run locks the period; cross-company run access is a 404', async () => {
     expect((await request(app).post(P(`/runs/${runId}/lock`)).set(auth(hr))).status).toBe(200);
     expect((await request(app).get(P(`/runs/${runId}`)).set(auth(otherHr))).status).toBe(404);
-    expect((await request(app).post(P(`/runs/${runId}/bank-file`)).set(auth(otherHr)).send({ bankCode: 'NMB' })).status).toBe(404);
+    expect((await request(app).get(P(`/runs/${runId}/salary-sheet`)).set(auth(otherHr))).status).toBe(404);
     const ps = await db.query<{ id: string }>('SELECT id FROM payslip WHERE run_id = $1 LIMIT 1', [runId]);
     expect((await request(app).get(P(`/payslips/${ps.rows[0]!.id}`)).set(auth(otherHr))).status).toBe(404);
     expect((await request(app).get(P(`/payslips/${ps.rows[0]!.id}/html`)).set(auth(otherHr))).status).toBe(404);
-    expect((await request(app).get(P(`/runs/${runId}/etds.csv`)).set(auth(otherHr))).status).toBe(404);
+    expect((await request(app).get(P(`/runs/${runId}/salary-sheet`)).query({ format: 'csv' }).set(auth(otherHr))).status).toBe(404);
   });
 });
 
@@ -140,7 +144,7 @@ describe('payslip visibility', () => {
     const foreign = (await request(app).post('/api/v1/auth/login').send({ email: 'emp@other.local', password: PASS })).body.token;
     expect((await request(app).get(P('/payslips')).set(auth(foreign)).query({ employeeId: DEMO.sita })).status).toBe(404);
     expect((await request(app).get(P('/declarations')).set(auth(foreign)).query({ employeeId: DEMO.sita, fiscalYearStart: 2083 })).status).toBe(404);
-    // Ram manages Sita: he may see her attendance, but pay is HR/finance/self only (plan §13.2 cost figures are role-gated).
+    // Ram manages Sita: he may see her attendance, but pay is HR/self only (plan §13.2 cost figures are role-gated).
     await db.query(`UPDATE employee_assignment SET manager_id = $2 WHERE employee_id = $1 AND upper_inf(valid)`, [DEMO.sita, DEMO.ram]);
     const manager = (await loginAs(db, app, ['manager'], DEMO.ram)).token;
     expect((await request(app).get(P('/payslips')).set(auth(manager)).query({ employeeId: DEMO.sita })).status).toBe(403);
@@ -177,33 +181,14 @@ describe('loss of pay from attendance flags', () => {
 });
 
 describe('outputs', () => {
-  it('bank file validation rejects bad accounts and Everest width overflows with per-row messages', async () => {
-    await db.query(`UPDATE employee SET bank_code = 'EVEREST', bank_branch = '12', bank_account_enc = $2 WHERE id = $1`, [DEMO.ram, testCipher.encrypt('1234567890123456789', `employee:${DEMO.ram}:bank`)]);
-    const ev = await request(app).post(P(`/runs/${runId}/bank-file`)).set(auth(financeA)).send({ bankCode: 'EVEREST' });
-    expect(ev.status).toBe(400);
-    expect(ev.body.details.join(' ')).toMatch(/14 characters/);
-    await db.query(`UPDATE employee SET bank_account_enc = $2 WHERE id = $1`, [DEMO.ram, testCipher.encrypt('12345678901234', `employee:${DEMO.ram}:bank`)]);
-    const ok = await request(app).post(P(`/runs/${runId}/bank-file`)).set(auth(financeA)).send({ bankCode: 'EVEREST' });
-    expect(ok.status).toBe(201);
-    const dl = await request(app).get(P(`/runs/${runId}/bank-files/${ok.body.id}`)).set(auth(financeA));
-    const line = dl.text.split('\r\n')[0]!;
-    expect(line).toHaveLength(80);
-    expect(line.slice(0, 14)).toBe('12345678901234');
-    expect(line.slice(49, 64)).toMatch(/^\d{15}$/);
-    expect(line.slice(64, 68)).toBe('0012');
-  });
-  it('journal balances and the SSF sheet allocation sums to 31% of basic', async () => {
-    const j = await request(app).get(P(`/runs/${runId}/journal.json`)).set(auth(financeA));
-    const debit = j.body.journal.reduce((a: ReturnType<typeof D>, r: { debit: string }) => a.plus(r.debit), D(0));
-    const credit = j.body.journal.reduce((a: ReturnType<typeof D>, r: { credit: string }) => a.plus(r.credit), D(0));
-    expect(debit.toFixed(2)).toBe(credit.toFixed(2));
+  it('the SSF sheet allocation sums to 31% of basic', async () => {
     const ssf = await request(app).get(P(`/runs/${runId}/ssf-sheet.csv`)).set(auth(hr));
     const row = ssf.text.split('\r\n')[1]!.split(',');
     const basic = D(row[3]!);
     const alloc = D(row[6]!).plus(row[7]!).plus(row[8]!).plus(row[9]!);
     expect(alloc.minus(basic.times('0.31')).abs().lte('0.05')).toBe(true);
   });
-  it('payslip HTML escapes user-controlled strings', async () => {
+  it('payslip and salary sheet HTML escape user-controlled strings; CSV quotes commas', async () => {
     await db.query(`UPDATE employee SET name_en = $2, designation = $3 WHERE id = $1`, [DEMO.sita, 'Sita <script>alert(1)</script>', '"><img src=x onerror=alert(1)>']);
     const ps = await db.query<{ id: string }>('SELECT id FROM payslip WHERE run_id = $1 AND employee_id = $2', [runId, DEMO.sita]);
     const html = await request(app).get(P(`/payslips/${ps.rows[0]!.id}/html`)).set(auth(hr));
@@ -211,6 +196,14 @@ describe('outputs', () => {
     expect(html.text).not.toContain('<script>alert(1)</script>');
     expect(html.text).toContain('&lt;script&gt;');
     expect(html.text).not.toContain('<img src=x');
+    const sheet = await request(app).get(P(`/runs/${runId}/salary-sheet`)).query({ format: 'html' }).set(auth(hr));
+    expect(sheet.status).toBe(200);
+    expect(sheet.text).not.toContain('<script>alert(1)</script>');
+    expect(sheet.text).toContain('&lt;script&gt;');
+    expect(sheet.text).not.toContain('<img src=x');
+    await db.query(`UPDATE employee SET name_en = 'Sharma, Sita' WHERE id = $1`, [DEMO.sita]);
+    const csv = await request(app).get(P(`/runs/${runId}/salary-sheet`)).query({ format: 'csv' }).set(auth(hr));
+    expect(csv.text).toContain(',"Sharma, Sita",');
     await db.query(`UPDATE employee SET name_en = 'Sita Sharma', designation = NULL WHERE id = $1`, [DEMO.sita]);
   });
 });
@@ -230,8 +223,7 @@ describe('final settlement scoping', () => {
     const festival = d.body.lines.find((l: { code: string }) => l.code === 'FESTIVAL');
     expect(festival.amount).toBe('7500.00');
     await request(app).post(P(`/runs/${fs.body.id}/review`)).set(auth(hr));
-    await db.query(`UPDATE company_setting SET value = value || '{"twoApproverThreshold": 5000000}' WHERE company_id = $1 AND key = 'payroll.policy'`, [DEMO.companyId]);
-    expect((await request(app).post(P(`/runs/${fs.body.id}/approve`)).set(auth(financeA))).status).toBe(200);
+    expect((await request(app).post(P(`/runs/${fs.body.id}/approve`)).set(auth(hr))).status).toBe(200);
     expect((await request(app).post(P(`/runs/${fs.body.id}/lock`)).set(auth(hr))).status).toBe(200);
     const sitaLocked = await db.query(`SELECT count(*)::int AS n FROM attendance_day WHERE employee_id = $1 AND local_date BETWEEN '2026-09-17' AND '2026-10-16' AND locked_at IS NOT NULL`, [DEMO.sita]);
     expect(sitaLocked.rows[0].n).toBe(0);

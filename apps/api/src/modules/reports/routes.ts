@@ -9,10 +9,10 @@ import { hours, nptHHMM, sendReport } from './csv.js';
 const fmt = z.object({ format: z.enum(['json', 'csv']).optional() });
 const range = fmt.extend({ from: isoDate, to: isoDate });
 
-/** Reports (plan §5.10): JSON by default, `?format=csv` for Excel. HR, finance and managers. */
+/** Reports (plan §5.10): JSON by default, `?format=csv` for Excel. HR and managers. */
 export function reportsRoutes({ db }: AppDeps): Router {
   const r = Router();
-  r.use(requireRole('hr', 'finance', 'manager'));
+  r.use(requireRole('hr', 'manager'));
 
   r.get('/daily', async (req, res) => {
     const q = fmt.extend({ date: isoDate }).parse(req.query);

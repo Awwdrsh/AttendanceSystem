@@ -11,7 +11,7 @@ import { safeAdToBs, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 
-/** Self-service tax declaration with HR/finance verification. */
+/** Self-service tax declaration with HR verification. */
 export default function DeclarationsPage() {
   const { user, hasRole } = useAuth();
   const bs = safeAdToBs(todayNpt());
@@ -22,7 +22,7 @@ export default function DeclarationsPage() {
   const [f, setF] = useState({ lifePremium: 0, healthPremium: 0, citMonthly: 0, medicalCost: 0, otherRetirementAnnual: 0 });
   useEffect(() => { const d = q.data?.declaration; if (d) setF({ lifePremium: Number(d.life_premium), healthPremium: Number(d.health_premium), citMonthly: Number(d.cit_monthly), medicalCost: Number(d.medical_cost), otherRetirementAnnual: Number(d.other_retirement_annual) }); else setF({ lifePremium: 0, healthPremium: 0, citMonthly: 0, medicalCost: 0, otherRetirementAnnual: 0 }); }, [q.data]);
   const [busy, setBusy] = useState(false);
-  const isVerifier = hasRole('hr', 'finance');
+  const isVerifier = hasRole('hr');
   const status = q.data?.declaration?.status;
   const canVerify = isVerifier && !!employeeId && status === 'submitted';
   const fyOptions = [currentFy - 2, currentFy - 1, currentFy, currentFy + 1].map((y) => ({ value: String(y), label: `FY ${y}/${String(y + 1).slice(-2)}` }));

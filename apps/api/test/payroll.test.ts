@@ -1,19 +1,19 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
-import { D, Decimal } from '@hajiri/payroll-engine';
+import { D } from '@hajiri/payroll-engine';
 import type { Db } from '../src/db/pool.js';
 import { testCipher } from './setup-db.js';
 import { auth, DEMO, freshDb, loginAs, testApp } from './setup-db.js';
 
 let db: Db; let app: ReturnType<typeof testApp>;
-let hr: string; let finance: string; let financeUserId: string; let sitaTok: string; let ramTok: string;
+let hr: string; let hrUserId: string; let hr2: string; let hr2UserId: string; let sitaTok: string; let ramTok: string;
 let stdVersionId: string; let periodId: string; let runId: string;
 const P = (path: string) => `/api/v1/payroll${path}`;
 
 beforeAll(async () => {
   db = await freshDb(); app = testApp(db);
-  hr = (await loginAs(db, app, ['hr'])).token;
-  const f = await loginAs(db, app, ['finance']); finance = f.token; financeUserId = f.userId;
+  const h = await loginAs(db, app, ['hr']); hr = h.token; hrUserId = h.userId;
+  const h2 = await loginAs(db, app, ['hr']); hr2 = h2.token; hr2UserId = h2.userId;
   sitaTok = (await loginAs(db, app, ['employee'], DEMO.sita)).token;
   ramTok = (await loginAs(db, app, ['employee'], DEMO.ram)).token;
   // Master data needed by pre-flight: bank, PAN, SSF ids.
@@ -140,22 +140,64 @@ describe('payroll run lifecycle (Bhadra 2083)', () => {
     expect(ram.flags).toContain('FirstPayslip');
     expect(run.body.run.totals.headcount).toBe('2');
   });
-  it('maker-checker: maker cannot approve, HR cannot approve, finance (different user) can; then lock is immutable', async () => {
-    expect((await request(app).post(P(`/runs/${runId}/approve`)).set(auth(finance))).status).toBe(409); // not reviewed yet
+  it('draft salary sheet: one row per employee, a column per component, totals that match the run', async () => {
+    const sheet = await request(app).get(P(`/runs/${runId}/salary-sheet`)).set(auth(hr));
+    expect(sheet.status).toBe(200);
+    expect(sheet.body.run).toMatchObject({ final: false, status: 'computed' });
+    expect(sheet.body.period).toMatchObject({ label: 'Bhadra 2083', bsYear: 2083, bsMonth: 5 });
+    expect(sheet.body.rows.map((r: { empCode: string }) => r.empCode)).toEqual(['E001', 'E002']);
+    const codes = (k: string) => sheet.body.columns[k].map((c: { code: string }) => c.code);
+    expect(codes('earnings')).toEqual(expect.arrayContaining(['BASIC', 'BONUS', 'OT']));
+    expect(codes('deductions')).toEqual(expect.arrayContaining(['SSF_EE', 'PF_EE', 'LOAN']));
+    expect(codes('employer')).toEqual(expect.arrayContaining(['SSF_ER', 'GRATUITY']));
+    const sita = sheet.body.rows[0];
+    expect(sita.earnings.BASIC).toBe('36129.03');
+    expect(sita.employer.SSF_ER).toBe('7226.00');
+    expect(sita.bankAccount).toBe('****0012');
+    expect(D(sita.costToCompany).toFixed(2)).toBe(D(sita.gross).plus(sita.employerTotal).toFixed(2));
+    for (const r of sheet.body.rows) {
+      const earned = Object.values(r.earnings as Record<string, string>).reduce((a, x) => a.plus(x), D(0));
+      const deducted = Object.values(r.deductions as Record<string, string>).reduce((a, x) => a.plus(x), D(0));
+      expect(earned.toFixed(2)).toBe(r.gross);
+      expect(deducted.toFixed(2)).toBe(r.totalDeductions);
+      expect(D(r.gross).minus(r.totalDeductions).plus(r.rounding).toFixed(2)).toBe(r.net);
+      expect(D(r.net).mod(1).isZero()).toBe(true);
+    }
+    const run = await request(app).get(P(`/runs/${runId}`)).set(auth(hr));
+    expect(sheet.body.totals.net).toBe(D(run.body.run.totals.net).toFixed(2));
+    expect(sheet.body.totals.gross).toBe(D(run.body.run.totals.gross).toFixed(2));
+    const csv = await request(app).get(P(`/runs/${runId}/salary-sheet`)).query({ format: 'csv' }).set(auth(hr));
+    expect(csv.headers['content-disposition']).toContain('salary-sheet-2083-05-draft.csv');
+    const lines = csv.text.replace(/^\uFEFF/, '').split('\r\n');
+    expect(lines[0]).toMatch(/salary sheet, Bhadra 2083 .*DRAFT/);
+    expect(lines[1]).toMatch(/^S\.N\.,Employee code,Name,Designation,Department,Paid days,Unpaid days,OT hours,/);
+    expect(lines[1]).toMatch(/,Total deductions,Rounding,Net pay,/);
+    expect(lines[2]).toMatch(/^1,E001,Sita Sharma,/);
+    expect(lines[4]).toMatch(/^,,Total \(2\),/);
+    const html = await request(app).get(P(`/runs/${runId}/salary-sheet`)).query({ format: 'html' }).set(auth(hr));
+    expect(html.text).toContain('Salary sheet');
+    expect(html.text).toContain('DRAFT');
+    expect(html.text).toContain('Prepared by');
+    expect((await request(app).get(P(`/runs/${runId}/salary-sheet`)).set(auth(sitaTok))).status).toBe(403);
+    expect((await request(app).get(P('/runs/00000000-0000-7000-8000-00000000ffff/salary-sheet')).set(auth(hr))).status).toBe(404);
+  });
+  it('HR approves (no finance step); an optional policy requires a different HR approver; then lock is immutable', async () => {
+    expect((await request(app).post(P(`/runs/${runId}/approve`)).set(auth(hr))).status).toBe(409); // not reviewed yet
     expect((await request(app).post(P(`/runs/${runId}/review`)).set(auth(hr)).send({ notes: 'checked variances' })).status).toBe(200);
+    expect((await request(app).post(P(`/runs/${runId}/approve`)).set(auth(sitaTok))).status).toBe(403);
+    await db.query(`UPDATE company_setting SET value = value || '{"separateApprover": true}' WHERE company_id = $1 AND key = 'payroll.policy'`, [DEMO.companyId]);
+    const maker = (await db.query('SELECT maker_id FROM payroll_run WHERE id = $1', [runId])).rows[0].maker_id;
+    expect(maker).toBe(hrUserId);
     expect((await request(app).post(P(`/runs/${runId}/approve`)).set(auth(hr))).status).toBe(403);
-    // A finance user who is also the maker cannot approve.
-    const makerFinance = await loginAs(db, app, ['hr', 'finance']);
-    await db.query('UPDATE payroll_run SET maker_id = $2 WHERE id = $1', [runId, makerFinance.userId]);
-    expect((await request(app).post(P(`/runs/${runId}/approve`)).set(auth(makerFinance.token))).status).toBe(403);
-    const ap = await request(app).post(P(`/runs/${runId}/approve`)).set(auth(finance));
+    await db.query(`UPDATE company_setting SET value = value || '{"separateApprover": false}' WHERE company_id = $1 AND key = 'payroll.policy'`, [DEMO.companyId]);
+    const ap = await request(app).post(P(`/runs/${runId}/approve`)).set(auth(hr2));
     expect(ap.status).toBe(200);
-    expect(ap.body).toMatchObject({ approved: true, pendingSecondApproval: false });
+    expect(ap.body).toMatchObject({ approved: true });
     expect(ap.body.signature).toMatch(/^sha256:[0-9a-f]{64}$/);
     const lock = await request(app).post(P(`/runs/${runId}/lock`)).set(auth(hr));
     expect(lock.status).toBe(200);
     const run = await db.query('SELECT status, locked_at, checker_id FROM payroll_run WHERE id = $1', [runId]);
-    expect(run.rows[0]).toMatchObject({ status: 'locked', checker_id: financeUserId });
+    expect(run.rows[0]).toMatchObject({ status: 'locked', checker_id: hr2UserId });
     await expect(db.query(`UPDATE payslip SET net = 1 WHERE run_id = $1`, [runId])).rejects.toThrow(/locked/);
     await expect(db.query(`DELETE FROM payslip_line WHERE payslip_id IN (SELECT id FROM payslip WHERE run_id = $1)`, [runId])).rejects.toThrow(/locked/);
     await expect(db.query(`UPDATE payroll_run SET status = 'draft' WHERE id = $1`, [runId])).rejects.toThrow(/immutable/);
@@ -165,28 +207,21 @@ describe('payroll run lifecycle (Bhadra 2083)', () => {
     const inst = await db.query('SELECT amount FROM loan_installment');
     expect(inst.rows).toHaveLength(1);
   });
-  it('bank files in each format, SSF sheet, ETDS and journal export', async () => {
-    const nmb = await request(app).post(P(`/runs/${runId}/bank-file`)).set(auth(finance)).send({ bankCode: 'NMB' });
-    expect(nmb.status).toBe(201);
-    expect(nmb.body.rows).toBe(2);
-    const dl = await request(app).get(P(`/runs/${runId}/bank-files/${nmb.body.id}`)).set(auth(finance));
-    expect(dl.text).toMatch(/^001234560001\d*,Sita Sharma,\d+\.\d{2},007,Salary 2083-05\r\n/);
-    const everest = await request(app).post(P(`/runs/${runId}/bank-file`)).set(auth(finance)).send({ bankCode: 'EVEREST' });
-    expect(everest.status).toBe(201);
-    expect(everest.body.rows).toBe(0); // nobody banks with Everest in the demo data
-    const generic = await request(app).post(P(`/runs/${runId}/bank-file`)).set(auth(finance)).send({ bankCode: 'GENERIC' });
-    expect(generic.status).toBe(201);
-    expect((await request(app).post(P(`/runs/${runId}/bank-file`)).set(auth(hr)).send({ bankCode: 'NMB' })).status).toBe(403);
+  it('final salary sheet names who prepared and approved it; SSF sheet; finance-only exports are gone', async () => {
+    const sheet = await request(app).get(P(`/runs/${runId}/salary-sheet`)).set(auth(hr));
+    expect(sheet.body.run).toMatchObject({ final: true, status: 'locked' });
+    expect(sheet.body.run.approvedBy).toBeTruthy();
+    const csv = await request(app).get(P(`/runs/${runId}/salary-sheet`)).query({ format: 'csv' }).set(auth(hr));
+    expect(csv.headers['content-disposition']).toContain('salary-sheet-2083-05.csv');
+    expect(csv.text).not.toContain('DRAFT');
+    const html = await request(app).get(P(`/runs/${runId}/salary-sheet`)).query({ format: 'html' }).set(auth(hr));
+    expect(html.text).not.toContain('class="draft"');
+    expect(html.text).toMatch(/Run locked \d+ \w+ 20\d\d\./);
     const ssf = await request(app).get(P(`/runs/${runId}/ssf-sheet.csv`)).set(auth(hr));
     expect(ssf.text.split('\r\n')[1]).toMatch(/^E001,10000000001,Sita Sharma,36129\.03,3974\.00,7226\.00,361\.29,505\.81,97\.55,10235\.35,11200\.00$/);
-    const etds = await request(app).get(P(`/runs/${runId}/etds.csv`)).set(auth(finance));
-    expect(etds.text).toMatch(/E001,123456789,Sita Sharma,/);
-    const j = await request(app).get(P(`/runs/${runId}/journal.json`)).set(auth(finance));
-    const debit = j.body.journal.reduce((a: Decimal, r: { debit: string }) => a.plus(r.debit), D(0));
-    const credit = j.body.journal.reduce((a: Decimal, r: { credit: string }) => a.plus(r.credit), D(0));
-    expect(debit.toFixed(2)).toBe(credit.toFixed(2));
-    expect((await request(app).post(P(`/runs/${runId}/disburse`)).set(auth(finance))).status).toBe(200);
-    expect((await request(app).post(P(`/runs/${runId}/file`)).set(auth(finance))).status).toBe(200);
+    for (const [method, path] of [['post', 'bank-file'], ['get', 'etds.csv'], ['get', 'journal.json'], ['post', 'disburse'], ['post', 'file']] as const) {
+      expect((await request(app)[method](P(`/runs/${runId}/${path}`)).set(auth(hr))).status).toBe(404);
+    }
   });
   it('publish notifies employees; employees see only their own published payslips; HTML renders in English', async () => {
     expect((await request(app).get(P('/payslips')).set(auth(sitaTok))).body.payslips).toHaveLength(0);

@@ -53,7 +53,7 @@ export default function PayrollHubPage() {
 
   return (
     <Stack gap="lg">
-      <PageHeader title="Pay runs" subtitle="Each run moves through pre-flight, inputs, review, approval and lock. Locked runs never change; corrections go in a supplementary run."
+      <PageHeader title="Pay runs" subtitle="Each run moves through pre-flight, inputs, review, HR approval and lock, then gives you the salary sheet. Locked runs never change; corrections go in a supplementary run."
         actions={<>
           <Button variant="default" leftSection={<IconCoins size={16} stroke={1.6} />} onClick={() => setBonus(true)}>Bonus run</Button>
           <Button leftSection={<IconPlus size={16} stroke={1.6} />} onClick={() => setOpen(true)}>New pay run</Button>
@@ -61,7 +61,7 @@ export default function PayrollHubPage() {
 
       {empty ? (
         <EmptyState icon={<IconReceipt2 size={20} stroke={1.6} />} title="No pay runs yet"
-          hint="A pay run calculates every employee's payslip for one month from their salary structure and locked attendance. Once approved and locked, it produces the bank file and statutory sheets."
+          hint="A pay run calculates every employee's payslip for one month from their salary structure and locked attendance. Once approved and locked, it produces the salary sheet and the SSF sheet, and employees can see their payslips."
           action={{ label: 'Create your first pay run', onClick: () => setOpen(true) }} />
       ) : (
         <DataTable<PayrollRun> rows={rows} rowKey={(r) => r.id} loading={runs.loading} error={runs.error} onRowClick={(r) => nav(`/payroll/runs/${r.id}`)}

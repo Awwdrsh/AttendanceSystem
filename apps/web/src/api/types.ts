@@ -1,4 +1,4 @@
-export type Role = 'admin' | 'hr' | 'finance' | 'manager' | 'employee';
+export type Role = 'admin' | 'hr' | 'manager' | 'employee';
 
 export interface AuthUser { id: string; companyId: string | null; employeeId: string | null; email: string; name: string; roles: Role[]; mustChangePassword: boolean }
 
@@ -117,8 +117,21 @@ export interface Variance { flagged: number; previousNet: string; byEmployee: Ar
 export interface PayslipSummary { id: string; employee_id?: string; emp_code?: string; name_en?: string; run_id?: string; run_type?: string; bs_year?: number; bs_month?: number; paid_days: string; lop_days: string; ot_hours: string; gross: string; tds: string; employee_statutory?: string; employer_statutory?: string; total_deductions: string; net: string; flags?: string[]; published_at: string | null; locked_at?: string | null }
 export interface PayslipLine { code: string; type: string; name_en: string; name_ne: string | null; amount: string; basis: unknown; sort_order: number }
 export interface PayslipDetail { payslip: Record<string, unknown> & { id: string; employee_id: string; emp_code: string; name_en: string; bs_year: number; bs_month: number; paid_days: string; lop_days: string; ot_hours: string; gross: string; taxable: string; tds: string; employee_statutory: string; employer_statutory: string; total_deductions: string; net: string; explain: Array<{ code?: string; text?: string; line?: string; [k: string]: unknown }>; ytd: Record<string, string>; published_at: string | null }; lines: PayslipLine[]; tax: unknown }
-export interface RunDetail { run: PayrollRun; period: PayrollPeriod; payslips: PayslipSummary[]; bankFiles: Array<{ id: string; bank_code: string; format: string; filename: string; checksum: string; created_at: string }> }
-export interface BankFileResult { id: string; filename: string; rows: number; checksum: string; warnings: string[] }
+export interface RunDetail { run: PayrollRun; period: PayrollPeriod; payslips: PayslipSummary[] }
+export interface SalarySheetRow {
+  sn: number; employeeId: string; empCode: string; name: string; designation: string | null; department: string | null;
+  paidDays: string; lopDays: string; otHours: string; earnings: Record<string, string>; gross: string;
+  deductions: Record<string, string>; totalDeductions: string; rounding: string; net: string;
+  employer: Record<string, string>; employerTotal: string; costToCompany: string; bank: string | null; bankAccount: string | null; flags: string[];
+}
+export interface SalarySheet {
+  company: string;
+  period: { label: string; bsYear: number; bsMonth: number; from: string; to: string; days: number };
+  run: { id: string; type: string; status: string; final: boolean; preparedBy: string | null; approvedBy: string | null; approvedAt: string | null; lockedAt: string | null };
+  columns: { earnings: Array<{ code: string; name: string }>; deductions: Array<{ code: string; name: string }>; employer: Array<{ code: string; name: string }>; rounding: boolean };
+  rows: SalarySheetRow[];
+  totals: Omit<SalarySheetRow, 'sn' | 'employeeId' | 'empCode' | 'name' | 'designation' | 'department' | 'bank' | 'bankAccount' | 'flags'>;
+}
 
 export interface Consent { id: string; purpose: string; modality: string; notice_version: string; granted_at: string; revoked_at: string | null }
 export interface TemplateMeta { id: string; modality: string; vendor_format: string; device_user_pin: string | null; device_sn: string | null; key_version: number; consent_id: string | null; created_at: string; shredded_at: string | null }

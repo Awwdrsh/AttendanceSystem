@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
 import { validateFormula, D } from '@hajiri/payroll-engine';
@@ -8,13 +7,13 @@ import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '.
 import { isoDate, money } from '../../validation.js';
 import { assertManages, hasRole, requireRole } from '../auth/middleware.js';
 import { lockAttendance } from '../attendance/service.js';
-import { buildBankFile, type BankRow } from './bank-files.js';
-import { etdsCsv, etdsRows, journal, journalCsv, ssfSheetCsv } from './exports.js';
+import { ssfSheetCsv } from './exports.js';
 import { renderPayslipHtml } from './payslip-html.js';
-import { advanceRun, approveRun, bonusAllocation, computeRun, ensurePeriod, getPeriod, getRun, lockRun, preflight, publishRun, reviewRun } from './service.js';
+import { salarySheet, salarySheetCsv, salarySheetHtml } from './salary-sheet.js';
+import { approveRun, bonusAllocation, computeRun, ensurePeriod, getPeriod, getRun, lockRun, preflight, publishRun, reviewRun } from './service.js';
 
 const STATUTORY_KEYS = new Set(['tax.schedule', 'tax.deductions', 'ssf.rates', 'pf.rates', 'ot.multiplier', 'festival.allowance', 'min_wage', 'bonus.caps', 'ssf.deposit_days', 'tds.deposit_days']);
-const payrollRole = requireRole('hr', 'finance');
+const payrollRole = requireRole('hr');
 
 export function payrollRoutes({ db, cipher }: AppDeps): Router {
   const r = Router();
@@ -40,7 +39,7 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     await audit(db, { actorId: req.user!.id, action: 'create', table: 'rule_version', rowId: rows.rows[0]!.id, after: b });
     res.status(201).json({ id: rows.rows[0]!.id });
   });
-  r.post('/rules/:id/approve', requireRole('finance'), async (req, res) => {
+  r.post('/rules/:id/approve', requireRole('hr'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const rows = await db.query('UPDATE rule_version SET approved_by = $2, approved_at = now() WHERE id = $1 RETURNING id', [id, req.user!.id]);
     if (!rows.rows[0]) throw new NotFoundError('rule not found');
@@ -155,7 +154,7 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     const employeeId = q.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
     await assertManages(db, req.user!, employeeId);
-    if (employeeId !== req.user!.employeeId && !hasRole(req.user!, 'hr', 'finance')) throw new ForbiddenError();
+    if (employeeId !== req.user!.employeeId && !hasRole(req.user!, 'hr')) throw new ForbiddenError();
     const rows = await db.query('SELECT d.* FROM tax_declaration d JOIN employee e ON e.id = d.employee_id WHERE d.employee_id = $1 AND d.fiscal_year_start = $2 AND e.company_id = $3', [employeeId, q.fiscalYearStart, cid(req)]);
     res.json({ declaration: rows.rows[0] ?? null });
   });
@@ -270,8 +269,7 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     const slips = await db.query(
       `SELECT ps.id, ps.employee_id, e.emp_code, e.name_en, ps.paid_days, ps.lop_days, ps.ot_hours, ps.gross, ps.tds, ps.employee_statutory, ps.employer_statutory, ps.total_deductions, ps.net, ps.flags, ps.published_at
          FROM payslip ps JOIN employee e ON e.id = ps.employee_id WHERE ps.run_id = $1 ORDER BY (jsonb_array_length(ps.flags) > 0) DESC, e.emp_code`, [run.id]);
-    const files = await db.query('SELECT id, bank_code, format, filename, checksum, created_at FROM bank_file WHERE run_id = $1 ORDER BY created_at DESC', [run.id]);
-    res.json({ run, period: p, payslips: slips.rows, bankFiles: files.rows });
+    res.json({ run, period: p, payslips: slips.rows });
   });
   r.post('/runs/:id/preflight', payrollRole, async (req, res) => {
     const run = await getRun(db, cid(req), z.uuid().parse(req.params.id));
@@ -327,76 +325,43 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     await reviewRun(db, cid(req), z.uuid().parse(req.params.id), req.user!.id, b.notes);
     res.json({ ok: true });
   });
-  r.post('/runs/:id/approve', requireRole('finance'), async (req, res) => {
+  r.post('/runs/:id/approve', requireRole('hr'), async (req, res) => {
     const result = await approveRun(db, cid(req), z.uuid().parse(req.params.id), { id: req.user!.id, roles: req.user!.roles });
     res.json({ ok: true, ...result });
   });
   r.post('/runs/:id/lock', payrollRole, async (req, res) => { res.json(await lockRun(db, cid(req), z.uuid().parse(req.params.id), req.user!.id)); });
-  r.post('/runs/:id/disburse', requireRole('finance'), async (req, res) => { await advanceRun(db, cid(req), z.uuid().parse(req.params.id), req.user!.id, 'disbursed'); res.json({ ok: true }); });
-  r.post('/runs/:id/file', requireRole('finance'), async (req, res) => { await advanceRun(db, cid(req), z.uuid().parse(req.params.id), req.user!.id, 'filed'); res.json({ ok: true }); });
   r.post('/runs/:id/publish', payrollRole, async (req, res) => { res.json({ published: await publishRun(db, cid(req), z.uuid().parse(req.params.id), req.user!.id) }); });
 
   // ---------------------------------------------------------------- outputs (plan §11.10)
-  r.post('/runs/:id/bank-file', requireRole('finance'), async (req, res) => {
-    const run = await getRun(db, cid(req), z.uuid().parse(req.params.id));
-    if (!run.locked_at) throw new ConflictError('bank files are generated from locked runs only');
-    const b = z.object({ bankCode: z.enum(['NMB', 'NABIL', 'NIC_ASIA', 'EVEREST', 'PRABHU', 'GENERIC']) }).parse(req.body);
-    const p = await getPeriod(db, cid(req), run.period_id);
-    const rows = await db.query<{ employee_id: string; emp_code: string; name_en: string; bank_code: string | null; bank_branch: string | null; bank_account_enc: Buffer | null; phone: string | null; email: string | null; net: string }>(
-      `SELECT e.id AS employee_id, e.emp_code, e.name_en, e.bank_code, e.bank_branch, e.bank_account_enc, e.phone, e.email, ps.net::text FROM payslip ps JOIN employee e ON e.id = ps.employee_id
-        WHERE ps.run_id = $1 AND ps.net > 0 AND ($2 = 'GENERIC' OR e.bank_code = $2) ORDER BY e.emp_code`, [run.id, b.bankCode]);
-    const bankRows: BankRow[] = rows.rows.map((x) => ({
-      empCode: x.emp_code, name: x.name_en, bankCode: x.bank_code ?? '', branch: x.bank_branch ?? '', amount: x.net,
-      account: x.bank_account_enc ? cipher.decrypt(x.bank_account_enc, `employee:${x.employee_id}:bank`) : '', ...(x.phone ? { mobile: x.phone } : {}), ...(x.email ? { email: x.email } : {}),
-    }));
-    const period = `${p.bs_year}-${String(p.bs_month).padStart(2, '0')}`;
-    const file = buildBankFile(b.bankCode, bankRows, period);
-    if (file.errors.length && b.bankCode !== 'GENERIC') return res.status(400).json({ error: 'bank file validation failed', details: file.errors });
-    const checksum = createHash('sha256').update(file.content, 'utf8').digest('hex');
-    const ins = await db.query<{ id: string }>('INSERT INTO bank_file (run_id, bank_code, format, filename, content, checksum, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-      [run.id, file.bankCode, file.format, file.filename, file.content, checksum, req.user!.id]);
-    await audit(db, { actorId: req.user!.id, action: 'bank_file', table: 'bank_file', rowId: ins.rows[0]!.id, after: { bankCode: file.bankCode, rows: bankRows.length, checksum } });
-    return res.status(201).json({ id: ins.rows[0]!.id, filename: file.filename, rows: bankRows.length, checksum, warnings: file.errors });
-  });
-  r.get('/runs/:id/bank-files/:fileId', requireRole('finance'), async (req, res) => {
-    const run = await getRun(db, cid(req), z.uuid().parse(req.params.id));
-    const f = await db.query<{ filename: string; content: string; format: string }>('SELECT filename, content, format FROM bank_file WHERE id = $1 AND run_id = $2', [z.uuid().parse(req.params.fileId), run.id]);
-    if (!f.rows[0]) throw new NotFoundError('file not found');
-    await audit(db, { actorId: req.user!.id, action: 'download', table: 'bank_file', rowId: req.params.fileId as string });
-    res.setHeader('Content-Disposition', `attachment; filename="${f.rows[0].filename}"`);
-    res.type(f.rows[0].format === 'txt' ? 'text/plain' : f.rows[0].format === 'tsv' ? 'text/tab-separated-values' : 'text/csv').send(f.rows[0].content);
-  });
   r.get('/runs/:id/ssf-sheet.csv', payrollRole, async (req, res) => {
     const run = await getRun(db, cid(req), z.uuid().parse(req.params.id));
     res.setHeader('Content-Disposition', `attachment; filename="ssf-${run.id}.csv"`);
     res.type('text/csv').send(await ssfSheetCsv(db, run.id));
   });
-  r.get('/runs/:id/etds.csv', requireRole('finance'), async (req, res) => {
-    const run = await getRun(db, cid(req), z.uuid().parse(req.params.id));
-    const rows = (await etdsRows(db, run.id)).map((x) => ({ ...x, pan: x.pan_enc ? cipher.decrypt(x.pan_enc, `employee:${x.employee_id}:pan`) : '' }));
-    await audit(db, { actorId: req.user!.id, action: 'etds_export', table: 'payroll_run', rowId: run.id });
-    res.setHeader('Content-Disposition', `attachment; filename="etds-${run.id}.csv"`);
-    res.type('text/csv').send(etdsCsv(rows));
-  });
-  r.get('/runs/:id/journal.:fmt', payrollRole, async (req, res) => {
-    const run = await getRun(db, cid(req), z.uuid().parse(req.params.id));
-    const rows = await journal(db, cid(req), run.id);
-    if (req.params.fmt === 'json') return res.json({ journal: rows });
-    res.setHeader('Content-Disposition', `attachment; filename="journal-${run.id}.csv"`);
-    return res.type('text/csv').send(journalCsv(rows));
+  /** Salary sheet: every employee's earnings, deductions and net pay in one table. JSON, `?format=csv` for Excel, `?format=html` to print. */
+  r.get('/runs/:id/salary-sheet', payrollRole, async (req, res) => {
+    const { format } = z.object({ format: z.enum(['json', 'csv', 'html']).default('json') }).parse(req.query);
+    const sheet = await salarySheet(db, cid(req), z.uuid().parse(req.params.id));
+    if (!sheet) throw new NotFoundError('payroll run not found');
+    if (!sheet.rows.length && format !== 'json') throw new ConflictError('this run has no payslips yet; calculate it first');
+    await audit(db, { actorId: req.user!.id, action: 'salary_sheet', table: 'payroll_run', rowId: sheet.run.id, after: { format } });
+    const name = `salary-sheet-${sheet.period.bsYear}-${String(sheet.period.bsMonth).padStart(2, '0')}${sheet.run.final ? '' : '-draft'}`;
+    if (format === 'csv') { res.setHeader('Content-Disposition', `attachment; filename="${name}.csv"`); return res.type('text/csv; charset=utf-8').send(salarySheetCsv(sheet)); }
+    if (format === 'html') return res.type('text/html').send(salarySheetHtml(sheet));
+    return res.json(sheet);
   });
 
   // ---------------------------------------------------------------- payslips (employee self-service, plan §13.7)
   const canSeePayslip = (user: NonNullable<typeof r extends never ? never : import('../auth/service.js').AuthUser>, employeeId: string) =>
-    hasRole(user, 'hr', 'finance') || user.employeeId === employeeId;
+    hasRole(user, 'hr') || user.employeeId === employeeId;
 
   r.get('/payslips', async (req, res) => {
     const q = z.object({ employeeId: z.uuid().optional(), fiscalYearStart: z.coerce.number().int().optional() }).parse(req.query);
     const employeeId = q.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
     await assertManages(db, req.user!, employeeId);          // 404 outside the company, 403 for unrelated employees
-    if (!canSeePayslip(req.user!, employeeId)) throw new ForbiddenError('payslips are visible to the employee and to HR/finance only');
-    const onlyPublished = !hasRole(req.user!, 'hr', 'finance');
+    if (!canSeePayslip(req.user!, employeeId)) throw new ForbiddenError('payslips are visible to the employee and to HR only');
+    const onlyPublished = !hasRole(req.user!, 'hr');
     const rows = await db.query(
       `SELECT ps.id, ps.run_id, r.run_type, p.bs_year, p.bs_month, ps.paid_days, ps.lop_days, ps.ot_hours, ps.gross, ps.tds, ps.total_deductions, ps.net, ps.published_at, r.locked_at
          FROM payslip ps JOIN payroll_run r ON r.id = ps.run_id JOIN payroll_period p ON p.id = r.period_id
@@ -415,7 +380,7 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     const row = ps.rows[0];
     if (!row || row.company_id !== req.user!.companyId) throw new NotFoundError('payslip not found');
     if (!canSeePayslip(req.user!, row.employee_id)) throw new ForbiddenError();
-    if (!hasRole(req.user!, 'hr', 'finance') && !row.published_at) throw new NotFoundError('payslip not found');
+    if (!hasRole(req.user!, 'hr') && !row.published_at) throw new NotFoundError('payslip not found');
     const lines = await db.query('SELECT component_code AS code, type, name_en, name_ne, amount, basis, sort_order FROM payslip_line WHERE payslip_id = $1 ORDER BY sort_order', [id]);
     return { row, lines: lines.rows as Array<{ code: string; type: string; name_en: string; name_ne: string | null; amount: string; basis: unknown; sort_order: number }> };
   }

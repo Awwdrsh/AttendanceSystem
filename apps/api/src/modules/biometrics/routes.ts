@@ -53,7 +53,7 @@ export function biometricsRoutes({ db }: AppDeps): Router {
       notStored: { en: ['Continuous location tracking', 'Productivity scores or lateness rankings'], ne: ['निरन्तर स्थान ट्र्याकिङ', 'उत्पादकता अंक वा ढिलाइको श्रेणी'] },
       retention: RETENTION,
       access: {
-        en: ['You: your own punches, attendance, corrections and this record', 'Your manager: your attendance status and requests', 'HR: your profile and attendance; sensitive fields are decrypted on demand and every read is logged', 'Finance: payroll data only'],
+        en: ['You: your own punches, attendance, corrections and this record', 'Your manager: your attendance status and requests', 'HR: your profile, attendance and payroll; sensitive fields are decrypted on demand and every read is logged'],
         ne: ['तपाईं: आफ्नै हाजिरी, सुधार र यो अभिलेख', 'तपाईंको प्रबन्धक: तपाईंको हाजिरी स्थिति र अनुरोध', 'मानव संसाधन: प्रोफाइल र हाजिरी; संवेदनशील क्षेत्र आवश्यक पर्दा मात्र खोलिन्छ र हरेक पहुँच लग हुन्छ', 'वित्त: तलब डेटा मात्र'],
       },
       withdraw: {

@@ -90,7 +90,7 @@ describe('workflow authorisation', () => {
 
   it('a definition change does not alter in-flight instances', async () => {
     const { instanceId } = await sitaRequest('2026-11-17');
-    await db.query(`UPDATE workflow_definition SET steps = '[{"role":"manager"},{"role":"hr"},{"role":"finance"}]' WHERE company_id = $1 AND object_type = 'leave_request'`, [DEMO.companyId]);
+    await db.query(`UPDATE workflow_definition SET steps = '[{"role":"manager"},{"role":"hr"},{"role":"admin"}]' WHERE company_id = $1 AND object_type = 'leave_request'`, [DEMO.companyId]);
     expect((await request(app).post(`/api/v1/workflow/${instanceId}/approve`).set(auth(ram)).send({})).body.state).toBe('approved');
     await db.query(`UPDATE workflow_definition SET steps = '[{"role":"manager"}]' WHERE company_id = $1 AND object_type = 'leave_request'`, [DEMO.companyId]);
   });

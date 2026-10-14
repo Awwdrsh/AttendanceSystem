@@ -12,8 +12,8 @@ import { relativeTime } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 
-const ROLES: Role[] = ['admin', 'hr', 'finance', 'manager', 'employee'];
-const ROLE_LABEL: Record<Role, string> = { admin: 'Admin', hr: 'HR', finance: 'Finance', manager: 'Manager', employee: 'Employee' };
+const ROLES: Role[] = ['admin', 'hr', 'manager', 'employee'];
+const ROLE_LABEL: Record<Role, string> = { admin: 'Admin', hr: 'HR', manager: 'Manager', employee: 'Employee' };
 const ROLE_OPTIONS = ROLES.map((r) => ({ value: r, label: ROLE_LABEL[r] }));
 
 export default function UsersPage() {
@@ -26,7 +26,7 @@ export default function UsersPage() {
   return (
     <Stack gap="md">
       <PageHeader title="Users & roles"
-        subtitle="Who can sign in and what they can do. Employees see only their own data, managers approve for their team, HR runs attendance and finance approves payroll."
+        subtitle="Who can sign in and what they can do. Employees see only their own data, managers approve for their team, HR runs attendance, leave and payroll."
         actions={isAdmin ? <Button leftSection={<IconPlus size={16} stroke={1.6} />} onClick={() => setOpen(true)}>Add user</Button> : null} />
       <DataTable<AppUserRow> rows={q.data?.users ?? []} rowKey={(u) => u.id} loading={q.loading} error={q.error} emptyTitle="No users yet" {...(isAdmin ? { emptyHint: 'Add a user so they can sign in.' } : {})}
         columns={[

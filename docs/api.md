@@ -1,209 +1,241 @@
-# API reference (generated from route files)
+# API reference
 
-All routes are under `/api/v1` and need a session (cookie `hajiri_session` or `Authorization: Bearer <token>`) except `/auth/login`. Roles in brackets where a route is restricted; otherwise self-or-HR scoping applies.
+All routes are under `/api/v1` and need a session (cookie `hajiri_session` or `Authorization: Bearer <token>`) except `POST /auth/login`.
+Admin can call every route. "Signed-in" routes apply their own scoping: employees see their own records, managers their direct reports, HR the whole company.
+Generated from the route files; every route here is exercised by the API test suite.
 
-## attendance  (`/attendance`)
+## auth
 
-- `12: /attendancer.post('/recompute',`
-- `19: /attendancer.post('/recompute-range',`
-- `29: /attendancer.get('/days',`
-- `36: /attendancer.get('/punches',`
-- `48: /attendancer.get('/exceptions',`
-- `63: /attendancer.get('/today',`
+| Method | Path | Access |
+|---|---|---|
+| POST | `/api/v1/auth/login` | Public |
+| POST | `/api/v1/auth/logout` | Signed-in |
+| GET | `/api/v1/auth/me` | Signed-in |
+| POST | `/api/v1/auth/change-password` | Signed-in |
+| GET | `/api/v1/auth/users` | HR |
+| POST | `/api/v1/auth/users` | Admin |
+| PATCH | `/api/v1/auth/users/:id` | Admin |
 
-## auth  (`/auth`)
+## employees
 
-- `25: /authr.post('/login',`
-- `33: /authr.post('/logout',`
-- `39: /authr.get('/me',`
-- `41: /authr.post('/change-password',`
-- `50: /authr.get('/users',`
-- `57: /authr.post('/users',`
-- `71: /authr.patch('/users/:id',`
+| Method | Path | Access |
+|---|---|---|
+| GET | `/api/v1/employees` | HR, Manager |
+| GET | `/api/v1/employees/:id` | Signed-in |
+| GET | `/api/v1/employees/:id/sensitive` | HR |
+| POST | `/api/v1/employees` | HR |
+| PATCH | `/api/v1/employees/:id` | HR |
+| POST | `/api/v1/employees/import` | HR |
+| GET | `/api/v1/employees/:id/assignments` | Signed-in |
+| GET | `/api/v1/employees/:id/audit` | Signed-in |
 
-## biometrics  (`/biometrics`)
+## attendance
 
-- `47: /biometricsr.get('/transparency',`
-- `67: /biometricsr.post('/consent',`
-- `80: /biometricsr.get('/consent',`
-- `90: /biometricsr.post('/consent/:id/revoke',`
-- `110: /biometricsr.get('/templates',`
-- `121: /biometricsr.get('/templates/unmapped',`
-- `129: /biometricsr.post('/templates/:id/shred',`
-- `140: /biometricsr.post('/employees/:id/shred-all',`
-- `150: /biometricsr.get('/dsar',`
-- `177: /biometricsr.post('/retention/run',`
-- `188: /biometricsr.get('/stats',`
+| Method | Path | Access |
+|---|---|---|
+| POST | `/api/v1/attendance/recompute` | HR, Manager |
+| POST | `/api/v1/attendance/recompute-range` | HR |
+| GET | `/api/v1/attendance/days` | Signed-in |
+| GET | `/api/v1/attendance/punches` | Signed-in |
+| GET | `/api/v1/attendance/exceptions` | HR, Manager |
+| GET | `/api/v1/attendance/today` | HR, Manager |
 
-## dashboard  (`/dashboard`)
+## devices
 
-- `13: /dashboardr.get('/executive',`
-- `66: /dashboardr.get('/me',`
+| Method | Path | Access |
+|---|---|---|
+| GET | `/api/v1/devices` | HR, Admin |
+| POST | `/api/v1/devices/:id/activate` | HR, Admin |
+| POST | `/api/v1/devices/:id/disable` | HR, Admin |
+| GET | `/api/v1/devices/:id/mappings` | HR, Admin |
+| POST | `/api/v1/devices/:id/map` | HR, Admin |
+| GET | `/api/v1/devices/punches/unmapped` | HR, Admin |
+| POST | `/api/v1/devices/:id/commands` | HR, Admin |
+| GET | `/api/v1/devices/:id/commands` | HR, Admin |
+| POST | `/api/v1/devices/:id/sync-users` | HR, Admin |
 
-## devices  (`/devices`)
+## shifts
 
-- `20: /devicesr.get('/',`
-- `32: /devicesr.post('/:id/activate',`
-- `43: /devicesr.post('/:id/disable',`
-- `51: /devicesr.get('/:id/mappings',`
-- `63: /devicesr.post('/:id/map',`
-- `103: /devicesr.get('/punches/unmapped',`
-- `114: /devicesr.post('/:id/commands',`
-- `124: /devicesr.get('/:id/commands',`
-- `133: /devicesr.post('/:id/sync-users',`
+| Method | Path | Access |
+|---|---|---|
+| GET | `/api/v1/shifts/holidays` | Signed-in |
+| POST | `/api/v1/shifts/holidays` | HR |
+| PATCH | `/api/v1/shifts/holidays/:id` | HR |
+| DELETE | `/api/v1/shifts/holidays/:id` | HR |
+| POST | `/api/v1/shifts/holidays/import-default` | HR |
+| GET | `/api/v1/shifts/locations` | Signed-in |
+| POST | `/api/v1/shifts/locations` | HR |
+| PATCH | `/api/v1/shifts/locations/:id` | HR |
+| DELETE | `/api/v1/shifts/locations/:id` | HR |
+| GET | `/api/v1/shifts/calendar` | Signed-in |
+| GET | `/api/v1/shifts/roster` | HR, Manager |
+| PUT | `/api/v1/shifts/roster` | HR, Manager |
+| DELETE | `/api/v1/shifts/roster` | HR, Manager |
+| POST | `/api/v1/shifts/roster/copy-week` | HR, Manager |
+| POST | `/api/v1/shifts/roster/publish` | HR, Manager |
+| POST | `/api/v1/shifts/assign` | HR |
+| GET | `/api/v1/shifts` | Signed-in |
+| POST | `/api/v1/shifts` | HR |
+| GET | `/api/v1/shifts/:id` | Signed-in |
+| PATCH | `/api/v1/shifts/:id` | HR |
+| DELETE | `/api/v1/shifts/:id` | HR |
 
-## employees  (`/employees`)
+## leave
 
-- `76: /employeesr.get('/',`
-- `90: /employeesr.get('/:id',`
-- `102: /employeesr.get('/:id/sensitive',`
-- `115: /employeesr.post('/',`
-- `143: /employeesr.patch('/:id',`
-- `197: /employeesr.post('/import',`
-- `249: /employeesr.get('/:id/assignments',`
-- `257: /employeesr.get('/:id/audit',`
+| Method | Path | Access |
+|---|---|---|
+| GET | `/api/v1/leave/types` | Signed-in |
+| POST | `/api/v1/leave/types` | HR |
+| PATCH | `/api/v1/leave/types/:id` | HR |
+| GET | `/api/v1/leave/balances` | Signed-in |
+| GET | `/api/v1/leave/preview` | Signed-in |
+| POST | `/api/v1/leave/requests` | Signed-in |
+| GET | `/api/v1/leave/requests` | Signed-in |
+| POST | `/api/v1/leave/requests/:id/cancel` | Signed-in |
+| POST | `/api/v1/leave/adjust` | HR |
+| GET | `/api/v1/leave/ledger` | Signed-in |
+| GET | `/api/v1/leave/team-calendar` | Signed-in |
 
-## leave  (`/leave`)
+## workflow
 
-- `79: /leaver.get('/types',`
-- `83: /leaver.post('/types',`
-- `94: /leaver.patch('/types/:id',`
-- `117: /leaver.get('/balances',`
-- `128: /leaver.get('/preview',`
-- `144: /leaver.post('/requests',`
-- `211: /leaver.get('/requests',`
-- `232: /leaver.post('/requests/:id/cancel',`
-- `261: /leaver.post('/adjust',`
-- `273: /leaver.get('/ledger',`
-- `288: /leaver.get('/team-calendar',`
+| Method | Path | Access |
+|---|---|---|
+| GET | `/api/v1/workflow/inbox` | Signed-in |
+| GET | `/api/v1/workflow/:id` | Signed-in |
+| POST | `/api/v1/workflow/:id/approve` | Signed-in |
+| POST | `/api/v1/workflow/:id/reject` | Signed-in |
+| POST | `/api/v1/workflow/bulk-approve` | Signed-in |
 
-## notifications  (`/notifications`)
+## regularisation
 
-- `9: /notificationsr.get('/',`
-- `19: /notificationsr.post('/read-all',`
-- `24: /notificationsr.post('/:id/read',`
+| Method | Path | Access |
+|---|---|---|
+| POST | `/api/v1/regularisation` | Signed-in |
+| GET | `/api/v1/regularisation` | Signed-in |
+| POST | `/api/v1/regularisation/:id/cancel` | Signed-in |
 
-## ot  (`/ot`)
+## ot
 
-- `44: /otr.post('/requests',`
-- `84: /otr.get('/requests',`
-- `100: /otr.post('/requests/:id/cancel',`
-- `113: /otr.get('/slips',`
-- `139: /otr.post('/slips/:id/approve',`
-- `149: /otr.post('/slips/:id/reject',`
-- `159: /otr.post('/slips/:id/comp-off',`
-- `177: /otr.get('/register',`
+| Method | Path | Access |
+|---|---|---|
+| POST | `/api/v1/ot/requests` | Signed-in |
+| GET | `/api/v1/ot/requests` | Signed-in |
+| POST | `/api/v1/ot/requests/:id/cancel` | Signed-in |
+| GET | `/api/v1/ot/slips` | Signed-in |
+| POST | `/api/v1/ot/slips/:id/approve` | HR, Manager |
+| POST | `/api/v1/ot/slips/:id/reject` | HR, Manager |
+| POST | `/api/v1/ot/slips/:id/comp-off` | HR, Manager |
+| GET | `/api/v1/ot/register` | HR |
 
-## payroll  (`/payroll`)
+## notifications
 
-- `24: /payrollr.get('/rules',`
-- `33: /payrollr.post('/rules',`
-- `43: /payrollr.post('/rules/:id/approve',`
-- `52: /payrollr.get('/components',`
-- `68: /payrollr.post('/components',`
-- `78: /payrollr.patch('/components/:code',`
-- `94: /payrollr.get('/structures',`
-- `100: /payrollr.post('/structures',`
-- `112: /payrollr.post('/structures/:id/versions',`
-- `123: /payrollr.get('/assignments',`
-- `131: /payrollr.post('/assignments',`
-- `153: /payrollr.get('/declarations',`
-- `162: /payrollr.put('/declarations',`
-- `178: /payrollr.post('/declarations/:employeeId/verify',`
-- `189: /payrollr.get('/loans',`
-- `196: /payrollr.post('/loans',`
-- `209: /payrollr.get('/periods',`
-- `213: /payrollr.post('/periods',`
-- `223: /payrollr.get('/runs',`
-- `229: /payrollr.post('/runs',`
-- `257: /payrollr.post('/runs/bonus',`
-- `267: /payrollr.get('/runs/:id',`
-- `276: /payrollr.post('/runs/:id/preflight',`
-- `282: /payrollr.post('/runs/:id/lock-attendance',`
-- `290: /payrollr.post('/runs/:id/inputs',`
-- `315: /payrollr.get('/runs/:id/inputs',`
-- `320: /payrollr.post('/runs/:id/compute',`
-- `325: /payrollr.post('/runs/:id/review',`
-- `330: /payrollr.post('/runs/:id/approve',`
-- `334: /payrollr.post('/runs/:id/lock',`
-- `335: /payrollr.post('/runs/:id/disburse',`
-- `336: /payrollr.post('/runs/:id/file',`
-- `337: /payrollr.post('/runs/:id/publish',`
-- `340: /payrollr.post('/runs/:id/bank-file',`
-- `361: /payrollr.get('/runs/:id/bank-files/:fileId',`
-- `369: /payrollr.get('/runs/:id/ssf-sheet.csv',`
-- `374: /payrollr.get('/runs/:id/etds.csv',`
-- `381: /payrollr.get('/runs/:id/journal.:fmt',`
-- `393: /payrollr.get('/payslips',`
-- `422: /payrollr.get('/payslips/:id',`
-- `427: /payrollr.get('/payslips/:id/html',`
+| Method | Path | Access |
+|---|---|---|
+| GET | `/api/v1/notifications` | Signed-in |
+| POST | `/api/v1/notifications/read-all` | Signed-in |
+| POST | `/api/v1/notifications/:id/read` | Signed-in |
 
-## punch  (`/punch`)
+## reports
 
-- `34: /punchr.post('/',`
-- `93: /punchr.get('/today',`
-- `106: /punchr.post('/manual',`
+| Method | Path | Access |
+|---|---|---|
+| GET | `/api/v1/reports/daily` | HR, Manager |
+| GET | `/api/v1/reports/register` | HR, Manager |
+| GET | `/api/v1/reports/ot` | HR, Manager |
+| GET | `/api/v1/reports/late-early` | HR, Manager |
+| GET | `/api/v1/reports/leave-balances` | HR, Manager |
+| GET | `/api/v1/reports/headcount` | HR, Manager |
+| GET | `/api/v1/reports/exceptions-summary` | HR, Manager |
+| GET | `/api/v1/reports/devices` | HR, Manager |
+| GET | `/api/v1/reports/punch-audit` | HR, Manager |
 
-## regularisation  (`/regularisation`)
+## punch
 
-- `73: /regularisationr.post('/',`
-- `138: /regularisationr.get('/',`
-- `155: /regularisationr.post('/:id/cancel',`
+| Method | Path | Access |
+|---|---|---|
+| POST | `/api/v1/punch` | Signed-in |
+| GET | `/api/v1/punch/today` | Signed-in |
+| POST | `/api/v1/punch/manual` | HR |
 
-## reports  (`/reports`)
+## settings
 
-- `17: /reportsr.get('/daily',`
-- `32: /reportsr.get('/register',`
-- `57: /reportsr.get('/ot',`
-- `69: /reportsr.get('/late-early',`
-- `83: /reportsr.get('/leave-balances',`
-- `103: /reportsr.get('/headcount',`
-- `116: /reportsr.get('/exceptions-summary',`
-- `129: /reportsr.get('/devices',`
-- `141: /reportsr.get('/punch-audit',`
+| Method | Path | Access |
+|---|---|---|
+| GET | `/api/v1/settings/company` | HR, Admin |
+| GET | `/api/v1/settings` | HR, Admin |
+| PUT | `/api/v1/settings/:key` | HR, Admin |
+| POST | `/api/v1/settings/preview/attendance` | HR, Admin |
+| GET | `/api/v1/settings/branches` | HR, Admin |
+| POST | `/api/v1/settings/branches` | HR, Admin |
+| PATCH | `/api/v1/settings/branches/:id` | HR, Admin |
+| GET | `/api/v1/settings/org-units` | HR, Admin |
+| POST | `/api/v1/settings/org-units` | HR, Admin |
+| PATCH | `/api/v1/settings/org-units/:id` | HR, Admin |
 
-## settings  (`/settings`)
+## payroll
 
-- `18: /settingsr.get('/company',`
-- `31: /settingsr.get('/',`
-- `43: /settingsr.put('/:key',`
-- `62: /settingsr.post('/preview/attendance',`
-- `107: /settingsr.get('/branches',`
-- `111: /settingsr.post('/branches',`
-- `117: /settingsr.patch('/branches/:id',`
-- `128: /settingsr.get('/org-units',`
-- `132: /settingsr.post('/org-units',`
-- `139: /settingsr.patch('/org-units/:id',`
+| Method | Path | Access |
+|---|---|---|
+| GET | `/api/v1/payroll/rules` | HR |
+| POST | `/api/v1/payroll/rules` | Admin |
+| POST | `/api/v1/payroll/rules/:id/approve` | HR |
+| GET | `/api/v1/payroll/components` | HR |
+| POST | `/api/v1/payroll/components` | HR |
+| PATCH | `/api/v1/payroll/components/:code` | HR |
+| GET | `/api/v1/payroll/structures` | HR |
+| POST | `/api/v1/payroll/structures` | HR |
+| POST | `/api/v1/payroll/structures/:id/versions` | HR |
+| GET | `/api/v1/payroll/assignments` | HR |
+| POST | `/api/v1/payroll/assignments` | HR |
+| GET | `/api/v1/payroll/declarations` | Signed-in |
+| PUT | `/api/v1/payroll/declarations` | Signed-in |
+| POST | `/api/v1/payroll/declarations/:employeeId/verify` | HR |
+| GET | `/api/v1/payroll/loans` | HR |
+| POST | `/api/v1/payroll/loans` | HR |
+| GET | `/api/v1/payroll/periods` | HR |
+| POST | `/api/v1/payroll/periods` | HR |
+| GET | `/api/v1/payroll/runs` | HR |
+| POST | `/api/v1/payroll/runs` | HR |
+| POST | `/api/v1/payroll/runs/bonus` | HR |
+| GET | `/api/v1/payroll/runs/:id` | HR |
+| POST | `/api/v1/payroll/runs/:id/preflight` | HR |
+| POST | `/api/v1/payroll/runs/:id/lock-attendance` | HR |
+| POST | `/api/v1/payroll/runs/:id/inputs` | HR |
+| GET | `/api/v1/payroll/runs/:id/inputs` | HR |
+| POST | `/api/v1/payroll/runs/:id/compute` | HR |
+| POST | `/api/v1/payroll/runs/:id/review` | HR |
+| POST | `/api/v1/payroll/runs/:id/approve` | HR |
+| POST | `/api/v1/payroll/runs/:id/lock` | HR |
+| POST | `/api/v1/payroll/runs/:id/publish` | HR |
+| GET | `/api/v1/payroll/runs/:id/ssf-sheet.csv` | HR |
+| GET | `/api/v1/payroll/runs/:id/salary-sheet` | HR |
+| GET | `/api/v1/payroll/payslips` | Signed-in |
+| GET | `/api/v1/payroll/payslips/:id` | Signed-in |
+| GET | `/api/v1/payroll/payslips/:id/html` | Signed-in |
 
-## shifts  (`/shifts`)
+## biometrics
 
-- `80: /shiftsr.get('/holidays',`
-- `95: /shiftsr.post('/holidays',`
-- `110: /shiftsr.patch('/holidays/:id',`
-- `127: /shiftsr.delete('/holidays/:id',`
-- `138: /shiftsr.post('/holidays/import-default',`
-- `161: /shiftsr.get('/locations',`
-- `166: /shiftsr.post('/locations',`
-- `173: /shiftsr.patch('/locations/:id',`
-- `182: /shiftsr.delete('/locations/:id',`
-- `191: /shiftsr.get('/calendar',`
-- `211: /shiftsr.get('/roster',`
-- `230: /shiftsr.put('/roster',`
-- `262: /shiftsr.delete('/roster',`
-- `271: /shiftsr.post('/roster/copy-week',`
-- `295: /shiftsr.post('/roster/publish',`
-- `310: /shiftsr.post('/assign',`
-- `329: /shiftsr.get('/',`
-- `334: /shiftsr.post('/',`
-- `346: /shiftsr.get('/:id',`
-- `353: /shiftsr.patch('/:id',`
-- `377: /shiftsr.delete('/:id',`
+| Method | Path | Access |
+|---|---|---|
+| GET | `/api/v1/biometrics/transparency` | Signed-in |
+| POST | `/api/v1/biometrics/consent` | Signed-in |
+| GET | `/api/v1/biometrics/consent` | Signed-in |
+| POST | `/api/v1/biometrics/consent/:id/revoke` | Signed-in |
+| GET | `/api/v1/biometrics/templates` | Signed-in |
+| GET | `/api/v1/biometrics/templates/unmapped` | HR |
+| POST | `/api/v1/biometrics/templates/:id/shred` | HR |
+| POST | `/api/v1/biometrics/employees/:id/shred-all` | HR |
+| GET | `/api/v1/biometrics/dsar` | Signed-in |
+| POST | `/api/v1/biometrics/retention/run` | HR, Admin |
+| GET | `/api/v1/biometrics/stats` | HR |
 
-## workflow  (`/workflow`)
+## dashboard
 
-- `11: /workflowr.get('/inbox',`
-- `15: /workflowr.get('/:id',`
-- `39: /workflowr.post('/:id/approve',`
-- `40: /workflowr.post('/:id/reject',`
-- `42: /workflowr.post('/bulk-approve',`
+| Method | Path | Access |
+|---|---|---|
+| GET | `/api/v1/dashboard/executive` | HR, Manager |
+| GET | `/api/v1/dashboard/me` | Signed-in |
 
+## gateway (port 8080)
+
+The device gateway receives punches from ZKTeco (ADMS/push) and Hikvision devices and forwards them to the API. See `apps/gateway`.

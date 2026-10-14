@@ -37,7 +37,7 @@ table.blk th{text-align:left;font-weight:500;color:#6b707b;font-size:12px;paddin
 table.blk td{padding:6px 0;border-bottom:1px solid #f0f0f2}.amt{text-align:right;font-variant-numeric:tabular-nums}.muted{color:#9aa0aa}
 .totals{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:8px;font-weight:600}
 .net{margin-top:24px;padding:18px 20px;border:1px solid #e6e7ea;border-radius:12px;display:flex;justify-content:space-between;align-items:center}
-.net .label{color:#6b707b}.net b{font-size:24px;font-weight:600;letter-spacing:-.02em;color:#4048cc;font-variant-numeric:tabular-nums}.words{font-size:12px;color:#6b707b;margin-top:2px}
+.net .label{color:#6b707b}.net b{font-size:24px;font-weight:600;letter-spacing:-.02em;color:#12773a;font-variant-numeric:tabular-nums}.words{font-size:12px;color:#6b707b;margin-top:2px}
 .foot{margin-top:24px;font-size:11px;color:#6b707b;border-top:1px solid #e6e7ea;padding-top:10px}.explain{margin-top:16px;font-size:12px}
 @media print{body{margin:10mm auto}.net{border-color:#bbb}}
 </style></head><body>

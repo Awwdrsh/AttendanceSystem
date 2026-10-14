@@ -48,7 +48,7 @@ export default function EmployeeDetailPage() {
   const audit = useQuery(() => empApi.audit(id), [id]);
   const templates = useQuery(() => bioApi.templates(id), [id]);
   const consents = useQuery(() => bioApi.consents(id), [id]);
-  const payslips = useQuery(() => payApi.payslips({ employeeId: id }), [id], { enabled: hasRole('hr', 'finance') });
+  const payslips = useQuery(() => payApi.payslips({ employeeId: id }), [id], { enabled: hasRole('hr') });
   const [sensitive, setSensitive] = useState<{ pan: string | null; bankAccount: string | null } | null>(null);
   const [busy, setBusy] = useState(false); const [shred, setShred] = useState(false); const [editing, setEditing] = useState(false);
   const e = emp.data?.employee;

@@ -212,8 +212,8 @@ export function leaveRoutes({ db }: AppDeps): Router {
   r.get('/requests', async (req, res) => {
     const q = z.object({ employeeId: z.uuid().optional(), status: z.enum(['pending', 'approved', 'rejected', 'cancelled']).optional(), from: isoDate.optional(), to: isoDate.optional(), scope: z.enum(['own', 'team', 'all']).optional() }).parse(req.query);
     const u = req.user!;
-    const scope = q.scope ?? (hasRole(u, 'hr', 'finance') ? 'all' : hasRole(u, 'manager') ? 'team' : 'own');
-    if (scope === 'all' && !hasRole(u, 'hr', 'finance')) throw new ForbiddenError('scope all requires HR');
+    const scope = q.scope ?? (hasRole(u, 'hr') ? 'all' : hasRole(u, 'manager') ? 'team' : 'own');
+    if (scope === 'all' && !hasRole(u, 'hr')) throw new ForbiddenError('scope all requires HR');
     if (q.employeeId) await assertManages(db, u, q.employeeId);
     const rows = await db.query(
       `SELECT lr.id, lr.employee_id, e.emp_code, e.name_en, e.name_ne, lr.leave_type_id, lt.code AS type_code, lt.name_en AS type_name, lt.paid,
@@ -296,7 +296,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
         WHERE e.company_id = $1 AND lr.status IN ('pending', 'approved') AND lr.from_date <= $3::date AND lr.to_date >= $2::date
           AND ($4 OR a.manager_id = $5::uuid OR lr.employee_id = $5::uuid
                OR a.manager_id = (SELECT manager_id FROM employee_assignment m WHERE m.employee_id = $5::uuid AND m.valid @> current_date))
-        ORDER BY lr.from_date`, [u.companyId, q.from, q.to, hasRole(u, 'hr', 'finance'), u.employeeId]);
+        ORDER BY lr.from_date`, [u.companyId, q.from, q.to, hasRole(u, 'hr'), u.employeeId]);
     const days = new Map<string, Array<Record<string, unknown>>>();
     for (const lr of rows.rows) {
       for (const d of dateRange(lr.from_date < q.from ? q.from : lr.from_date, lr.to_date > q.to ? q.to : lr.to_date)) {

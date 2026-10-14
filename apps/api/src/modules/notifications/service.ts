@@ -34,7 +34,7 @@ export async function userIdForEmployee(db: Queryable, employeeId: string): Prom
   return r.rows[0]?.id ?? null;
 }
 
-/** All active users holding a role in a company (for HR/finance broadcasts). */
+/** All active users holding a role in a company (for HR broadcasts). */
 export async function userIdsWithRole(db: Queryable, companyId: string, role: string): Promise<string[]> {
   const r = await db.query<{ id: string }>(`SELECT id FROM app_user WHERE company_id = $1 AND status = 'active' AND ($2 = ANY(roles) OR 'admin' = ANY(roles))`, [companyId, role]);
   return r.rows.map((x) => x.id);

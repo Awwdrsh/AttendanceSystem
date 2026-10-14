@@ -85,8 +85,8 @@ export function otRoutes({ db }: AppDeps): Router {
   r.get('/requests', async (req, res) => {
     const q = z.object({ employeeId: z.uuid().optional(), status: z.enum(['pending', 'approved', 'rejected', 'cancelled']).optional(), from: isoDate.optional(), to: isoDate.optional(), scope: z.enum(['own', 'team', 'all']).optional() }).parse(req.query);
     const u = req.user!;
-    const scope = q.scope ?? (hasRole(u, 'hr', 'finance') ? 'all' : hasRole(u, 'manager') ? 'team' : 'own');
-    if (scope === 'all' && !hasRole(u, 'hr', 'finance')) throw new ForbiddenError('scope all requires HR');
+    const scope = q.scope ?? (hasRole(u, 'hr') ? 'all' : hasRole(u, 'manager') ? 'team' : 'own');
+    if (scope === 'all' && !hasRole(u, 'hr')) throw new ForbiddenError('scope all requires HR');
     if (q.employeeId) await assertManages(db, u, q.employeeId);
     const rows = await db.query(
       `SELECT o.id, o.employee_id, e.emp_code, e.name_en, o.local_date, o.requested_min, o.approved_min, o.reason, o.status, o.workflow_instance_id, o.created_at, o.decided_at
@@ -114,14 +114,14 @@ export function otRoutes({ db }: AppDeps): Router {
   r.get('/slips', async (req, res) => {
     const q = z.object({ employeeId: z.uuid().optional(), from: isoDate.optional(), to: isoDate.optional(), status: z.enum(['detected', 'approved', 'rejected', 'posted', 'comp_off']).optional() }).parse(req.query);
     const u = req.user!;
-    const employeeId = hasRole(u, 'hr', 'finance', 'manager') ? q.employeeId ?? null : u.employeeId;
-    if (!hasRole(u, 'hr', 'finance', 'manager') && !employeeId) throw new ForbiddenError('no employee linked to this user');
+    const employeeId = hasRole(u, 'hr', 'manager') ? q.employeeId ?? null : u.employeeId;
+    if (!hasRole(u, 'hr', 'manager') && !employeeId) throw new ForbiddenError('no employee linked to this user');
     const rows = await db.query(
       `SELECT s.id, s.employee_id, e.emp_code, e.name_en, s.local_date, s.detected_min, s.approved_min, s.multiplier, s.day_type, s.status, s.posted_payslip_id, s.reviewed_by, s.reviewed_at, s.created_at
          FROM ot_slip s JOIN employee e ON e.id = s.employee_id LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
         WHERE e.company_id = $1 AND ($2::uuid IS NULL OR s.employee_id = $2) AND ($3::date IS NULL OR s.local_date >= $3) AND ($4::date IS NULL OR s.local_date <= $4)
           AND ($5::text IS NULL OR s.status = $5) AND ($6 OR a.manager_id = $7::uuid OR s.employee_id = $7::uuid)
-        ORDER BY s.local_date DESC LIMIT 1000`, [u.companyId, employeeId, q.from ?? null, q.to ?? null, q.status ?? null, hasRole(u, 'hr', 'finance'), u.employeeId]);
+        ORDER BY s.local_date DESC LIMIT 1000`, [u.companyId, employeeId, q.from ?? null, q.to ?? null, q.status ?? null, hasRole(u, 'hr'), u.employeeId]);
     res.json({ slips: rows.rows });
   });
 
@@ -175,7 +175,7 @@ export function otRoutes({ db }: AppDeps): Router {
   });
 
   /** Inspector-ready OT register (plan §5.10). */
-  r.get('/register', requireRole('hr', 'finance'), async (req, res) => {
+  r.get('/register', requireRole('hr'), async (req, res) => {
     const q = z.object({ from: isoDate, to: isoDate, format: z.enum(['json', 'csv']).default('json') }).parse(req.query);
     const rows = await db.query<Record<string, unknown>>(
       `SELECT e.emp_code, e.name_en, s.local_date, v.bs_date, s.day_type, s.detected_min, s.approved_min, s.multiplier, s.status

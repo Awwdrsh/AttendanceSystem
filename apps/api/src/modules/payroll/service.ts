@@ -36,7 +36,7 @@ export async function getRun(db: Queryable, companyId: string, runId: string): P
   return r.rows[0];
 }
 
-export async function payrollPolicy(db: Queryable, companyId: string): Promise<PayrollPolicy & { payDay: number; twoApproverThreshold: string; encashmentDivisor: string }> {
+export async function payrollPolicy(db: Queryable, companyId: string): Promise<PayrollPolicy & { payDay: number; separateApprover: boolean; encashmentDivisor: string }> {
   const r = await db.query<{ value: Record<string, unknown> }>(`SELECT value FROM company_setting WHERE company_id = $1 AND key = 'payroll.policy'`, [companyId]);
   const v = r.rows[0]?.value ?? {};
   return {
@@ -46,7 +46,7 @@ export async function payrollPolicy(db: Queryable, companyId: string): Promise<P
     includeEmployerContributionInIncome: v.includeEmployerContributionInIncome !== false,
     fullTime: true,
     payDay: typeof v.payDay === 'number' ? v.payDay : 25,
-    twoApproverThreshold: String(v.twoApproverThreshold ?? '5000000'),
+    separateApprover: v.separateApprover === true,
     encashmentDivisor: String(v.encashmentDivisor ?? 'bs_days'),
   };
 }
@@ -333,32 +333,23 @@ export async function reviewRun(db: Db, companyId: string, runId: string, actorI
   await audit(db, { actorId, action: 'review', table: 'payroll_run', rowId: runId });
 }
 
-export interface ApprovalResult { signature: string; approved: boolean; pendingSecondApproval: boolean }
+export interface ApprovalResult { signature: string; approved: boolean }
 
 /**
- * Checker approval (plan §11.8, §12.4): a finance user other than the maker signs. Above payroll.policy.twoApproverThreshold
- * (total net) a second, different finance approver is required before the run becomes approved.
+ * HR sign-off: payroll is owned by HR, with no finance step. The approver may be the person who prepared the run unless
+ * payroll.policy.separateApprover is on, in which case a different HR user must approve.
  */
-export async function approveRun(db: Db, companyId: string, runId: string, checker: { id: string; roles: string[] }): Promise<ApprovalResult> {
+export async function approveRun(db: Db, companyId: string, runId: string, approver: { id: string; roles: string[] }): Promise<ApprovalResult> {
   const run = await getRun(db, companyId, runId);
-  if (run.status !== 'reviewed') throw new ConflictError(`run is ${run.status}; it must be reviewed by the maker first`);
-  if (run.maker_id === checker.id) throw new ForbiddenError('the maker cannot approve their own run (maker-checker)');
-  if (!checker.roles.includes('finance') && !checker.roles.includes('admin')) throw new ForbiddenError('approval requires the finance role');
+  if (run.status !== 'reviewed') throw new ConflictError(`run is ${run.status}; review it first`);
+  if (!approver.roles.includes('hr') && !approver.roles.includes('admin')) throw new ForbiddenError('approval requires the HR role');
   const policy = await payrollPolicy(db, companyId);
-  const totalNet = D((run.totals?.net as string | undefined) ?? '0');
-  const needsTwo = totalNet.gt(policy.twoApproverThreshold);
-  const first = run.params.firstApproval as { checkerId: string; signature: string; at: string } | undefined;
-  const payload = JSON.stringify({ runId, totals: run.totals, checkerId: checker.id, at: new Date().toISOString() });
+  if (policy.separateApprover && run.maker_id === approver.id) throw new ForbiddenError('company policy requires a different HR user to approve this run');
+  const payload = JSON.stringify({ runId, totals: run.totals, approverId: approver.id, at: new Date().toISOString() });
   const signature = `sha256:${createHash('sha256').update(payload).digest('hex')}`;
-  if (needsTwo && !first) {
-    await db.query(`UPDATE payroll_run SET params = params || $2::jsonb WHERE id = $1`, [runId, JSON.stringify({ firstApproval: { checkerId: checker.id, signature, at: new Date().toISOString() } })]);
-    await audit(db, { actorId: checker.id, action: 'approve_first', table: 'payroll_run', rowId: runId, after: { signature, payload, threshold: policy.twoApproverThreshold } });
-    return { signature, approved: false, pendingSecondApproval: true };
-  }
-  if (needsTwo && first && first.checkerId === checker.id) throw new ConflictError('a second, different finance approver is required above the two-approver threshold');
-  await db.query(`UPDATE payroll_run SET status = 'approved', approved_at = now(), checker_id = $2, approval_signature = $3 WHERE id = $1`, [runId, checker.id, signature]);
-  await audit(db, { actorId: checker.id, action: 'approve', table: 'payroll_run', rowId: runId, after: { signature, payload, ...(first ? { firstApproval: first } : {}) } });
-  return { signature, approved: true, pendingSecondApproval: false };
+  await db.query(`UPDATE payroll_run SET status = 'approved', approved_at = now(), checker_id = $2, approval_signature = $3 WHERE id = $1`, [runId, approver.id, signature]);
+  await audit(db, { actorId: approver.id, action: 'approve', table: 'payroll_run', rowId: runId, after: { signature, payload } });
+  return { signature, approved: true };
 }
 
 export async function lockRun(db: Db, companyId: string, runId: string, actorId: string): Promise<{ attendanceLocked: number }> {
@@ -396,14 +387,6 @@ export async function lockRun(db: Db, companyId: string, runId: string, actorId:
     await client.query('COMMIT');
     return { attendanceLocked: n };
   } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
-}
-
-export async function advanceRun(db: Db, companyId: string, runId: string, actorId: string, to: 'disbursed' | 'filed'): Promise<void> {
-  const run = await getRun(db, companyId, runId);
-  const allowed: Record<string, string> = { disbursed: 'locked', filed: 'disbursed' };
-  if (run.status !== allowed[to]) throw new ConflictError(`run is ${run.status}; cannot mark ${to}`);
-  await db.query(`UPDATE payroll_run SET status = $2, ${to === 'disbursed' ? 'disbursed_at' : 'filed_at'} = now() WHERE id = $1`, [runId, to]);
-  await audit(db, { actorId, action: to, table: 'payroll_run', rowId: runId });
 }
 
 export async function publishRun(db: Db, companyId: string, runId: string, actorId: string): Promise<number> {

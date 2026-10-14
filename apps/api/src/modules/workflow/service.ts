@@ -48,12 +48,12 @@ export async function isManagerOf(db: Queryable, managerEmployeeId: string, empl
 }
 
 /**
- * Team-scoped access (plan §12.4 ABAC "own record only" / direct reports): HR, finance and admin may act for anyone in
+ * Team-scoped access (plan §12.4 ABAC "own record only" / direct reports): HR and admin may act for anyone in
  * their company; a manager only for direct reports (and self); everyone for themselves. Throws ForbiddenError otherwise.
  * Callers must separately verify the employee belongs to the user's company (404 for other companies).
  */
 export async function assertManages(db: Queryable, user: AuthUser, employeeId: string): Promise<void> {
-  if (hasRole(user, 'hr', 'finance')) return;
+  if (hasRole(user, 'hr')) return;
   if (user.employeeId === employeeId) return;
   if (hasRole(user, 'manager') && user.employeeId && (await isManagerOf(db, user.employeeId, employeeId))) return;
   throw new ForbiddenError('not allowed to act for this employee');

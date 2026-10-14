@@ -32,7 +32,7 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
     ['leave_request', [{ role: 'manager' }]],
     ['regularisation_request', [{ role: 'manager' }]],
     ['ot_request', [{ role: 'manager' }]],
-    ['payroll_run', [{ role: 'finance' }]],
+    ['payroll_run', [{ role: 'hr' }]],
   ];
   let w = 0;
   for (const [type, steps] of workflows) {
@@ -45,7 +45,7 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
   const settings: Array<[string, unknown]> = [
     ['attendance.policy', { version: 'default-v1', otMinThresholdMin: 30, otRoundingMin: 15, requirePreapproval: true, holidayWork: 'substitute_leave', nightWindowEnabled: false, nightPremiumRate: 0, autoClockOutAfterMin: 0, regularisationBackdateDays: 30, regularisationMonthlyCap: 5 }],
     ['leave.policy', { leaveYear: 'fiscal', sandwichRule: false, probationRestriction: true, maxContinuousDays: 30 }],
-    ['payroll.policy', { prorationBasis: 'bs_calendar_days', hourlyDivisor: 208, payDay: 25, rounding: 'half_up_rupee', twoApproverThreshold: 5000000, encashmentDivisor: 'bs_days' }],
+    ['payroll.policy', { prorationBasis: 'bs_calendar_days', hourlyDivisor: 208, payDay: 25, rounding: 'half_up_rupee', separateApprover: false, encashmentDivisor: 'bs_days' }],
     ['payslip.policy', { language: 'both', numerals: 'latin', passwordProtect: true }],
     ['notifications.policy', { quietHoursStart: '21:00', quietHoursEnd: '07:00', slaHours: 24, escalationHours: 48 }],
   ];

@@ -10,7 +10,7 @@ import { listDays } from '../attendance/service.js';
 export function dashboardRoutes({ db }: AppDeps): Router {
   const r = Router();
 
-  r.get('/executive', requireRole('hr', 'finance', 'manager'), async (req, res) => {
+  r.get('/executive', requireRole('hr', 'manager'), async (req, res) => {
     const cid = req.user!.companyId;
     const today = localDateOf(Date.now());
     let monthStart = today;

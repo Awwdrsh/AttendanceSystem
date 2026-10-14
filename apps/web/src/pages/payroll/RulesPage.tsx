@@ -29,7 +29,7 @@ export default function RulesPage() {
           { key: 'valid', header: 'Effective', render: (r) => <Text size="sm" c="dimmed">{effective(r)}</Text> },
           { key: 'approved', header: 'Approval', render: (r) => r.approved_at ? <Text size="sm" c="dimmed">{fmtAd(r.approved_at)}</Text> : <StatusBadge status="pending" /> },
           { key: 'src', header: 'Source', render: (r) => r.source_url ? <Anchor href={r.source_url} target="_blank" rel="noreferrer" size="sm" onClick={(e) => e.stopPropagation()} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>Open<IconExternalLink size={14} stroke={1.6} /></Anchor> : <Text size="sm" c="dimmed">—</Text> },
-          { key: 'a', header: '', align: 'right', render: (r) => !r.approved_at && hasRole('finance') ? <Button size="xs" variant="default" leftSection={<IconCheck size={14} stroke={1.6} />} onClick={async (e) => { e.stopPropagation(); try { await payApi.approveRule(r.id); toast.ok('Rule approved.'); await q.reload(); } catch (err) { toast.err(err); } }}>Approve</Button> : null },
+          { key: 'a', header: '', align: 'right', render: (r) => !r.approved_at && hasRole('hr') ? <Button size="xs" variant="default" leftSection={<IconCheck size={14} stroke={1.6} />} onClick={async (e) => { e.stopPropagation(); try { await payApi.approveRule(r.id); toast.ok('Rule approved.'); await q.reload(); } catch (err) { toast.err(err); } }}>Approve</Button> : null },
         ]} />
       <Modal opened={!!view} onClose={() => setView(null)} title={<Text fw={600} ff="monospace">{view?.rule_key}</Text>} size="lg" centered>
         {view ? <Stack gap="md">

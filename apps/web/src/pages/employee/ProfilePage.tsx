@@ -8,7 +8,7 @@ import { PageHeader, SectionTitle } from '../../components/PageHeader';
 import { fmtAd } from '../../lib/format';
 import { useQuery } from '../../lib/useQuery';
 
-const ROLE: Record<string, string> = { admin: 'Admin', hr: 'HR', finance: 'Finance', manager: 'Manager', employee: 'Employee' };
+const ROLE: Record<string, string> = { admin: 'Admin', hr: 'HR', manager: 'Manager', employee: 'Employee' };
 const REGIME: Record<string, string> = { ssf: 'Social Security Fund (SSF)', pf: 'Provident Fund (PF)', none: 'None' };
 
 function initials(name: string | undefined): string {

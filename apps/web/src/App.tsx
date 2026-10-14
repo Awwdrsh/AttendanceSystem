@@ -20,12 +20,11 @@ const EmployeeDetailPage = lazy(() => import('./pages/hr/EmployeeDetailPage'));
 const ReportsPage = lazy(() => import('./pages/hr/ReportsPage'));
 const RunWizardPage = lazy(() => import('./pages/payroll/RunWizardPage'));
 
-/** Everyone lands where their work is: employees on their own day, HR on the overview, finance on payroll, managers on approvals. */
+/** Everyone lands where their work is: employees on their own day, HR on the overview, managers on approvals. */
 function Home() {
   const { user, hasRole } = useAuth();
   if (user?.employeeId) return <HomePage />;
   if (hasRole('hr')) return <Navigate to="/overview" replace />;
-  if (hasRole('finance')) return <Navigate to="/payroll" replace />;
   if (hasRole('manager')) return <Navigate to="/approvals" replace />;
   return <HomePage />;
 }
@@ -70,7 +69,7 @@ export function App() {
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/settings/*" element={<SettingsHub />} />
           </Route>
-          <Route element={<RequireRole roles={['finance', 'hr']} />}>
+          <Route element={<RequireRole roles={['hr']} />}>
             <Route path="/payroll/runs/:id" element={<RunWizardPage />} />
             <Route path="/payroll/*" element={<PayrollHub />} />
           </Route>

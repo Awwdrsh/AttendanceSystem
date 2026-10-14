@@ -1,5 +1,5 @@
 import { Alert, Badge, Button, Group, Modal, Paper, ScrollArea, Select, SimpleGrid, Stack, Stepper, Table, Text, TextInput, Textarea } from '@mantine/core';
-import { IconAlertCircle, IconAlertTriangle, IconCalculator, IconCheck, IconChevronLeft, IconCircleCheck, IconDownload, IconFileText, IconInfoCircle, IconLock, IconPlus, IconSend, IconShieldCheck } from '@tabler/icons-react';
+import { IconAlertCircle, IconAlertTriangle, IconCalculator, IconCheck, IconChevronLeft, IconCircleCheck, IconDownload, IconInfoCircle, IconLock, IconPlus, IconSend, IconShieldCheck } from '@tabler/icons-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import { payroll as payApi } from '../../api';
@@ -14,9 +14,10 @@ import { StatusBadge } from '../../components/StatusBadge';
 import { bsMonthLabel, fmtAd, fmtMoney, fmtTime } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
+import { SalarySheet } from './SalarySheet';
 
 const ORDER = ['draft', 'preflight_failed', 'computed', 'reviewed', 'approved', 'locked', 'disbursed', 'filed'];
-const stepOf = (s: string) => ({ draft: 0, preflight_failed: 0, computed: 2, reviewed: 3, approved: 4, locked: 5, disbursed: 5, filed: 5 }[s] ?? 0);
+const stepOf = (s: string) => ({ draft: 0, preflight_failed: 0, computed: 2, reviewed: 3, approved: 3, locked: 4, disbursed: 4, filed: 4 }[s] ?? 0);
 const RUN_TYPE_LABEL: Record<string, string> = { regular: 'Regular run', supplementary: 'Supplementary run', arrears: 'Arrears run', off_cycle: 'Off-cycle run', final_settlement: 'Final settlement', bonus: 'Bonus run' };
 const ICON = { size: 16, stroke: 1.6 } as const;
 const stamp = (iso: string) => `${fmtAd(iso)} at ${fmtTime(iso)}`;
@@ -70,14 +71,14 @@ function StepNav({ onBack, children }: { onBack?: () => void; children?: ReactNo
 
 export default function RunWizardPage() {
   const { id = '' } = useParams();
-  const { user, hasRole } = useAuth();
+  const { hasRole } = useAuth();
   const q = useQuery(() => payApi.run(id), [id]);
   const inputs = useQuery(() => payApi.inputs(id), [id]);
   const [step, setStep] = useState(0);
   const [pf, setPf] = useState<Preflight | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [addInput, setAddInput] = useState(false); const [inEmp, setInEmp] = useState<string | null>(null); const [inCode, setInCode] = useState('ALLOWANCE'); const [inAmt, setInAmt] = useState(''); const [inNote, setInNote] = useState('');
-  const [notes, setNotes] = useState(''); const [bank, setBank] = useState('GENERIC');
+  const [notes, setNotes] = useState('');
   const [override, setOverride] = useState(false); const [overrideReason, setOverrideReason] = useState('');
   const comps = useQuery(() => payApi.components(), []);
   const run = q.data?.run; const period = q.data?.period;
@@ -86,7 +87,6 @@ export default function RunWizardPage() {
   if (!run || !period) return null;
   const locked = !!run.locked_at;
   const act = async (key: string, fn: () => Promise<unknown>, okMsg: string) => { setBusy(key); try { await fn(); toast.ok(okMsg); await q.reload(); } catch (e) { toast.err(e); } finally { setBusy(null); } };
-  const isMaker = run.maker_id === user?.id;
   const totals = run.totals ?? {};
   const varianceRows = (run.variance?.byEmployee ?? []);
   const slips = q.data?.payslips ?? [];
@@ -102,6 +102,7 @@ export default function RunWizardPage() {
     { key: 'net', label: 'Net pay', value: fmtMoney(totalNet) },
   ];
   const reviewStatuses = ['reviewed', 'approved', 'locked', 'disbursed', 'filed'];
+  const published = slips.length > 0 && slips.every((x) => x.published_at);
 
   return (
     <Stack gap="lg">
@@ -114,9 +115,8 @@ export default function RunWizardPage() {
         <Stepper.Step label="Pre-flight" description={pf ? (pf.ok ? 'Clear' : `${pf.blockers.length} ${pf.blockers.length === 1 ? 'blocker' : 'blockers'}`) : 'Not run'} />
         <Stepper.Step label="Inputs" description={`${inputs.data?.inputs.length ?? 0} items`} />
         <Stepper.Step label="Calculate & review" description={run.computed_at ? `${slips.length} payslips` : undefined} />
-        <Stepper.Step label="Approve" description={run.approved_at ? 'Signed' : undefined} />
-        <Stepper.Step label="Lock" description={locked ? 'Locked' : undefined} />
-        <Stepper.Step label="Pay & publish" description={run.filed_at ? 'Filed' : run.disbursed_at ? 'Paid' : undefined} />
+        <Stepper.Step label="Approve & lock" description={locked ? 'Locked' : run.approved_at ? 'Approved' : undefined} />
+        <Stepper.Step label="Salary sheet" description={published ? 'Payslips published' : locked ? 'Final' : run.computed_at ? 'Draft' : undefined} />
       </Stepper>
 
       {step === 0 ? <Stack>
@@ -223,71 +223,39 @@ export default function RunWizardPage() {
         )}
         <Textarea label="Reviewer notes" description="Saved with the review." value={notes} onChange={(e) => setNotes(e.currentTarget.value)} autosize minRows={2} disabled={locked} />
         <StepNav onBack={() => setStep(1)}>
+          {run.computed_at ? <Button variant="default" onClick={() => setStep(4)}>Preview salary sheet</Button> : null}
           <Button variant={reviewStatuses.includes(run.status) ? 'filled' : 'default'} disabled={!reviewStatuses.includes(run.status)} onClick={() => setStep(3)}>Continue to approval</Button>
         </StepNav>
       </Stack> : null}
 
       {step === 3 ? <Stack>
-        <SectionTitle hint="A finance user other than the person who prepared the run signs off. Large runs need a second finance approver.">Approve</SectionTitle>
+        <SectionTitle hint="HR signs off the totals, then locks the run. Locking freezes the payslips and makes attendance for the period read-only; later corrections go in a supplementary run.">Approve and lock</SectionTitle>
         <StatStrip stats={summary} />
-        {isMaker ? <Alert variant="light" color="orange" icon={<IconAlertTriangle {...ICON} />}>You prepared this run, so someone else in finance has to approve it.</Alert> : null}
-        {!hasRole('finance') ? <Alert variant="light" color="gray" icon={<IconInfoCircle {...ICON} />}>Approval needs the finance role. Ask a finance user to approve this run.</Alert> : null}
         {run.approved_at ? <Alert variant="light" color="brand" icon={<IconCircleCheck {...ICON} />} title="Approved">Signed {stamp(run.approved_at)}. Signature <Text span ff="monospace" size="xs">{run.approval_signature?.slice(0, 20) ?? ''}</Text></Alert> : null}
+        {locked ? <Alert variant="light" color="brand" icon={<IconLock {...ICON} />} title="Locked">Locked {stamp(run.locked_at!)}. The salary sheet is final.</Alert> : null}
+        {!run.approved_at && run.status !== 'reviewed' ? <Alert variant="light" color="gray" icon={<IconInfoCircle {...ICON} />}>Calculate the run and mark it reviewed before approving.</Alert> : null}
         <StepNav onBack={() => setStep(2)}>
-          {run.status === 'reviewed' ? <Button leftSection={<IconCheck {...ICON} />} disabled={isMaker || !hasRole('finance')} loading={busy === 'approve'} onClick={() => act('approve', async () => { const r = await payApi.approve(id); if (r.pendingSecondApproval) toast.info('This run is above the two-approver threshold. A second finance user must also approve it before it can be locked.', 'First approval recorded'); }, 'Approval recorded.')}>Approve run</Button> : null}
-          {['approved', 'locked', 'disbursed', 'filed'].includes(run.status) ? <Button onClick={() => setStep(4)}>Continue to lock</Button> : null}
+          {run.status === 'reviewed' && hasRole('hr') ? <Button leftSection={<IconCheck {...ICON} />} loading={busy === 'approve'} onClick={() => act('approve', () => payApi.approve(id), 'Run approved.')}>Approve run</Button> : null}
+          {run.status === 'approved' ? <Button leftSection={<IconLock {...ICON} />} loading={busy === 'lockrun'} onClick={() => act('lockrun', () => payApi.lock(id), 'Run locked. Attendance for the period is now read-only.')}>Lock run</Button> : null}
+          {locked ? <Button onClick={() => setStep(4)}>Continue to salary sheet</Button> : null}
         </StepNav>
       </Stack> : null}
 
       {step === 4 ? <Stack>
-        <SectionTitle hint="Locking freezes the payslips and makes attendance for the period read-only. Later corrections go in a supplementary run.">Lock</SectionTitle>
-        <StatStrip stats={summary} />
-        {locked
-          ? <Alert variant="light" color="brand" icon={<IconLock {...ICON} />} title="Locked">Locked {stamp(run.locked_at!)}. Bank and statutory files can now be generated.</Alert>
-          : run.status !== 'approved' ? <Alert variant="light" color="gray" icon={<IconInfoCircle {...ICON} />}>Approve the run before locking it.</Alert> : null}
-        <StepNav onBack={() => setStep(3)}>
-          {run.status === 'approved' ? <Button leftSection={<IconLock {...ICON} />} loading={busy === 'lockrun'} onClick={() => act('lockrun', () => payApi.lock(id), 'Run locked. Attendance for the period is now read-only.')}>Lock run</Button> : null}
-          {locked ? <Button onClick={() => setStep(5)}>Continue to pay & publish</Button> : null}
-        </StepNav>
-      </Stack> : null}
-
-      {step === 5 ? <Stack>
-        {!locked ? <Alert variant="light" color="gray" icon={<IconInfoCircle {...ICON} />}>Lock the run first. Files are only generated from locked runs.</Alert> : null}
-        <SimpleGrid cols={{ base: 1, md: 2 }}>
-          <Paper withBorder p="md">
-            <Text fw={600} size="sm">Bank file</Text>
-            <Text size="sm" c="dimmed" mb="sm">Salary transfer file in your bank's upload format.</Text>
-            <Group gap="xs">
-              <Select aria-label="Bank format" value={bank} onChange={(v) => v && setBank(v)} allowDeselect={false} data={['NMB', 'NABIL', 'NIC_ASIA', 'EVEREST', 'PRABHU', 'GENERIC'].map((b) => ({ value: b, label: b === 'GENERIC' ? 'Generic CSV' : b.replace('_', ' ') }))} w={160} />
-              <Button variant="default" leftSection={<IconFileText {...ICON} />} disabled={!locked || !hasRole('finance')} loading={busy === 'bank'} onClick={() => act('bank', async () => { const r = await payApi.bankFile(id, bank); if (r.warnings.length) toast.info(r.warnings.slice(0, 3).join('; '), 'Validation notes'); }, 'Bank file generated.')}>Generate</Button>
-            </Group>
-            {(q.data?.bankFiles ?? []).length ? <Stack gap={0} mt="md" style={{ borderTop: '1px solid var(--hj-line-soft)' }}>
-              {(q.data?.bankFiles ?? []).map((f) => (
-                <Group key={f.id} justify="space-between" wrap="nowrap" py={8} style={{ borderBottom: '1px solid var(--hj-line-soft)' }}>
-                  <div style={{ minWidth: 0 }}>
-                    <Text size="sm" fw={500} truncate>{f.filename}</Text>
-                    <Text size="xs" c="dimmed">{f.bank_code}, {stamp(f.created_at)}, checksum <Text span ff="monospace" size="xs">{f.checksum.slice(0, 12)}</Text></Text>
-                  </div>
-                  <Button size="xs" variant="subtle" leftSection={<IconDownload size={14} stroke={1.6} />} onClick={() => payApi.downloadBankFile(id, f.id, f.filename).catch((e) => toast.err(e))}>Download</Button>
-                </Group>
-              ))}
-            </Stack> : null}
-          </Paper>
-          <Paper withBorder p="md">
-            <Text fw={600} size="sm">Statutory and accounting exports</Text>
-            <Text size="sm" c="dimmed" mb="sm">Deposit SSF within 25 days of month end; file ETDS by the 25th of the following month.</Text>
+        <SalarySheet runId={id} version={`${run.status}:${run.computed_at ?? ''}`} />
+        <Paper withBorder p="md">
+          <Group justify="space-between" wrap="wrap" gap="sm">
+            <div>
+              <Text fw={600} size="sm">Payslips and SSF</Text>
+              <Text size="sm" c="dimmed">{published ? 'Payslips are published. Employees can see them under Payslips.' : locked ? 'Publish to let each employee see their own payslip. The SSF sheet lists contributions to deposit within 25 days of month end.' : 'Available once the run is locked.'}</Text>
+            </div>
             <Group gap="xs">
               <Button variant="default" leftSection={<IconDownload {...ICON} />} disabled={!locked} onClick={() => payApi.ssfSheet(id).catch((e) => toast.err(e))}>SSF sheet</Button>
-              <Button variant="default" leftSection={<IconDownload {...ICON} />} disabled={!locked || !hasRole('finance')} onClick={() => payApi.etds(id).catch((e) => toast.err(e))}>ETDS annex</Button>
-              <Button variant="default" leftSection={<IconDownload {...ICON} />} disabled={!locked} onClick={() => payApi.journal(id).catch((e) => toast.err(e))}>Journal CSV</Button>
+              <Button leftSection={<IconSend {...ICON} />} disabled={!locked || published} loading={busy === 'pub'} onClick={() => act('pub', () => payApi.publish(id), 'Payslips published and employees notified.')}>{published ? 'Published' : 'Publish payslips'}</Button>
             </Group>
-          </Paper>
-        </SimpleGrid>
-        <StepNav onBack={() => setStep(4)}>
-          {locked ? <Button variant="default" leftSection={<IconSend {...ICON} />} loading={busy === 'pub'} onClick={() => act('pub', () => payApi.publish(id), 'Payslips published and employees notified.')}>Publish payslips</Button> : null}
-          {run.status === 'locked' && hasRole('finance') ? <Button leftSection={<IconCheck {...ICON} />} loading={busy === 'disb'} onClick={() => act('disb', () => payApi.disburse(id), 'Marked as paid.')}>Mark as paid</Button> : null}
-          {run.status === 'disbursed' && hasRole('finance') ? <Button leftSection={<IconCheck {...ICON} />} loading={busy === 'file'} onClick={() => act('file', () => payApi.file(id), 'Run marked as filed.')}>Mark as filed</Button> : null}
-        </StepNav>
+          </Group>
+        </Paper>
+        <StepNav onBack={() => setStep(3)} />
       </Stack> : null}
 
       <Modal opened={override} onClose={() => setOverride(false)} title="Calculate despite blockers" centered>

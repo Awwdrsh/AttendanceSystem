@@ -3,8 +3,8 @@ import { hashPassword, randomToken, sha256Hex, verifyPassword } from '../../cryp
 import { audit } from '../../audit.js';
 import { UnauthorizedError } from '../../errors.js';
 
-export type Role = 'admin' | 'hr' | 'finance' | 'manager' | 'employee';
-export const ROLES: Role[] = ['admin', 'hr', 'finance', 'manager', 'employee'];
+export type Role = 'admin' | 'hr' | 'manager' | 'employee';
+export const ROLES: Role[] = ['admin', 'hr', 'manager', 'employee'];
 
 export interface AuthUser {
   id: string;
