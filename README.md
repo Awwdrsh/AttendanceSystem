@@ -16,7 +16,7 @@ explains terminal onboarding; `docs/adr/` records decisions.
 | Payroll | Formula DSL and component graph, BS-month proration, SSF 11/20 and PF/gratuity regimes, CIT, versioned income-tax schedules (FY 2082/83 and 2083/84) with TDS projection and true-up, festival allowance, loans, arrears, supplementary, final settlement, Bonus Act run, maker-checker with two-approver threshold, locked runs, printable payslips, bank files (NMB, Nabil, NIC Asia, Everest, Prabhu), SSF sheet, ETDS annex, journal export |
 | Self-service and management | Eight-item menu. Employees: Home (clock in/out, request work from home), My attendance, Time off, Payslips, Profile and privacy. Managers: Approvals, Attendance (who's in, fix a punch), Leave calendar. HR: Overview, Employees with CSV import, Attendance (exceptions, overtime), Leave (balances, policies, history), Payroll, Reports, Settings (rules, shifts, holidays, devices, users, setup checklist) |
 | Security and privacy | Sessions with lockout and idle timeout, role-based access scoped to company and direct reports, field encryption for PAN, bank accounts and biometric templates, hash-chained audit log, append-only punches, consent records, crypto-shredding, DSAR export, transparency page |
-| Operations | One-command install, start/stop, boot services, update script, Docker stack, English web app in the CoreValley visual identity (logo, hydro green, Manrope and JetBrains Mono, all assets self-hosted) with a command palette (Cmd+K), light and dark mode; payroll periods follow Bikram Sambat months |
+| Operations | One-command install, start/stop, boot services, update script, Docker stack, English web app in the CoreValley visual identity (logo, hydro green, Manrope and JetBrains Mono, all assets self-hosted) with a command palette (Cmd+K), light and dark mode; every date is shown in Bikram Sambat (English month names) with a Nepali-month date picker and calendars |
 
 ## Install on a new machine (macOS or Ubuntu/Debian)
 
@@ -48,7 +48,7 @@ terminals appear as pending under Devices and must be approved before their punc
 
 | Path | What |
 |---|---|
-| `packages/bs-calendar` | Bikram Sambat table (2082–2084, 2084 projected) and conversions |
+| `packages/bs-calendar` | Bikram Sambat table (2000–2090 BS, i.e. 1943–2034 AD; 2084 onward projected), cross-checked against three converters and Nepali Patro |
 | `packages/attendance-engine` | pure `computeDay` / `computeOt` with worked-example and property tests |
 | `packages/payroll-engine` | pure payroll computation, formula DSL, tax schedules, 28 golden fixtures |
 | `apps/api` | Express API, SQL migrations, all HR/attendance/payroll modules, background worker |
@@ -69,7 +69,7 @@ These are documented in code comments and plan.md section 18, and need a decisio
   income; SST waiver for SSF, PF and CIT contributors; disability deduction; remote-area figures.
 - Golden payroll fixtures are engine snapshots, not accountant-signed; a two-cycle parallel run is still required before
   payroll go-live (plan section 15).
-- BS 2084 month lengths are a projection and must be verified against the official calendar.
+- BS 2084 to 2090 month lengths are projections and must be verified against the official calendar when it is published. The built-in public holiday list covers BS 2083 only; add later years under Settings, Holidays.
 - Terminal protocol details (ZKTeco status/verify codes, template layouts, Hikvision field names) come from community
   sources and must be verified on purchased units; the ZKTeco comm key is not validated (VLAN and serial allow-list are
   the controls).

@@ -28,7 +28,8 @@ describe('format helpers', () => {
     expect(d.ad).toBe('28 Aug 2026');
   });
   it('long English dates', () => {
-    expect(fmtDateLong('2026-10-13')).toBe('Tue, 13 Oct 2026');
+    expect(fmtDateLong('2026-10-13')).toBe('Tue, 27 Ashwin 2083');
+    expect(fmtDateLong('2026-10-14')).toBe('Wed, 28 Ashwin 2083');
   });
   it('fiscal year and date arithmetic', () => {
     expect(fiscalLabel('2026-08-28')).toBe('2083/84');

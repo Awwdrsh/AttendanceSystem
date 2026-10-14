@@ -6,12 +6,15 @@ import type { TeamCalendarDay } from '../../api/types';
 import { EmptyState } from '../../components/EmptyState';
 import { PageHeader } from '../../components/PageHeader';
 import { StatusBadge } from '../../components/StatusBadge';
-import { addDays, fmtAd, fmtDateLong, fmtDateShort, todayNpt } from '../../lib/format';
+import { BS_MONTH_NAMES_EN } from '@hajiri/bs-calendar';
+import { adSpanLabel } from '../../components/BsDatePicker';
+import { bsMonthGrid, nextMonth, prevMonth, safe } from '../../lib/bs';
+import { fmtDateLong, todayNpt } from '../../lib/format';
 import { useQuery } from '../../lib/useQuery';
 
 type Off = TeamCalendarDay['off'][number];
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const weekStartOf = (d: string) => addDays(d, -new Date(`${d}T00:00:00Z`).getUTCDay());
+const AD_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /** One teammate off on a day: first name with a dot; pending requests are outlined. */
 function OffChip({ o }: { o: Off }) {
@@ -31,52 +34,65 @@ function OffChip({ o }: { o: Off }) {
   );
 }
 
-/** Who is off over the next four weeks, as a calendar grid or a day-by-day list. */
+/** Who is off in a Nepali (BS) month, as a calendar grid or a day-by-day list. */
 export default function TeamCalendarPage() {
   const today = todayNpt();
-  const [start, setStart] = useState(weekStartOf(today));
+  const nowBs = safe(today) ?? { year: 2083, month: 1, day: 1 };
+  const [month, setMonth] = useState({ year: nowBs.year, month: nowBs.month });
   const [view, setView] = useState<'grid' | 'list'>('grid');
-  const end = addDays(start, 27);
+  const cells = bsMonthGrid(month.year, month.month);
+  const start = cells[0]!.ad; const end = cells[cells.length - 1]!.ad;
+  const inMonth = cells.filter((c) => c.inMonth);
   const q = useQuery(() => leaveApi.teamCalendar(start, end), [start]);
   const cal = useQuery(() => shiftApi.calendar(start, end), [start]);
   const offMap = new Map((q.data?.days ?? []).map((d) => [d.date, d.off]));
-  const days: string[] = []; for (let i = 0; i < 28; i++) days.push(addDays(start, i));
+  const days = cells.map((c) => c.ad);
+  const cellOf = new Map(cells.map((c) => [c.ad, c]));
   const hol = new Map((cal.data?.days ?? []).map((d) => [d.date, d]));
-  const listDays = days.filter((d) => (offMap.get(d) ?? []).length > 0 || (hol.get(d)?.holidays.length ?? 0) > 0);
+  const listDays = days.filter((d) => cellOf.get(d)?.inMonth).filter((d) => (offMap.get(d) ?? []).length > 0 || (hol.get(d)?.holidays.length ?? 0) > 0);
 
   return (
     <Stack gap="md">
-      <PageHeader title="Team calendar" subtitle={`${fmtAd(start)} to ${fmtAd(end)}. See who is off before you approve leave.`}
+      <PageHeader title="Team calendar" subtitle="See who is off before you approve leave."
         actions={<>
           <Group gap={4} wrap="nowrap">
-            <Tooltip label="Previous 4 weeks"><ActionIcon variant="default" size={36} aria-label="Previous 4 weeks" onClick={() => setStart(addDays(start, -28))}><IconChevronLeft size={16} stroke={1.6} /></ActionIcon></Tooltip>
-            <Button variant="default" onClick={() => setStart(weekStartOf(today))}>Today</Button>
-            <Tooltip label="Next 4 weeks"><ActionIcon variant="default" size={36} aria-label="Next 4 weeks" onClick={() => setStart(addDays(start, 28))}><IconChevronRight size={16} stroke={1.6} /></ActionIcon></Tooltip>
+            <Tooltip label="Previous month"><ActionIcon variant="default" size={36} aria-label="Previous month" onClick={() => setMonth(prevMonth(month.year, month.month))}><IconChevronLeft size={16} stroke={1.6} /></ActionIcon></Tooltip>
+            <Button variant="default" onClick={() => setMonth({ year: nowBs.year, month: nowBs.month })}>This month</Button>
+            <Tooltip label="Next month"><ActionIcon variant="default" size={36} aria-label="Next month" onClick={() => setMonth(nextMonth(month.year, month.month))}><IconChevronRight size={16} stroke={1.6} /></ActionIcon></Tooltip>
           </Group>
           <SegmentedControl value={view} onChange={(v) => setView(v as 'grid' | 'list')} data={[{ value: 'grid', label: 'Calendar' }, { value: 'list', label: 'List' }]} />
         </>} />
 
+      <Group justify="space-between" align="flex-end">
+        <div>
+          <Text fz={24} fw={700} lh={1.1} style={{ letterSpacing: '-0.02em' }}>{BS_MONTH_NAMES_EN[month.month - 1]} <Text span inherit c="var(--hj-hydro)">{month.year}</Text></Text>
+          <Text className="mono" fz={11} c="dimmed" mt={4} style={{ letterSpacing: '0.08em', textTransform: 'uppercase' }}>{inMonth.length ? `${adSpanLabel(inMonth[0]!.ad, inMonth[inMonth.length - 1]!.ad)}, ${inMonth.length} days` : ''}</Text>
+        </div>
+      </Group>
       {q.error ? <EmptyState title="Could not load the team calendar" hint={`${q.error}. Refresh the page to try again.`} /> : view === 'grid' ? (
         <Paper withBorder style={{ overflow: 'hidden' }}>
           <ScrollArea type="auto">
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, minmax(96px, 1fr))', minWidth: 700 }}>
-              {WEEKDAYS.map((d) => <Text key={d} size="xs" c="dimmed" fw={500} px="sm" py={8} style={{ borderBottom: '1px solid var(--hj-line)' }}>{d}</Text>)}
+              {WEEKDAYS.map((d, i) => <Text key={d} className="mono" fz={10.5} c={i === 6 ? 'var(--hj-bad)' : 'dimmed'} fw={500} px="sm" py={8} style={{ borderBottom: '1px solid var(--hj-line)', letterSpacing: '0.08em', textTransform: 'uppercase', background: 'var(--hj-raised)' }}>{d}</Text>)}
               {days.map((d, i) => {
                 const off = offMap.get(d) ?? []; const h = hol.get(d);
                 const isToday = d === today;
-                const dayNum = Number(d.slice(8, 10));
+                const c = cellOf.get(d)!;
+                const adDay = Number(d.slice(8, 10));
                 return (
                   <div key={d} style={{
                     minHeight: 104, padding: 8, display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0,
                     borderLeft: i % 7 ? '1px solid var(--hj-line-soft)' : undefined,
                     borderTop: i >= 7 ? '1px solid var(--hj-line-soft)' : undefined,
-                    background: h?.weeklyOff || h?.holidays.length ? 'var(--hj-canvas)' : undefined,
+                    background: h?.holidays.length ? 'rgba(180, 83, 9, 0.05)' : c.saturday ? 'rgba(220, 38, 38, 0.035)' : undefined,
+                    opacity: c.inMonth ? 1 : 0.45,
                   }}>
-                    <Group gap={6} wrap="nowrap">
-                      <Text size="xs" fw={isToday ? 600 : 500} className="num" c={isToday ? 'white' : 'inherit'}
-                        style={isToday ? { background: 'var(--hj-hydro)', borderRadius: 999, minWidth: 22, height: 22, lineHeight: '22px', textAlign: 'center' } : {}}>
-                        {i === 0 || dayNum === 1 ? fmtDateShort(d) : dayNum}
+                    <Group gap={6} wrap="nowrap" justify="space-between">
+                      <Text fz={17} fw={isToday ? 800 : 650} lh={1} className="num" c={isToday ? 'var(--hj-on-hydro)' : c.saturday || h?.holidays.length ? 'var(--hj-bad)' : 'inherit'}
+                        style={isToday ? { background: 'var(--hj-hydro)', borderRadius: 6, minWidth: 28, height: 26, lineHeight: '26px', textAlign: 'center' } : { paddingLeft: 2 }}>
+                        {c.bs.day}
                       </Text>
+                      <Text className="mono" fz={10} c="dimmed">{adDay === 1 || i === 0 ? `${AD_MONTHS[Number(d.slice(5, 7)) - 1]} ${adDay}` : adDay}</Text>
                     </Group>
                     {h?.holidays.length ? <Text size="xs" c="dimmed" truncate title={h.holidays.map((x) => x.name_en).join(', ')}>{h.holidays[0]!.name_en}</Text> : null}
                     <Stack gap={3}>
@@ -90,7 +106,7 @@ export default function TeamCalendarPage() {
           </ScrollArea>
         </Paper>
       ) : listDays.length === 0 ? (
-        <EmptyState title="Everyone is in for these four weeks" hint="No approved or pending leave and no public holidays in this range." />
+        <EmptyState title="Everyone is in this month" hint="No approved or pending leave and no public holidays in this month." />
       ) : (
         <Paper withBorder style={{ overflow: 'hidden' }}>
           {listDays.map((d, idx) => {
@@ -120,7 +136,7 @@ export default function TeamCalendarPage() {
           })}
         </Paper>
       )}
-      {view === 'grid' ? <Text size="xs" c="dimmed">Filled names are approved leave, outlined names are pending. Hover a name for the leave type. Shaded days are weekly offs or holidays.</Text> : null}
+      {view === 'grid' ? <Text size="xs" c="dimmed">Big numbers are Nepali dates, small ones Gregorian. Saturdays and public holidays are in red. Filled names are approved leave, outlined names are pending.</Text> : null}
     </Stack>
   );
 }

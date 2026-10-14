@@ -58,13 +58,28 @@ export function addDays(ad: string, days: number): string {
 
 const AD_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-/** "28 Aug 2026" */
-export function fmtAd(ad: string | null | undefined): string {
+/** Gregorian "14 Oct 2026", for the small secondary date shown next to a Bikram Sambat date. */
+export function fmtGregorian(ad: string | null | undefined): string {
   if (!ad) return '—';
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ad);
   if (!m) return ad;
   return `${Number(m[3])} ${AD_MONTHS[Number(m[2]) - 1]} ${m[1]}`;
 }
+
+/**
+ * The app's date format: Bikram Sambat, e.g. "28 Ashwin 2083". Input is the ISO (AD) date the API uses.
+ * Dates outside the calendar table fall back to the Gregorian form.
+ */
+export function fmtAd(ad: string | null | undefined): string {
+  if (!ad) return '—';
+  const iso = ad.slice(0, 10);
+  const bs = safeAdToBs(iso);
+  if (!bs) return fmtGregorian(iso);
+  return `${bs.day} ${BS_MONTH_NAMES_EN[bs.month - 1]} ${bs.year}`;
+}
+
+/** Same as fmtAd; reads better at call sites. */
+export const fmtDate = fmtAd;
 
 export function safeAdToBs(ad: string): BsDate | null {
   try { return adToBs(ad); } catch { return null; }
@@ -75,10 +90,10 @@ export function dualDate(ad: string | null | undefined, lang: Lang = 'en', numer
   if (!ad) return { bs: '—', bsLong: '—', ad: '—' };
   const iso = ad.slice(0, 10);
   const bs = safeAdToBs(iso);
-  if (!bs) return { bs: iso, bsLong: iso, ad: fmtAd(iso) };
+  if (!bs) return { bs: iso, bsLong: iso, ad: fmtGregorian(iso) };
   void lang; void numerals;
   const month = BS_MONTH_NAMES_EN[bs.month - 1];
-  return { bs: formatBs(bs), bsLong: `${bs.day} ${month} ${bs.year}`, ad: fmtAd(iso) };
+  return { bs: formatBs(bs), bsLong: `${bs.day} ${month} ${bs.year}`, ad: fmtGregorian(iso) };
 }
 
 export function bsMonthLabel(bsYear: number, bsMonth: number, lang: Lang = 'en', numerals: Numerals = 'latin'): string {
@@ -117,7 +132,7 @@ export function truncate(s: string | null | undefined, n = 40): string {
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-/** "Tue, 13 Oct 2026" */
+/** "Tue, 27 Ashwin 2083" */
 export function fmtDateLong(ad: string | null | undefined): string {
   if (!ad) return '—';
   const iso = ad.slice(0, 10);
@@ -126,12 +141,13 @@ export function fmtDateLong(ad: string | null | undefined): string {
   return `${WEEKDAYS[d.getUTCDay()]}, ${fmtAd(iso)}`;
 }
 
-/** "13 Oct" (same year as today) or "13 Oct 2025". */
+/** "27 Ashwin" within the current BS year, otherwise "27 Ashwin 2082". */
 export function fmtDateShort(ad: string | null | undefined): string {
   if (!ad) return '—';
   const iso = ad.slice(0, 10);
   const full = fmtAd(iso);
-  return iso.slice(0, 4) === todayNpt().slice(0, 4) ? full.replace(/ \d{4}$/, '') : full;
+  const bs = safeAdToBs(iso); const now = safeAdToBs(todayNpt());
+  return bs && now && bs.year === now.year ? full.replace(/ \d{4}$/, '') : full;
 }
 
 /** "Good morning" etc. in Nepal time. */

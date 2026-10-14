@@ -11,7 +11,8 @@ import { PageHeader } from '../../components/PageHeader';
 import { liveStatus, StatusBadge, statusLabel, toneColor } from '../../components/StatusBadge';
 import { useI18n } from '../../i18n';
 import { bsMonthGrid, nextMonth, prevMonth, safe } from '../../lib/bs';
-import { bsMonthLabel, fmtAd, fmtDateLong, fmtDateShort, fmtTime, minutesToHm, todayNpt } from '../../lib/format';
+import { adSpanLabel } from '../../components/BsDatePicker';
+import { bsMonthLabel, fmtDateLong, fmtTime, minutesToHm, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import { describeFlag, sourceLabel } from './HomePage';
@@ -84,11 +85,11 @@ export default function MyAttendancePage() {
   return (
     <Stack gap="lg">
       <PageHeader title="My attendance"
-        subtitle={bounds ? `${fmtAd(bounds.startAd)} to ${fmtAd(bounds.endAd)}. Months follow the payroll calendar. Select a day to see its details or request a correction.` : undefined}
+        subtitle={bounds ? `${adSpanLabel(bounds.startAd, bounds.endAd)} in the Gregorian calendar. Select a day to see its details or request a correction.` : undefined}
         actions={
           <Group gap={6} wrap="nowrap">
             <ActionIcon variant="default" size="lg" aria-label="Previous month" onClick={() => setYm(prevMonth(ym.year, ym.month))}><IconChevronLeft size={16} stroke={1.6} /></ActionIcon>
-            <Text fw={500} size="sm" w={120} ta="center">{bsMonthLabel(ym.year, ym.month)}</Text>
+            <Text fw={700} size="sm" w={130} ta="center">{bsMonthLabel(ym.year, ym.month)}</Text>
             <ActionIcon variant="default" size="lg" aria-label="Next month" onClick={() => setYm(nextMonth(ym.year, ym.month))}><IconChevronRight size={16} stroke={1.6} /></ActionIcon>
             {todayBs && (todayBs.year !== ym.year || todayBs.month !== ym.month) ? <Button variant="subtle" onClick={() => setYm({ year: todayBs.year, month: todayBs.month })}>This month</Button> : null}
           </Group>
@@ -105,14 +106,14 @@ export default function MyAttendancePage() {
 
       <Paper withBorder p="sm" style={{ overflowX: 'auto' }}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, minmax(44px, 1fr))', gap: 4, minWidth: 320 }}>
-          {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => <Text key={d} ta="center" size="xs" c="dimmed" py={4}>{d}</Text>)}
+          {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d, i) => <Text key={d} ta="center" className="mono" fz={10.5} c={i === 6 ? 'var(--hj-bad)' : 'dimmed'} py={4} style={{ letterSpacing: '0.08em', textTransform: 'uppercase' }}>{d}</Text>)}
           {grid.map((c) => {
             const d = byDate.get(c.ad);
             const hol = holidays.get(c.ad);
             const st = d ? statusOf(d) : null;
             const isToday = c.ad === todayIso;
             const isSel = selected === c.ad;
-            const dayNum = Number(c.ad.slice(8, 10));
+            const adDay = Number(c.ad.slice(8, 10));
             return (
               <button key={c.ad} type="button" onClick={() => { setSelected(c.ad); setCorrect(false); }} disabled={!c.inMonth} aria-label={fmtDateLong(c.ad)}
                 style={{
@@ -124,11 +125,13 @@ export default function MyAttendancePage() {
                   display: 'flex', flexDirection: 'column', gap: 2,
                 }}>
                 <Group justify="space-between" wrap="nowrap" gap={4}>
-                  <Text size="sm" fw={isToday ? 600 : 500} className="num" {...(isToday ? { c: 'brand' } : c.saturday ? { c: 'dimmed' } : {})}>
-                    {dayNum === 1 || c === grid[0] ? fmtDateShort(c.ad) : dayNum}
+                  <Text fz={16} fw={isToday ? 800 : 650} lh={1} className="num" c={isToday ? 'var(--hj-on-hydro)' : c.saturday || hol ? 'var(--hj-bad)' : 'inherit'}
+                    style={isToday ? { background: 'var(--hj-hydro)', borderRadius: 6, minWidth: 26, height: 24, lineHeight: '24px', textAlign: 'center' } : undefined}>
+                    {c.bs.day}
                   </Text>
-                  {d && d.late_min > 0 ? <Tooltip label={`${d.late_min} min late`}><span className="hj-dot" style={{ background: 'var(--hj-warn)' }} aria-label="Late" /></Tooltip> : null}
+                  <Text className="mono" fz={9.5} c="dimmed">{adDay === 1 || c === grid[0] ? `${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][Number(c.ad.slice(5, 7)) - 1]} ${adDay}` : adDay}</Text>
                 </Group>
+                {d && d.late_min > 0 ? <Tooltip label={`${d.late_min} min late`}><Text size="xs" c="var(--hj-warn)" className="num" visibleFrom="sm">{d.late_min} min late</Text></Tooltip> : null}
                 {st ? (
                   <Group gap={5} wrap="nowrap" visibleFrom="sm">
                     <span className="hj-dot" style={{ background: toneColor(st) }} aria-hidden />

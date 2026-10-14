@@ -2,7 +2,6 @@ import '@fontsource-variable/manrope';
 import '@fontsource-variable/jetbrains-mono';
 import '@mantine/core/styles.css';
 import '@mantine/notifications/styles.css';
-import '@mantine/dates/styles.css';
 import '@mantine/spotlight/styles.css';
 import './styles.css';
 import { StrictMode } from 'react';
