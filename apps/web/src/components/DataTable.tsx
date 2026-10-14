@@ -41,7 +41,7 @@ export function DataTable<R>({ columns, rows, rowKey, loading, error, emptyTitle
         </Group>
       ) : null}
       <ScrollArea.Autosize mah={maxHeight} type="auto">
-        <Table stickyHeader striped={false} withRowBorders miw={600}>
+        <Table stickyHeader striped={false} withRowBorders miw={Math.min(600, columns.length * 150)}>
           <Table.Thead>
             <Table.Tr>
               {selectable ? <Table.Th w={40}><Checkbox aria-label="Select all" checked={allSelected} indeterminate={!allSelected && sel.size > 0} onChange={toggleAll} /></Table.Th> : null}

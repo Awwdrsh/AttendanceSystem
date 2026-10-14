@@ -1,10 +1,11 @@
 import { Select, Stack, Text } from '@mantine/core';
+import { useMediaQuery } from '@mantine/hooks';
 import { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { payroll as payApi } from '../../api';
 import type { PayslipSummary } from '../../api/types';
 import { useAuth } from '../../auth/AuthProvider';
-import { DataTable } from '../../components/DataTable';
+import { DataTable, type Column } from '../../components/DataTable';
 import { StatStrip } from '../../components/Kpi';
 import { PageHeader } from '../../components/PageHeader';
 import { bsMonthLabel, fmtMoney, safeAdToBs, todayNpt } from '../../lib/format';
@@ -23,6 +24,8 @@ export default function PayslipsPage() {
   const q = useQuery(() => payApi.payslips({ employeeId, fiscalYearStart: Number(fy) }), [employeeId, fy], { enabled: !!employeeId });
   const years = [curFy - 2, curFy - 1, curFy].map((y) => ({ value: String(y), label: `FY ${y}/${String(y + 1).slice(-2)}` }));
   const rows = q.data?.payslips ?? [];
+  // On a phone the table keeps month and net pay in view; the full breakdown is one tap away on the payslip.
+  const narrow = useMediaQuery('(max-width: 36em)');
   const sum = (k: 'gross' | 'net' | 'tds') => rows.reduce((a, r) => a + Number(r[k] ?? 0), 0);
   return (
     <Stack gap="lg">
@@ -46,10 +49,12 @@ export default function PayslipsPage() {
               {r.run_type && r.run_type !== 'regular' ? <Text size="xs" c="dimmed">{runTypeLabel(r.run_type)}</Text> : null}
             </div>
           ) },
-          { key: 'paid', header: 'Paid days', align: 'right', render: (r) => <><span className="num">{Number(r.paid_days)}</span>{Number(r.lop_days) > 0 ? <Text span size="xs" c="dimmed" className="num">{` (${Number(r.lop_days)} unpaid)`}</Text> : null}</> },
-          { key: 'gross', header: 'Gross', align: 'right', render: (r) => <span className="num">{fmtMoney(r.gross)}</span> },
-          { key: 'ded', header: 'Deductions', align: 'right', render: (r) => <span className="num">{fmtMoney(r.total_deductions)}</span> },
           { key: 'net', header: 'Net pay', align: 'right', render: (r) => <Text span size="sm" fw={600} className="num">{fmtMoney(r.net)}</Text> },
+          ...(narrow ? [] : ([
+            { key: 'paid', header: 'Paid days', align: 'right', render: (r) => <><span className="num">{Number(r.paid_days)}</span>{Number(r.lop_days) > 0 ? <Text span size="xs" c="dimmed" className="num">{` (${Number(r.lop_days)} unpaid)`}</Text> : null}</> },
+            { key: 'gross', header: 'Gross', align: 'right', render: (r) => <span className="num">{fmtMoney(r.gross)}</span> },
+            { key: 'ded', header: 'Deductions', align: 'right', render: (r) => <span className="num">{fmtMoney(r.total_deductions)}</span> },
+          ] satisfies Column<PayslipSummary>[])),
         ]} />
     </Stack>
   );

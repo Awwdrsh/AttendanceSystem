@@ -104,11 +104,12 @@ export const devices = {
   activate: (id: string, b: { branchId?: string; name?: string }) => post<{ id: string }>(`/devices/${id}/activate`, b),
   disable: (id: string) => post<{ id: string }>(`/devices/${id}/disable`),
   mappings: (id: string) => get<{ mappings: T.DeviceMapping[] }>(`/devices/${id}/mappings`),
-  map: (id: string, b: { pin: string; employeeId: string; from: string; syncToDevice?: boolean }) => post<{ ok: boolean; reattributed: number; dates: string[] }>(`/devices/${id}/map`, b),
+  map: (id: string, b: { pin: string; employeeId: string; from: string; syncToDevice?: boolean; replace?: boolean }) => post<{ ok: boolean; reattributed: number; dates: string[] }>(`/devices/${id}/map`, b),
   unmapped: () => get<{ punches: T.UnmappedPunch[] }>('/devices/punches/unmapped'),
   commands: (id: string) => get<{ commands: T.DeviceCommand[] }>(`/devices/${id}/commands`),
   command: (id: string, command: string) => post<{ id: number }>(`/devices/${id}/commands`, { command }),
   syncUsers: (id: string) => post<{ queued: number }>(`/devices/${id}/sync-users`),
+  issueKey: (id: string) => post<{ key: string }>(`/devices/${id}/key`),
 };
 
 export const notifications = {

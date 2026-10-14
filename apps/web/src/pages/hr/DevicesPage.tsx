@@ -1,7 +1,8 @@
-import { ActionIcon, Button, Drawer, Group, Menu, Modal, Paper, Select, SimpleGrid, Stack, Tabs, Text, TextInput } from '@mantine/core';
-import { IconBan, IconCheck, IconDots, IconInfoCircle, IconLink, IconRefresh } from '@tabler/icons-react';
+import { ActionIcon, Alert, Button, Code, Drawer, Group, Menu, Modal, Paper, Select, SimpleGrid, Stack, Tabs, Text, TextInput } from '@mantine/core';
+import { IconBan, IconCheck, IconDots, IconInfoCircle, IconKey, IconLink, IconRefresh } from '@tabler/icons-react';
 import { useState } from 'react';
 import { devices as devApi } from '../../api';
+import { ApiError } from '../../api/client';
 import type { Device, DeviceMapping, UnmappedPunch } from '../../api/types';
 import { DateField } from '../../components/BsDatePicker';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -31,17 +32,23 @@ export default function DevicesPage() {
   const [sel, setSel] = useState<Device | null>(null);
   const mappings = useQuery(() => devApi.mappings(sel!.id), [sel?.id], { enabled: !!sel });
   const commands = useQuery(() => devApi.commands(sel!.id), [sel?.id], { enabled: !!sel });
-  const [map, setMap] = useState<{ deviceId: string; pin: string } | null>(null);
+  const [map, setMap] = useState<{ deviceId: string; pin: string; replace?: boolean; conflict?: string } | null>(null);
   const [mapEmp, setMapEmp] = useState<string | null>(null); const [mapFrom, setMapFrom] = useState<string | null>(todayNpt()); const [busy, setBusy] = useState(false);
   const [activate, setActivate] = useState<Device | null>(null); const [actName, setActName] = useState('');
   const [disable, setDisable] = useState<Device | null>(null);
+  const [issued, setIssued] = useState<{ device: Device; key: string } | null>(null);
+  const issueKey = async (d: Device) => { try { setIssued({ device: d, key: (await devApi.issueKey(d.id)).key }); } catch (e) { toast.err(e); } };
   const physical = (q.data?.devices ?? []).filter((d) => !['mobile', 'kiosk', 'manual'].includes(d.vendor));
   const unmappedRows = unmapped.data?.punches ?? [];
 
   const doMap = async () => {
     if (!map || !mapEmp || !mapFrom) return; setBusy(true);
-    try { const r = await devApi.map(map.deviceId, { pin: map.pin, employeeId: mapEmp, from: mapFrom }); toast.ok(`PIN ${map.pin} mapped. ${r.reattributed} earlier day(s) re-attributed and recalculated.`); setMap(null); await Promise.all([unmapped.reload(), mappings.reload(), q.reload()]); }
-    catch (e) { toast.err(e); } finally { setBusy(false); }
+    try { const r = await devApi.map(map.deviceId, { pin: map.pin, employeeId: mapEmp, from: mapFrom, ...(map.replace ? { replace: true } : {}) }); toast.ok(`PIN ${map.pin} mapped. ${r.reattributed} earlier day(s) re-attributed and recalculated.`); setMap(null); await Promise.all([unmapped.reload(), mappings.reload(), q.reload()]); }
+    catch (e) {
+      // The PIN already belongs to someone else from that date: ask before moving it (and their punches) across.
+      if (e instanceof ApiError && e.status === 409 && !map.replace) setMap({ ...map, replace: true, conflict: e.message });
+      else toast.err(e);
+    } finally { setBusy(false); }
   };
   const syncUsers = async (d: Device) => {
     try { const r = await devApi.syncUsers(d.id); toast.ok(`${r.queued} user records queued for the terminal.`); if (sel?.id === d.id) await commands.reload(); } catch (e) { toast.err(e); }
@@ -90,6 +97,7 @@ export default function DevicesPage() {
                         {d.status === 'pending' ? <Menu.Item leftSection={<IconCheck {...ICON} />} onClick={() => openActivate(d)}>Activate</Menu.Item> : null}
                         <Menu.Item leftSection={<IconLink {...ICON} />} onClick={() => setMap({ deviceId: d.id, pin: '' })}>Map a PIN</Menu.Item>
                         <Menu.Item leftSection={<IconRefresh {...ICON} />} onClick={() => void syncUsers(d)}>Sync users to device</Menu.Item>
+                        {d.protocol !== 'adms' && d.company_id ? <Menu.Item leftSection={<IconKey {...ICON} />} onClick={() => void issueKey(d)}>Issue new device key</Menu.Item> : null}
                         {d.status === 'active' ? <><Menu.Divider /><Menu.Item color="red" leftSection={<IconBan {...ICON} />} onClick={() => setDisable(d)}>Disable device</Menu.Item></> : null}
                       </Menu.Dropdown>
                     </Menu>
@@ -159,16 +167,25 @@ export default function DevicesPage() {
 
       <Modal opened={!!map} onClose={() => setMap(null)} title="Map a device PIN" centered>
         <Stack>
-          <TextInput label="Device PIN" description="The user ID enrolled on the terminal." value={map?.pin ?? ''} onChange={(e) => map && setMap({ ...map, pin: e.currentTarget.value })} required />
+          <TextInput label="Device PIN" description="The user ID enrolled on the terminal." value={map?.pin ?? ''} onChange={(e) => map && setMap({ deviceId: map.deviceId, pin: e.currentTarget.value })} required />
           <EmployeePicker value={mapEmp} onChange={setMapEmp} required />
           <DateField label="Valid from" value={mapFrom} onChange={setMapFrom} required description="Unmapped punches from this date on are re-attributed to the employee." />
+          {map?.replace ? <Alert variant="light" color="orange" title="This PIN is already in use">{map.conflict} Replacing it moves that person's punches from the chosen date to the employee above and recalculates both.</Alert> : null}
           <Group justify="flex-end">
             <Button variant="default" onClick={() => setMap(null)}>Cancel</Button>
-            <Button loading={busy} disabled={!map?.pin || !mapEmp || !mapFrom} onClick={doMap}>Map PIN</Button>
+            <Button loading={busy} color={map?.replace ? 'orange' : 'brand'} disabled={!map?.pin || !mapEmp || !mapFrom} onClick={doMap}>{map?.replace ? 'Replace mapping' : 'Map PIN'}</Button>
           </Group>
         </Stack>
       </Modal>
 
+      <Modal opened={!!issued} onClose={() => setIssued(null)} title={`Device key for ${issued?.device.name ?? issued?.device.serial_no ?? ''}`} centered>
+        <Stack>
+          <Text size="sm" c="dimmed">Enter this key in the terminal's listening-host settings as <Code>?key=…</Code>. It is shown only once; issuing a new key stops the old one working.</Text>
+          <Code block>{issued?.key}</Code>
+          <Alert variant="light" color="yellow">Copy it now. Hajiri stores only a fingerprint of the key.</Alert>
+          <Group justify="flex-end"><Button variant="default" onClick={() => void navigator.clipboard?.writeText(issued?.key ?? '').then(() => toast.ok('Key copied.'))}>Copy key</Button><Button onClick={() => setIssued(null)}>Done</Button></Group>
+        </Stack>
+      </Modal>
       <Modal opened={!!activate} onClose={() => setActivate(null)} title={`Activate ${activate?.serial_no ?? ''}`} centered>
         <Stack>
           <Text size="sm" c="dimmed">Only activate terminals you installed. Once active, this device can submit punches for your company.</Text>

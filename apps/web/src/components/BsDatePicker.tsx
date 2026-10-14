@@ -75,15 +75,16 @@ export function DateField({ value, onChange, label, description, holidays, minDa
     else if (e.key === 'PageDown') { e.preventDefault(); setView(nextMonth(view.year, view.month)); }
   };
 
-  const commitTyped = () => {
-    if (!typed.trim()) { setTypedErr(null); return; }
+  /** Enter commits and closes (even if the date is unchanged); blur only commits a changed date. */
+  const commitTyped = (fromEnter = false) => {
+    if (!typed.trim()) { setTypedErr(null); if (fromEnter) close(); return; }
     const m = /^\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\s*$/.exec(typed);
     try {
       if (!m) throw new Error('format');
       const ad = bsToAd({ year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) });
       if (!inBounds(ad)) { setTypedErr('That date is outside the allowed range'); return; }
       setTypedErr(null);
-      if (ad !== value) pick(ad);
+      if (ad !== value) pick(ad); else if (fromEnter) close();
     } catch { setTypedErr('Use the Nepali date as YYYY-MM-DD, for example 2083-06-28'); }
   };
 
@@ -93,7 +94,7 @@ export function DateField({ value, onChange, label, description, holidays, minDa
 
   return (
     <Box w={w}>
-      <Popover opened={opened} onChange={(o) => (o ? open() : close())} position="bottom-start" shadow="md" withinPortal radius="lg" offset={6}>
+      <Popover opened={opened} onChange={(o) => (o ? open() : close())} onClose={close} closeOnClickOutside closeOnEscape position="bottom-start" shadow="md" withinPortal radius="lg" offset={6}>
         <Popover.Target>
           <InputBase component="button" type="button" pointer onClick={toggle} disabled={!!disabled} aria-haspopup="dialog" aria-expanded={opened}
             required={!!required}
@@ -161,7 +162,7 @@ export function DateField({ value, onChange, label, description, holidays, minDa
 
           <TextInput mt={10} size="xs" placeholder="Type a Nepali date, e.g. 2083-06-28" value={typed} error={typedErr}
             onChange={(e) => { setTyped(e.currentTarget.value); setTypedErr(null); }}
-            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitTyped(); } }} onBlur={commitTyped}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitTyped(true); } }} onBlur={() => { if (opened) commitTyped(); }}
             aria-label="Type a Nepali date" classNames={{ input: 'mono' }} />
           <Group justify="space-between" mt={10} wrap="nowrap" gap="xs">
             <Text size="xs" c="dimmed" lh={1.3}>
