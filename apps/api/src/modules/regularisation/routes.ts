@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { bsLabel } from '../../bsdate.js';
 import { Router } from 'express';
 import { z } from 'zod';
 import { localDateOf, NPT_OFFSET_MIN, MIN_MS } from '@hajiri/attendance-engine';
@@ -56,7 +57,7 @@ export async function applyRegularisationDecision(db: Queryable, requestId: stri
   await notify(db, {
     companyId: rr.company_id, userId, employeeId: rr.employee_id, template: `regularisation.${state}`,
     title: state === 'approved' ? 'Attendance correction approved' : 'Attendance correction rejected',
-    body: `${rr.kind.replace('_', ' ')} for ${rr.local_date} was ${state}${ctx.reason ? `: ${ctx.reason}` : ''}.`, payload: { requestId }, channels: ['push'],
+    body: `${rr.kind === 'wfh' ? 'Work from home' : rr.kind.replace('_', ' ')} for ${bsLabel(String(rr.local_date).slice(0, 10))} was ${state}${ctx.reason ? `: ${ctx.reason}` : ''}.`, payload: { requestId }, channels: ['push'],
   });
 }
 registerHandler('regularisation_request', applyRegularisationDecision);
@@ -126,7 +127,7 @@ export function regularisationRoutes({ db }: AppDeps): Router {
       id = ins.rows[0]!.id;
       const inst = await startWorkflow(client, {
         companyId: emp.rows[0].company_id, objectType: 'regularisation_request', objectId: id, employeeId,
-        title: 'Attendance correction to approve', body: `${b.kind.replace('_', ' ')} on ${b.localDate}: ${b.reason}`,
+        title: 'Attendance correction to approve', body: `${b.kind === 'wfh' ? 'Work from home' : b.kind.replace('_', ' ')} on ${bsLabel(b.localDate)}: ${b.reason}`,
       });
       await client.query('UPDATE regularisation_request SET workflow_instance_id = $2 WHERE id = $1', [id, inst.id]);
       await audit(client, { actorId: u.id, action: 'create', table: 'regularisation_request', rowId: id, after: { ...b, employeeId, onBehalf } });

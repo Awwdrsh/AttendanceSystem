@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { bsMonthName } from '../../bsdate.js';
 import { computePayslip, D, Decimal, type ComponentDef, type PayrollInput, type PayrollResult, type PayrollPolicy, type LoanInput } from '@hajiri/payroll-engine';
 import { adToBs, bsMonthBounds, fiscalYear, fiscalYearOf } from '@hajiri/bs-calendar';
 import type { Db, Queryable } from '../../db/pool.js';
@@ -413,7 +414,7 @@ export async function publishRun(db: Db, companyId: string, runId: string, actor
   for (const r of rows.rows) {
     const userId = await userIdForEmployee(db, r.employee_id);
     await notify(db, { companyId, userId, employeeId: r.employee_id, template: 'payslip.published', title: 'Your payslip is ready',
-      body: `Your payslip for ${p.bs_year}-${String(p.bs_month).padStart(2, '0')} is ready to view.`, payload: { payslipId: r.id }, channels: ['push'] });
+      body: `Your payslip for ${bsMonthName(p.bs_year, p.bs_month)} is ready to view.`, payload: { payslipId: r.id }, channels: ['push'] });
   }
   await audit(db, { actorId, action: 'publish', table: 'payroll_run', rowId: runId, after: { payslips: rows.rowCount } });
   return rows.rowCount ?? 0;

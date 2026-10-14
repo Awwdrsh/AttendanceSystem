@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { bsLabel } from '../../bsdate.js';
 import { z } from 'zod';
 import type { AppDeps } from '../../deps.js';
 import type { Queryable } from '../../db/pool.js';
@@ -31,7 +32,7 @@ export async function applyOtDecision(db: Queryable, requestId: string, state: '
   const userId = await userIdForEmployee(db, o.employee_id);
   await notify(db, {
     companyId: o.company_id, userId, employeeId: o.employee_id, template: `ot.${state}`, title: state === 'approved' ? 'Overtime approved' : 'Overtime rejected',
-    body: `Overtime on ${o.local_date}: ${state === 'approved' ? `${approved} minutes approved` : 'rejected'}${ctx.reason ? ` (${ctx.reason})` : ''}.`, payload: { requestId }, channels: ['push'],
+    body: `Overtime on ${bsLabel(o.local_date)}: ${state === 'approved' ? `${approved} minutes approved` : 'rejected'}${ctx.reason ? ` (${ctx.reason})` : ''}.`, payload: { requestId }, channels: ['push'],
   });
 }
 registerHandler('ot_request', applyOtDecision);

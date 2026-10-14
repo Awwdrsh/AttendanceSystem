@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { bsRange } from '../../bsdate.js';
 import { z } from 'zod';
 import type { AppDeps } from '../../deps.js';
 import type { Queryable } from '../../db/pool.js';
@@ -38,7 +39,7 @@ export async function applyLeaveDecision(db: Queryable, requestId: string, state
   await notify(db, {
     companyId: lr.company_id, userId, employeeId: lr.employee_id, template: `leave.${state}`,
     title: state === 'approved' ? 'Leave approved' : 'Leave rejected',
-    body: `${lr.type_name} ${lr.from_date}${lr.to_date !== lr.from_date ? ` to ${lr.to_date}` : ''} was ${state}${ctx.reason ? `: ${ctx.reason}` : ''}.`,
+    body: `${lr.type_name} ${bsRange(String(lr.from_date).slice(0, 10), String(lr.to_date).slice(0, 10))} was ${state}${ctx.reason ? `: ${ctx.reason}` : ''}.`,
     payload: { requestId }, channels: ['push', 'sms'],
   });
 }
@@ -199,7 +200,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
       requestId = ins.rows[0]!.id;
       const inst = await startWorkflow(client, {
         companyId: emp.company_id, objectType: 'leave_request', objectId: requestId, employeeId,
-        title: 'Leave request to approve', body: `${type.name_en} ${b.from}${b.to !== b.from ? ` to ${b.to}` : ''} (${calc.days} day(s))${b.reason ? `: ${b.reason}` : ''}`,
+        title: 'Leave request to approve', body: `${type.name_en} ${bsRange(b.from, b.to)} (${calc.days} day(s))${b.reason ? `: ${b.reason}` : ''}`,
       });
       await client.query('UPDATE leave_request SET workflow_instance_id = $2 WHERE id = $1', [requestId, inst.id]);
       await audit(client, { actorId: req.user!.id, action: 'create', table: 'leave_request', rowId: requestId, after: { ...b, days: calc.days } });

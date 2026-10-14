@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { bsRange } from '../../bsdate.js';
 import { z } from 'zod';
 import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
@@ -33,28 +34,54 @@ const SHIFT_COLS = `s.id, s.code, s.name_en, s.name_ne, s.start_time::text AS st
   s.rounding_min, s.rounding_direction, (s.end_time <= s.start_time) AS crosses_midnight,
   (SELECT count(*) FROM shift_assignment a WHERE a.shift_id = s.id AND a.valid @> current_date) AS assigned_employees`;
 
-/** Default public holidays for BS 2083 (plan §6.10, Merokalam list); employer picks the 13/14 paid days (Sec 41). */
-const HOLIDAYS_2083: Array<[string, string, string, 'all' | 'female']> = [
-  ['2026-04-14', 'Nepali New Year', 'नयाँ वर्ष', 'all'],
-  ['2026-05-01', 'Buddha Jayanti / Labour Day', 'बुद्ध जयन्ती / मजदुर दिवस', 'all'],
-  ['2026-05-29', 'Republic Day', 'गणतन्त्र दिवस', 'all'],
-  ['2026-09-14', 'Teej', 'तीज', 'female'],
-  ['2026-09-19', 'Constitution Day', 'संविधान दिवस', 'all'],
-  ['2026-10-04', 'Jitiya', 'जितिया', 'female'],
-  ['2026-10-17', 'Dashain (Phulpati)', 'दशैं (फूलपाती)', 'all'],
-  ['2026-10-18', 'Dashain (Maha Astami)', 'दशैं (महाअष्टमी)', 'all'],
-  ['2026-10-19', 'Dashain (Maha Navami)', 'दशैं (महानवमी)', 'all'],
-  ['2026-10-20', 'Dashain (Vijaya Dashami)', 'दशैं (विजया दशमी)', 'all'],
-  ['2026-10-21', 'Dashain (Ekadashi)', 'दशैं (एकादशी)', 'all'],
-  ['2026-10-22', 'Dashain (Dwadashi)', 'दशैं (द्वादशी)', 'all'],
-  ['2026-10-23', 'Dashain (Trayodashi)', 'दशैं (त्रयोदशी)', 'all'],
-  ['2026-11-08', 'Tihar (Kag Tihar)', 'तिहार (काग तिहार)', 'all'],
-  ['2026-11-09', 'Tihar (Kukur Tihar)', 'तिहार (कुकुर तिहार)', 'all'],
-  ['2026-11-10', 'Tihar (Laxmi Puja)', 'तिहार (लक्ष्मी पूजा)', 'all'],
-  ['2026-11-11', 'Tihar (Govardhan Puja)', 'तिहार (गोवर्धन पूजा)', 'all'],
-  ['2026-11-12', 'Tihar (Bhai Tika)', 'तिहार (भाइटीका)', 'all'],
-  ['2026-11-15', 'Chhath', 'छठ', 'all'],
-  ['2026-12-25', 'Christmas', 'क्रिसमस', 'all'],
+/**
+ * Public holidays for BS 2083 (14 Apr 2026 to 13 Apr 2027), checked in October 2026 against the published lists on
+ * hamropatro.com and katigate.com. Community or region-specific days (Eid, Lhosars, Indra Jatra, Holi by region)
+ * are imported as optional so HR can decide which to observe. The employer still picks the paid days (Sec 41).
+ */
+const HOLIDAYS_2083: Array<[string, string, 'all' | 'female', boolean]> = [
+  ['2026-04-14', 'Nepali New Year', 'all', false],
+  ['2026-05-01', 'Buddha Jayanti and Labour Day', 'all', false],
+  ['2026-05-28', 'Bakar Eid', 'all', true],
+  ['2026-05-29', 'Republic Day', 'all', false],
+  ['2026-08-26', "Prophet Muhammad's Birthday", 'all', true],
+  ['2026-08-28', 'Janai Purnima', 'all', false],
+  ['2026-09-04', 'Krishna Janmashtami', 'all', false],
+  ['2026-09-08', "Gen Z Martyrs' Day", 'all', false],
+  ['2026-09-14', 'Haritalika Teej', 'female', false],
+  ['2026-09-19', 'Constitution Day', 'all', false],
+  ['2026-09-25', 'Indra Jatra', 'all', true],
+  ['2026-10-04', 'Jitiya', 'female', true],
+  ['2026-10-11', 'Ghatasthapana', 'all', false],
+  ['2026-10-17', 'Dashain (Phulpati)', 'all', false],
+  ['2026-10-18', 'Dashain (Maha Ashtami)', 'all', false],
+  ['2026-10-19', 'Dashain holiday', 'all', false],
+  ['2026-10-20', 'Dashain (Maha Navami)', 'all', false],
+  ['2026-10-21', 'Dashain (Vijaya Dashami)', 'all', false],
+  ['2026-10-22', 'Dashain (Ekadashi)', 'all', false],
+  ['2026-10-23', 'Dashain holiday', 'all', false],
+  ['2026-11-08', 'Tihar (Laxmi Puja)', 'all', false],
+  ['2026-11-09', 'Tihar (Gai Puja)', 'all', false],
+  ['2026-11-10', 'Tihar (Govardhan Puja and Mha Puja)', 'all', false],
+  ['2026-11-11', 'Tihar (Bhai Tika)', 'all', false],
+  ['2026-11-12', 'Tihar holiday', 'all', false],
+  ['2026-11-15', 'Chhath', 'all', false],
+  ['2026-11-24', 'Guru Nanak Jayanti', 'all', true],
+  ['2026-12-03', 'International Day of Persons with Disabilities', 'all', true],
+  ['2026-12-24', 'Udhauli Parva', 'all', true],
+  ['2026-12-25', 'Christmas', 'all', false],
+  ['2026-12-30', 'Tamu Lhosar', 'all', true],
+  ['2027-01-11', 'Prithvi Jayanti', 'all', false],
+  ['2027-01-15', 'Maghe Sankranti', 'all', false],
+  ['2027-02-07', 'Sonam Lhosar', 'all', true],
+  ['2027-02-11', 'Basanta Panchami', 'all', true],
+  ['2027-02-19', 'Democracy Day', 'all', false],
+  ['2027-03-06', 'Maha Shivaratri', 'all', false],
+  ['2027-03-08', "International Women's Day", 'female', false],
+  ['2027-03-09', 'Gyalpo Lhosar', 'all', true],
+  ['2027-03-21', 'Holi (hill districts)', 'all', true],
+  ['2027-03-22', 'Holi (Terai districts)', 'all', true],
+  ['2027-04-06', 'Ghode Jatra', 'all', true],
 ];
 
 
@@ -140,13 +167,13 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     if (b.bsYear !== 2083) return res.status(400).json({ error: 'default list available for BS 2083 only; add others via POST /shifts/holidays' });
     let inserted = 0;
     const insertedDates: string[] = [];
-    for (const [ad, en, ne, scope] of HOLIDAYS_2083) {
+    for (const [ad, en, scope, optional] of HOLIDAYS_2083) {
       // UNIQUE with a NULL branch_id never conflicts in SQL, so idempotency is an explicit existence check.
       const ins = await db.query(
-        `INSERT INTO holiday (company_id, branch_id, local_date, bs_date, name_en, name_ne, gender_scope)
+        `INSERT INTO holiday (company_id, branch_id, local_date, bs_date, name_en, gender_scope, optional)
          SELECT $1, NULL, $2, (SELECT bs_date FROM bs_calendar WHERE ad_date = $2), $3, $4, $5
           WHERE NOT EXISTS (SELECT 1 FROM holiday WHERE company_id = $1 AND branch_id IS NULL AND local_date = $2 AND name_en = $3)`,
-        [req.user!.companyId, ad, en, ne, scope]);
+        [req.user!.companyId, ad, en, scope, optional]);
       if ((ins.rowCount ?? 0) > 0) { inserted++; insertedDates.push(ad); }
     }
     if (inserted) {
@@ -300,7 +327,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     for (const row of rows.rows) {
       const userId = await userIdForEmployee(db, row.employee_id);
       await notify(db, { companyId: req.user!.companyId, userId, employeeId: row.employee_id, template: 'roster.published', title: 'Roster published',
-        body: `Your shifts for ${b.from} to ${b.to} have been published (${row.n} days).`, payload: { from: b.from, to: b.to }, channels: ['push'] });
+        body: `Your shifts for ${bsRange(b.from, b.to)} have been published (${row.n} days).`, payload: { from: b.from, to: b.to }, channels: ['push'] });
     }
     await audit(db, { actorId: req.user!.id, action: 'publish', table: 'roster', after: b });
     res.json({ notified: rows.rows.length });

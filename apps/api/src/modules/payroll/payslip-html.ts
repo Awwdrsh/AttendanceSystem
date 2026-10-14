@@ -1,5 +1,6 @@
 import { amountInWordsEn, formatNpr, D } from '@hajiri/payroll-engine';
 import { BS_MONTH_NAMES_EN } from '@hajiri/bs-calendar';
+import { bsLabel } from '../../bsdate.js';
 
 export interface PayslipView {
   company: { nameEn: string; nameNe: string | null };
@@ -41,7 +42,7 @@ table.blk td{padding:6px 0;border-bottom:1px solid #f0f0f2}.amt{text-align:right
 @media print{body{margin:10mm auto}.net{border-color:#bbb}}
 </style></head><body>
 <div class="hdr"><div><h1>${esc(v.company.nameEn)}</h1><div class="sub">Payslip</div></div>
-<div class="period"><div class="sub">Pay period</div><b>${esc(period)}</b><div class="muted">${esc(v.period.startAd)} to ${esc(v.period.endAd)}</div></div></div>
+<div class="period"><div class="sub">Pay period</div><b>${esc(period)}</b><div class="muted">${esc(bsLabel(v.period.startAd))} to ${esc(bsLabel(v.period.endAd))}</div></div></div>
 <div class="meta">
 <div><span>Employee</span>${esc(v.employee.nameEn)} (${esc(v.employee.code)})</div>
 <div><span>Designation</span>${esc(v.employee.designation) || '—'}</div><div><span>Department</span>${esc(v.employee.department) || '—'}</div>

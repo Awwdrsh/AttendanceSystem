@@ -39,14 +39,14 @@ describe('shifts', () => {
   });
   it('holiday import is idempotent and the calendar marks Saturdays', async () => {
     const first = await request(app).post('/api/v1/shifts/holidays/import-default').set(auth(hr)).send({ bsYear: 2083 });
-    expect(first.body).toEqual({ inserted: 20, total: 20 });
+    expect(first.body).toEqual({ inserted: 42, total: 42 });
     const second = await request(app).post('/api/v1/shifts/holidays/import-default').set(auth(hr)).send({ bsYear: 2083 });
     expect(second.body.inserted).toBe(0);
     const cal = await request(app).get('/api/v1/shifts/calendar').set(auth(hr)).query({ from: '2026-10-17', to: '2026-10-24' });
     const sat = cal.body.days.find((d: { date: string }) => d.date === '2026-10-17');
     expect(sat).toMatchObject({ weeklyOff: true, bsDate: '2083-06-31' });
     expect(sat.holidays[0].name_en).toMatch(/Dashain/);
-    const h = await request(app).post('/api/v1/shifts/holidays').set(auth(hr)).send({ localDate: '2026-12-30', nameEn: 'Tamu Lhosar' });
+    const h = await request(app).post('/api/v1/shifts/holidays').set(auth(hr)).send({ localDate: '2026-12-31', nameEn: 'Company anniversary' });
     expect(h.status).toBe(201);
     expect(h.body.recomputeQueued).toBe(2);
   });

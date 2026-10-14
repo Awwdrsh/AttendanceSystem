@@ -45,9 +45,9 @@ describe('shift and roster guards', () => {
   });
 
   it('duplicate company-wide holidays are refused and the default import stays idempotent', async () => {
-    expect((await request(app).post('/api/v1/shifts/holidays').set(auth(hr)).send({ localDate: '2026-12-30', nameEn: 'Tamu Lhosar' })).status).toBe(201);
-    expect((await request(app).post('/api/v1/shifts/holidays').set(auth(hr)).send({ localDate: '2026-12-30', nameEn: 'Tamu Lhosar' })).status).toBe(409);
-    expect((await request(app).post('/api/v1/shifts/holidays/import-default').set(auth(hr)).send({ bsYear: 2083 })).body.inserted).toBe(20);
+    expect((await request(app).post('/api/v1/shifts/holidays').set(auth(hr)).send({ localDate: '2026-12-31', nameEn: 'Company anniversary' })).status).toBe(201);
+    expect((await request(app).post('/api/v1/shifts/holidays').set(auth(hr)).send({ localDate: '2026-12-31', nameEn: 'Company anniversary' })).status).toBe(409);
+    expect((await request(app).post('/api/v1/shifts/holidays/import-default').set(auth(hr)).send({ bsYear: 2083 })).body.inserted).toBe(42);
     expect((await request(app).post('/api/v1/shifts/holidays/import-default').set(auth(hr)).send({ bsYear: 2083 })).body.inserted).toBe(0);
     const n = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM holiday WHERE company_id = $1 AND local_date = '2026-10-17'`, [DEMO.companyId]);
     expect(n.rows[0]!.n).toBe('1');
