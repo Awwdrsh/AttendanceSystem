@@ -28,7 +28,8 @@ describe('Hikvision ISAPI listening host', () => {
     expect(store.punches).toHaveLength(1);
     expect(store.punches[0]).toMatchObject({ vendor: 'hikvision', deviceUserPin: '1', employeeId: 'emp-1', verifyMode: 'face', direction: 'in', localDate: '2026-09-21', deviceLocalTime: '2026-09-21 10:17:03' });
     expect(store.punches[0]!.punchedAt.toISOString()).toBe('2026-09-21T04:32:03.000Z');
-    expect(store.recomputeQueue).toEqual([{ employeeId: 'emp-1', localDate: '2026-09-21', reason: 'punch:hikvision' }]);
+    // A morning punch also re-evaluates the previous day (a night shift's punch-out belongs to the day it started).
+    expect(store.recomputeQueue).toEqual([{ employeeId: 'emp-1', localDate: '2026-09-20', reason: 'punch:hikvision' }, { employeeId: 'emp-1', localDate: '2026-09-21', reason: 'punch:hikvision' }]);
   });
 
   it('dedupes resent events and does not dedupe across devices', async () => {

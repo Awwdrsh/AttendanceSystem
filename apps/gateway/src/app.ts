@@ -37,6 +37,16 @@ const TEMPLATE_TABLES = new Set(['FINGERTMP', 'FACE', 'BIODATA', 'FP', 'ATTPHOTO
  *   Hikvision ISAPI listening host (Appendix C):
  *     POST /hikvision/event?sn=..             JSON or multipart AccessControllerEvent / heartbeat
  */
+/**
+ * Days a punch can change: its own date and, for a morning punch (before 12:00 Nepal time), the previous date, because a
+ * night shift or an overtime punch-out after midnight belongs to the day the shift started.
+ */
+export function affectedDates(punchedAt: Date, localDate: string): string[] {
+  const nptHour = new Date(punchedAt.getTime() + 345 * 60_000).getUTCHours();
+  if (nptHour >= 12) return [localDate];
+  return [new Date(Date.parse(`${localDate}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10), localDate];
+}
+
 export function createGatewayApp(deps: GatewayDeps): Express {
   const { store, signer, logger, serverVersion = 'hajiri-gw/0.1.0' } = deps;
   const cipher = deps.cipher ?? null;
@@ -45,13 +55,19 @@ export function createGatewayApp(deps: GatewayDeps): Express {
 
   const app = express();
   app.disable('x-powered-by');
-  if (logger) app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => (req.url ?? '').startsWith('/iclock/getrequest') || req.url === '/health' } }));
+  // Request logs carry method and path only: the Hikvision device key travels in the query string or x-device-key header.
+  if (logger) app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => (req.url ?? '').startsWith('/iclock/getrequest') || req.url === '/health' },
+    serializers: { req: (req: { method?: string; url?: string }) => ({ method: req.method, url: redactUrl(req.url ?? '') }), res: (res: { statusCode?: number }) => ({ statusCode: res.statusCode }) } }));
   // Devices send raw tab-separated text with odd or missing content types; accept everything as text.
   app.use('/iclock/fdata', express.text({ type: () => true, limit: '10mb' }));
   app.use('/iclock', express.text({ type: () => true, limit: '2mb' }));
   app.use('/hikvision', express.raw({ type: () => true, limit: '10mb' }));
 
   const plain = (res: Response, body: string, status = 200) => res.status(status).type('text/plain').send(body);
+  /** ADMS cursors are echoed back in the handshake options block, so only plain digits are accepted (no line injection). */
+  const stampOf = (v: unknown): string | undefined => (typeof v === 'string' && /^\d{1,20}$/.test(v) ? v : undefined);
+  /** Firmware version strings are stored and shown to admins: printable and short. */
+  const versionOf = (v: unknown): string | undefined => (typeof v === 'string' && /^[\w.() -]{1,32}$/.test(v) ? v : undefined);
 
   /** Serial numbers: printable, bounded, no path or log tricks. Returns null when unacceptable. */
   const serialOf = (v: unknown): string | null => {
@@ -80,6 +96,9 @@ export function createGatewayApp(deps: GatewayDeps): Express {
     let punch: NormalizedPunch;
     try { punch = buildPunch(base, tzOffsetMin, signer); } catch { counters.malformed++; return null; }
     const skewMs = punch.punchedAt.getTime() - Date.now();
+    // A reset clock (factory 2000-01-01) or one days ahead cannot be a real punch; storing it would put attendance on the
+    // wrong day. Rejected outright (the raw archive keeps the line); smaller future skews are stored but flagged.
+    if (punch.punchedAt.getTime() < MIN_PUNCH_MS || skewMs > MAX_FUTURE_MS) { counters.rejected++; return null; }
     if (skewMs > maxSkewMs) {
       punch.raw = { ...punch.raw, clockSkew: true, clockSkewMs: skewMs };
       counters.skewed++;
@@ -89,7 +108,7 @@ export function createGatewayApp(deps: GatewayDeps): Express {
     const outcome = await store.insertPunch(punch);
     if (outcome === 'inserted') {
       counters.inserted++;
-      if (punch.employeeId) await store.enqueueRecompute(punch.employeeId, punch.localDate, `punch:${device.vendor}`);
+      if (punch.employeeId) for (const d of affectedDates(punch.punchedAt, punch.localDate)) await store.enqueueRecompute(punch.employeeId, d, `punch:${device.vendor}`);
     } else if (outcome === 'duplicate') counters.duplicate++;
     else counters.near++;
     return punch;
@@ -98,17 +117,22 @@ export function createGatewayApp(deps: GatewayDeps): Express {
   /** Encrypt and store template uploads; discard photos; never log bodies (plan §9.1 decision 5). */
   async function storeTemplates(device: DeviceRecord, table: string, body: string) {
     const parsed = parseTemplateUpload(table, body);
-    let stored = 0, discarded = 0;
+    let stored = 0, discarded = 0, noConsent = 0;
     for (const t of parsed.templates) {
       if (!cipher || !t.valid) { discarded++; continue; }
+      // A template is kept only for a mapped employee with an active consent for that modality; after a withdrawal
+      // (or before consent is given) the device's upload is dropped. The raw archive is unaffected.
       const employeeId = await store.resolveEmployee(device.id, t.pin, new Date().toISOString().slice(0, 10));
-      const aad = templateAad(employeeId ?? `pin:${device.serialNo}:${t.pin}`, t.modality);
+      const consentId = employeeId ? await store.activeConsentId(employeeId, t.modality) : null;
+      if (!employeeId || !consentId) { discarded++; noConsent++; continue; }
+      const aad = templateAad(employeeId, t.modality);
       await store.insertTemplate({
         deviceId: device.id, deviceUserPin: t.pin, employeeId, modality: t.modality, vendorFormat: t.vendorFormat,
-        ciphertext: cipher.encrypt(t.templateB64, aad), keyVersion: cipher.keyVersion, aadHash: aadHash(aad),
+        ciphertext: cipher.encrypt(t.templateB64, aad), keyVersion: cipher.keyVersion, aadHash: aadHash(aad), consentId,
       });
       stored++;
     }
+    if (noConsent) logger?.warn({ sn: device.serialNo, count: noConsent }, 'templates discarded: no active biometric consent for the mapped employee');
     if (parsed.templates.length && !cipher) logger?.warn({ sn: device.serialNo, count: parsed.templates.length }, 'templates discarded: DATA_ENCRYPTION_KEY not configured');
     logger?.info({ sn: device.serialNo, table, stored, discarded, photos: parsed.photos, users: parsed.users, unknown: parsed.unknown }, 'template upload');
     return { stored, discarded, ...parsed };
@@ -118,7 +142,7 @@ export function createGatewayApp(deps: GatewayDeps): Express {
   app.get('/iclock/cdata', async (req, res) => {
     const sn = serialOf(req.query.SN);
     if (!sn) return plain(res, 'ERROR: SN required', 400);
-    const pushVersion = req.query.pushver ? String(req.query.pushver) : undefined;
+    const pushVersion = versionOf(req.query.pushver);
     let device = await store.getDevice(sn);
     if (!device) {
       device = await store.registerPending(sn, { vendor: 'zkteco', protocol: 'adms', ...(pushVersion ? { pushVersion } : {}) });
@@ -155,7 +179,7 @@ export function createGatewayApp(deps: GatewayDeps): Express {
         }, device.tzOffsetMin, c);
         if (r.deviceLocalTime > newest) newest = r.deviceLocalTime;
       }
-      const stamp = req.query.Stamp ? String(req.query.Stamp) : undefined;
+      const stamp = stampOf(req.query.Stamp);
       if (stamp) await store.touch(sn!, { attlogStamp: stamp });
       if (newest && c.inserted > 0) {
         // Only fresh (non-buffered) records say anything about the clock; buffered replays are old by definition.
@@ -169,7 +193,7 @@ export function createGatewayApp(deps: GatewayDeps): Express {
     }
 
     if (table === 'OPERLOG') {
-      const stamp = req.query.OpStamp ? String(req.query.OpStamp) : undefined;
+      const stamp = stampOf(req.query.OpStamp);
       if (stamp) await store.touch(sn!, { oplogStamp: stamp });
       await storeTemplates(device, table, body);
       return plain(res, 'OK: 1');
@@ -198,9 +222,14 @@ export function createGatewayApp(deps: GatewayDeps): Express {
   app.post('/iclock/devicecmd', async (req, res) => {
     const sn = serialOf(req.query.SN);
     const body = typeof req.body === 'string' ? req.body : '';
-    if (sn && (await store.getDevice(sn))) { archive.append(sn, 'devicecmd', body); await store.touch(sn, { lastSeenAt: new Date() }); }
+    // Results are accepted only from an approved device and only for that device's own commands; otherwise anyone on
+    // the network could mark another terminal's commands as done or failed.
+    const device = sn ? await store.getDevice(sn) : null;
+    if (!device || device.status !== 'active') return plain(res, 'ERROR: device not approved', 403);
+    archive.append(sn!, 'devicecmd', body);
+    await store.touch(sn!, { lastSeenAt: new Date() });
     for (const r of parseDeviceCmdResults(body)) {
-      await store.ackCommand(r.id, r.returnCode);
+      await store.ackCommand(device.id, r.id, r.returnCode);
       logger?.info({ sn, ...r }, 'device command result');
     }
     return plain(res, 'OK');
@@ -232,11 +261,11 @@ export function createGatewayApp(deps: GatewayDeps): Express {
       if (!device) { logger?.warn({ sn }, 'pending device cap reached; registration refused'); return plain(res, 'ERROR: too many pending devices', 403); }
       logger?.warn({ sn }, 'unknown hikvision device registered as pending');
     }
-    // Only known devices are archived (unknown serials could otherwise fill the disk).
-    if (device.status === 'active') archive.append(sn, 'hikvision', body);
-    await store.touch(sn, { lastSeenAt: new Date() });
-    if (device.status !== 'active') return plain(res, 'ERROR: device not approved', 403);
+    if (device.status !== 'active') { await store.touch(sn, { lastSeenAt: new Date() }); return plain(res, 'ERROR: device not approved', 403); }
     if (!commKeyOk(device, req)) { logger?.warn({ sn }, 'device key missing or wrong'); return plain(res, 'ERROR: device key rejected', 403); }
+    // Archived and marked seen only once authenticated (unknown or unauthenticated senders could otherwise fill the disk).
+    archive.append(sn, 'hikvision', body);
+    await store.touch(sn, { lastSeenAt: new Date() });
     if (ev.kind === 'heartbeat') return plain(res, 'OK');
     if (ev.kind !== 'attendance' || !ev.pin || !ev.deviceLocalTime) { logger?.debug({ sn, major: ev.major, minor: ev.minor, xml: ev.raw.fromXml === true }, 'non-attendance event ignored'); return plain(res, 'OK'); }
     const c = newCounters();
@@ -271,5 +300,14 @@ function isStorageUnavailable(e: { code?: string; message?: string }): boolean {
   return (!!e.code && codes.has(e.code)) || /terminat|connection|timeout/i.test(e.message ?? '') && !/invalid/i.test(e.message ?? '');
 }
 
-interface Counters { inserted: number; duplicate: number; near: number; unmapped: number; skewed: number; malformed: number }
-const newCounters = (): Counters => ({ inserted: 0, duplicate: 0, near: 0, unmapped: 0, skewed: 0, malformed: 0 });
+interface Counters { inserted: number; duplicate: number; near: number; unmapped: number; skewed: number; malformed: number; rejected: number }
+const newCounters = (): Counters => ({ inserted: 0, duplicate: 0, near: 0, unmapped: 0, skewed: 0, malformed: 0, rejected: 0 });
+
+/** Punches before 2020 or more than a day in the future are refused (device clock reset or badly wrong). */
+const MIN_PUNCH_MS = Date.UTC(2020, 0, 1);
+const MAX_FUTURE_MS = 24 * 3600_000;
+
+/** Drop secrets from a logged URL: the Hikvision listening-host URL may carry ?key=. */
+export function redactUrl(url: string): string {
+  return url.replace(/([?&](?:key|token|password|pwd)=)[^&]*/gi, '$1[redacted]');
+}

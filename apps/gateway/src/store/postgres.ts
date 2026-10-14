@@ -75,9 +75,15 @@ export class PostgresStore implements Store {
 
   async insertTemplate(t: TemplateRecord) {
     await this.pool.query(
-      `INSERT INTO biometric_template (employee_id, device_user_pin, modality, vendor_format, ciphertext, key_version, aad_hash, enrolled_on_device_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [t.employeeId, t.deviceUserPin, t.modality, t.vendorFormat, t.ciphertext, t.keyVersion, t.aadHash, t.deviceId]);
+      `INSERT INTO biometric_template (employee_id, device_user_pin, modality, vendor_format, ciphertext, key_version, aad_hash, enrolled_on_device_id, consent_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [t.employeeId, t.deviceUserPin, t.modality, t.vendorFormat, t.ciphertext, t.keyVersion, t.aadHash, t.deviceId, t.consentId ?? null]);
+  }
+
+  async activeConsentId(employeeId: string, modality: TemplateRecord['modality']) {
+    const r = await this.pool.query<{ id: string }>(
+      `SELECT id FROM consent_record WHERE employee_id = $1 AND modality = $2 AND revoked_at IS NULL ORDER BY granted_at DESC LIMIT 1`, [employeeId, modality]);
+    return r.rows[0]?.id ?? null;
   }
 
   async enqueueCommand(deviceId: string, command: string) {
@@ -99,11 +105,11 @@ export class PostgresStore implements Store {
     return r.rows.map((c) => ({ id: Number(c.id), command: c.command }));
   }
 
-  async ackCommand(id: number, returnCode: number) {
+  async ackCommand(deviceId: string, id: number, returnCode: number) {
     await this.pool.query(
       `UPDATE device_command SET status = CASE WHEN $2::int >= 0 THEN 'acked' ELSE 'failed' END, return_code = $2::int, acked_at = now()
-        WHERE id = $1 AND status = 'sent'`,
-      [id, returnCode]);
+        WHERE id = $1 AND device_id = $3 AND status = 'sent'`,
+      [id, returnCode, deviceId]);
   }
 
   async listDevices(filter: { status?: DeviceRecord['status']; protocol?: string } = {}) {

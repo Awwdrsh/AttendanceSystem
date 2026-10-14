@@ -70,7 +70,7 @@ describe('command safety', () => {
     expect(await store.popQueuedCommands(deviceId, t2)).toEqual([]);
     expect(store.commands[0]).toMatchObject({ status: 'failed', attempts: 2 });
     // a late ack for a failed command is ignored
-    await store.ackCommand(id, 0);
+    await store.ackCommand(deviceId, id, 0);
     expect(store.commands[0]!.status).toBe('failed');
   });
 });

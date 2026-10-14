@@ -76,7 +76,7 @@ export function parseDeviceCmdResults(body: string): Array<{ id: number; returnC
     const p = new URLSearchParams(line.trim());
     const id = Number(p.get('ID'));
     const returnCode = Number(p.get('Return'));
-    if (!Number.isInteger(id) || !Number.isInteger(returnCode)) continue;
+    if (!Number.isSafeInteger(id) || id <= 0 || !Number.isSafeInteger(returnCode) || Math.abs(returnCode) > 2_147_483_647) continue;
     out.push({ id, returnCode, cmd: p.get('CMD') ?? '' });
   }
   return out;

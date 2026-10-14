@@ -37,7 +37,7 @@ describe('PostgresStore end to end', () => {
     const punches = await pool.query('SELECT device_user_pin, employee_id, verify_mode, local_date FROM punch_event ORDER BY punched_at');
     expect(punches.rows).toEqual([{ device_user_pin: '1', employee_id: C.emp, verify_mode: 'fingerprint', local_date: '2026-09-21' }, { device_user_pin: '7', employee_id: null, verify_mode: 'face', local_date: '2026-09-21' }]);
     const q = await pool.query('SELECT employee_id, local_date::text, reason FROM recompute_queue');
-    expect(q.rows).toEqual([{ employee_id: C.emp, local_date: '2026-09-21', reason: 'punch:zkteco' }]);
+    expect(q.rows.sort((a, b) => a.local_date.localeCompare(b.local_date))).toEqual([{ employee_id: C.emp, local_date: '2026-09-20', reason: 'punch:zkteco' }, { employee_id: C.emp, local_date: '2026-09-21', reason: 'punch:zkteco' }]);
     const dev = await pool.query('SELECT attlog_stamp, clock_drift_sec, last_seen_at FROM device WHERE serial_no = $1', ['PG-01']);
     expect(dev.rows[0].attlog_stamp).toBe('5');
     expect(dev.rows[0].last_seen_at).not.toBeNull();
@@ -45,6 +45,7 @@ describe('PostgresStore end to end', () => {
   });
 
   it('encrypts templates so the API FieldCipher can decrypt them; plaintext absent', async () => {
+    await pool.query(`INSERT INTO consent_record (employee_id, purpose, modality, notice_version) VALUES ($1, 'attendance', 'fingerprint', 'v1')`, [C.emp]);
     const b64 = Buffer.from('real-template-bytes').toString('base64');
     await request(app).post('/iclock/fdata?SN=PG-01&table=FINGERTMP').set('Content-Type', 'application/octet-stream').send(`PIN=1\tFID=6\tSize=1\tValid=1\tTMP=${b64}\n`);
     const rows = await pool.query<{ employee_id: string; ciphertext: Buffer; aad_hash: string; modality: string }>('SELECT employee_id, ciphertext, aad_hash, modality FROM biometric_template');
@@ -86,7 +87,7 @@ describe('PostgresStore end to end', () => {
     expect(await store.popQueuedCommands(C.device, t2)).toEqual([]);
     const row = await pool.query('SELECT status, attempts FROM device_command WHERE id = $1', [id]);
     expect(row.rows[0]).toEqual({ status: 'failed', attempts: 2 });
-    await store.ackCommand(id, 0);
+    await store.ackCommand(C.device, id, 0);
     expect((await pool.query('SELECT status FROM device_command WHERE id = $1', [id])).rows[0].status).toBe('failed');
   });
 

@@ -92,7 +92,7 @@ describe('command channel', () => {
   it('marks failed results', async () => {
     const id = await store.enqueueCommand(deviceId, 'CHECK');
     await request(app).get('/iclock/getrequest?SN=DEMO-01');
-    await request(app).post('/iclock/devicecmd').set('Content-Type', 'text/plain').send(`ID=${id}&Return=-1002&CMD=CHECK`);
+    await request(app).post('/iclock/devicecmd?SN=DEMO-01').set('Content-Type', 'text/plain').send(`ID=${id}&Return=-1002&CMD=CHECK`);
     expect(store.commands[0]).toMatchObject({ status: 'failed', returnCode: -1002 });
   });
   it('SHELL can never be queued', async () => {

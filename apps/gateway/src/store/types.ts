@@ -35,6 +35,8 @@ export interface TemplateRecord {
   ciphertext: Buffer;
   keyVersion: number;
   aadHash: string;
+  /** The employee's active biometric consent the template was stored under. */
+  consentId?: string | null;
 }
 
 export interface Store {
@@ -48,13 +50,16 @@ export interface Store {
   /** Ask the API worker to recompute the day (plan §10.3). Idempotent. */
   enqueueRecompute(employeeId: string, localDate: string, reason: string): Promise<void>;
   insertTemplate(t: TemplateRecord): Promise<void>;
+  /** Id of the employee's unrevoked consent for this modality, or null (Privacy Act 2075 s.23: no consent, no template). */
+  activeConsentId(employeeId: string, modality: TemplateRecord['modality']): Promise<string | null>;
   enqueueCommand(deviceId: string, command: string): Promise<number>;
   /**
    * Hand queued commands to the device and mark them sent. Commands sent but not acknowledged within
    * COMMAND_ACK_TIMEOUT_MS are re-sent once, then marked failed (devices lose polls across reboots/outages).
    */
   popQueuedCommands(deviceId: string, now?: Date): Promise<Array<{ id: number; command: string }>>;
-  ackCommand(id: number, returnCode: number): Promise<void>;
+  /** Record a result for one of this device's sent commands; ids belonging to another device are ignored. */
+  ackCommand(deviceId: string, id: number, returnCode: number): Promise<void>;
   listDevices(filter?: { status?: DeviceRecord['status']; protocol?: string }): Promise<DeviceRecord[]>;
   countPunches(deviceId: string, localDate: string): Promise<number>;
 }

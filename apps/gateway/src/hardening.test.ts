@@ -52,7 +52,7 @@ describe('ADMS hardening', () => {
   it('queues recompute for mapped employees only', async () => {
     const app = createGatewayApp({ store, signer });
     await attlog(app, '1\t2026-09-21 10:17:03\t0\t1\t0\n9\t2026-09-21 10:18:03\t0\t1\t0\n');
-    expect(store.recomputeQueue).toEqual([{ employeeId: 'emp-1', localDate: '2026-09-21', reason: 'punch:zkteco' }]);
+    expect(store.recomputeQueue).toEqual([{ employeeId: 'emp-1', localDate: '2026-09-20', reason: 'punch:zkteco' }, { employeeId: 'emp-1', localDate: '2026-09-21', reason: 'punch:zkteco' }]);
   });
 
   it('archives raw bodies per device per day and never logs templates elsewhere', async () => {
@@ -88,6 +88,7 @@ describe('templates', () => {
 
   it('stores templates encrypted in the API cipher format, discards invalid ones, and discards everything without a key', async () => {
     const withKey = createGatewayApp({ store, signer, cipher: new TemplateCipher(key) });
+    store.grantConsent('emp-1', 'fingerprint');
     const b64 = Buffer.from('finger-template-bytes').toString('base64');
     await attlog(withKey, `FP PIN=1\tFID=6\tSize=1\tValid=1\tTMP=${b64}\nFP PIN=1\tFID=7\tSize=1\tValid=0\tTMP=${b64}\n`, 'OPERLOG');
     expect(store.templates).toHaveLength(1);

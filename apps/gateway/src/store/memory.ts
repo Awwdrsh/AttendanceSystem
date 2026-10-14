@@ -17,6 +17,7 @@ export class MemoryStore implements Store {
   recomputeQueue: Array<{ employeeId: string; localDate: string; reason: string }> = [];
   mappings = new Map<string, string>(); // `${deviceId}:${pin}` -> employeeId
   commands: MemoryCommand[] = [];
+  consents = new Map<string, string>(); // `${employeeId}:${modality}` -> consent id
   private nextCmd = 1;
 
   constructor(readonly opts: StoreOptions = {}) {}
@@ -59,6 +60,10 @@ export class MemoryStore implements Store {
 
   async insertTemplate(t: TemplateRecord) { this.templates.push(t); }
 
+  grantConsent(employeeId: string, modality: TemplateRecord['modality']): string { const id = randomUUID(); this.consents.set(`${employeeId}:${modality}`, id); return id; }
+  revokeConsent(employeeId: string, modality: TemplateRecord['modality']) { this.consents.delete(`${employeeId}:${modality}`); }
+  async activeConsentId(employeeId: string, modality: TemplateRecord['modality']) { return this.consents.get(`${employeeId}:${modality}`) ?? null; }
+
   async enqueueCommand(deviceId: string, command: string) {
     assertAllowedCommand(command, this.opts.allowDangerousCommands);
     const id = this.nextCmd++;
@@ -77,8 +82,8 @@ export class MemoryStore implements Store {
     return q.map((c) => ({ id: c.id, command: c.command }));
   }
 
-  async ackCommand(id: number, returnCode: number) {
-    const c = this.commands.find((x) => x.id === id);
+  async ackCommand(deviceId: string, id: number, returnCode: number) {
+    const c = this.commands.find((x) => x.id === id && x.deviceId === deviceId);
     if (c && c.status === 'sent') { c.status = returnCode >= 0 ? 'acked' : 'failed'; c.returnCode = returnCode; }
   }
 

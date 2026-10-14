@@ -10,6 +10,8 @@ import { PostgresStore } from './store/postgres.js';
 
 const cfg = loadConfig();
 const logger = pino({ level: cfg.LOG_LEVEL });
+// An ephemeral key makes every stored punch signature unverifiable after a restart; never acceptable in production.
+if (!cfg.GATEWAY_SIGNING_KEY && process.env.NODE_ENV === 'production') throw new Error('GATEWAY_SIGNING_KEY is required when NODE_ENV=production (run scripts/setup.sh)');
 const signer = cfg.GATEWAY_SIGNING_KEY ? Signer.fromBase64Pkcs8(cfg.GATEWAY_SIGNING_KEY) : Signer.ephemeral();
 if (signer.ephemeral) logger.warn('GATEWAY_SIGNING_KEY not set: using an ephemeral signing key (dev only)');
 const cipher = cfg.DATA_ENCRYPTION_KEY ? TemplateCipher.fromBase64(cfg.DATA_ENCRYPTION_KEY) : null;
