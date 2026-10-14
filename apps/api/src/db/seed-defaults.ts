@@ -27,6 +27,10 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
       [companyId, ...t, i]);
     n += r.rowCount ?? 0;
   }
+  // Event-based statutory leave: paid days per event (maternity 60 of 98, maternity-care 15, mourning 13), not a balance.
+  await db.query(
+    `UPDATE leave_type SET event_days = v.days FROM (VALUES ('MATERNITY', 60), ('PATERNITY', 15), ('MOURNING', 13)) AS v(code, days)
+      WHERE leave_type.company_id = $1 AND leave_type.code = v.code AND leave_type.event_days IS NULL`, [companyId]);
 
   const workflows: Array<[string, Array<{ role: string }>]> = [
     ['leave_request', [{ role: 'manager' }]],

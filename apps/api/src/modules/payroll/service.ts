@@ -74,8 +74,13 @@ export async function preflight(db: Queryable, companyId: string, run: RunRow): 
   const noAssign = emps.filter((e) => !e.assignment);
   if (noAssign.length) blockers.push({ code: 'no_salary_assignment', message: 'Employees without a salary assignment for the period', count: noAssign.length, employees: noAssign.map((e) => e.emp_code) });
 
-  const incomplete = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM v_attendance_latest WHERE employee_id = ANY($1) AND local_date BETWEEN $2 AND $3 AND status = 'Incomplete'`, [ids, p.start_ad, p.end_ad]);
-  if (Number(incomplete.rows[0]?.n) > 0) warnings.push({ code: 'incomplete_days', message: 'Days with a missing punch will count as unpaid unless regularised', count: Number(incomplete.rows[0]!.n) });
+  const incomplete = await db.query<{ emp_code: string; n: string }>(
+    `SELECT e.emp_code, count(*)::text AS n FROM v_attendance_latest v JOIN employee e ON e.id = v.employee_id
+      WHERE v.employee_id = ANY($1) AND v.local_date BETWEEN $2 AND $3 AND v.status = 'Incomplete' GROUP BY e.emp_code ORDER BY e.emp_code`, [ids, p.start_ad, p.end_ad]);
+  if (incomplete.rows.length) {
+    const days = incomplete.rows.reduce((a, r) => a + Number(r.n), 0);
+    warnings.push({ code: 'incomplete_days', message: 'Days with a missing punch are paid as worked; check them and regularise if needed', count: days, employees: incomplete.rows.map((r) => `${r.emp_code}: ${r.n} ${r.n === '1' ? 'day' : 'days'}`) });
+  }
   const pendingReg = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM regularisation_request WHERE employee_id = ANY($1) AND local_date BETWEEN $2 AND $3 AND status = 'pending'`, [ids, p.start_ad, p.end_ad]);
   if (Number(pendingReg.rows[0]?.n) > 0) warnings.push({ code: 'pending_regularisations', message: 'Regularisation requests still pending', count: Number(pendingReg.rows[0]!.n) });
   const pendingLeave = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM leave_request WHERE employee_id = ANY($1) AND status = 'pending' AND from_date <= $3 AND to_date >= $2`, [ids, p.start_ad, p.end_ad]);
@@ -93,6 +98,20 @@ interface EmpRow {
   id: string; emp_code: string; name_en: string; name_ne: string | null; gender: 'male' | 'female' | 'other' | null; marital_status: 'single' | 'couple' | null;
   is_resident: boolean; regime: 'ssf' | 'pf' | 'none'; remote_area_class: 'A' | 'B' | 'C' | 'D' | null; disability: boolean; ot_eligible: boolean; festival_month: number | null;
   join_date: string | null; exit_date: string | null; assignment: { structure_version_id: string; base_amounts: Record<string, string>; valid: string } | null;
+  segments: Array<{ base_amounts: Record<string, string>; from: string; days: number }> | null;
+}
+
+/**
+ * A salary revision inside the period: blend every overlapping assignment's base amounts by the days each one covers, so
+ * 69,500 for 15 days and 60,000 for 16 days pays the day-weighted figure rather than the newest amount for the whole month.
+ */
+export function blendSegments(segments: Array<{ base_amounts: Record<string, string>; days: number }>): Record<string, string> {
+  const total = segments.reduce((a, s) => a + s.days, 0);
+  if (!total) return segments.at(-1)?.base_amounts ?? {};
+  const codes = new Set(segments.flatMap((s) => Object.keys(s.base_amounts)));
+  const out: Record<string, string> = {};
+  for (const code of codes) out[code] = segments.reduce((a, s) => a.plus(D(s.base_amounts[code] ?? 0).times(s.days)), D(0)).div(total).toDecimalPlaces(2).toFixed(2);
+  return out;
 }
 
 async function activeEmployees(db: Queryable, companyId: string, p: PeriodRow, run: RunRow): Promise<EmpRow[]> {
@@ -101,7 +120,10 @@ async function activeEmployees(db: Queryable, companyId: string, p: PeriodRow, r
     `SELECT e.id, e.emp_code, e.name_en, e.name_ne, e.gender, e.marital_status, e.is_resident, e.regime, e.remote_area_class, e.disability, e.ot_eligible, e.festival_month,
             e.join_date::text, e.exit_date::text,
             (SELECT jsonb_build_object('structure_version_id', a.structure_version_id, 'base_amounts', a.base_amounts, 'valid', a.valid::text)
-               FROM salary_assignment a WHERE a.employee_id = e.id AND a.valid && daterange($2::date, $3::date, '[]') ORDER BY upper_inf(a.valid) DESC, lower(a.valid) DESC LIMIT 1) AS assignment
+               FROM salary_assignment a WHERE a.employee_id = e.id AND a.valid && daterange($2::date, $3::date, '[]') ORDER BY upper_inf(a.valid) DESC, lower(a.valid) DESC LIMIT 1) AS assignment,
+            (SELECT jsonb_agg(jsonb_build_object('base_amounts', a.base_amounts, 'from', lower(a.valid * daterange($2::date, $3::date, '[]'))::text,
+                                                 'days', upper(a.valid * daterange($2::date, $3::date, '[]')) - lower(a.valid * daterange($2::date, $3::date, '[]'))) ORDER BY lower(a.valid))
+               FROM salary_assignment a WHERE a.employee_id = e.id AND a.valid && daterange($2::date, $3::date, '[]')) AS segments
        FROM employee e
       WHERE e.company_id = $1 AND (e.join_date IS NULL OR e.join_date <= $3) AND (e.exit_date IS NULL OR e.exit_date >= $2)
         AND ($4::uuid[] IS NULL OR e.id = ANY($4))
@@ -170,7 +192,8 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
                   -- half-day leave with no punches: the leave half is paid unless the leave type is unpaid, the other half is absent
                   WHEN status = 'Absent' AND flags @> '[{"kind":"HalfDayLeave"}]' AND flags @> '[{"kind":"UnpaidLeave"}]' THEN 1
                   WHEN status = 'Absent' AND flags @> '[{"kind":"HalfDayLeave"}]' THEN 0.5
-                  WHEN status IN ('Absent', 'Incomplete') THEN 1
+                  -- Incomplete (a missing punch) means the person came in: it is paid and surfaced as a pre-flight warning instead.
+                  WHEN status = 'Absent' THEN 1
                   WHEN status = 'HalfDay' THEN 0.5
                   WHEN status = 'OnLeave' AND flags @> '[{"kind":"UnpaidLeave"}]' THEN 1
                   WHEN status = 'HalfDayLeave' AND flags @> '[{"kind":"UnpaidLeave"}]' THEN 0.5
@@ -231,7 +254,16 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
           inputs.push(D(run.params.noticePay).gt(0) ? { code: 'NOTICE_PAY', amount: D(run.params.noticePay).toFixed(2) } : { code: 'NOTICE_DEDUCTION', amount: D(run.params.noticePay).abs().toFixed(2) });
         }
       }
-      const baseAmounts = carriesSalary ? emp.assignment.base_amounts : {};
+      // Segments are clipped to the employment window so a joiner's single assignment is not diluted by days before joining.
+      const segs = (emp.segments ?? []).map((sg) => {
+        const start = sg.from > from ? sg.from : from;
+        const endExcl = new Date(new Date(sg.from).getTime() + sg.days * 86_400_000).toISOString().slice(0, 10);
+        const stop = endExcl <= to ? endExcl : new Date(new Date(to).getTime() + 86_400_000).toISOString().slice(0, 10);
+        return { ...sg, from: start, days: Math.max(0, Math.round((new Date(stop).getTime() - new Date(start).getTime()) / 86_400_000)) };
+      }).filter((sg) => sg.days > 0);
+      const revised = carriesSalary && segs.length > 1;
+      const baseAmounts = !carriesSalary ? {} : revised ? blendSegments(segs) : emp.assignment.base_amounts;
+      if (revised && emp.assignment.base_amounts.BASIC !== undefined) extras.lastBasic = D(emp.assignment.base_amounts.BASIC).toFixed(2);
       const input: PayrollInput = {
         employee: { id: emp.id, code: emp.emp_code, nameEn: emp.name_en, nameNe: emp.name_ne, gender: emp.gender, maritalStatus: emp.marital_status, isResident: emp.is_resident, regime: emp.regime,
           remoteAreaClass: emp.remote_area_class, disability: emp.disability, otEligible: emp.ot_eligible, festivalMonth: emp.festival_month },
@@ -262,7 +294,11 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
         input.inputs = [{ code: 'BONUS', amount: D(bonus).toFixed(2), note: 'Bonus Act 2030' }];
       }
       const result = computePayslip(input);
+      if (revised) {
+        result.explain.unshift({ code: 'SALARY_REVISION', text: `Salary changed during the period; base amounts are day-weighted: ${segs.map((sg) => `${Object.entries(sg.base_amounts).map(([c, v]) => `${c} ${v}`).join(', ')} for ${sg.days} days from ${sg.from}`).join('; ')}` });
+      }
       const flags = [...result.flags];
+      if (revised) flags.push('SalaryRevised');
       const prevNet = prev.get(emp.id);
       if (run.run_type === 'regular') {
         if (prevNet === undefined) flags.push('FirstPayslip');
@@ -364,8 +400,8 @@ export async function lockRun(db: Db, companyId: string, runId: string, actorId:
     let n: number;
     if (only) {
       const r = await client.query(
-        `UPDATE attendance_day a SET locked_at = now() FROM v_attendance_latest v
-          WHERE a.id = v.id AND v.employee_id = ANY($1) AND v.local_date BETWEEN $2 AND $3 AND a.locked_at IS NULL`, [only, p.start_ad, p.end_ad]);
+        `UPDATE attendance_day a SET locked_at = now() FROM v_attendance_latest v JOIN employee e ON e.id = v.employee_id
+          WHERE a.id = v.id AND v.employee_id = ANY($1) AND e.company_id = $4 AND v.local_date BETWEEN $2 AND $3 AND a.locked_at IS NULL`, [only, p.start_ad, p.end_ad, companyId]);
       n = r.rowCount ?? 0;
     } else {
       n = await lockAttendance(client, companyId, p.start_ad, p.end_ad);

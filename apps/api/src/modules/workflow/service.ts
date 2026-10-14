@@ -121,6 +121,17 @@ export async function canAct(db: Queryable, user: AuthUser, inst: WorkflowInstan
   return ids.includes(user.id);
 }
 
+/** Who may read an approval: HR, the subject, the subject's line manager, a current approver, or anyone who already acted on it. */
+export async function canView(db: Queryable, user: AuthUser, inst: WorkflowInstance): Promise<boolean> {
+  if (user.companyId !== inst.company_id) return false;
+  if (hasRole(user, 'hr')) return true;
+  if (inst.employee_id && user.employeeId === inst.employee_id) return true;
+  if (inst.employee_id && user.employeeId && hasRole(user, 'manager') && (await isManagerOf(db, user.employeeId, inst.employee_id))) return true;
+  if (await canAct(db, user, inst)) return true;
+  const acted = await db.query('SELECT 1 FROM approval_action WHERE instance_id = $1 AND (actor_id = $2 OR on_behalf_of = $2) LIMIT 1', [inst.id, user.id]);
+  return acted.rows.length > 0;
+}
+
 export async function startWorkflow(db: Queryable, input: StartWorkflowInput): Promise<WorkflowInstance> {
   const def = await db.query<{ steps: WorkflowStep[] }>(
     'SELECT steps FROM workflow_definition WHERE company_id = $1 AND object_type = $2', [input.companyId, input.objectType]);

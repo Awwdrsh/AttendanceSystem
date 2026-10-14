@@ -54,7 +54,7 @@ export function biometricsRoutes({ db }: AppDeps): Router {
       retention: RETENTION,
       access: {
         en: ['You: your own punches, attendance, corrections and this record', 'Your manager: your attendance status and requests', 'HR: your profile, attendance and payroll; sensitive fields are decrypted on demand and every read is logged'],
-        ne: ['तपाईं: आफ्नै हाजिरी, सुधार र यो अभिलेख', 'तपाईंको प्रबन्धक: तपाईंको हाजिरी स्थिति र अनुरोध', 'मानव संसाधन: प्रोफाइल र हाजिरी; संवेदनशील क्षेत्र आवश्यक पर्दा मात्र खोलिन्छ र हरेक पहुँच लग हुन्छ', 'वित्त: तलब डेटा मात्र'],
+        ne: ['तपाईं: आफ्नै हाजिरी, सुधार र यो अभिलेख', 'तपाईंको प्रबन्धक: तपाईंको हाजिरी स्थिति र अनुरोध', 'मानव संसाधन: प्रोफाइल र हाजिरी; संवेदनशील क्षेत्र आवश्यक पर्दा मात्र खोलिन्छ र हरेक पहुँच लग हुन्छ'],
       },
       withdraw: {
         en: 'You may withdraw biometric consent at any time from My data; your templates are shredded and you punch with card or PIN instead. Contact HR to correct any record (Privacy Act 2075 s.28).',

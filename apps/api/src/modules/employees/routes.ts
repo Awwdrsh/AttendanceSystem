@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
-import { BadRequestError, NotFoundError } from '../../errors.js';
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors.js';
 import { assertManages, hasRole, requireRole } from '../auth/middleware.js';
 import { nptToday } from '@hajiri/attendance-engine';
 
@@ -71,9 +71,22 @@ async function validateRefs(db: AppDeps['db'], companyId: string | null, b: Empl
   if (b.probationEnd && b.joinDate && b.probationEnd < b.joinDate) throw new BadRequestError('probation end cannot be before join date');
 }
 
+/** Search text is matched literally: % and _ typed by the user are not wildcards. */
+export const likeEscape = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+
 export function employeeRoutes({ db, cipher }: AppDeps): Router {
   const r = Router();
 
+  /** emp_code of the employee already holding this PAN in the company (other than exceptId), via the blind index. */
+  const panOwner = async (companyId: string, pan: string, exceptId?: string): Promise<string | null> =>
+    (await db.query<{ emp_code: string }>('SELECT emp_code FROM employee WHERE company_id = $1 AND pan_bidx = $2 AND ($3::uuid IS NULL OR id <> $3) LIMIT 1',
+      [companyId, cipher.blindIndex(pan), exceptId ?? null])).rows[0]?.emp_code ?? null;
+  const assertPanFree = async (companyId: string, pan: string, exceptId?: string) => {
+    const owner = await panOwner(companyId, pan, exceptId);
+    if (owner) throw new ConflictError(`this PAN is already recorded for employee ${owner}`);
+  };
+
+  // HR lists the whole company; a manager lists only their direct reports and themselves.
   r.get('/', requireRole('hr', 'manager'), async (req, res) => {
     const q = z.object({ status: z.enum(['active', 'exited']).optional(), search: z.string().max(100).optional(), branchId: z.uuid().optional(), pan: z.string().regex(PAN_RE).optional() }).parse(req.query);
     if (q.pan && !hasRole(req.user!, 'hr')) return res.status(403).json({ error: 'PAN lookup requires HR' });
@@ -83,7 +96,9 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
         WHERE e.company_id = $1 AND ($2::text IS NULL OR e.status = $2)
           AND ($3::text IS NULL OR e.emp_code ILIKE '%' || $3 || '%' OR e.name_en ILIKE '%' || $3 || '%' OR e.name_ne ILIKE '%' || $3 || '%')
           AND ($4::uuid IS NULL OR a.branch_id = $4) AND ($5::text IS NULL OR e.pan_bidx = $5)
-        ORDER BY e.emp_code`, [req.user!.companyId, q.status ?? null, q.search ?? null, q.branchId ?? null, q.pan ? cipher.blindIndex(q.pan) : null]);
+          AND ($6 OR e.id = $7::uuid OR a.manager_id = $7::uuid)
+        ORDER BY e.emp_code`, [req.user!.companyId, q.status ?? null, q.search ? likeEscape(q.search) : null, q.branchId ?? null, q.pan ? cipher.blindIndex(q.pan) : null,
+          hasRole(req.user!, 'hr'), req.user!.employeeId]);
     if (q.pan) await audit(db, { actorId: req.user!.id, action: 'pan_lookup', table: 'employee', after: { matches: rows.rows.length } });
     res.json({ employees: rows.rows });
   });
@@ -116,6 +131,7 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
   r.post('/', requireRole('hr'), async (req, res) => {
     const b = employeeBody.parse(req.body);
     await validateRefs(db, req.user!.companyId, b);
+    if (b.pan) await assertPanFree(req.user!.companyId!, b.pan);
     const client = await db.connect();
     try {
       await client.query('BEGIN');
@@ -162,6 +178,7 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
       ];
       for (const [k, col] of map) if (b[k] !== undefined) { vals.push(b[k]); sets.push(`${col} = $${vals.length}`); }
       if (b.exitDate) sets.push(`status = 'exited'`); else if (b.exitDate === null) sets.push(`status = 'active'`);
+      if (b.pan) await assertPanFree(req.user!.companyId!, b.pan, id);
       if (b.pan) { vals.push(cipher.encrypt(b.pan, `employee:${id}:pan`), cipher.blindIndex(b.pan)); sets.push(`pan_enc = $${vals.length - 1}`, `pan_bidx = $${vals.length}`); }
       if (b.bankAccount) { vals.push(cipher.encrypt(b.bankAccount, `employee:${id}:bank`), b.bankAccount.slice(-4)); sets.push(`bank_account_enc = $${vals.length - 1}`, `bank_account_last4 = $${vals.length}`); }
       if (sets.length) await client.query(`UPDATE employee SET ${sets.join(', ')}, updated_at = now() WHERE id = $1`, vals);
@@ -223,6 +240,13 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
     const codes = valid.map((v) => v.empCode);
     const dup = codes.filter((c, i) => codes.indexOf(c) !== i);
     for (const d of new Set(dup)) errors.push({ row: 0, message: `duplicate emp_code in file: ${d}` });
+    const pans = valid.filter((v) => v.pan).map((v) => v.pan!);
+    for (const d of new Set(pans.filter((x, i) => pans.indexOf(x) !== i))) errors.push({ row: 0, message: `duplicate PAN in file: *****${d.slice(-4)}` });
+    for (const v of valid) {
+      if (!v.pan) continue;
+      const taken = await panOwner(req.user!.companyId!, v.pan);
+      if (taken) errors.push({ row: 0, message: `PAN of ${v.empCode} is already recorded for ${taken}` });
+    }
     if (errors.length || dryRun) return res.status(errors.length ? 400 : 200).json({ imported: 0, valid: valid.length, errors });
     const client = await db.connect();
     let imported = 0;

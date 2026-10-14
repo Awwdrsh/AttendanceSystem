@@ -7,7 +7,7 @@ import { resolveSession, type AuthUser, type Role } from './service.js';
 export const SESSION_COOKIE = 'hajiri_session';
 
 declare module 'express-serve-static-core' {
-  interface Request { user?: AuthUser; sessionToken?: string }
+  interface Request { user?: AuthUser; sessionToken?: string; authMethod?: 'cookie' | 'bearer' }
 }
 
 function readCookie(req: Request, name: string): string | undefined {
@@ -27,9 +27,30 @@ export function sessionLoader(db: Queryable) {
     const token = bearer ?? readCookie(req, SESSION_COOKIE);
     if (token) {
       const user = await resolveSession(db, token);
-      if (user) { req.user = user; req.sessionToken = token; }
+      if (user) { req.user = user; req.sessionToken = token; req.authMethod = bearer ? 'bearer' : 'cookie'; }
     }
     next();
+  };
+}
+
+/**
+ * CSRF defence for cookie sessions: a state-changing request carried by the session cookie must come from this
+ * site's own origin (or a configured CORS origin). SameSite=Lax already stops other sites; this also stops other
+ * apps on the same host (e.g. another localhost port), which count as same-site. Bearer-token clients are unaffected.
+ */
+export function sameOriginGuard(allowedOrigins: string[]) {
+  const allowed = new Set(allowedOrigins);
+  return (req: Request, _res: Response, next: NextFunction) => {
+    if (!req.user || req.authMethod !== 'cookie' || ['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+    let origin = req.get('origin');
+    if (!origin || origin === 'null') {
+      const ref = req.get('referer');
+      if (!ref) return origin === 'null' ? next(new ForbiddenError('cross-site request refused')) : next();
+      try { origin = new URL(ref).origin; } catch { return next(new ForbiddenError('cross-site request refused')); }
+    }
+    const self = `${req.protocol}://${req.get('host')}`;
+    if (origin === self || allowed.has(origin)) return next();
+    return next(new ForbiddenError('cross-site request refused'));
   };
 }
 

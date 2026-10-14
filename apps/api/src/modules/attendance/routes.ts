@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import type { AppDeps } from '../../deps.js';
 import { assertManages, hasRole, requireRole } from '../auth/middleware.js';
-import { dateRange, enqueueRecompute, listDays, recomputeDay } from './service.js';
+import { dateRange, enqueueRecompute, listDays, recomputeDay, INLINE_RECOMPUTE_MAX } from './service.js';
 
 import { isoDate } from '../../validation.js';
 
@@ -22,8 +22,14 @@ export function attendanceRoutes({ db }: AppDeps): Router {
     if (dates.length === 0 || dates.length > 62) return res.status(400).json({ error: 'range must be 1 to 62 days' });
     const owned = await db.query<{ n: number }>('SELECT count(*)::int AS n FROM employee WHERE company_id = $1 AND id = ANY($2)', [req.user!.companyId, b.employeeIds]);
     if (owned.rows[0]!.n !== new Set(b.employeeIds).size) return res.status(403).json({ error: 'some employees are not in your company' });
-    await enqueueRecompute(db, b.employeeIds.flatMap((e) => dates.map((d) => ({ employeeId: e, localDate: d }))), 'manual');
-    return res.json({ queued: b.employeeIds.length * dates.length });
+    const ids = [...new Set(b.employeeIds)];
+    // Small ranges are recomputed right away so the result is visible on return; larger ones go to the worker.
+    if (ids.length * dates.length <= INLINE_RECOMPUTE_MAX) {
+      for (const e of ids) for (const d of dates) await recomputeDay(db, e, d);
+      return res.json({ queued: 0, recomputed: ids.length * dates.length });
+    }
+    await enqueueRecompute(db, ids.flatMap((e) => dates.map((d) => ({ employeeId: e, localDate: d }))), 'manual');
+    return res.json({ queued: ids.length * dates.length, recomputed: 0 });
   });
 
   r.get('/days', async (req, res) => {
@@ -44,7 +50,7 @@ export function attendanceRoutes({ db }: AppDeps): Router {
     res.json({ punches: rows.rows });
   });
 
-  /** Exceptions queue (plan §5.4): latest days with anomalies in a range, company-wide. */
+  /** Exceptions queue (plan §5.4): latest days with anomalies in a range; HR company-wide, a manager for direct reports. */
   r.get('/exceptions', requireRole('hr', 'manager'), async (req, res) => {
     const q = z.object({ from: isoDate, to: isoDate, status: z.string().optional() }).parse(req.query);
     const rows = await db.query(
@@ -54,8 +60,9 @@ export function attendanceRoutes({ db }: AppDeps): Router {
           AND (v.status IN ('Incomplete', 'Absent') OR v.flags @> '[{"kind":"OTCapExceeded"}]' OR v.flags @> '[{"kind":"OTPreapprovalMissing"}]'
                OR v.flags @> '[{"kind":"UnpairedPunch"}]' OR v.flags @> '[{"kind":"AutoClockOut"}]')
           AND ($4::text IS NULL OR v.status = $4)
+          AND ($5 OR e.id = $6::uuid OR EXISTS (SELECT 1 FROM employee_assignment a WHERE a.employee_id = e.id AND a.manager_id = $6::uuid AND a.valid @> v.local_date))
         ORDER BY v.local_date DESC, e.emp_code LIMIT 1000`,
-      [req.user!.companyId, q.from, q.to, q.status ?? null]);
+      [req.user!.companyId, q.from, q.to, q.status ?? null, hasRole(req.user!, 'hr'), req.user!.employeeId]);
     res.json({ exceptions: rows.rows });
   });
 

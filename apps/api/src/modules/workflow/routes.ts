@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { recomputeQueuedFor } from '../attendance/service.js';
 import type { AppDeps } from '../../deps.js';
 import { NotFoundError } from '../../errors.js';
-import { act, getInstance, inboxFor, summarise, timeline } from './service.js';
+import { act, canView, getInstance, inboxFor, summarise, timeline } from './service.js';
 
 /** Approvals inbox and one-tap decisions (plan §5.8, §13.5). */
 export function workflowRoutes({ db }: AppDeps): Router {
@@ -15,7 +16,8 @@ export function workflowRoutes({ db }: AppDeps): Router {
   r.get('/:id', async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const inst = await getInstance(db, id);
-    if (!inst || inst.company_id !== req.user!.companyId) throw new NotFoundError('approval not found');
+    // Only the subject, their line manager, HR, current approvers and people who already acted may read it (leave reasons can be medical).
+    if (!inst || inst.company_id !== req.user!.companyId || !(await canView(db, req.user!, inst))) throw new NotFoundError('approval not found');
     res.json({ instance: inst, summary: await summarise(db, inst), actions: await timeline(db, inst) });
   });
 
@@ -33,6 +35,8 @@ export function workflowRoutes({ db }: AppDeps): Router {
         payload: b.approvedMin !== undefined ? { approvedMin: b.approvedMin } : {},
       });
       await client.query('COMMIT');
+      // An approval that changes attendance (leave, correction, work from home, overtime) shows up immediately.
+      if (existing.employee_id) await recomputeQueuedFor(db, existing.employee_id);
       res.json({ state });
     } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
   };
@@ -50,6 +54,7 @@ export function workflowRoutes({ db }: AppDeps): Router {
         await client.query('BEGIN');
         const state = await act(client, { instanceId: id, user: req.user!, decision: 'approve' });
         await client.query('COMMIT');
+        if (existing.employee_id) await recomputeQueuedFor(db, existing.employee_id);
         results.push({ id, state });
       } catch (e) {
         await client.query('ROLLBACK');

@@ -8,6 +8,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$ROOT"
 setup_path
 mkdir -p logs
+# Logs hold employee names and request details: owner-only.
+chmod 700 logs
+for f in logs/*.log; do [ -f "$f" ] && chmod 600 "$f"; done
 
 UNINSTALL=0
 for a in "$@"; do case "$a" in --uninstall) UNINSTALL=1 ;; -h|--help) sed -n '2,6p' "$0"; exit 0 ;; *) fail "unknown option $a" ;; esac; done

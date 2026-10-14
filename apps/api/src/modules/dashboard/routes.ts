@@ -3,7 +3,7 @@ import { localDateOf } from '@hajiri/attendance-engine';
 import { adToBs, bsMonthBounds } from '@hajiri/bs-calendar';
 import type { AppDeps } from '../../deps.js';
 import { BadRequestError } from '../../errors.js';
-import { requireRole } from '../auth/middleware.js';
+import { hasRole, requireRole } from '../auth/middleware.js';
 import { listDays } from '../attendance/service.js';
 
 /** Executive and employee home dashboards (plan §3, §13.2: ≤ 6 KPI tiles, one trend, one "needs attention" list). */
@@ -59,7 +59,8 @@ export function dashboardRoutes({ db }: AppDeps): Router {
         ...(leaveOld.rows[0]!.n > 0 ? [{ kind: 'leave_overdue', label: `${leaveOld.rows[0]!.n} leave requests waiting over 24 h`, count: leaveOld.rows[0]!.n }] : []),
       ],
       otMinutesThisMonth: ot.rows[0]!.minutes,
-      lastPayrollRun: lastRun.rows[0] ?? null,
+      // Payroll totals are HR-only; managers get the attendance tiles.
+      lastPayrollRun: hasRole(req.user!, 'hr') ? lastRun.rows[0] ?? null : null,
     });
   });
 

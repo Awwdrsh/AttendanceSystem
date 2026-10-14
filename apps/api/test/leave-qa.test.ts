@@ -83,9 +83,11 @@ describe('leave guards', () => {
 
   it('accrual runs twice without double posting and skips employees who joined after the month', async () => {
     await db.query(`UPDATE employee SET join_date = '2026-09-01' WHERE id = $1`, [DEMO.ram]);
+    // Earlier requests may already have granted Ram this year's casual allocation; the month run must add nothing for him.
+    const ramRows = async () => (await db.query('SELECT 1 FROM leave_ledger WHERE employee_id = $1 AND reason IN ($2, $3)', [DEMO.ram, 'accrual', 'allocation'])).rows.length;
+    const before = await ramRows();
     const a = await runMonthlyAccrual(db, DEMO.companyId, 2083, 4); // Shrawan 2083 ends 16 Aug 2026, before Ram joined
-    const ramRows = await db.query('SELECT 1 FROM leave_ledger WHERE employee_id = $1 AND reason IN ($2, $3)', [DEMO.ram, 'accrual', 'allocation']);
-    expect(ramRows.rows).toHaveLength(0);
+    expect(await ramRows()).toBe(before);
     const b = await runMonthlyAccrual(db, DEMO.companyId, 2083, 4);
     expect(b.postings).toBe(0);
     expect(a.bsMonth).toBe(4);

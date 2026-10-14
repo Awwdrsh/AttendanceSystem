@@ -20,7 +20,7 @@ const shiftBody = z.object({
   graceInMin: z.number().int().min(0).max(240).default(0),
   graceOutMin: z.number().int().min(0).max(240).default(0),
   earlyInWindowMin: z.number().int().min(0).max(720).default(60),
-  lateOutWindowMin: z.number().int().min(0).max(720).default(120),
+  lateOutWindowMin: z.number().int().min(0).max(720).default(360),
   breakMinutes: z.number().int().min(0).max(240).default(0),
   halfDayThresholdMin: z.number().int().min(0).max(720).default(240),
   absentThresholdMin: z.number().int().min(0).max(720).default(120),
@@ -98,6 +98,13 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     return req.user.companyId;
   };
 
+  /** A branch id from the body must belong to the caller's company. */
+  async function assertBranch(companyId: string | null, branchId: string | null | undefined): Promise<void> {
+    if (!branchId) return;
+    const b = await db.query('SELECT 1 FROM branch WHERE id = $1 AND company_id = $2', [branchId, companyId]);
+    if (!b.rows[0]) throw new NotFoundError('branch not found');
+  }
+
   async function activeEmployeeIds(companyId: string): Promise<string[]> {
     const rows = await db.query<{ id: string }>(`SELECT id FROM employee WHERE company_id = $1 AND status = 'active'`, [companyId]);
     return rows.rows.map((x) => x.id);
@@ -121,6 +128,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
 
   r.post('/holidays', requireRole('hr'), async (req, res) => {
     const b = holidayBody.parse(req.body);
+    await assertBranch(req.user!.companyId, b.branchId);
     // The UNIQUE constraint treats NULL branch_id as distinct, so company-wide duplicates must be refused explicitly.
     const dup = await db.query('SELECT 1 FROM holiday WHERE company_id = $1 AND branch_id IS NOT DISTINCT FROM $2 AND local_date = $3 AND name_en = $4', [req.user!.companyId, b.branchId ?? null, b.localDate, b.nameEn]);
     if (dup.rows[0]) throw new ConflictError('this holiday already exists for that date');
@@ -137,6 +145,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   r.patch('/holidays/:id', requireRole('hr'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const b = provided(holidayBody.partial().parse(req.body), req.body);
+    await assertBranch(req.user!.companyId, b.branchId);
     const before = await db.query<{ local_date: string }>('SELECT local_date FROM holiday WHERE id = $1 AND company_id = $2', [id, req.user!.companyId]);
     if (!before.rows[0]) throw new NotFoundError('holiday not found');
     const bs = b.localDate ? (await db.query<{ bs_date: string }>('SELECT bs_date FROM bs_calendar WHERE ad_date = $1', [b.localDate])).rows[0]?.bs_date ?? null : null;
@@ -192,6 +201,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   const locationBody = z.object({ name: z.string().min(1).max(80), branchId: z.uuid().nullable().optional(), lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180), radiusM: z.number().int().min(20).max(5000).default(150) });
   r.post('/locations', requireRole('hr'), async (req, res) => {
     const b = locationBody.parse(req.body);
+    await assertBranch(req.user!.companyId, b.branchId);
     const ins = await db.query<{ id: string }>('INSERT INTO location (company_id, branch_id, name, lat, lng, radius_m) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
       [req.user!.companyId, b.branchId ?? null, b.name, b.lat, b.lng, b.radiusM]);
     await audit(db, { actorId: req.user!.id, action: 'create', table: 'location', rowId: ins.rows[0]!.id, after: b });
@@ -200,6 +210,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   r.patch('/locations/:id', requireRole('hr'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const b = provided(locationBody.partial().parse(req.body), req.body);
+    await assertBranch(req.user!.companyId, b.branchId);
     const u = await db.query('UPDATE location SET name = coalesce($2, name), lat = coalesce($3, lat), lng = coalesce($4, lng), radius_m = coalesce($5, radius_m), branch_id = CASE WHEN $7 THEN $6 ELSE branch_id END WHERE id = $1 AND company_id = $8',
       [id, b.name ?? null, b.lat ?? null, b.lng ?? null, b.radiusM ?? null, b.branchId ?? null, b.branchId !== undefined, req.user!.companyId]);
     if (!u.rowCount) throw new NotFoundError('location not found');
@@ -217,11 +228,15 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   // ---------------------------------------------------------------- calendar for the UI (holidays + weekly offs)
   r.get('/calendar', async (req, res) => {
     const q = z.object({ from: isoDate, to: isoDate, employeeId: z.uuid().optional() }).parse(req.query);
+    if (q.to < q.from || (Date.parse(q.to) - Date.parse(q.from)) / 86_400_000 >= 400) return res.status(400).json({ error: 'range must be 1 to 400 days' });
     const dates = dateRange(q.from, q.to);
-    if (dates.length > 400) return res.status(400).json({ error: 'range too long' });
-    const weeklyOff = q.employeeId
-      ? (await db.query<{ weekly_off_days: number[] }>('SELECT weekly_off_days FROM employee WHERE id = $1', [q.employeeId])).rows[0]?.weekly_off_days ?? [6]
-      : [6];
+    let weeklyOff = [6];
+    if (q.employeeId) {
+      const emp = await db.query<{ weekly_off_days: number[] }>('SELECT weekly_off_days FROM employee WHERE id = $1 AND company_id = $2', [q.employeeId, req.user!.companyId]);
+      if (!emp.rows[0]) throw new NotFoundError('employee not found');
+      await assertManages(db, req.user!, q.employeeId); // self, their manager or HR only
+      weeklyOff = emp.rows[0].weekly_off_days;
+    }
     const hol = await db.query<{ local_date: string; name_en: string; name_ne: string | null; gender_scope: string; optional: boolean; branch_id: string | null }>(
       'SELECT local_date, name_en, name_ne, gender_scope, optional, branch_id FROM holiday WHERE company_id = $1 AND local_date BETWEEN $2 AND $3 ORDER BY local_date',
       [req.user!.companyId, q.from, q.to]);
@@ -407,6 +422,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   /** Refuse to delete a shift that employees still use; the UI reassigns first (plan §13.8 destructive-action rule). */
   r.delete('/:id', requireRole('hr'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
+    if (!(await db.query('SELECT 1 FROM shift WHERE id = $1 AND company_id = $2', [id, req.user!.companyId])).rows[0]) throw new NotFoundError('shift not found');
     const used = await db.query<{ assignments: string; roster: string }>(
       `SELECT (SELECT count(*) FROM shift_assignment WHERE shift_id = $1 AND upper_inf(valid))::text AS assignments, (SELECT count(*) FROM roster WHERE shift_id = $1 AND local_date >= current_date)::text AS roster`, [id]);
     const u = used.rows[0]!;

@@ -189,6 +189,9 @@ if ! pnpm install --frozen-lockfile >/tmp/hajiri-install.log 2>&1; then
 fi
 ok "node_modules ready"
 
+# Secrets files are readable by this user only, whether they were just written or already existed.
+for f in apps/api/.env apps/gateway/.env; do [ -f "$f" ] && chmod 600 "$f"; done
+
 step "Database schema and seeds"
 pnpm --filter @hajiri/api --silent db:migrate
 pnpm --filter @hajiri/api --silent db:seed:bs
@@ -211,9 +214,10 @@ if psql_q "select 1 from app_user where email = lower('$ADMIN_EMAIL')" | grep -q
   ok "$ADMIN_EMAIL exists (reset with: pnpm --filter @hajiri/api cli reset-password --email $ADMIN_EMAIL --password <new>)"
 else
   ADMIN_PASSWORD="$(node -e "console.log(require('node:crypto').randomBytes(12).toString('base64url'))")"
-  pnpm --filter @hajiri/api --silent cli create-admin --email "$ADMIN_EMAIL" --password "$ADMIN_PASSWORD" --company "$COMPANY_CODE" >/dev/null
+  # Passed in the environment, not on the command line, so it never shows up in the process list.
+  HAJIRI_PASSWORD="$ADMIN_PASSWORD" pnpm --filter @hajiri/api --silent cli create-admin --email "$ADMIN_EMAIL" --company "$COMPANY_CODE" >/dev/null
   printf 'email=%s\npassword=%s\n' "$ADMIN_EMAIL" "$ADMIN_PASSWORD" > .admin-credentials; chmod 600 .admin-credentials
-  ok "created $ADMIN_EMAIL  (password saved once in .admin-credentials; change it after first login)"
+  ok "created $ADMIN_EMAIL  (temporary password in .admin-credentials; you will be asked to change it at first sign-in)"
 fi
 
 step "Web app"

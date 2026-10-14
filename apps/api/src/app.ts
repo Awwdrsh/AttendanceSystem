@@ -1,10 +1,11 @@
+import { FormulaError, PayrollError } from '@hajiri/payroll-engine';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import helmet from 'helmet';
 import { pinoHttp } from 'pino-http';
 import { ZodError } from 'zod';
 import type { AppDeps } from './deps.js';
 import { HttpError } from './errors.js';
-import { sessionLoader, requireAuth, requirePasswordChanged } from './modules/auth/middleware.js';
+import { sameOriginGuard, sessionLoader, requireAuth, requirePasswordChanged } from './modules/auth/middleware.js';
 import { authRoutes } from './modules/auth/routes.js';
 import { attendanceRoutes } from './modules/attendance/routes.js';
 import { deviceRoutes } from './modules/devices/routes.js';
@@ -22,6 +23,8 @@ import { payrollRoutes } from './modules/payroll/routes.js';
 import { biometricsRoutes } from './modules/biometrics/routes.js';
 import { dashboardRoutes } from './modules/dashboard/routes.js';
 
+export const LOG_REDACT = ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-api-key"]', 'res.headers["set-cookie"]'];
+
 export interface AppOptions {
   corsOrigins?: string[];
   webDist?: string;
@@ -32,8 +35,9 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 'loopback');
-  app.use(opts.webDist
-    ? helmet({
+  // The same strict policy whether or not the web build is served here: the API's own HTML (payslips, salary sheets)
+  // only needs inline styles, and JSON responses are unaffected.
+  app.use(helmet({
       contentSecurityPolicy: {
         directives: {
           defaultSrc: ["'self'"],
@@ -44,11 +48,13 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
           connectSrc: ["'self'"],
           frameAncestors: ["'none'"],
           objectSrc: ["'none'"],
+          formAction: ["'self'"],
+          baseUri: ["'self'"],
         },
       },
-    })
-    : helmet({ contentSecurityPolicy: false }));
-  if (logger) app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => req.url === '/health' } }));
+    }));
+  // Session tokens travel in the Authorization and Cookie headers; never write them to the request log.
+  if (logger) app.use(pinoHttp({ logger: logger.child({}, { redact: { paths: LOG_REDACT, censor: '[redacted]' } }), autoLogging: { ignore: (req) => req.url === '/health' } }));
   app.use(express.json({ limit: '2mb' }));
   app.use(express.text({ type: 'text/csv', limit: '10mb' }));
 
@@ -74,6 +80,7 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
   });
 
   app.use(sessionLoader(db));
+  app.use(sameOriginGuard(opts.corsOrigins ?? []));
 
   const api = express.Router();
   api.use('/auth', authRoutes(db, { secureCookie: deps.secureCookie, ...(deps.pepper ? { pepper: deps.pepper } : {}) }));
@@ -106,6 +113,8 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof ZodError) return res.status(400).json({ error: 'validation', issues: err.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
     if (err instanceof HttpError) return res.status(err.status).json({ error: err.message, ...(err.details !== undefined ? { details: err.details } : {}) });
+    // Payroll calculation and formula errors are bad configuration or input (a broken formula, an amount out of range), not crashes.
+    if (err instanceof PayrollError || err instanceof FormulaError) return res.status(422).json({ error: err.message });
     const e = err as { type?: string; status?: number; code?: string; message?: string; constraint?: string; detail?: string };
     if (e.type === 'entity.parse.failed') return res.status(400).json({ error: 'invalid JSON body' });
     if (e.type === 'entity.too.large') return res.status(413).json({ error: 'request body too large' });
@@ -115,6 +124,7 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
       case '23503': return res.status(400).json({ error: 'referenced record does not exist', constraint: e.constraint });
       case '23514': return res.status(400).json({ error: 'value not allowed', constraint: e.constraint });
       case '22P02': case '22007': case '22008': return res.status(400).json({ error: 'invalid value format' });
+      case '22021': case '22P05': return res.status(400).json({ error: 'text contains a character that is not allowed' });
       case 'P0001': return res.status(409).json({ error: e.message?.replace(/^error: /, '') ?? 'operation not allowed' });
     }
     (logger ?? console).error({ err, path: req.path }, 'unhandled error');

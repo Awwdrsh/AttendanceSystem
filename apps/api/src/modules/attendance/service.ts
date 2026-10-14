@@ -1,7 +1,7 @@
-import { computeDay, DEFAULT_POLICY, type AttendanceDay, type AttendancePolicy, type DayContext } from '@hajiri/attendance-engine';
+import { computeDay, DEFAULT_POLICY, localDateOf, NPT_OFFSET_MIN, MIN_MS, type AttendanceDay, type AttendancePolicy, type DayContext } from '@hajiri/attendance-engine';
 import { weekdayOf } from '@hajiri/bs-calendar';
 import type { Db, Queryable } from '../../db/pool.js';
-import { NotFoundError } from '../../errors.js';
+import { BadRequestError, NotFoundError } from '../../errors.js';
 import * as repo from './repo.js';
 
 export interface RecomputeResult {
@@ -87,6 +87,8 @@ async function recomputeInTx(db: Queryable, employeeId: string, localDate: strin
 
   const latest = await repo.latestVersion(db, employeeId, localDate);
   if (latest?.locked_at) return { day, version: latest.version, changed: false, locked: true };
+  // A payroll period whose attendance is locked is frozen even for days that had no row yet.
+  if (!latest && (await periodLocked(db, employee.company_id, localDate))) return { day, version: 0, changed: false, locked: true };
   if (latest && latest.inputs_hash === day.inputsHash) return { day, version: latest.version, changed: false, locked: false };
 
   const version = (latest?.version ?? 0) + 1;
@@ -130,10 +132,14 @@ export async function enqueueRecompute(db: Queryable, items: Array<{ employeeId:
 }
 
 /** Every date in [from, to] inclusive, as 'YYYY-MM-DD'. */
+/** Longest range any caller may expand day by day (about ten years); stops a request like 0001-01-01..9999-12-31 from pinning the CPU. */
+export const MAX_RANGE_DAYS = 3660;
+
 export function dateRange(from: string, to: string): string[] {
   const out: string[] = [];
   const start = new Date(`${from}T00:00:00Z`).getTime();
   const end = new Date(`${to}T00:00:00Z`).getTime();
+  if ((end - start) / 86_400_000 >= MAX_RANGE_DAYS) throw new BadRequestError(`date range is too long (max ${MAX_RANGE_DAYS} days)`);
   for (let t = start; t <= end; t += 86_400_000) out.push(new Date(t).toISOString().slice(0, 10));
   return out;
 }
@@ -152,6 +158,65 @@ export async function listDays(db: Queryable, employeeId: string, from: string, 
        FROM v_attendance_latest WHERE employee_id = $1 AND local_date BETWEEN $2 AND $3 ORDER BY local_date`,
     [employeeId, from, to]);
   return r.rows;
+}
+
+async function periodLocked(db: Queryable, companyId: string, localDate: string): Promise<boolean> {
+  const r = await db.query('SELECT 1 FROM payroll_period WHERE company_id = $1 AND attendance_locked_at IS NOT NULL AND $2::date BETWEEN start_ad AND end_ad LIMIT 1', [companyId, localDate]);
+  return r.rows.length > 0;
+}
+
+/**
+ * Is this employee's day frozen by payroll? True when the day's latest version is locked, or when the payroll period
+ * covering it has had its attendance locked (even if no row existed for that day at lock time).
+ */
+export async function isAttendanceLocked(db: Queryable, employeeId: string, localDate: string): Promise<boolean> {
+  const r = await db.query(
+    `SELECT 1 FROM v_attendance_latest WHERE employee_id = $1 AND local_date = $2 AND locked_at IS NOT NULL
+     UNION ALL
+     SELECT 1 FROM payroll_period p JOIN employee e ON e.company_id = p.company_id
+      WHERE e.id = $1 AND p.attendance_locked_at IS NOT NULL AND $2::date BETWEEN p.start_ad AND p.end_ad
+     LIMIT 1`, [employeeId, localDate]);
+  return r.rows.length > 0;
+}
+
+/**
+ * Days a punch at `atMs` can belong to: its own calendar date and, for a morning punch, the previous date (a night shift
+ * or an overtime punch-out after midnight belongs to the day the shift started).
+ */
+export function datesForPunch(atMs: number): string[] {
+  const date = localDateOf(atMs);
+  const hour = new Date(atMs + NPT_OFFSET_MIN * MIN_MS).getUTCHours();
+  if (hour >= 12) return [date];
+  const prev = new Date(Date.parse(`${date}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+  return [prev, date];
+}
+
+/** Recompute every day a punch can affect; returns the day that now contains the punch (or the punch's own date). */
+export async function recomputeForPunch(db: Db, employeeId: string, atMs: number, punchId: string): Promise<RecomputeResult> {
+  const results: RecomputeResult[] = [];
+  for (const d of datesForPunch(atMs)) results.push(await recomputeDay(db, employeeId, d));
+  return results.find((r) => r.day.punchIds.includes(punchId)) ?? results[results.length - 1]!;
+}
+
+/** Most days a request handler recomputes inline; larger ranges are left to the worker. */
+export const INLINE_RECOMPUTE_MAX = 62;
+
+/**
+ * Process this employee's queued recomputes right away (after an approval commits) so the UI shows the corrected day
+ * immediately. Skipped when more than INLINE_RECOMPUTE_MAX days are queued; failures stay queued for the worker.
+ */
+export async function recomputeQueuedFor(db: Db, employeeId: string): Promise<number> {
+  const q = await db.query<{ local_date: string }>(`SELECT local_date::text FROM recompute_queue WHERE employee_id = $1 AND enqueued_at <= now() ORDER BY local_date LIMIT $2`, [employeeId, INLINE_RECOMPUTE_MAX + 1]);
+  if (q.rows.length === 0 || q.rows.length > INLINE_RECOMPUTE_MAX) return 0;
+  let n = 0;
+  for (const { local_date } of q.rows) {
+    try {
+      await recomputeDay(db, employeeId, local_date);
+      await db.query('DELETE FROM recompute_queue WHERE employee_id = $1 AND local_date = $2', [employeeId, local_date]);
+      n++;
+    } catch { /* left queued; the worker retries with backoff */ }
+  }
+  return n;
 }
 
 /** Lock every latest attendance_day in a period for a company (payroll pre-flight). Returns rows locked. */

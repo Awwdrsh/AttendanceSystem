@@ -11,11 +11,12 @@ import { dateRange, enqueueRecompute } from '../attendance/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
 import { assertManages, cancelWorkflow, nptToday, registerHandler, startWorkflow, type DecisionContext } from '../workflow/service.js';
 import {
-  assertNoOverlap, balances, computeLeaveDays, getEmployeeLite, getLeaveType, hasLockedDay, ledgerBalance, pendingDays, type LeaveTypeRow,
+  assertNoOverlap, balances, computeLeaveDays, eventDaysUsed, getEmployeeLite, getLeaveType, hasLockedDay, leaveTypeByCode, ledgerBalance, pendingDays, type LeaveTypeRow,
 } from './service.js';
+import { allocateAnnualLeave, runLeaveCatchUp } from './accrual.js';
 
 export { creditCompOff, encashableBalances, postEncashment } from './service.js';
-export { runMonthlyAccrual, expireSubstituteLeave } from './accrual.js';
+export { runMonthlyAccrual, expireSubstituteLeave, allocateAnnualLeave, runLeaveCatchUp } from './accrual.js';
 
 /** Approval/rejection effect for leave requests (registered with the workflow engine). */
 export async function applyLeaveDecision(db: Queryable, requestId: string, state: 'approved' | 'rejected', ctx: DecisionContext): Promise<void> {
@@ -52,10 +53,11 @@ const typeBody = z.object({
   encashable: z.boolean().default(false), certificateAfterDays: z.number().int().min(0).nullable().optional(), allowHalfDay: z.boolean().default(true),
   maxConsecutiveDays: z.number().int().min(1).nullable().optional(), minServiceDays: z.number().int().min(0).default(0), negativeBalanceLimit: z.number().min(0).default(0),
   genderScope: z.enum(['all', 'female', 'male']).default('all'), sandwichRule: z.boolean().default(false), expiryDays: z.number().int().min(1).nullable().optional(),
+  eventDays: z.number().min(0.5).max(365).nullable().optional(),
 });
 
 /** Columns that define a statutory entitlement (Labour Act Ch. 9) — not editable through the API once statutory. */
-const STATUTORY_LOCKED = new Set(['accrualBasis', 'accrualDays', 'accrualPerWorkedDays', 'maxBalance', 'paid', 'genderScope', 'expiryDays']);
+const STATUTORY_LOCKED = new Set(['accrualBasis', 'accrualDays', 'accrualPerWorkedDays', 'maxBalance', 'paid', 'genderScope', 'expiryDays', 'eventDays']);
 
 
 /** Keys actually present in the request body: PATCH must not apply schema defaults to untouched fields. */
@@ -85,10 +87,10 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const b = typeBody.parse(req.body);
     const ins = await db.query<{ id: string }>(
       `INSERT INTO leave_type (company_id, code, name_en, name_ne, paid, statutory, accrual_basis, accrual_days, accrual_per_worked_days, max_balance, carry_forward, encashable,
-         certificate_after_days, allow_half_day, max_consecutive_days, min_service_days, negative_balance_limit, gender_scope, sandwich_rule, expiry_days, sort_order)
-       VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 100) RETURNING id`,
+         certificate_after_days, allow_half_day, max_consecutive_days, min_service_days, negative_balance_limit, gender_scope, sandwich_rule, expiry_days, event_days, sort_order)
+       VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 100) RETURNING id`,
       [companyOf(req), b.code, b.nameEn, b.nameNe ?? null, b.paid, b.accrualBasis, b.accrualDays, b.accrualPerWorkedDays ?? null, b.maxBalance ?? null, b.carryForward, b.encashable,
-        b.certificateAfterDays ?? null, b.allowHalfDay, b.maxConsecutiveDays ?? null, b.minServiceDays, b.negativeBalanceLimit, b.genderScope, b.sandwichRule, b.expiryDays ?? null]);
+        b.certificateAfterDays ?? null, b.allowHalfDay, b.maxConsecutiveDays ?? null, b.minServiceDays, b.negativeBalanceLimit, b.genderScope, b.sandwichRule, b.expiryDays ?? null, b.eventDays ?? null]);
     await audit(db, { actorId: req.user!.id, action: 'create', table: 'leave_type', rowId: ins.rows[0]!.id, after: b });
     res.status(201).json({ id: ins.rows[0]!.id });
   });
@@ -105,7 +107,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
       ['code', 'code'], ['nameEn', 'name_en'], ['nameNe', 'name_ne'], ['paid', 'paid'], ['accrualBasis', 'accrual_basis'], ['accrualDays', 'accrual_days'],
       ['accrualPerWorkedDays', 'accrual_per_worked_days'], ['maxBalance', 'max_balance'], ['carryForward', 'carry_forward'], ['encashable', 'encashable'],
       ['certificateAfterDays', 'certificate_after_days'], ['allowHalfDay', 'allow_half_day'], ['maxConsecutiveDays', 'max_consecutive_days'], ['minServiceDays', 'min_service_days'],
-      ['negativeBalanceLimit', 'negative_balance_limit'], ['genderScope', 'gender_scope'], ['sandwichRule', 'sandwich_rule'], ['expiryDays', 'expiry_days'],
+      ['negativeBalanceLimit', 'negative_balance_limit'], ['genderScope', 'gender_scope'], ['sandwichRule', 'sandwich_rule'], ['expiryDays', 'expiry_days'], ['eventDays', 'event_days'],
     ];
     const sets: string[] = []; const vals: unknown[] = [id];
     for (const [k, col] of map) if (b[k] !== undefined) { vals.push(b[k]); sets.push(`${col} = $${vals.length}`); }
@@ -122,6 +124,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const emp = await getEmployeeLite(db, employeeId);
     if (!emp || emp.company_id !== req.user!.companyId) throw new NotFoundError('employee not found');
     await assertManages(db, req.user!, employeeId);
+    await allocateAnnualLeave(db, emp.company_id, nptToday(), employeeId);
     res.json({ employeeId, balances: await balances(db, emp, q.asOf ?? nptToday()) });
   });
 
@@ -136,9 +139,14 @@ export function leaveRoutes({ db }: AppDeps): Router {
     await assertManages(db, req.user!, employeeId);
     const policy = await leavePolicy(emp.company_id);
     const calc = await computeLeaveDays(db, emp, type, q.from, q.to, q.halfDay ?? null, policy.sandwichRule);
+    if (type.event_days !== null) {
+      const left = Number(type.event_days) - (await eventDaysUsed(db, employeeId, type.id, q.from, q.to));
+      return res.json({ ...calc, balance: Number(type.event_days), available: left, balanceAfter: left - calc.days });
+    }
+    await allocateAnnualLeave(db, emp.company_id, nptToday(), employeeId);
     const bal = await ledgerBalance(db, employeeId, type.id);
     const pend = await pendingDays(db, employeeId, type.id);
-    res.json({ ...calc, balance: bal, available: bal - pend, balanceAfter: bal - pend - calc.days });
+    return res.json({ ...calc, balance: bal, available: bal - pend, balanceAfter: bal - pend - calc.days });
   });
 
   // ---------------------------------------------------------------- requests
@@ -146,7 +154,10 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const b = z.object({
       employeeId: z.uuid().optional(), leaveTypeId: z.uuid(), from: isoDate, to: isoDate, halfDay: z.enum(['first_half', 'second_half']).optional(),
       reason: z.string().max(1000).optional(), attachmentKey: z.string().max(200).optional(),
+      /** HR only: record full-day leave on a past day that already shows as worked (e.g. a mis-attributed punch). */
+      override: z.boolean().optional(),
     }).parse(req.body);
+    if (b.override && !hasRole(req.user!, 'hr')) throw new ForbiddenError('only HR can override the worked-day check');
     if (b.to < b.from) throw new BadRequestError('to must be on or after from');
     const employeeId = b.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
@@ -168,12 +179,37 @@ export function leaveRoutes({ db }: AppDeps): Router {
       throw new BadRequestError(`${type.name_en} cannot be taken during probation (ends ${emp.probation_end})`);
     }
     const calc = await computeLeaveDays(db, emp, type, b.from, b.to, b.halfDay ?? null, policy.sandwichRule);
-    const maxRun = type.max_consecutive_days ?? policy.maxContinuousDays;
-    if (calc.days > maxRun) throw new BadRequestError(`${type.name_en} cannot exceed ${maxRun} consecutive days`);
+    // The company's maxContinuousDays policy limits discretionary leave only; a statutory entitlement cannot be capped by policy.
+    const maxRun = type.max_consecutive_days ?? (type.statutory ? null : policy.maxContinuousDays);
+    if (maxRun !== null && calc.days > maxRun) throw new BadRequestError(`${type.name_en} cannot exceed ${maxRun} consecutive days`);
+    if (type.event_days !== null) {
+      const perEvent = Number(type.event_days);
+      const used = await eventDaysUsed(db, employeeId, type.id, b.from, b.to);
+      if (used + calc.days > perEvent) {
+        const left = Math.max(0, perEvent - used);
+        const unpaid = await leaveTypeByCode(db, emp.company_id, 'SPECIAL_UNPAID');
+        const rest = type.code === 'MATERNITY' && unpaid ? ` Take the remaining days (up to 98 in total) as ${unpaid.name_en}.` : '';
+        return res.status(400).json({
+          error: `${type.name_en} allows ${perEvent} day(s) per event${used ? ` and ${used} are already requested for this event` : ''}; this request needs ${calc.days}.${rest}`,
+          suggestion: { paidDays: left, remainingDays: calc.days - left, ...(rest ? { remainderLeaveTypeId: unpaid!.id } : {}) },
+        });
+      }
+    }
+    // Full-day leave cannot replace a past day the employee is already recorded as having worked; that would turn a worked day
+    // into leave (and unpaid leave into a pay cut). Half days are fine; HR can override for a mis-attributed punch.
+    if (!b.halfDay && !b.override) {
+      const worked = await db.query<{ local_date: string }>(
+        `SELECT local_date::text FROM v_attendance_latest WHERE employee_id = $1 AND local_date = ANY($2::date[]) AND local_date < $3::date AND status IN ('Present', 'WFH') ORDER BY local_date`,
+        [employeeId, calc.workingDays, nptToday()]);
+      if (worked.rows.length) {
+        throw new ConflictError(`${employeeId === req.user!.employeeId ? 'You were' : 'The employee was'} recorded as working on ${bsRange(worked.rows[0]!.local_date, worked.rows[worked.rows.length - 1]!.local_date)} (${worked.rows.length} day(s)). Apply for a half day, or ask HR to correct the attendance first.`);
+      }
+    }
     if (type.certificate_after_days !== null && calc.days > type.certificate_after_days && !b.attachmentKey) {
       throw new BadRequestError(`a medical certificate is required for more than ${type.certificate_after_days} consecutive days of ${type.name_en} (Sec 44(2))`);
     }
-    if (type.paid) {
+    if (type.paid && type.event_days === null) {
+      await allocateAnnualLeave(db, emp.company_id, nptToday(), employeeId);
       const available = (await ledgerBalance(db, employeeId, type.id)) - (await pendingDays(db, employeeId, type.id));
       if (calc.days > available + Number(type.negative_balance_limit)) {
         const paidDays = Math.max(0, Math.floor(available * 2) / 2);
@@ -256,6 +292,14 @@ export function leaveRoutes({ db }: AppDeps): Router {
       await client.query('COMMIT');
     } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
     res.json({ ok: true });
+  });
+
+  /** Run leave accrual catch-up now: missed months of the current fiscal year and missing annual allocations (idempotent). */
+  r.post('/accrual/run', requireRole('hr'), async (req, res) => {
+    const summary = await runLeaveCatchUp(db, companyOf(req), nptToday());
+    const postings = summary.months.reduce((a, m) => a + m.postings, 0) + summary.annualPostings;
+    await audit(db, { actorId: req.user!.id, action: 'accrual_catch_up', table: 'leave_ledger', rowId: companyOf(req), after: { postings, months: summary.months.length } });
+    res.json({ postings, months: summary.months.map((m) => ({ bsYear: m.bsYear, bsMonth: m.bsMonth, postings: m.postings })), annualPostings: summary.annualPostings });
   });
 
   /** HR ledger adjustments and allocations (audited). */

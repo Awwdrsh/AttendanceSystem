@@ -3,11 +3,11 @@ import { z } from 'zod';
 import { localDateOf, localTimeMs } from '@hajiri/attendance-engine';
 import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
-import { BadRequestError, NotFoundError } from '../../errors.js';
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors.js';
 import { hhmm, isoDate } from '../../validation.js';
 import { sha256Hex } from '../../crypto.js';
 import { requireRole } from '../auth/middleware.js';
-import { listDays, recomputeDay } from '../attendance/service.js';
+import { isAttendanceLocked, listDays, recomputeForPunch } from '../attendance/service.js';
 import { ensurePseudoDevice, nptLocalTime } from './devices.js';
 import { geofence, type GeoLocation } from './geo.js';
 
@@ -38,12 +38,14 @@ export function punchRoutes({ db }: AppDeps): Router {
     if (b.mocked) throw new BadRequestError('Punch not saved. Your phone reported a fake location. Turn off mock location and try again.');
     if (b.selfie && Buffer.byteLength(b.selfie, 'utf8') > SELFIE_MAX_BYTES) throw new BadRequestError('Selfie is too large (max 300 KB).');
 
+    // The punch time is always the server's clock: a phone clock set a few minutes back must not erase a late arrival.
+    // The client time is kept in raw for audit and large differences are flagged.
     const serverNow = Date.now();
     const clientMs = Date.parse(b.clientTime);
     const clockSkewMs = clientMs - serverNow;
     const flags: string[] = [];
-    let at = clientMs;
-    if (Math.abs(clockSkewMs) > CLOCK_TOLERANCE_MS) { at = serverNow; flags.push('ClockSkew'); }
+    const at = serverNow;
+    if (Math.abs(clockSkewMs) > CLOCK_TOLERANCE_MS) flags.push('ClockSkew');
 
     const emp = await db.query<{ company_id: string; emp_code: string; branch_id: string | null; work_from_home: boolean }>(
       `SELECT e.company_id, e.emp_code, a.branch_id, e.work_from_home FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
@@ -91,7 +93,7 @@ export function punchRoutes({ db }: AppDeps): Router {
       [device.id, device.serialNo, device.vendor, e.emp_code, employeeId, new Date(at), nptLocalTime(at), localDate, b.direction, b.source, b.source,
         JSON.stringify({ lat: b.lat ?? null, lng: b.lng ?? null, accuracyM: b.accuracyM ?? null, inside: geo.inside, remote, locationId: geo.locationId, distanceM: geo.distanceM,
           clientTime: b.clientTime, clockSkewMs, reason: b.reason ?? null, flags, selfie: b.selfie ? 'discarded' : null, ip: req.ip ?? null }), key]);
-    const result = await recomputeDay(db, employeeId, localDate);
+    const result = await recomputeForPunch(db, employeeId, at, ins.rows[0]!.id);
     return res.status(201).json({
       duplicate: false, punch: ins.rows[0], flags, location: { inside: geo.inside, name: geo.locationName, distanceM: geo.distanceM },
       day: result.day, remote, message: `Clocked ${b.direction === 'out' ? 'out' : 'in'} at ${nptLocalTime(at).slice(11, 16)}${remote ? ' from home' : geo.inside === false ? ' (outside location, flagged)' : ''}`,
@@ -116,6 +118,7 @@ export function punchRoutes({ db }: AppDeps): Router {
     const b = z.object({ employeeId: z.uuid(), localDate: isoDate, time: hhmm, direction: z.enum(['in', 'out']), reason: z.string().min(3).max(300) }).parse(req.body);
     const emp = await db.query<{ emp_code: string }>('SELECT emp_code FROM employee WHERE id = $1 AND company_id = $2', [b.employeeId, req.user!.companyId]);
     if (!emp.rows[0]) throw new NotFoundError('employee not found');
+    if (await isAttendanceLocked(db, b.employeeId, b.localDate)) throw new ConflictError('this day is locked by payroll; raise a supplementary correction instead');
     const device = await ensurePseudoDevice(db, req.user!.companyId!, 'MANUAL');
     const at = localTimeMs(b.localDate, b.time);
     const key = sha256Hex(`manual|${b.employeeId}|${b.localDate}|${b.time}|${b.direction}`);
@@ -126,7 +129,7 @@ export function punchRoutes({ db }: AppDeps): Router {
         JSON.stringify({ reason: b.reason, enteredBy: req.user!.id }), key]);
     if (!ins.rows[0]) return res.status(200).json({ duplicate: true });
     await audit(db, { actorId: req.user!.id, action: 'manual_punch', table: 'punch_event', rowId: ins.rows[0].id, after: b });
-    const result = await recomputeDay(db, b.employeeId, b.localDate);
+    const result = await recomputeForPunch(db, b.employeeId, at, ins.rows[0].id);
     return res.status(201).json({ duplicate: false, punchId: ins.rows[0].id, day: result.day });
   });
 

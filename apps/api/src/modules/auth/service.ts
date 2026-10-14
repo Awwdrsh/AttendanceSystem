@@ -1,7 +1,8 @@
+import { nptToday } from '@hajiri/attendance-engine';
 import type { Queryable } from '../../db/pool.js';
 import { hashPassword, randomToken, sha256Hex, verifyPassword } from '../../crypto.js';
 import { audit } from '../../audit.js';
-import { UnauthorizedError } from '../../errors.js';
+import { BadRequestError, UnauthorizedError } from '../../errors.js';
 
 export type Role = 'admin' | 'hr' | 'manager' | 'employee';
 export const ROLES: Role[] = ['admin', 'hr', 'manager', 'employee'];
@@ -52,11 +53,18 @@ export async function login(db: Queryable, email: string, password: string, meta
   if (!row || row.status !== 'active') throw new UnauthorizedError('invalid email or password');
   if (row.locked_until && row.locked_until.getTime() > Date.now()) throw new UnauthorizedError('account temporarily locked; try again later');
   if (!ok) {
-    const failed = row.failed_logins + 1;
-    const lockedUntil = failed >= MAX_FAILED ? new Date(Date.now() + LOCK_MS) : null;
-    await db.query('UPDATE app_user SET failed_logins = $2::int, locked_until = coalesce($3::timestamptz, locked_until) WHERE id = $1', [row.id, failed, lockedUntil]);
+    // Increment in SQL so parallel guesses cannot undercount and slip past the lockout.
+    await db.query(
+      `UPDATE app_user SET failed_logins = failed_logins + 1,
+              locked_until = CASE WHEN failed_logins + 1 >= $2 THEN now() + make_interval(secs => $3) ELSE locked_until END
+        WHERE id = $1`, [row.id, MAX_FAILED, LOCK_MS / 1000]);
     await audit(db, { actorId: row.id, action: 'login_failed', table: 'app_user', rowId: row.id });
     throw new UnauthorizedError('invalid email or password');
+  }
+  // Someone who has left (exit date before today, Nepal time) can no longer sign in; HR clears the exit date to restore access.
+  if (row.employee_id) {
+    const ex = await db.query<{ left: boolean }>('SELECT exit_date < $2::date AS left FROM employee WHERE id = $1', [row.employee_id, nptToday()]);
+    if (ex.rows[0]?.left) throw new UnauthorizedError('this account was closed when you left the company; contact HR if you need your records');
   }
   const token = randomToken();
   await db.query('UPDATE app_user SET failed_logins = 0, locked_until = NULL, last_login_at = now() WHERE id = $1', [row.id]);
@@ -71,7 +79,8 @@ const DUMMY_HASH = 'scrypt$32768$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAA
 export async function resolveSession(db: Queryable, token: string): Promise<AuthUser | null> {
   const r = await db.query<UserRow & { last_seen_at: Date }>(
     `SELECT u.*, s.last_seen_at FROM session s JOIN app_user u ON u.id = s.user_id
-      WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.status = 'active'`, [sha256Hex(token)]);
+      WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.status = 'active'
+        AND NOT EXISTS (SELECT 1 FROM employee e WHERE e.id = u.employee_id AND e.exit_date < $2::date)`, [sha256Hex(token), nptToday()]);
   const row = r.rows[0];
   if (!row) return null;
   if (Date.now() - row.last_seen_at.getTime() > SESSION_IDLE_MS) {
@@ -90,6 +99,7 @@ export async function changePassword(db: Queryable, userId: string, current: str
   const r = await db.query<UserRow>('SELECT * FROM app_user WHERE id = $1', [userId]);
   const row = r.rows[0];
   if (!row || !(await verifyPassword(current, row.password_hash, pepper))) throw new UnauthorizedError('current password is incorrect');
+  if (current === next) throw new BadRequestError('the new password must be different from the current one');
   await db.query('UPDATE app_user SET password_hash = $2, must_change_password = false WHERE id = $1', [userId, await hashPassword(next, pepper)]);
   await db.query('UPDATE session SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL', [userId]);
   await audit(db, { actorId: userId, action: 'password_change', table: 'app_user', rowId: userId });

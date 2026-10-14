@@ -9,7 +9,7 @@ import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { isoDate } from '../../validation.js';
 import { hasRole } from '../auth/middleware.js';
-import { enqueueRecompute } from '../attendance/service.js';
+import { enqueueRecompute, isAttendanceLocked, recomputeQueuedFor } from '../attendance/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
 import { act, assertManages, cancelWorkflow, nptToday, registerHandler, startWorkflow, type DecisionContext } from '../workflow/service.js';
 
@@ -38,6 +38,10 @@ export async function applyRegularisationDecision(db: Queryable, requestId: stri
   const rr = r.rows[0];
   if (!rr) throw new NotFoundError('regularisation request not found');
   if (rr.status !== 'pending') throw new ConflictError(`request already ${rr.status}`);
+  if (state === 'approved') {
+    // Payroll may have locked the day after the request was filed; a correction must not slip into a locked period.
+    if (await isAttendanceLocked(db, rr.employee_id, String(rr.local_date).slice(0, 10))) throw new ConflictError('this day is now locked by payroll; reject the request and let HR raise a supplementary correction');
+  }
   await db.query('UPDATE regularisation_request SET status = $2, decided_at = now() WHERE id = $1', [requestId, state]);
   if (state === 'approved') {
     if (rr.kind === 'missed_punch' && rr.punch_time) {
@@ -111,8 +115,7 @@ export function regularisationRoutes({ db }: AppDeps): Router {
       if (Number(cnt.rows[0]!.n) >= pol.monthlyCap) throw new BadRequestError(`monthly limit of ${pol.monthlyCap} corrections reached; contact HR`);
       }
     }
-    const locked = await db.query('SELECT 1 FROM v_attendance_latest WHERE employee_id = $1 AND local_date = $2 AND locked_at IS NOT NULL', [employeeId, b.localDate]);
-    if (locked.rows[0]) throw new ConflictError('this day is locked by payroll; HR must raise a supplementary correction');
+    if (await isAttendanceLocked(db, employeeId, b.localDate)) throw new ConflictError('this day is locked by payroll; HR must raise a supplementary correction');
     const dup = await db.query('SELECT 1 FROM regularisation_request WHERE employee_id = $1 AND local_date = $2 AND kind = $3 AND status = $4', [employeeId, b.localDate, b.kind, 'pending']);
     if (dup.rows[0]) throw new ConflictError('a pending request of this kind already exists for that day');
 
@@ -137,6 +140,7 @@ export function regularisationRoutes({ db }: AppDeps): Router {
       }
       await client.query('COMMIT');
     } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+    if (state === 'approved') await recomputeQueuedFor(db, employeeId);
     res.status(201).json({ id, status: state === 'approved' ? 'approved' : 'pending' });
   });
 
@@ -165,7 +169,9 @@ export function regularisationRoutes({ db }: AppDeps): Router {
     await assertManages(db, req.user!, rr.employee_id);
     // Approved corrections already produced a punch/decision; they cannot be undone here (a new request or HR adjustment supersedes).
     if (rr.status !== 'pending') throw new ConflictError(`only pending requests can be cancelled (status ${rr.status})`);
-    await db.query(`UPDATE regularisation_request SET status = 'cancelled', decided_at = now() WHERE id = $1`, [id]);
+    // Conditional update: an approval landing at the same moment wins, and the cancel reports the conflict.
+    const u = await db.query(`UPDATE regularisation_request SET status = 'cancelled', decided_at = now() WHERE id = $1 AND status = 'pending'`, [id]);
+    if (!u.rowCount) throw new ConflictError('request was decided in the meantime');
     await cancelWorkflow(db, 'regularisation_request', id);
     await audit(db, { actorId: req.user!.id, action: 'cancel', table: 'regularisation_request', rowId: id });
     res.json({ ok: true });

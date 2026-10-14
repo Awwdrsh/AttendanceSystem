@@ -1,6 +1,7 @@
 import { amountInWordsEn, formatNpr, D } from '@hajiri/payroll-engine';
 import { bsLabel, bsMonthName } from '../../bsdate.js';
 import type { Queryable } from '../../db/pool.js';
+import { csvCell as cell } from '../reports/csv.js';
 
 type LineType = 'earning' | 'deduction' | 'employer_contribution';
 export interface SheetColumn { code: string; name: string }
@@ -90,8 +91,6 @@ export async function salarySheet(db: Queryable, companyId: string, runId: strin
     },
   };
 }
-
-const cell = (c: string) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c);
 
 /** CSV with a byte-order mark so Excel opens it as UTF-8; one header row, one row per employee, a totals row. */
 export function salarySheetCsv(s: SalarySheet): string {

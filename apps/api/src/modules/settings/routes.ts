@@ -31,10 +31,12 @@ export function settingsRoutes({ db }: AppDeps): Router {
   r.get('/', async (req, res) => {
     const rows = await db.query<{ key: string; value: unknown; updated_at: Date; updated_by: string | null }>('SELECT key, value, updated_at, updated_by FROM company_setting WHERE company_id = $1', [req.user!.companyId]);
     const byKey = new Map(rows.rows.map((x) => [x.key, x]));
+    // An unsaved company profile defaults to the company's registered name, so the value can be edited and saved back as is.
+    const companyName = (await db.query<{ name_en: string }>('SELECT name_en FROM company WHERE id = $1', [req.user!.companyId])).rows[0]?.name_en ?? 'Company';
     const settings = SETTING_KEYS.map((key) => {
       const row = byKey.get(key);
       const schema = settingSchemas[key];
-      const value = row ? row.value : (schema.safeParse(key === 'company.profile' ? { nameEn: '' } : {}).data ?? null);
+      const value = row ? row.value : (schema.safeParse(key === 'company.profile' ? { nameEn: companyName } : {}).data ?? null);
       return { key, description: settingDescriptions[key], value, updatedAt: row?.updated_at ?? null, updatedBy: row?.updated_by ?? null };
     });
     res.json({ settings, locked: { otCapDayMin: 240, otCapWeekMin: 1440, note: 'Labour Act 2074 Sec 30(1): overtime caps cannot be raised above 4 h/day and 24 h/week.' } });
@@ -70,26 +72,28 @@ export function settingsRoutes({ db }: AppDeps): Router {
         requirePreapproval: proposedRaw.requirePreapproval as boolean, capDayMin: proposedRaw.otCapDayMin as number, capWeekMin: proposedRaw.otCapWeekMin as number,
         nightWindowEnabled: proposedRaw.nightWindowEnabled as boolean, nightPremiumRate: proposedRaw.nightPremiumRate as number },
     };
-    const emps = await db.query<{ id: string; gender: string | null; ot_eligible: boolean; weekly_off_days: number[]; company_id: string }>(
-      `SELECT id, gender, ot_eligible, weekly_off_days, company_id FROM employee WHERE company_id = $1 AND status = 'active' AND ($2::uuid[] IS NULL OR id = ANY($2)) ORDER BY emp_code LIMIT 200`,
+    const emps = await db.query<repo.RangeEmployee>(
+      `SELECT id, gender, ot_eligible, weekly_off_days, company_id, join_date, exit_date FROM employee WHERE company_id = $1 AND status = 'active' AND ($2::uuid[] IS NULL OR id = ANY($2)) ORDER BY emp_code LIMIT 200`,
       [req.user!.companyId, b.employeeIds ?? null]);
     const counts = { late: 0, halfDay: 0, absent: 0, otDetected: 0, otMinutes: 0 };
     const current = { late: 0, halfDay: 0, absent: 0, otDetected: 0, otMinutes: 0 };
     const affected = new Map<string, number>();
+    // All inputs for the range in a handful of queries; the loop below is pure computation.
+    const inputs = await repo.loadRangeInputs(db, req.user!.companyId!, emps.rows, dates);
     for (const e of emps.rows) {
       for (const d of dates) {
-        const [branchId, shift, punches, leave, wfh, otPre, otWeek] = await Promise.all([
-          repo.getBranchId(db, e.id, d), repo.resolveShift(db, e.id, d), repo.getPunchesAround(db, e.id, d), repo.approvedLeave(db, e.id, d),
-          repo.approvedWfh(db, e.id, d), repo.approvedOtMinutes(db, e.id, d), repo.otMinutesThisWeek(db, e.id, d)]);
-        if (!shift) continue;
-        const ctx: DayContext = { holiday: await repo.isHoliday(db, e.company_id, branchId, d, e.gender), weeklyOff: e.weekly_off_days.includes(weekdayOf(d)), leave: leave.cover, wfh, otEligible: e.ot_eligible, otPreapprovedMin: otPre, otMinutesThisWeek: otWeek };
-        const day = computeDay({ employeeId: e.id, localDate: d, shift, punches, ctx, policy: proposed });
+        const x = inputs.get(`${e.id}|${d}`)!;
+        const employed = (!e.join_date || d >= e.join_date) && (!e.exit_date || d <= e.exit_date);
+        if (!x.shift || !employed) continue;
+        const ctx: DayContext = { holiday: x.holiday, weeklyOff: e.weekly_off_days.includes(weekdayOf(d)), leave: x.leave, wfh: x.wfh, otEligible: e.ot_eligible, otPreapprovedMin: x.otPreapprovedMin, otMinutesThisWeek: x.otMinutesThisWeek };
+        const day = computeDay({ employeeId: e.id, localDate: d, shift: x.shift, punches: x.punches, ctx, policy: proposed });
         if (day.lateMin > 0) counts.late++;
         if (day.status === 'HalfDay') counts.halfDay++;
         if (day.status === 'Absent') counts.absent++;
         if (day.ot.minutes > 0) { counts.otDetected++; counts.otMinutes += day.ot.minutes; }
-        const stored = await repo.latestVersion(db, e.id, d);
-        if (stored && stored.inputs_hash !== day.inputsHash) affected.set(e.id, (affected.get(e.id) ?? 0) + 1);
+        // "Affected" means the outcome would change, not the hash (the preview policy always hashes differently).
+        const st = x.stored;
+        if (st && (st.status !== day.status || st.late_min !== day.lateMin || st.ot_min !== day.ot.minutes)) affected.set(e.id, (affected.get(e.id) ?? 0) + 1);
       }
     }
     const cur = await db.query<{ late: number; half: number; absent: number; ot: number; otmin: number }>(
@@ -129,8 +133,15 @@ export function settingsRoutes({ db }: AppDeps): Router {
     const rows = await db.query('SELECT id, branch_id, parent_id, kind, code, name_en, name_ne FROM org_unit WHERE company_id = $1 ORDER BY code', [req.user!.companyId]);
     res.json({ orgUnits: rows.rows });
   });
+  /** Branch and parent ids in an org-unit body must belong to the caller's company, and a unit cannot be its own parent. */
+  const checkOrgRefs = async (companyId: string | null, b: { branchId?: string | null | undefined; parentId?: string | null | undefined }, selfId?: string) => {
+    if (b.branchId && !(await db.query('SELECT 1 FROM branch WHERE id = $1 AND company_id = $2', [b.branchId, companyId])).rows[0]) throw new NotFoundError('branch not found');
+    if (b.parentId && !(await db.query('SELECT 1 FROM org_unit WHERE id = $1 AND company_id = $2', [b.parentId, companyId])).rows[0]) throw new NotFoundError('parent unit not found');
+    if (selfId && b.parentId === selfId) throw new BadRequestError('an org unit cannot be its own parent');
+  };
   r.post('/org-units', async (req, res) => {
     const b = z.object({ kind: z.enum(['department', 'team']), code: z.string().min(1).max(20), nameEn: z.string().min(1).max(120), nameNe: z.string().max(120).optional(), branchId: z.uuid().optional(), parentId: z.uuid().optional() }).parse(req.body);
+    await checkOrgRefs(req.user!.companyId, b);
     const row = await db.query('INSERT INTO org_unit (company_id, branch_id, parent_id, kind, code, name_en, name_ne) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, branch_id, parent_id, kind, code, name_en, name_ne',
       [req.user!.companyId, b.branchId ?? null, b.parentId ?? null, b.kind, b.code, b.nameEn, b.nameNe ?? null]);
     await audit(db, { actorId: req.user!.id, action: 'create', table: 'org_unit', rowId: row.rows[0].id, after: b });
@@ -139,6 +150,7 @@ export function settingsRoutes({ db }: AppDeps): Router {
   r.patch('/org-units/:id', async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const b = z.object({ nameEn: z.string().min(1).max(120).optional(), nameNe: z.string().max(120).nullable().optional(), branchId: z.uuid().nullable().optional(), parentId: z.uuid().nullable().optional() }).parse(req.body);
+    await checkOrgRefs(req.user!.companyId, b, id);
     const row = await db.query(`UPDATE org_unit SET name_en = coalesce($3, name_en), name_ne = CASE WHEN $5 THEN $4 ELSE name_ne END,
         branch_id = CASE WHEN $7 THEN $6 ELSE branch_id END, parent_id = CASE WHEN $9 THEN $8 ELSE parent_id END
       WHERE id = $1 AND company_id = $2 RETURNING id, branch_id, parent_id, kind, code, name_en, name_ne`,

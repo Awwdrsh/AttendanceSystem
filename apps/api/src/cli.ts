@@ -1,6 +1,8 @@
 /**
  * Admin CLI:  pnpm --filter @hajiri/api cli <command> [options]
  *   create-admin --email <email> --password <pw> [--name <name>] [--company DEMO]
+ *     (the password may come from HAJIRI_PASSWORD instead of --password, which keeps it out of the process list;
+ *      the new admin must change it at first sign-in)
  *   seed-defaults [--company DEMO]        leave types, workflows, settings, rule versions, salary components
  *   reset-password --email <email> --password <pw>
  */
@@ -13,6 +15,7 @@ import { seedDefaults } from './db/seed-defaults.js';
 const args = process.argv.slice(2);
 const cmd = args[0];
 const opt = (name: string, def?: string) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] ?? def : def; };
+const passwordArg = () => opt('password') ?? process.env.HAJIRI_PASSWORD;
 
 const db = createPool(loadDatabaseUrl());
 // Secrets are only required for password operations.
@@ -27,17 +30,17 @@ async function companyId(code: string): Promise<string> {
 try {
   switch (cmd) {
     case 'create-admin': {
-      const email = opt('email'); const password = opt('password');
-      if (!email || !password) throw new Error('--email and --password are required');
+      const email = opt('email'); const password = passwordArg();
+      if (!email || !password) throw new Error('--email and --password (or HAJIRI_PASSWORD) are required');
       const err = passwordPolicyError(password); if (err) throw new Error(err);
       const cid = await companyId(opt('company', 'DEMO')!);
-      const u = await createUser(db, { companyId: cid, email, name: opt('name', 'Administrator')!, password, roles: ['admin'], pepper: pepper() });
+      const u = await createUser(db, { companyId: cid, email, name: opt('name', 'Administrator')!, password, roles: ['admin'], mustChangePassword: true, pepper: pepper() });
       console.log(`admin user ${u.email} created (${u.id})`);
       break;
     }
     case 'reset-password': {
-      const email = opt('email'); const password = opt('password');
-      if (!email || !password) throw new Error('--email and --password are required');
+      const email = opt('email'); const password = passwordArg();
+      if (!email || !password) throw new Error('--email and --password (or HAJIRI_PASSWORD) are required');
       const err = passwordPolicyError(password); if (err) throw new Error(err);
       const r = await db.query('UPDATE app_user SET password_hash = $2, failed_logins = 0, locked_until = NULL WHERE email = lower($1) RETURNING id', [email, await hashPassword(password, pepper())]);
       if (!r.rowCount) throw new Error('user not found');

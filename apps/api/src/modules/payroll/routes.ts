@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { validateFormula, D } from '@hajiri/payroll-engine';
+import { formulaReferences, validateFormula, D } from '@hajiri/payroll-engine';
 import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
@@ -14,6 +14,8 @@ import { approveRun, bonusAllocation, computeRun, ensurePeriod, getPeriod, getRu
 
 const STATUTORY_KEYS = new Set(['tax.schedule', 'tax.deductions', 'ssf.rates', 'pf.rates', 'ot.multiplier', 'festival.allowance', 'min_wage', 'bonus.caps', 'ssf.deposit_days', 'tds.deposit_days']);
 const payrollRole = requireRole('hr');
+/** Salary figures, declarations and profit are never negative; a negative CIT or premium would raise net pay. */
+const amount = money.refine((v) => !v.startsWith('-'), 'must not be negative');
 
 export function payrollRoutes({ db, cipher }: AppDeps): Router {
   const r = Router();
@@ -31,7 +33,7 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
   // Rule versions are jurisdiction-wide (not per company), so only an administrator may add them (FY rollover SOP, plan §16.6).
   r.post('/rules', requireRole('admin'), async (req, res) => {
     const b = z.object({ ruleKey: z.string().min(1).max(60), validFromAd: isoDate, validToAd: isoDate.nullable().optional(), validFromBs: z.string(), validToBs: z.string().nullable().optional(),
-      value: z.unknown(), sourceUrl: z.string().url().optional(), note: z.string().max(500).optional(), supersedesId: z.uuid().optional() }).parse(req.body);
+      value: z.unknown(), sourceUrl: z.string().url().regex(/^https?:\/\//i, 'source must be an http(s) link').optional(), note: z.string().max(500).optional(), supersedesId: z.uuid().optional() }).parse(req.body);
     const rows = await db.query<{ id: string }>(
       `INSERT INTO rule_version (rule_key, valid_from_ad, valid_to_ad, valid_from_bs, valid_to_bs, value, source_url, note, supersedes_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
       [b.ruleKey, b.validFromAd, b.validToAd ?? null, b.validFromBs, b.validToBs ?? null, JSON.stringify(b.value), b.sourceUrl ?? null, b.note ?? null, b.supersedesId ?? null]);
@@ -58,11 +60,35 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     rounding: z.enum(['paisa', 'rupee']).default('paisa'), sortOrder: z.number().int().default(100), active: z.boolean().default(true),
   });
   async function checkFormulas(companyId: string, b: { code: string; formula?: string | null | undefined; condition?: string | null | undefined }) {
-    const known = (await db.query<{ code: string }>('SELECT code FROM salary_component WHERE company_id = $1', [companyId])).rows.map((x) => x.code);
+    const all = (await db.query<{ code: string; formula: string | null; condition: string | null }>('SELECT code, formula, condition FROM salary_component WHERE company_id = $1', [companyId])).rows;
+    const known = all.map((x) => x.code);
     known.push(b.code);
     for (const [label, src] of [['formula', b.formula], ['condition', b.condition]] as const) {
       if (src) { const err = validateFormula(src, known); if (err) throw new BadRequestError(`${label}: ${err}`); }
     }
+    // A component may not depend on itself, directly or through others: the run would only fail at calculation time.
+    const codes = new Set(known);
+    const graph = new Map<string, Array<string | null | undefined>>();
+    for (const c of all) graph.set(c.code, [c.formula, c.condition]);
+    const cur = graph.get(b.code) ?? [null, null];
+    graph.set(b.code, [b.formula !== undefined ? b.formula : cur[0], b.condition !== undefined ? b.condition : cur[1]]);
+    const deps = new Map<string, string[]>();
+    for (const [code, srcs] of graph) {
+      const refs = new Set<string>();
+      for (const src of srcs) if (src) { try { for (const x of formulaReferences(src)) if (codes.has(x)) refs.add(x); } catch { /* invalid stored formula: reported when it runs */ } }
+      deps.set(code, [...refs]);
+    }
+    const path: string[] = []; const state = new Map<string, 1 | 2>();
+    const visit = (code: string): string[] | null => {
+      if (state.get(code) === 2) return null;
+      if (state.get(code) === 1) return [...path.slice(path.indexOf(code)), code];
+      state.set(code, 1); path.push(code);
+      for (const d of deps.get(code) ?? []) { const cyc = visit(d); if (cyc) return cyc; }
+      path.pop(); state.set(code, 2);
+      return null;
+    };
+    const cycle = visit(b.code);
+    if (cycle) throw new BadRequestError(`formula refers back to itself: ${cycle.join(' → ')}`);
   }
   r.post('/components', payrollRole, async (req, res) => {
     const b = componentBody.parse(req.body);
@@ -128,11 +154,15 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     res.json({ assignments: rows.rows });
   });
   r.post('/assignments', payrollRole, async (req, res) => {
-    const b = z.object({ employeeId: z.uuid(), structureVersionId: z.uuid(), from: isoDate, baseAmounts: z.record(z.string(), money) }).parse(req.body);
+    const b = z.object({ employeeId: z.uuid(), structureVersionId: z.uuid(), from: isoDate, baseAmounts: z.record(z.string(), amount) }).parse(req.body);
     const emp = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [b.employeeId, cid(req)]);
     if (!emp.rows[0]) throw new NotFoundError('employee not found');
-    const sv = await db.query('SELECT 1 FROM salary_structure_version v JOIN salary_structure s ON s.id = v.structure_id WHERE v.id = $1 AND s.company_id = $2', [b.structureVersionId, cid(req)]);
+    const sv = await db.query<{ components: Array<{ code: string }> }>('SELECT v.components FROM salary_structure_version v JOIN salary_structure s ON s.id = v.structure_id WHERE v.id = $1 AND s.company_id = $2', [b.structureVersionId, cid(req)]);
     if (!sv.rows[0]) throw new NotFoundError('salary structure version not found');
+    const inStructure = new Set(sv.rows[0].components.map((c) => c.code));
+    const unknownCodes = Object.keys(b.baseAmounts).filter((c) => !inStructure.has(c));
+    if (unknownCodes.length) throw new BadRequestError(`not components of this salary structure: ${unknownCodes.join(', ')}`);
+    if (!Object.keys(b.baseAmounts).length) throw new BadRequestError('baseAmounts needs at least one component amount');
     const client = await db.connect();
     try {
       await client.query('BEGIN');
@@ -159,8 +189,8 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     res.json({ declaration: rows.rows[0] ?? null });
   });
   r.put('/declarations', async (req, res) => {
-    const b = z.object({ employeeId: z.uuid().optional(), fiscalYearStart: z.number().int(), lifePremium: money.default('0'), healthPremium: money.default('0'), citMonthly: money.default('0'),
-      medicalCost: money.default('0'), otherRetirementAnnual: money.default('0'), submit: z.boolean().default(true) }).parse(req.body);
+    const b = z.object({ employeeId: z.uuid().optional(), fiscalYearStart: z.number().int(), lifePremium: amount.default('0'), healthPremium: amount.default('0'), citMonthly: amount.default('0'),
+      medicalCost: amount.default('0'), otherRetirementAnnual: amount.default('0'), submit: z.boolean().default(true) }).parse(req.body);
     const employeeId = b.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
     await assertManages(db, req.user!, employeeId);
@@ -245,6 +275,10 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
       if (!ex.rows[0].exit_date) throw new BadRequestError('final settlement needs an exit date on the employee record');
       if (ex.rows[0].exit_date > p.end_ad) throw new BadRequestError('the exit date is after this period; pick the period containing the exit date');
     }
+    if (b.employeeIds?.length) {
+      const own = await db.query<{ n: number }>('SELECT count(*)::int AS n FROM employee WHERE company_id = $1 AND id = ANY($2)', [cid(req), b.employeeIds]);
+      if (own.rows[0]!.n !== new Set(b.employeeIds).size) throw new NotFoundError('one or more employees not found');
+    }
     if (b.referencesRunId) { const ref = await getRun(db, cid(req), b.referencesRunId); if (!ref.locked_at) throw new BadRequestError('referenced run must be locked'); }
     const params = { ...(b.employeeIds ? { employeeIds: b.employeeIds } : {}), ...(b.noticePay ? { noticePay: b.noticePay } : {}) };
     const rows = await db.query<{ id: string }>(
@@ -254,7 +288,7 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     res.status(201).json({ id: rows.rows[0]!.id });
   });
   r.post('/runs/bonus', payrollRole, async (req, res) => {
-    const b = z.object({ periodId: z.uuid(), fiscalYearStart: z.number().int(), netProfit: money }).parse(req.body);
+    const b = z.object({ periodId: z.uuid(), fiscalYearStart: z.number().int(), netProfit: amount }).parse(req.body);
     const p = await getPeriod(db, cid(req), b.periodId);
     const alloc = await bonusAllocation(db, cid(req), b.fiscalYearStart, b.netProfit);
     const rows = await db.query<{ id: string }>(
@@ -293,6 +327,10 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     const unknown = [...new Set(b.inputs.map((i) => i.componentCode))].filter((c) => !codes.has(c));
     if (unknown.length) throw new BadRequestError(`unknown or inactive component code(s): ${unknown.join(', ')}`);
     for (const i of b.inputs) if (!D(i.amount).gt(0)) throw new BadRequestError('input amounts must be positive');
+    // A run scoped to named employees (supplementary, final settlement) only pays them; an input for anyone else would be silently dropped.
+    const scoped = Array.isArray(run.params.employeeIds) ? new Set(run.params.employeeIds as string[]) : null;
+    const outside = scoped ? [...new Set(b.inputs.map((i) => i.employeeId))].filter((e) => !scoped.has(e)) : [];
+    if (outside.length) throw new BadRequestError(`this run only includes ${scoped!.size} named ${scoped!.size === 1 ? 'employee' : 'employees'}; ${outside.length} input ${outside.length === 1 ? 'employee is' : 'employees are'} not in it`);
     const client = await db.connect();
     let added = 0;
     try {

@@ -51,11 +51,11 @@ export const settingSchemas = {
   }),
   'company.profile': z.object({
     nameEn: z.string().min(1).max(120),
-    nameNe: z.string().max(120).optional(),
-    address: z.string().max(300).optional(),
-    pan: z.string().regex(/^\d{9}$/).optional(),
-    ssfEmployerId: z.string().max(20).optional(),
-    logoDataUrl: z.string().max(200_000).regex(/^data:image\/(png|jpeg|svg\+xml);base64,/).optional(),
+    nameNe: z.string().max(120).nullish(),
+    address: z.string().max(300).nullish(),
+    pan: z.string().regex(/^\d{9}$/).nullish(),
+    ssfEmployerId: z.string().max(20).nullish(),
+    logoDataUrl: z.string().max(200_000).regex(/^data:image\/(png|jpeg|svg\+xml);base64,/).nullish(),
   }),
 } as const;
 

@@ -9,6 +9,7 @@ import { isoDate } from '../../validation.js';
 import { hasRole, requireRole } from '../auth/middleware.js';
 import { enqueueRecompute } from '../attendance/service.js';
 import { creditCompOff } from '../leave/service.js';
+import { csvCell } from '../reports/csv.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
 import { assertManages, cancelWorkflow, nptToday, registerHandler, startWorkflow, type DecisionContext } from '../workflow/service.js';
 
@@ -105,7 +106,8 @@ export function otRoutes({ db }: AppDeps): Router {
     if (!o || o.company_id !== req.user!.companyId) throw new NotFoundError('request not found');
     await assertManages(db, req.user!, o.employee_id);
     if (o.status !== 'pending') throw new ConflictError(`only pending requests can be cancelled (status ${o.status})`);
-    await db.query(`UPDATE ot_request SET status = 'cancelled', decided_at = now() WHERE id = $1`, [id]);
+    const u = await db.query(`UPDATE ot_request SET status = 'cancelled', decided_at = now() WHERE id = $1 AND status = 'pending'`, [id]);
+    if (!u.rowCount) throw new ConflictError('request was decided in the meantime');
     await cancelWorkflow(db, 'ot_request', id);
     res.json({ ok: true });
   });
@@ -142,7 +144,9 @@ export function otRoutes({ db }: AppDeps): Router {
     const b = z.object({ approvedMin: z.number().int().min(0).max(CAP_DAY_MIN).optional() }).parse(req.body ?? {});
     const s = await slipFor(id, req.user!);
     const approved = Math.min(b.approvedMin ?? s.detected_min, s.detected_min, CAP_DAY_MIN);
-    await db.query(`UPDATE ot_slip SET status = 'approved', approved_min = $2, reviewed_by = $3, reviewed_at = now() WHERE id = $1`, [id, approved, req.user!.id]);
+    // Conditional update: a second approval (double click, two approvers at once) is a conflict, not a silent re-approval.
+    const upd = await db.query(`UPDATE ot_slip SET status = 'approved', approved_min = $2, reviewed_by = $3, reviewed_at = now() WHERE id = $1 AND status IN ('detected', 'rejected')`, [id, approved, req.user!.id]);
+    if (!upd.rowCount) throw new ConflictError(`slip is already ${s.status}`);
     await audit(db, { actorId: req.user!.id, action: 'approve', table: 'ot_slip', rowId: id, after: { approvedMin: approved } });
     res.json({ ok: true, approvedMin: approved });
   });
@@ -151,7 +155,8 @@ export function otRoutes({ db }: AppDeps): Router {
     const id = z.uuid().parse(req.params.id);
     const b = z.object({ reason: z.string().min(3).max(500) }).parse(req.body);
     const s = await slipFor(id, req.user!);
-    await db.query(`UPDATE ot_slip SET status = 'rejected', approved_min = 0, reviewed_by = $2, reviewed_at = now() WHERE id = $1`, [id, req.user!.id]);
+    const upd = await db.query(`UPDATE ot_slip SET status = 'rejected', approved_min = 0, reviewed_by = $2, reviewed_at = now() WHERE id = $1 AND status IN ('detected', 'approved')`, [id, req.user!.id]);
+    if (!upd.rowCount) throw new ConflictError(`slip is already ${s.status}`);
     await audit(db, { actorId: req.user!.id, action: 'reject', table: 'ot_slip', rowId: id, after: { reason: b.reason, employeeId: s.employee_id } });
     res.json({ ok: true });
   });
@@ -166,6 +171,9 @@ export function otRoutes({ db }: AppDeps): Router {
     const client = await db.connect();
     try {
       await client.query('BEGIN');
+      // Claim the slip first so a double click cannot credit substitute leave twice.
+      const claim = await client.query(`UPDATE ot_slip SET status = 'comp_off' WHERE id = $1 AND status NOT IN ('comp_off', 'posted', 'rejected') RETURNING id`, [id]);
+      if (!claim.rowCount) throw new ConflictError('slip was already converted, posted or rejected');
       const ledgerId = await creditCompOff(client, s.employee_id, days, expires, { refType: 'ot_slip', refId: id, note: `comp-off for ${minutes} min OT on ${s.local_date}`, postedBy: req.user!.id });
       await client.query(`UPDATE ot_slip SET status = 'comp_off', approved_min = $2, comp_off_ledger_id = $3, reviewed_by = $4, reviewed_at = now() WHERE id = $1`, [id, minutes, ledgerId, req.user!.id]);
       await audit(client, { actorId: req.user!.id, action: 'comp_off', table: 'ot_slip', rowId: id, after: { days, expires } });
@@ -183,8 +191,7 @@ export function otRoutes({ db }: AppDeps): Router {
         WHERE e.company_id = $1 AND s.local_date BETWEEN $2 AND $3 ORDER BY s.local_date, e.emp_code`, [req.user!.companyId, q.from, q.to]);
     if (q.format === 'csv') {
       const cols = ['emp_code', 'name_en', 'local_date', 'bs_date', 'day_type', 'detected_min', 'approved_min', 'multiplier', 'status'];
-      const esc = (v: unknown) => { const s = v === null || v === undefined ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-      res.type('text/csv').send('\uFEFF' + [cols.join(','), ...rows.rows.map((r0) => cols.map((c) => esc(r0[c])).join(','))].join('\r\n') + '\r\n');
+      res.type('text/csv').send('\uFEFF' + [cols.join(','), ...rows.rows.map((r0) => cols.map((c) => csvCell(r0[c])).join(','))].join('\r\n') + '\r\n');
       return;
     }
     res.json({ register: rows.rows });

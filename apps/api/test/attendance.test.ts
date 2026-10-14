@@ -142,8 +142,10 @@ describe('devices', () => {
     const cmd = await db.query(`SELECT command FROM device_command WHERE device_id = $1 ORDER BY id DESC LIMIT 1`, [DEMO.deviceId]);
     expect(cmd.rows[0].command).toMatch(/^DATA UPDATE USERINFO PIN=7\t/);
   });
-  it('overlapping mapping for a different employee is replaced from the new date', async () => {
-    const map = await request(app).post(`/api/v1/devices/${DEMO.deviceId}/map`).set(auth(hr)).send({ pin: '7', employeeId: DEMO.sita, from: '2026-10-01' });
+  it('overlapping mapping for a different employee needs confirmation, then is replaced from the new date', async () => {
+    const refused = await request(app).post(`/api/v1/devices/${DEMO.deviceId}/map`).set(auth(hr)).send({ pin: '7', employeeId: DEMO.sita, from: '2026-10-01' });
+    expect(refused.status).toBe(409);
+    const map = await request(app).post(`/api/v1/devices/${DEMO.deviceId}/map`).set(auth(hr)).send({ pin: '7', employeeId: DEMO.sita, from: '2026-10-01', replace: true });
     expect(map.status).toBe(201);
     const rows = await db.query(`SELECT employee_id, valid::text FROM device_user_map WHERE device_id = $1 AND device_user_pin = '7' ORDER BY lower(valid)`, [DEMO.deviceId]);
     expect(rows.rows).toHaveLength(2);
@@ -163,7 +165,7 @@ describe('devices', () => {
     expect(a.rows).toHaveLength(1);
   });
   it('CSV import validates rows and reports errors by row number', async () => {
-    const csv = 'emp_code,name_en,pan,join_date\nE200,Gita,123456789,2026-01-01\nE201,,12345,2026-13-40\n';
+    const csv = 'emp_code,name_en,pan,join_date\nE200,Gita,223456789,2026-01-01\nE201,,12345,2026-13-40\n'; // PAN differs from E100's: duplicates are refused
     const dry = await request(app).post('/api/v1/employees/import?dryRun=true').set(auth(hr)).set('Content-Type', 'text/csv').send(csv);
     expect(dry.status).toBe(400);
     expect(dry.body.errors.map((e: { row: number }) => e.row)).toEqual([3, 3, 3]);

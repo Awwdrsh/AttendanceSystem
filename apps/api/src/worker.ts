@@ -5,7 +5,7 @@ import type { FieldCipher } from './crypto.js';
 import type { Db } from './db/pool.js';
 import { sha256Hex } from './crypto.js';
 import { dateRange, enqueueRecompute, recomputeDay } from './modules/attendance/service.js';
-import { runMonthlyAccrual } from './modules/leave/accrual.js';
+import { runLeaveCatchUp, runMonthlyAccrual } from './modules/leave/accrual.js';
 import { dailyDigest, deliverQueued, LogSender, notify, notifyRole, userIdForEmployee, userIdsWithRole, WebhookSender, type Sender } from './modules/notifications/service.js';
 import { ensurePseudoDevice, nptLocalTime } from './modules/punch/devices.js';
 
@@ -32,10 +32,23 @@ export function sendersFromEnv(env: NodeJS.ProcessEnv, logger: Logger): Sender[]
 export const MAX_RECOMPUTE_ATTEMPTS = 5;
 
 /**
- * (1) Drain recompute_queue in batches of 50 (plan §10.3). A row that fails is re-queued with attempts + 1 and dropped
- * after MAX_RECOMPUTE_ATTEMPTS with an HR notification, so one poisoned row can never block the queue.
+ * (1) Drain recompute_queue (plan §10.3) in batches until it is empty or the time budget is spent, so a device backlog
+ * clears within a tick or two instead of 50 rows every 15 s. A row that fails is re-queued with attempts + 1 (and sorts
+ * after fresh work) and is dropped after MAX_RECOMPUTE_ATTEMPTS with an HR notification, so one poisoned row never blocks the queue.
  */
-export async function drainRecomputeQueue(deps: WorkerDeps, batch = 50): Promise<{ processed: number; failed: number; dropped: number }> {
+export async function drainRecomputeQueue(deps: WorkerDeps, opts: { batch?: number; budgetMs?: number } = {}): Promise<{ processed: number; failed: number; dropped: number }> {
+  const batch = opts.batch ?? 200;
+  const deadline = Date.now() + (opts.budgetMs ?? 10_000);
+  const total = { processed: 0, failed: 0, dropped: 0 };
+  do {
+    const r = await drainBatch(deps, batch);
+    total.processed += r.processed; total.failed += r.failed; total.dropped += r.dropped;
+    if (r.taken < batch) break;
+  } while (Date.now() < deadline);
+  return total;
+}
+
+async function drainBatch(deps: WorkerDeps, batch: number): Promise<{ processed: number; failed: number; dropped: number; taken: number }> {
   const { db, logger } = deps;
   const client = await db.connect();
   let rows: Array<{ employee_id: string; local_date: string; attempts: number }> = [];
@@ -43,7 +56,7 @@ export async function drainRecomputeQueue(deps: WorkerDeps, batch = 50): Promise
     await client.query('BEGIN');
     const r = await client.query<{ employee_id: string; local_date: string; attempts: number }>(
       `DELETE FROM recompute_queue WHERE (employee_id, local_date) IN (
-         SELECT employee_id, local_date FROM recompute_queue ORDER BY enqueued_at LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING employee_id, local_date, attempts`, [batch]);
+         SELECT employee_id, local_date FROM recompute_queue WHERE enqueued_at <= now() ORDER BY enqueued_at LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING employee_id, local_date, attempts`, [batch]);
     rows = r.rows;
     await client.query('COMMIT');
   } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
@@ -74,7 +87,7 @@ export async function drainRecomputeQueue(deps: WorkerDeps, batch = 50): Promise
       }
     }
   }
-  return { processed, failed, dropped };
+  return { processed, failed, dropped, taken: rows.length };
 }
 
 /** (2) Nightly sweep: last 3 days for every active employee (plan §10.3). */
@@ -98,6 +111,8 @@ export async function monthlyAccrualIfDue(deps: WorkerDeps, now = new Date()): P
     `SELECT c.id, (SELECT value->>'month' FROM company_setting s WHERE s.company_id = c.id AND s.key = 'leave.accrual.last') AS last FROM company c`);
   let ran = 0;
   for (const c of companies.rows) {
+    // Idempotent catch-up: missed months of this fiscal year and annual grants for people who joined after Shrawan.
+    try { await runLeaveCatchUp(deps.db, c.id, today); } catch (e) { deps.logger.error({ err: e, companyId: c.id }, 'leave catch-up failed'); }
     if (c.last && c.last >= key) continue;
     try {
       const summary = await runMonthlyAccrual(deps.db, c.id, prev.year, prev.month);

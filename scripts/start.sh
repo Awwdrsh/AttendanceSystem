@@ -30,6 +30,10 @@ pnpm --filter @hajiri/api --silent db:migrate
 ok "schema up to date"
 
 mkdir -p logs .run
+# Logs hold employee names and request details: owner-only.
+chmod 700 logs
+for f in logs/*.log; do [ -f "$f" ] && chmod 600 "$f"; done
+umask 077
 if [ "$DAEMON" = 1 ]; then
   if [ -f .run/api.pid ] && kill -0 "$(cat .run/api.pid)" 2>/dev/null; then fail "already running (./scripts/stop.sh first)"; fi
   step "Starting in background"

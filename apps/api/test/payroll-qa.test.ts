@@ -174,9 +174,11 @@ describe('loss of pay from attendance flags', () => {
     const c = await request(app).post(P(`/runs/${run.body.id}/compute`)).set(auth(hr)).send({ overrideReason: 'attendance partially entered for the LOP test' });
     expect(c.status).toBe(200);
     const r = await request(app).get(P(`/runs/${run.body.id}`)).set(auth(hr));
-    // 0.5 + 1 + 1 + 0.5 + 0 + 0 + 1 = 4 days of LOP
-    expect(r.body.payslips[0].lop_days).toBe('4.00');
-    expect(r.body.payslips[0].paid_days).toBe('26.00');
+    // 0.5 + 1 + 1 + 0.5 + 0 + 0 + 0 = 3 days of LOP: the Incomplete day (missing punch-out) was worked, so it is paid
+    expect(r.body.payslips[0].lop_days).toBe('3.00');
+    expect(r.body.payslips[0].paid_days).toBe('27.00');
+    const pf = (await db.query('SELECT preflight FROM payroll_run WHERE id = $1', [run.body.id])).rows[0].preflight;
+    expect(pf.warnings.find((w: { code: string }) => w.code === 'incomplete_days')).toMatchObject({ count: 1, employees: ['E001: 1 day'] });
   });
 });
 

@@ -82,8 +82,10 @@ describe('leave requests and approvals', () => {
     expect(day.day.status).toBe('OnLeave');
     const act = await db.query<{ signature: string }>('SELECT signature FROM approval_action WHERE instance_id = $1', [instanceId]);
     expect(act.rows[0]!.signature).toHaveLength(64);
+    // The approval recomputes the covered days before responding, so nothing is left for the worker.
     const queued = await db.query(`SELECT 1 FROM recompute_queue WHERE employee_id = $1 AND local_date = '2026-09-22'`, [DEMO.sita]);
-    expect(queued.rows).toHaveLength(1);
+    expect(queued.rows).toHaveLength(0);
+    expect((await db.query(`SELECT status FROM v_attendance_latest WHERE employee_id = $1 AND local_date = '2026-09-22'`, [DEMO.sita])).rows[0].status).toBe('OnLeave');
   });
 
   it('nobody approves their own request; rejecting needs a reason; double decision is a conflict', async () => {

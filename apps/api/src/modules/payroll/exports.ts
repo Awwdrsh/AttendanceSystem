@@ -1,7 +1,8 @@
 import { D } from '@hajiri/payroll-engine';
 import type { Queryable } from '../../db/pool.js';
+import { csvCell } from '../reports/csv.js';
 
-const csv = (rows: string[][]) => rows.map((r) => r.map((c) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(',')).join('\r\n') + '\r\n';
+const csv = (rows: string[][]) => rows.map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
 
 /** SSF monthly contribution sheet (plan §11.5, §11.10): per contributor basic, 11%, 20%, scheme allocation, 31% total. Official SOSYS layout to be confirmed (Gap G-3). */
 export async function ssfSheetCsv(db: Queryable, runId: string): Promise<string> {

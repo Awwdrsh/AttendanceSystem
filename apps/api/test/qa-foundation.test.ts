@@ -189,10 +189,11 @@ describe('attendance routes', () => {
     expect(ex.body.exceptions.map((e: { employee_id: string; status: string }) => [e.employee_id, e.status])).toContainEqual([DEMO.sita, 'Present']);
     expect(ex.body.exceptions[0].flags).toContainEqual({ kind: 'AutoClockOut' });
   });
-  it('recompute-range queues employee × date pairs in one statement and rejects empty ranges', async () => {
-    const r = await request(app).post('/api/v1/attendance/recompute-range').set(auth(hr)).send({ employeeIds: [DEMO.sita, DEMO.ram], from: '2026-09-01', to: '2026-09-03' });
-    expect(r.body.queued).toBe(6);
-    expect((await db.query(`SELECT count(*)::int AS n FROM recompute_queue`)).rows[0].n).toBe(6);
+  it('recompute-range queues employee × date pairs in one statement (above the inline limit) and rejects empty ranges', async () => {
+    await db.query('DELETE FROM recompute_queue');
+    const r = await request(app).post('/api/v1/attendance/recompute-range').set(auth(hr)).send({ employeeIds: [DEMO.sita, DEMO.ram], from: '2026-09-01', to: '2026-10-02' });
+    expect(r.body.queued).toBe(64);
+    expect((await db.query(`SELECT count(*)::int AS n FROM recompute_queue`)).rows[0].n).toBe(64);
     expect((await request(app).post('/api/v1/attendance/recompute-range').set(auth(hr)).send({ employeeIds: [DEMO.sita], from: '2026-09-03', to: '2026-09-01' })).status).toBe(400);
     await db.query('DELETE FROM recompute_queue');
   });
@@ -234,10 +235,11 @@ describe('worker resilience', () => {
 
 describe('reports', () => {
   it('neutralises spreadsheet formula injection in CSV cells', () => {
-    const csv = toCsv([{ key: 'a', header: 'A' }], [{ a: '=HYPERLINK("http://evil")' }, { a: '+1' }, { a: '-2' }, { a: '@x' }, { a: 'safe' }]);
+    const csv = toCsv([{ key: 'a', header: 'A' }], [{ a: '=HYPERLINK("http://evil")' }, { a: '+1' }, { a: '-2+cmd|x' }, { a: '@x' }, { a: 'safe' }, { a: '-2.50' }]);
     expect(csv).toContain(`"'=HYPERLINK(""http://evil"")"`);
     expect(csv).toContain(`'+1`);
-    expect(csv).toContain(`'-2`);
+    expect(csv).toContain(`'-2+cmd|x`);
+    expect(csv).toContain('\r\n-2.50\r\n'); // a plain negative number stays a number
     expect(csv).toContain(`'@x`);
     expect(csv).toContain('\r\nsafe\r\n');
   });

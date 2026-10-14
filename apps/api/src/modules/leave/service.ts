@@ -11,6 +11,8 @@ export interface LeaveTypeRow {
   max_balance: string | null; carry_forward: boolean; encashable: boolean; certificate_after_days: number | null; allow_half_day: boolean;
   max_consecutive_days: number | null; min_service_days: number; negative_balance_limit: string; gender_scope: 'all' | 'female' | 'male';
   sandwich_rule: boolean; expiry_days: number | null; sort_order: number;
+  /** Paid days per event for event-based statutory leave (maternity, maternity-care, mourning); null for balance-based types. */
+  event_days: string | null;
 }
 
 export interface EmployeeLite {
@@ -60,6 +62,11 @@ export async function computeLeaveDays(db: Queryable, emp: EmployeeLite, type: L
     if (!working.length) throw new BadRequestError(`${from} is not a working day`);
     return { days: 0.5, workingDays: working, excludedDays: [], sandwichApplied: false, explanation: 'Half day will be deducted' };
   }
+  if (type.event_days !== null) {
+    // Event-based statutory leave (maternity, maternity-care, mourning) runs in calendar days, weekly offs and holidays included.
+    const all = dateRange(from, to);
+    return { days: all.length, workingDays: all, excludedDays: [], sandwichApplied: false, explanation: `${all.length} calendar day(s) of ${type.name_en}` };
+  }
   const { working, nonWorking } = await workingDaysBetween(db, emp, from, to);
   const sandwich = (type.sandwich_rule || sandwichPolicy) && working.length >= 2 && nonWorking.length > 0 && working[0] === from && working[working.length - 1] === to;
   if (sandwich) {
@@ -70,6 +77,18 @@ export async function computeLeaveDays(db: Queryable, emp: EmployeeLite, type: L
   if (!working.length) throw new BadRequestError('the selected range contains no working days');
   return { days: working.length, workingDays: working, excludedDays: nonWorking, sandwichApplied: false,
     explanation: nonWorking.length ? `${working.length} working day(s) will be deducted; ${nonWorking.length} weekly-off/holiday day(s) excluded` : `${working.length} working day(s) will be deducted` };
+}
+
+/** Gap (calendar days) within which requests of the same event-based type are treated as one event. */
+export const EVENT_GAP_DAYS = 30;
+
+/** Days already requested (pending or approved) for the same event: requests of the type within EVENT_GAP_DAYS of [from, to]. */
+export async function eventDaysUsed(db: Queryable, employeeId: string, leaveTypeId: string, from: string, to: string, excludeId?: string): Promise<number> {
+  const r = await db.query<{ d: string }>(
+    `SELECT coalesce(sum(days_requested), 0)::text AS d FROM leave_request
+      WHERE employee_id = $1 AND leave_type_id = $2 AND status IN ('pending', 'approved') AND ($5::uuid IS NULL OR id <> $5)
+        AND to_date >= $3::date - $6::int AND from_date <= $4::date + $6::int`, [employeeId, leaveTypeId, from, to, excludeId ?? null, EVENT_GAP_DAYS]);
+  return Number(r.rows[0]!.d);
 }
 
 export async function ledgerBalance(db: Queryable, employeeId: string, leaveTypeId: string, asOf?: string): Promise<number> {
@@ -111,6 +130,16 @@ export async function balances(db: Queryable, emp: EmployeeLite, asOfAd: string)
     const encashed = -sum('encashment', true);
     const balance = r.rows.reduce((a, x) => a + Number(x.total), 0);
     const pending = await pendingDays(db, emp.id, t.id);
+    if (t.event_days !== null) {
+      // Event-based leave has no running balance: each event carries its own statutory entitlement.
+      const perEvent = Number(t.event_days);
+      out.push({
+        leaveTypeId: t.id, code: t.code, nameEn: t.name_en, nameNe: t.name_ne, paid: t.paid, encashable: t.encashable,
+        opening: 0, accrued: 0, taken, cancelled, lapsed: 0, carried: 0, adjustments: 0, compOff: 0, encashed: 0, pending, balance: perEvent, available: perEvent, fiscalYear: fy.label,
+        explanation: `Up to ${perEvent} paid day(s) per event (statutory); ${taken.toFixed(2)} day(s) taken this fiscal year`,
+      });
+      continue;
+    }
     out.push({
       leaveTypeId: t.id, code: t.code, nameEn: t.name_en, nameNe: t.name_ne, paid: t.paid, encashable: t.encashable,
       opening, accrued, taken, cancelled, lapsed, carried, adjustments, compOff, encashed, pending, balance, available: balance - pending, fiscalYear: fy.label,
