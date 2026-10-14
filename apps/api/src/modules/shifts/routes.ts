@@ -237,8 +237,8 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   // ---------------------------------------------------------------- roster (plan §5.3)
   r.get('/roster', requireRole('hr', 'manager'), async (req, res) => {
     const q = z.object({ from: isoDate, to: isoDate, branchId: z.uuid().optional() }).parse(req.query);
-    // Line managers roster their own reports only; HR/finance see the company.
-    const teamOnly = !hasRole(req.user!, 'hr', 'finance');
+    // Line managers roster their own reports only; HR sees the company.
+    const teamOnly = !hasRole(req.user!, 'hr');
     const emps = await db.query(
       `SELECT e.id, e.emp_code, e.name_en, e.name_ne, e.weekly_off_days,
               (SELECT s.shift_id FROM shift_assignment s WHERE s.employee_id = e.id AND s.valid @> $2::date) AS default_shift_id
@@ -297,7 +297,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   /** Copy last week's roster rows onto the week starting weekStart (plan §5.3 "copy last week"). */
   r.post('/roster/copy-week', requireRole('hr', 'manager'), async (req, res) => {
     const b = z.object({ weekStart: isoDate }).parse(req.body);
-    const teamOnly = !hasRole(req.user!, 'hr', 'finance');
+    const teamOnly = !hasRole(req.user!, 'hr');
     const rows = await db.query<{ employee_id: string; local_date: string; shift_id: string | null }>(
       `SELECT r.employee_id, r.local_date, r.shift_id FROM roster r JOIN employee e ON e.id = r.employee_id
         LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
@@ -321,9 +321,13 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   /** Publish: tell each rostered employee their shifts for the range. */
   r.post('/roster/publish', requireRole('hr', 'manager'), async (req, res) => {
     const b = z.object({ from: isoDate, to: isoDate }).parse(req.body);
+    // A line manager publishes only their own team's roster; HR publishes for the company.
+    const teamOnly = !hasRole(req.user!, 'hr');
     const rows = await db.query<{ employee_id: string; n: string }>(
       `SELECT r.employee_id, count(*)::text AS n FROM roster r JOIN employee e ON e.id = r.employee_id
-        WHERE e.company_id = $1 AND r.local_date BETWEEN $2 AND $3 GROUP BY r.employee_id`, [req.user!.companyId, b.from, b.to]);
+        LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
+        WHERE e.company_id = $1 AND r.local_date BETWEEN $2 AND $3 AND (NOT $4 OR a.manager_id = $5::uuid) GROUP BY r.employee_id`,
+      [req.user!.companyId, b.from, b.to, teamOnly, req.user!.employeeId]);
     for (const row of rows.rows) {
       const userId = await userIdForEmployee(db, row.employee_id);
       await notify(db, { companyId: req.user!.companyId, userId, employeeId: row.employee_id, template: 'roster.published', title: 'Roster published',
