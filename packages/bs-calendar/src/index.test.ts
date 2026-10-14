@@ -3,6 +3,7 @@ import {
   adToBs, bsToAd, bsMonthBounds, daysInBsMonth, fiscalYearOf, fiscalYear, formatBs, parseBs,
   supportedBsYears, weekdayOf, allSupportedDays, addBsDays, toDevanagariNumerals,
 } from './index.js';
+import { daysInBsYear } from './index.js';
 
 // All expected values below come from plan.md §6.10 and §10.5.
 describe('anchors from plan §6.10', () => {
@@ -43,13 +44,18 @@ describe('round trip and range', () => {
       expect(adToBs(ad)).toEqual(bs);
       count++;
     }
-    expect(count).toBe(365 * 3);
+    const { min, max } = supportedBsYears();
+    let expected = 0; for (let y = min; y <= max; y++) expected += daysInBsYear(y);
+    expect(count).toBe(expected);
+    expect(count).toBeGreaterThan(33_000);
   });
   it('rejects dates outside the table', () => {
-    expect(() => adToBs('2025-04-13')).toThrow(RangeError);
-    expect(() => bsToAd({ year: 2081, month: 1, day: 1 })).toThrow(RangeError);
+    expect(() => adToBs('1943-04-13')).toThrow(RangeError);
+    expect(() => bsToAd({ year: 1999, month: 12, day: 1 })).toThrow(RangeError);
+    expect(() => bsToAd({ year: 2091, month: 1, day: 1 })).toThrow(RangeError);
     expect(() => parseBs('2083-02-32')).toThrow(RangeError);
-    expect(supportedBsYears()).toEqual({ min: 2082, max: 2084 });
+    expect(supportedBsYears()).toEqual({ min: 2000, max: 2090 });
+    expect(adToBs('1943-04-14')).toEqual({ year: 2000, month: 1, day: 1 });
   });
   it('addBsDays crosses month and year boundaries', () => {
     expect(addBsDays(parseBs('2082-12-30'), 1)).toEqual({ year: 2083, month: 1, day: 1 });

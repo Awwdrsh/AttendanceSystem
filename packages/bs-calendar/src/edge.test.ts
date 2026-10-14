@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { adToBs, fiscalYear, fiscalYearOf, parseBs, supportedBsYears, daysInBsMonth } from './index.js';
+import { bsToAd } from './index.js';
 
 describe('edge cases', () => {
   it('a Date object is read as a UTC calendar date regardless of host time zone', () => {
@@ -13,8 +14,9 @@ describe('edge cases', () => {
     expect(fy.startYear).toBe(max);
     expect(fy.label).toBe(`${max}/${String(max + 1).slice(-2)}`);
     expect(fy.approximate).toBe(true);
-    expect(fy.endAd).toBe('2028-07-15');
-    expect(fiscalYear(max - 1)).toMatchObject({ approximate: false, endAd: '2027-07-16' });
+    expect(fy.endAd > bsToAd({ year: max, month: 12, day: 1 })).toBe(true);
+    expect(fiscalYear(max - 1)).toMatchObject({ approximate: false, endAd: bsToAd({ year: max, month: 3, day: daysInBsMonth(max, 3) }) });
+    expect(fiscalYear(2082)).toMatchObject({ approximate: false, endAd: '2026-07-16' });
   });
   it('fiscal year labels wrap correctly across a century', () => {
     expect(fiscalYear(2082).label).toBe('2082/83');
