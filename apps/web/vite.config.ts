@@ -7,7 +7,8 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    proxy: { '/api': api, '/health': api },
+    // Keep the browser's Host header: the API refuses cookie writes whose Origin does not match the host it sees.
+    proxy: { '/api': { target: api, changeOrigin: false }, '/health': { target: api, changeOrigin: false } },
   },
   build: { outDir: 'dist', sourcemap: false },
 });

@@ -283,6 +283,7 @@ export function startWorker(deps: WorkerDeps): { stop: () => void } {
   const d = { ...deps, senders };
   const last: Partial<Record<JobName, number>> = {};
   let nightlyDoneFor = '';
+  let startup = true;
   let running = false;
   const every = (job: JobName, ms: number, now: number) => (now - (last[job] ?? 0)) >= ms && (last[job] = now, true);
 
@@ -300,6 +301,8 @@ export function startWorker(deps: WorkerDeps): { stop: () => void } {
       const npt = new Date(t + NPT_OFFSET_MIN * MIN_MS);
       const today = npt.toISOString().slice(0, 10);
       if (npt.getUTCHours() === 0 && npt.getUTCMinutes() >= 30 && nightlyDoneFor !== today) { nightlyDoneFor = today; jobs.push('nightly', 'accrual'); }
+      // Run the idempotent leave catch-up once at start so a fresh or restarted install does not wait for 00:30.
+      if (startup) { startup = false; if (!jobs.includes('accrual')) jobs.push('accrual'); }
       const result = await runOnce(d, jobs, now);
       const q = result.queue as { processed: number } | undefined;
       if (q && q.processed > 0) deps.logger.info(result, 'worker tick');

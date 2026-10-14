@@ -6,6 +6,7 @@ import type { Queryable } from '../../db/pool.js';
 import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { isoDate } from '../../validation.js';
+import { adToBs, fiscalYear, fiscalYearOf } from '@hajiri/bs-calendar';
 import { hasRole, requireRole } from '../auth/middleware.js';
 import { dateRange, enqueueRecompute } from '../attendance/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
@@ -308,11 +309,34 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const emp = await getEmployeeLite(db, b.employeeId);
     const type = await getLeaveType(db, b.leaveTypeId);
     if (!emp || !type || emp.company_id !== req.user!.companyId || type.company_id !== emp.company_id) throw new NotFoundError('employee or leave type not found');
-    const ins = await db.query<{ id: string }>(
-      `INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, note, posted_by) VALUES ($1, $2, $3, $4, $5, 'hr_adjustment', $6, $7) RETURNING id`,
-      [b.employeeId, b.leaveTypeId, b.effectiveDate ?? nptToday(), b.deltaDays, b.kind, b.reason, req.user!.id]);
-    await audit(db, { actorId: req.user!.id, action: 'adjust', table: 'leave_ledger', rowId: ins.rows[0]!.id, after: b });
-    res.status(201).json({ id: ins.rows[0]!.id, balance: await ledgerBalance(db, b.employeeId, b.leaveTypeId) });
+    const effective = b.effectiveDate ?? nptToday();
+    const client = await db.connect();
+    let id: string; let replacedAutomatic: string | null = null;
+    try {
+      await client.query('BEGIN');
+      // An HR allocation for a fiscal year replaces the automatic annual grant for that year instead of stacking on it.
+      if (b.kind === 'allocation' && type.accrual_basis === 'annual') {
+        const fy = fiscalYearOf(adToBs(effective));
+        const auto = await client.query<{ total: string }>(
+          `SELECT coalesce(sum(delta_days), 0)::text AS total FROM leave_ledger WHERE employee_id = $1 AND leave_type_id = $2
+              AND effective_date >= $3::date AND effective_date < $4::date AND ((reason = 'allocation' AND ref_type = 'accrual') OR ref_type = 'accrual_replaced')`,
+          [b.employeeId, b.leaveTypeId, fy.startAd, fiscalYear(fy.startYear + 1).startAd]);
+        const net = Number(auto.rows[0]!.total);
+        if (net > 0) {
+          await client.query(
+            `INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, note, posted_by) VALUES ($1, $2, $3, $4, 'adjustment', 'accrual_replaced', $5, $6)`,
+            [b.employeeId, b.leaveTypeId, effective, -net, `Automatic FY${fy.startYear} grant replaced by HR allocation`, req.user!.id]);
+          replacedAutomatic = net.toFixed(2);
+        }
+      }
+      const ins = await client.query<{ id: string }>(
+        `INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, note, posted_by) VALUES ($1, $2, $3, $4, $5, 'hr_adjustment', $6, $7) RETURNING id`,
+        [b.employeeId, b.leaveTypeId, effective, b.deltaDays, b.kind, b.reason, req.user!.id]);
+      id = ins.rows[0]!.id;
+      await audit(client, { actorId: req.user!.id, action: 'adjust', table: 'leave_ledger', rowId: id, after: { ...b, replacedAutomatic } });
+      await client.query('COMMIT');
+    } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+    res.status(201).json({ id, balance: await ledgerBalance(db, b.employeeId, b.leaveTypeId), replacedAutomatic });
   });
 
   r.get('/ledger', async (req, res) => {

@@ -133,10 +133,16 @@ export async function balances(db: Queryable, emp: EmployeeLite, asOfAd: string)
     if (t.event_days !== null) {
       // Event-based leave has no running balance: each event carries its own statutory entitlement.
       const perEvent = Number(t.event_days);
+      // The current (or next upcoming) event: what is already requested for it comes off this event's entitlement.
+      const ev = await db.query<{ from_date: string; to_date: string }>(
+        `SELECT from_date::text, to_date::text FROM leave_request WHERE employee_id = $1 AND leave_type_id = $2 AND status IN ('pending', 'approved')
+            AND to_date >= $3::date - $4::int ORDER BY from_date LIMIT 1`, [emp.id, t.id, asOfAd, EVENT_GAP_DAYS]);
+      const used = ev.rows[0] ? await eventDaysUsed(db, emp.id, t.id, ev.rows[0].from_date, ev.rows[0].to_date) : 0;
+      const left = Math.max(0, perEvent - used);
       out.push({
         leaveTypeId: t.id, code: t.code, nameEn: t.name_en, nameNe: t.name_ne, paid: t.paid, encashable: t.encashable,
-        opening: 0, accrued: 0, taken, cancelled, lapsed: 0, carried: 0, adjustments: 0, compOff: 0, encashed: 0, pending, balance: perEvent, available: perEvent, fiscalYear: fy.label,
-        explanation: `Up to ${perEvent} paid day(s) per event (statutory); ${taken.toFixed(2)} day(s) taken this fiscal year`,
+        opening: 0, accrued: 0, taken, cancelled, lapsed: 0, carried: 0, adjustments: 0, compOff: 0, encashed: 0, pending, balance: left, available: left, fiscalYear: fy.label,
+        explanation: `Up to ${perEvent} paid day(s) per event (statutory)${used ? `; ${used} day(s) already requested for the current event, ${left} left` : ''}; ${taken.toFixed(2)} day(s) taken this fiscal year`,
       });
       continue;
     }

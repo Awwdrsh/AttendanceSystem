@@ -38,6 +38,8 @@ describe('event-based statutory leave (Labour Act Sec 45-47)', () => {
     const paid = await request(app).post(L('/requests')).set(auth(sita)).send({ leaveTypeId: t('MATERNITY'), from: '2026-11-23', to: '2027-01-21' });
     expect(paid.status, JSON.stringify(paid.body)).toBe(201);
     expect(paid.body.days).toBe(60);
+    const after = await request(app).get(L('/balances')).set(auth(sita));
+    expect(after.body.balances.find((b: { code: string }) => b.code === 'MATERNITY')).toMatchObject({ available: 0 });
     // A second maternity request for the same event is refused; the remaining 38 days go in as special unpaid leave.
     const more = await request(app).post(L('/requests')).set(auth(sita)).send({ leaveTypeId: t('MATERNITY'), from: '2027-01-22', to: '2027-01-25' });
     expect(more.status).toBe(400);
@@ -101,5 +103,22 @@ describe('leave over days already worked', () => {
     expect((await request(app).post(L('/requests')).set(auth(sita)).send({ leaveTypeId: t('HOME'), from: '2026-10-06', to: '2026-10-06', override: true })).status).toBe(403);
     expect((await request(app).post(L('/requests')).set(auth(hr)).send({ employeeId: DEMO.sita, leaveTypeId: t('HOME'), from: '2026-10-06', to: '2026-10-06', override: true })).status).toBe(201);
     expect((await request(app).get(L('/balances')).set(auth(stranger)).query({ employeeId: DEMO.sita })).status).toBe(403);
+  });
+});
+
+describe('HR opening allocation and the automatic annual grant', () => {
+  it('an HR allocation for the year replaces the automatic grant instead of stacking on it', async () => {
+    const emp = await newEmployee('ALLOC1', 'female', '2025-01-01');
+    expect(await allocateAnnualLeave(db, DEMO.companyId, '2026-10-14', emp)).toBeGreaterThan(0);
+    const auto = await ledgerBalance(db, emp, t('CASUAL'));
+    expect(auto).toBeGreaterThan(0);
+    const res = await request(app).post(L('/adjust')).set(auth(hr)).send({ employeeId: emp, leaveTypeId: t('CASUAL'), deltaDays: 6, kind: 'allocation', reason: 'Opening balance', effectiveDate: '2026-07-17' });
+    expect(res.status).toBe(201);
+    expect(Number(res.body.replacedAutomatic)).toBe(auto);
+    expect(await ledgerBalance(db, emp, t('CASUAL'))).toBe(6);
+    // A second HR allocation is an intentional top-up and is not offset again; the automatic grant never comes back.
+    await request(app).post(L('/adjust')).set(auth(hr)).send({ employeeId: emp, leaveTypeId: t('CASUAL'), deltaDays: 1, kind: 'allocation', reason: 'Top-up', effectiveDate: '2026-07-17' });
+    expect(await allocateAnnualLeave(db, DEMO.companyId, '2026-10-14', emp)).toBe(0);
+    expect(await ledgerBalance(db, emp, t('CASUAL'))).toBe(7);
   });
 });
