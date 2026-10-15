@@ -46,6 +46,7 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
     ['resignation', [{ role: 'manager' }, { role: 'hr' }]],
     ['job_requisition', [{ role: 'hr' }]],
     ['job_offer', [{ role: 'hr' }]],
+    ['profile_change', [{ role: 'hr' }]],
   ];
   let w = 0;
   for (const [type, steps] of workflows) {
@@ -62,6 +63,7 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
     ['payslip.policy', { language: 'both', numerals: 'latin', passwordProtect: true }],
     ['time.policy', { enabled: true, requireProject: false, roundingStep: 0, roundingMode: 'nearest', fridayReminder: true, autoStopHours: 12 }],
     ['hiring.policy', { retentionDays: 180, careersEnabled: true }],
+    ['people.policy', { makerChecker: false }],
     ['notifications.policy', { quietHoursStart: '21:00', quietHoursEnd: '07:00', slaHours: 24, escalationHours: 48 }],
   ];
   let s = 0;

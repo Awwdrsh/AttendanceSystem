@@ -6,6 +6,9 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors.js';
 import { assertManages, hasRole, requireRole } from '../auth/middleware.js';
 import { nptToday } from '@hajiri/attendance-engine';
 import { autoStartOnboarding } from '../lifecycle/service.js';
+import { recordCareerEvent } from '../people/career.js';
+import { diffEmployeeRows, recordFieldChanges } from '../people/history.js';
+import { peoplePolicy } from '../people/routes.js';
 
 import { isoDate } from '../../validation.js';
 const PAN_RE = /^\d{9}$/;
@@ -70,6 +73,13 @@ async function validateRefs(db: AppDeps['db'], companyId: string | null, b: Empl
   if (b.managerId && selfId && b.managerId === selfId) throw new BadRequestError('an employee cannot be their own manager');
   if (b.joinDate && b.exitDate && b.exitDate < b.joinDate) throw new BadRequestError('exit date cannot be before join date');
   if (b.probationEnd && b.joinDate && b.probationEnd < b.joinDate) throw new BadRequestError('probation end cannot be before join date');
+}
+
+/** Keep designation_id in step with the free-text designation: link it to the catalogue entry of the same name, if any. */
+async function linkDesignation(db: { query: AppDeps['db']['query'] }, employeeId: string): Promise<void> {
+  await db.query(
+    `UPDATE employee e SET designation_id = (SELECT d.id FROM designation d WHERE d.company_id = e.company_id AND lower(d.name_en) = lower(e.designation) ORDER BY d.active DESC LIMIT 1)
+      WHERE e.id = $1`, [employeeId]);
 }
 
 /** Search text is matched literally: % and _ typed by the user are not wildcards. */
@@ -152,6 +162,8 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
         `INSERT INTO employee_assignment (employee_id, valid, branch_id, org_unit_id, manager_id, employment_type) VALUES ($1, daterange($2, NULL), $3, $4, $5, $6)`,
         [id, from, b.branchId ?? null, b.orgUnitId ?? null, b.managerId ?? null, b.employmentType ?? 'regular']);
       if (b.shiftId) await client.query('INSERT INTO shift_assignment (employee_id, shift_id, valid) VALUES ($1, $2, daterange($3, NULL))', [id, b.shiftId, from]);
+      if (b.designation) await linkDesignation(client, id);
+      await recordCareerEvent(client, { companyId: req.user!.companyId!, employeeId: id, kind: 'hire', effectiveDate: from, details: { ...(b.designation ? { designation: b.designation } : {}), ...(b.grade ? { grade: b.grade } : {}) }, actorId: req.user!.id });
       await audit(client, { actorId: req.user!.id, action: 'create', table: 'employee', rowId: id, after: { ...b, pan: b.pan ? '***' : undefined, bankAccount: b.bankAccount ? '***' : undefined } });
       await autoStartOnboarding(client, req.user!.companyId!, id, b.joinDate ?? nptToday(), req.user!.id);
       await client.query('COMMIT');
@@ -165,6 +177,9 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
     await validateRefs(db, req.user!.companyId, b, id);
     const before = await db.query(`SELECT ${PUBLIC_COLS} FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date WHERE e.id = $1 AND e.company_id = $2`, [id, req.user!.companyId]);
     if (!before.rows[0]) throw new NotFoundError('employee not found');
+    if ((b.pan || b.bankAccount) && (await peoplePolicy(db, req.user!.companyId!)).makerChecker) {
+      throw new ConflictError('PAN and bank account changes need a second HR approval: edit them under the employee\'s profile (ID documents, Bank account)');
+    }
     const storedJoin = (before.rows[0] as { join_date: string | null }).join_date;
     if (b.exitDate && storedJoin && !b.joinDate && b.exitDate < storedJoin) throw new BadRequestError('exit date cannot be before join date');
     const client = await db.connect();
@@ -206,6 +221,11 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
         await client.query('DELETE FROM shift_assignment WHERE employee_id = $1 AND lower(valid) = $2::date', [id, today]);
         await client.query('INSERT INTO shift_assignment (employee_id, shift_id, valid) VALUES ($1, $2, daterange($3, NULL))', [id, b.shiftId, today]);
       }
+      if (b.designation !== undefined) await linkDesignation(client, id);
+      const afterRow = await client.query(`SELECT ${PUBLIC_COLS} FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date WHERE e.id = $1`, [id]);
+      const changes = await diffEmployeeRows(client, before.rows[0] as Record<string, unknown>, afterRow.rows[0] as Record<string, unknown>);
+      if (b.pan) changes.push({ field: 'pan', label: 'PAN', from: (before.rows[0] as { has_pan: boolean }).has_pan ? 'Recorded' : null, to: `•••• ${b.pan.slice(-4)}` });
+      await recordFieldChanges(client, { companyId: req.user!.companyId!, employeeId: id, changes: changes.filter((c) => c.field !== 'has_pan' || !b.pan), source: 'hr_edit', actorId: req.user!.id });
       await audit(client, { actorId: req.user!.id, action: 'update', table: 'employee', rowId: id, before: before.rows[0], after: { ...b, pan: b.pan ? '***' : undefined, bankAccount: b.bankAccount ? '***' : undefined } });
       await client.query('COMMIT');
     } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
@@ -265,6 +285,8 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
         if (b.pan) await client.query('UPDATE employee SET pan_enc = $2, pan_bidx = $3 WHERE id = $1', [id, cipher.encrypt(b.pan, `employee:${id}:pan`), cipher.blindIndex(b.pan)]);
         if (b.bankAccount) await client.query('UPDATE employee SET bank_account_enc = $2, bank_account_last4 = $3 WHERE id = $1', [id, cipher.encrypt(b.bankAccount, `employee:${id}:bank`), b.bankAccount.slice(-4)]);
         await client.query('INSERT INTO employee_assignment (employee_id, valid, employment_type) VALUES ($1, daterange($2, NULL), $3)', [id, b.joinDate ?? nptToday(), 'regular']);
+        if (b.designation) await linkDesignation(client, id);
+        await recordCareerEvent(client, { companyId: req.user!.companyId!, employeeId: id, kind: 'hire', effectiveDate: b.joinDate ?? nptToday(), details: { ...(b.designation ? { designation: b.designation } : {}), ...(b.grade ? { grade: b.grade } : {}) }, actorId: req.user!.id });
         imported++;
       }
       await audit(client, { actorId: req.user!.id, action: 'import', table: 'employee', after: { imported, skipped: errors.length } });

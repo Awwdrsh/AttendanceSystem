@@ -17,6 +17,9 @@ import { useQuery } from '../../lib/useQuery';
 import { LeaveApplyForm } from '../employee/LeavePage';
 import { EmployeeDocumentsTab } from '../documents/EmployeeDocumentsTab';
 import { LifecycleSection } from '../lifecycle/LifecycleSection';
+import { CareerTimeline } from '../../components/people/CareerTimeline';
+import { EmployeeProfilePanel } from '../../components/people/EmployeeProfilePanel';
+import { FieldHistory } from '../../components/people/FieldHistory';
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const EMPLOYMENT: Record<string, string> = { regular: 'Regular', work_based: 'Work-based', time_based: 'Time-based', casual: 'Casual', part_time: 'Part-time' };
@@ -74,12 +77,15 @@ export default function EmployeeDetailPage() {
       <Tabs defaultValue="overview" keepMounted={false}>
         <Tabs.List>
           <Tabs.Tab value="overview">Overview</Tabs.Tab>
+          <Tabs.Tab value="profile">Profile</Tabs.Tab>
+          <Tabs.Tab value="career">Career</Tabs.Tab>
           <Tabs.Tab value="leave">Leave</Tabs.Tab>
           <Tabs.Tab value="history">Employment history</Tabs.Tab>
           <Tabs.Tab value="lifecycle">Lifecycle</Tabs.Tab>
           <Tabs.Tab value="pay">Pay</Tabs.Tab>
           <Tabs.Tab value="documents">Documents</Tabs.Tab>
           <Tabs.Tab value="biometrics">Biometrics</Tabs.Tab>
+          <Tabs.Tab value="changes">Change history</Tabs.Tab>
           <Tabs.Tab value="audit">Audit</Tabs.Tab>
         </Tabs.List>
 
@@ -118,6 +124,10 @@ export default function EmployeeDetailPage() {
             </Paper>
           </Stack>
         </Tabs.Panel>
+
+        <Tabs.Panel value="profile" pt="lg"><EmployeeProfilePanel employeeId={id} /></Tabs.Panel>
+        <Tabs.Panel value="career" pt="lg"><CareerTimeline employeeId={id} canEdit={hasRole('hr')} onChanged={() => { void emp.reload(); void assignments.reload(); }} /></Tabs.Panel>
+        <Tabs.Panel value="changes" pt="lg"><FieldHistory employeeId={id} /></Tabs.Panel>
 
         <Tabs.Panel value="leave" pt="lg">
           <Stack gap="lg">

@@ -10,9 +10,10 @@ import { bsMonthLabel, fmtDateShort, fmtMoney, fmtTime, minutesToHm, relativeTim
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import { EXPENSE_TYPE_COLOR, EXPENSE_TYPE_LABEL, expenseSummary } from '../expenses/approvalSummary';
+import { ProfileChangeSummary } from '../../components/people/ProfileChangeSummary';
 
-const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', timesheet: 'Timesheet', shift_swap: 'Shift swap', letter_request: 'Letter request', probation_review: 'Probation', resignation: 'Resignation', job_requisition: 'Hiring request', job_offer: 'Job offer', ...EXPENSE_TYPE_LABEL };
-const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', timesheet: 'teal', shift_swap: 'cyan', letter_request: 'indigo', probation_review: 'teal', resignation: 'red', job_requisition: 'cyan', job_offer: 'teal', ...EXPENSE_TYPE_COLOR };
+const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', timesheet: 'Timesheet', shift_swap: 'Shift swap', letter_request: 'Letter request', probation_review: 'Probation', resignation: 'Resignation', job_requisition: 'Hiring request', job_offer: 'Job offer', profile_change: 'Profile change', ...EXPENSE_TYPE_LABEL };
+const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', timesheet: 'teal', shift_swap: 'cyan', letter_request: 'indigo', probation_review: 'teal', resignation: 'red', job_requisition: 'cyan', job_offer: 'teal', profile_change: 'cyan', ...EXPENSE_TYPE_COLOR };
 
 function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
@@ -75,6 +76,9 @@ function Summary({ item }: { item: InboxItem }) {
     case 'job_offer':
       main = <>Offer to {String(s.candidate ?? '')} as {String(s.designation ?? '')}</>;
       extra.push(<Text key="p" size="xs" c="dimmed">NPR {fmtMoney(String(s.salary ?? 0))} a month</Text>, <Text key="j" size="xs" c="dimmed">Joins {fmtDateShort(String(s.join_date))}</Text>);
+      break;
+    case 'profile_change':
+      main = <ProfileChangeSummary summary={s} />;
       break;
     default: {
       const x = expenseSummary(item.objectType, item.objectId, s);

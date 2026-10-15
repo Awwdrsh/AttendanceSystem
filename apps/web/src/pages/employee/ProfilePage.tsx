@@ -7,6 +7,11 @@ import { Field } from '../../components/Kpi';
 import { PageHeader, SectionTitle } from '../../components/PageHeader';
 import { fmtAd } from '../../lib/format';
 import { useQuery } from '../../lib/useQuery';
+import { people } from '../../api/people';
+import { AvatarEditor } from '../../components/people/AvatarEditor';
+import { CareerTimeline } from '../../components/people/CareerTimeline';
+import { MyChangeRequests } from '../../components/people/MyChangeRequests';
+import { ProfileSections } from '../../components/people/ProfileSections';
 
 const ROLE: Record<string, string> = { admin: 'Admin', hr: 'HR', manager: 'Manager', employee: 'Employee' };
 const REGIME: Record<string, string> = { ssf: 'Social Security Fund (SSF)', pf: 'Provident Fund (PF)', none: 'None' };
@@ -20,17 +25,22 @@ export default function ProfilePage() {
   const { user } = useAuth();
   const emp = useQuery(() => empApi.get(user!.employeeId!), [user?.employeeId], { enabled: !!user?.employeeId });
   const e = emp.data?.employee;
+  const card = useQuery(() => people.card(user!.employeeId!), [user?.employeeId], { enabled: !!user?.employeeId });
+  const requests = useQuery(() => people.myRequests(), [user?.employeeId], { enabled: !!user?.employeeId });
   return (
     <Stack gap="lg">
       <PageHeader title="Profile" subtitle="Your account and employment details. Ask HR if anything here is wrong." />
 
       <Paper withBorder p="lg">
-        <Group gap="md" wrap="nowrap" mb="lg">
-          <Avatar color="brand" radius="xl" size={48}>{initials(user?.name)}</Avatar>
-          <div style={{ minWidth: 0 }}>
-            <Text fw={600} size="lg" truncate>{user?.name}</Text>
-            <Text size="sm" c="dimmed" truncate>{[e?.designation, user?.email].filter(Boolean).join(', ')}</Text>
-          </div>
+        <Group gap="md" wrap="wrap" mb="lg" justify="space-between">
+          <Group gap="md" wrap="nowrap">
+            {card.data ? null : <Avatar color="brand" radius="xl" size={48}>{initials(user?.name)}</Avatar>}
+            <div style={{ minWidth: 0 }}>
+              <Text fw={600} size="lg" truncate>{user?.name}</Text>
+              <Text size="sm" c="dimmed" truncate>{[e?.designation, user?.email].filter(Boolean).join(', ')}</Text>
+            </div>
+          </Group>
+          {card.data ? <AvatarEditor id={card.data.person.id} name={card.data.person.name_en} hasAvatar={card.data.person.has_avatar} self onChanged={() => void card.reload()} /> : null}
         </Group>
         <SimpleGrid cols={{ base: 1, xs: 2, md: 4 }} spacing="lg">
           <Field label="Email">{user?.email || '—'}</Field>
@@ -42,6 +52,25 @@ export default function ProfilePage() {
           {e ? <Field label="Bank account">{e.bank_code ? `${e.bank_code}, ending ${e.bank_account_last4 ?? '—'}` : '—'}</Field> : null}
         </SimpleGrid>
       </Paper>
+
+      {user?.employeeId ? (
+        <>
+          <div>
+            <SectionTitle hint="Something wrong or out of date? Request a change and HR will review it.">My details</SectionTitle>
+            <ProfileSections employeeId={user.employeeId} mode="self" onRequested={() => void requests.reload()} />
+          </div>
+          {requests.data?.requests.length ? (
+            <div>
+              <SectionTitle>My change requests</SectionTitle>
+              <MyChangeRequests q={requests} onChanged={() => void requests.reload()} />
+            </div>
+          ) : null}
+          <div>
+            <SectionTitle>My career</SectionTitle>
+            <CareerTimeline employeeId={user.employeeId} canEdit={false} />
+          </div>
+        </>
+      ) : null}
 
       <div>
         <SectionTitle>Security</SectionTitle>

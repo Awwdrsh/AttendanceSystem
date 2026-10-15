@@ -70,6 +70,8 @@ const JUMPS: Array<{ to: string; label: string; group: string; roles?: Role[]; i
   { to: '/employees/onboarding', label: 'Onboarding', group: 'Employees', roles: ['hr'], icon: IconUserPlus },
   { to: '/employees/exits', label: 'Exits', group: 'Employees', roles: ['hr'], icon: IconLogout },
   { to: '/employees/documents', label: 'Documents & letters', group: 'Employees', roles: ['hr'], icon: IconFileCertificate },
+  { to: '/employees/requests', label: 'Profile change requests', group: 'Employees', roles: ['hr'], icon: IconListCheck },
+  { to: '/people/org-chart', label: 'Org chart', group: 'People', icon: IconAddressBook },
   { to: '/attendance/timesheets', label: 'Timesheets', group: 'Attendance', roles: ['manager', 'hr'], icon: IconHourglass },
   { to: '/attendance/rosters', label: 'Rosters & shift swaps', group: 'Attendance', roles: ['manager', 'hr'], icon: IconCalendarEvent },
   { to: '/attendance/visits', label: 'Field visits', group: 'Attendance', roles: ['manager', 'hr'], icon: IconClockHour4 },
