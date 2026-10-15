@@ -126,7 +126,7 @@ export async function deliverQueued(db: Queryable, senders: Sender[], now = new 
   const byChannel = new Map(senders.map((s) => [s.channel, s]));
   const rows = await db.query<OutboxRow>(
     `SELECT n.id, n.company_id, n.user_id, n.employee_id, n.channel, n.template, n.title, n.body, n.payload, n.attempts,
-            coalesce(u.email, e.email) AS recipient_email, e.phone AS recipient_phone
+            coalesce(n.to_email, u.email, e.email) AS recipient_email, e.phone AS recipient_phone
        FROM notification_outbox n
        LEFT JOIN app_user u ON u.id = n.user_id
        LEFT JOIN employee e ON e.id = coalesce(n.employee_id, u.employee_id)
