@@ -9,6 +9,7 @@ import { helpdeskDaily } from './modules/helpdesk/service.js';
 import { lifecycleDaily } from './modules/lifecycle/service.js';
 import { purgeRejectedCandidates } from './modules/hiring/service.js';
 import { applyDueCareerEvents } from './modules/people/career.js';
+import { performanceReminders } from './modules/performance/jobs.js';
 
 export interface ModuleJobDeps { db: Db; cipher: FieldCipher }
 export type ModuleJob = (deps: ModuleJobDeps, now: Date) => Promise<unknown>;
@@ -27,4 +28,5 @@ export const DAILY_MODULE_JOBS: Record<string, ModuleJob> = {
   helpdesk: (d, now) => helpdeskDaily(d.db, now),
   candidatesPurged: (d, now) => purgeRejectedCandidates(d.db, now),
   careerEventsApplied: (d, now) => applyDueCareerEvents(d.db, now),
+  performanceReminders: (d, now) => performanceReminders(d.db, now),
 };

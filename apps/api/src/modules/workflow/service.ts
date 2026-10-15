@@ -317,6 +317,12 @@ export async function summarise(db: Queryable, inst: WorkflowInstance): Promise<
         `SELECT t.name AS letter, lr.purpose, lr.addressed_to FROM letter_request lr JOIN letter_template t ON t.id = lr.template_id WHERE lr.id = $1`, [inst.object_id]);
       return r.rows[0] ?? {};
     }
+    case 'training_nomination': {
+      const r = await db.query(
+        `SELECT c.title AS course_title, c.delivery, c.cost, e.reason, s.starts_at FROM lrn_enrollment e JOIN lrn_course c ON c.id = e.course_id
+           LEFT JOIN lrn_session s ON s.id = e.session_id WHERE e.id = $1`, [inst.object_id]);
+      return r.rows[0] ?? {};
+    }
     default: {
       const fn = summarisers.get(inst.object_type);
       return fn ? fn(db, inst) : {};
