@@ -309,6 +309,11 @@ export async function summarise(db: Queryable, inst: WorkflowInstance): Promise<
       const { summariseTimesheet } = await import('../timesheets/service.js');
       return summariseTimesheet(db, inst.object_id);
     }
+    case 'letter_request': {
+      const r = await db.query(
+        `SELECT t.name AS letter, lr.purpose, lr.addressed_to FROM letter_request lr JOIN letter_template t ON t.id = lr.template_id WHERE lr.id = $1`, [inst.object_id]);
+      return r.rows[0] ?? {};
+    }
     default: {
       const fn = summarisers.get(inst.object_type);
       return fn ? fn(db, inst) : {};

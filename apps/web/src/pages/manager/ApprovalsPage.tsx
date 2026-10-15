@@ -11,8 +11,8 @@ import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import { EXPENSE_TYPE_COLOR, EXPENSE_TYPE_LABEL, expenseSummary } from '../expenses/approvalSummary';
 
-const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', timesheet: 'Timesheet', shift_swap: 'Shift swap', ...EXPENSE_TYPE_LABEL };
-const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', timesheet: 'teal', shift_swap: 'cyan', ...EXPENSE_TYPE_COLOR };
+const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', timesheet: 'Timesheet', shift_swap: 'Shift swap', letter_request: 'Letter request', ...EXPENSE_TYPE_LABEL };
+const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', timesheet: 'teal', shift_swap: 'cyan', letter_request: 'indigo', ...EXPENSE_TYPE_COLOR };
 
 function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
@@ -61,6 +61,11 @@ function Summary({ item }: { item: InboxItem }) {
       main = <>Swap shifts with {String(s.colleague_name)} on {fmtDateShort(String(s.local_date))} <Text span c="dimmed">({String(s.requester_shift_code ?? 'Off')} ⇄ {String(s.colleague_shift_code ?? 'Off')})</Text></>;
       if (s.reason) extra.push(<Text key="r" size="xs" c="dimmed">“{String(s.reason)}”</Text>);
       if (s.colleague_note) extra.push(<Text key="n" size="xs" c="dimmed">{String(s.colleague_name)}: “{String(s.colleague_note)}”</Text>);
+      break;
+    case 'letter_request':
+      main = <>{String(s.letter ?? 'Letter')} requested</>;
+      if (s.purpose) extra.push(<Text key="p" size="xs" c="dimmed">For {String(s.purpose)}</Text>);
+      if (s.addressed_to) extra.push(<Text key="a" size="xs" c="dimmed">To {String(s.addressed_to)}</Text>);
       break;
     default: {
       const x = expenseSummary(item.objectType, item.objectId, s);

@@ -1,5 +1,6 @@
 import type { FieldCipher } from './crypto.js';
 import type { Db } from './db/pool.js';
+import { documentsDailyJob } from './modules/documents/routes.js';
 import { purgeUnattachedFiles } from './modules/files/store.js';
 import { dailyTimeJobs } from './modules/timesheets/service.js';
 import { remindTravelSettlements } from './modules/expenses/jobs.js';
@@ -17,4 +18,5 @@ export const DAILY_MODULE_JOBS: Record<string, ModuleJob> = {
   timesheets: (d, now) => dailyTimeJobs(d.db, now),
   travelSettlementReminders: (d, now) => remindTravelSettlements(d.db, now),
   staleBreaksClosed: (d, now) => closeStaleBreaks(d.db, now),
+  documents: (d, now) => documentsDailyJob(d.db, now),
 };
