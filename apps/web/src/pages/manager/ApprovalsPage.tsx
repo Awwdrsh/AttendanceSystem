@@ -10,8 +10,8 @@ import { bsMonthLabel, fmtDateShort, fmtMoney, fmtTime, minutesToHm, relativeTim
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 
-const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run' };
-const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand' };
+const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', letter_request: 'Letter request' };
+const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', letter_request: 'teal' };
 
 function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
@@ -49,6 +49,11 @@ function Summary({ item }: { item: InboxItem }) {
     case 'payroll_run':
       main = <>{String(s.run_type).charAt(0).toUpperCase() + String(s.run_type).slice(1)} run for {bsMonthLabel(Number(s.bs_year), Number(s.bs_month))}</>;
       extra.push(<Text key="p" size="xs" c="dimmed">{String(s.payslips)} payslips</Text>, <Text key="n" size="xs" c="dimmed">Net {fmtMoney(String(s.total_net))}</Text>);
+      break;
+    case 'letter_request':
+      main = <>{String(s.letter ?? 'Letter')} requested</>;
+      if (s.purpose) extra.push(<Text key="p" size="xs" c="dimmed">For {String(s.purpose)}</Text>);
+      if (s.addressed_to) extra.push(<Text key="a" size="xs" c="dimmed">To {String(s.addressed_to)}</Text>);
       break;
     default:
       main = <Text span c="dimmed">{JSON.stringify(s)}</Text>;

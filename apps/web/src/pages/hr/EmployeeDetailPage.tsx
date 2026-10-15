@@ -15,6 +15,7 @@ import { bsMonthLabel, fmtAd, fmtMoney, fmtTime, NPT_OFFSET_MIN } from '../../li
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import { LeaveApplyForm } from '../employee/LeavePage';
+import { EmployeeDocumentsTab } from '../documents/EmployeeDocumentsTab';
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const EMPLOYMENT: Record<string, string> = { regular: 'Regular', work_based: 'Work-based', time_based: 'Time-based', casual: 'Casual', part_time: 'Part-time' };
@@ -75,6 +76,7 @@ export default function EmployeeDetailPage() {
           <Tabs.Tab value="leave">Leave</Tabs.Tab>
           <Tabs.Tab value="history">Employment history</Tabs.Tab>
           <Tabs.Tab value="pay">Pay</Tabs.Tab>
+          <Tabs.Tab value="documents">Documents</Tabs.Tab>
           <Tabs.Tab value="biometrics">Biometrics</Tabs.Tab>
           <Tabs.Tab value="audit">Audit</Tabs.Tab>
         </Tabs.List>
@@ -157,6 +159,10 @@ export default function EmployeeDetailPage() {
                 { key: 'open', header: '', align: 'right', render: (r) => <Button component={Link} to={`/me/payslips/${r.id}`} size="xs" variant="subtle">Open</Button> },
               ]} />
           </Stack>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="documents" pt="lg">
+          {id ? <EmployeeDocumentsTab employeeId={id} /> : null}
         </Tabs.Panel>
 
         <Tabs.Panel value="biometrics" pt="lg">
