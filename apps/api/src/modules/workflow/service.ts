@@ -59,6 +59,13 @@ export async function assertManages(db: Queryable, user: AuthUser, employeeId: s
   throw new ForbiddenError('not allowed to act for this employee');
 }
 
+/** Modules outside this file describe their own requests for the approvals inbox (headline, detail, note). */
+export type SummaryFn = (db: Queryable, inst: WorkflowInstance) => Promise<Record<string, unknown>>;
+const summaries = new Map<string, SummaryFn>();
+export function registerSummary(objectType: string, fn: SummaryFn): void {
+  summaries.set(objectType, fn);
+}
+
 /** Each request module registers how an approved/rejected decision is applied to its object. */
 export function registerHandler(objectType: string, fn: DecisionHandler): void {
   handlers.set(objectType, fn);
@@ -299,7 +306,7 @@ export async function summarise(db: Queryable, inst: WorkflowInstance): Promise<
       return r.rows[0] ?? {};
     }
     default:
-      return {};
+      return (await summaries.get(inst.object_type)?.(db, inst)) ?? {};
   }
 }
 

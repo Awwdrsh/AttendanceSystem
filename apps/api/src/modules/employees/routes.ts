@@ -5,6 +5,7 @@ import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors.js';
 import { assertManages, hasRole, requireRole } from '../auth/middleware.js';
 import { nptToday } from '@hajiri/attendance-engine';
+import { autoStartOnboarding } from '../lifecycle/service.js';
 
 import { isoDate } from '../../validation.js';
 const PAN_RE = /^\d{9}$/;
@@ -152,6 +153,7 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
         [id, from, b.branchId ?? null, b.orgUnitId ?? null, b.managerId ?? null, b.employmentType ?? 'regular']);
       if (b.shiftId) await client.query('INSERT INTO shift_assignment (employee_id, shift_id, valid) VALUES ($1, $2, daterange($3, NULL))', [id, b.shiftId, from]);
       await audit(client, { actorId: req.user!.id, action: 'create', table: 'employee', rowId: id, after: { ...b, pan: b.pan ? '***' : undefined, bankAccount: b.bankAccount ? '***' : undefined } });
+      await autoStartOnboarding(client, req.user!.companyId!, id, b.joinDate ?? nptToday(), req.user!.id);
       await client.query('COMMIT');
       res.status(201).json({ id });
     } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
