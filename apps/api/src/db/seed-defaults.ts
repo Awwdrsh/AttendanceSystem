@@ -1,5 +1,6 @@
 import type { Db } from './pool.js';
 import { seedPayrollDefaults } from '../modules/payroll/seed.js';
+import { seedDocumentDefaults } from '../modules/documents/letters.js';
 
 /**
  * Idempotent per-company defaults: statutory leave types (plan §6.2), approval workflows, company settings.
@@ -37,6 +38,7 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
     ['regularisation_request', [{ role: 'manager' }]],
     ['ot_request', [{ role: 'manager' }]],
     ['payroll_run', [{ role: 'hr' }]],
+    ['letter_request', [{ role: 'hr' }]],
   ];
   let w = 0;
   for (const [type, steps] of workflows) {
@@ -59,5 +61,6 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
     s += r.rowCount ?? 0;
   }
   const payroll = await seedPayrollDefaults(db, companyId);
-  return { leaveTypes: n, workflows: w, settings: s, ...payroll };
+  const documents = await seedDocumentDefaults(db, companyId);
+  return { leaveTypes: n, workflows: w, settings: s, ...payroll, documentCategories: documents.categories, letterTemplates: documents.templates };
 }

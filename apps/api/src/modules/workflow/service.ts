@@ -298,6 +298,11 @@ export async function summarise(db: Queryable, inst: WorkflowInstance): Promise<
            FROM payroll_run r JOIN payroll_period p ON p.id = r.period_id WHERE r.id = $1`, [inst.object_id]).catch(() => ({ rows: [] as Record<string, unknown>[] }));
       return r.rows[0] ?? {};
     }
+    case 'letter_request': {
+      const r = await db.query(
+        `SELECT t.name AS letter, lr.purpose, lr.addressed_to FROM letter_request lr JOIN letter_template t ON t.id = lr.template_id WHERE lr.id = $1`, [inst.object_id]);
+      return r.rows[0] ?? {};
+    }
     default:
       return {};
   }

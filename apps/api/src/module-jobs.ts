@@ -1,5 +1,6 @@
 import type { FieldCipher } from './crypto.js';
 import type { Db } from './db/pool.js';
+import { documentsDailyJob } from './modules/documents/routes.js';
 import { purgeUnattachedFiles } from './modules/files/store.js';
 
 export interface ModuleJobDeps { db: Db; cipher: FieldCipher }
@@ -11,4 +12,5 @@ export type ModuleJob = (deps: ModuleJobDeps, now: Date) => Promise<unknown>;
  */
 export const DAILY_MODULE_JOBS: Record<string, ModuleJob> = {
   filesPurged: (d, now) => purgeUnattachedFiles(d.db, now),
+  documents: (d, now) => documentsDailyJob(d.db, now),
 };
