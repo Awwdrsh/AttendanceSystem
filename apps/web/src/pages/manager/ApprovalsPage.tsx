@@ -11,8 +11,8 @@ import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import { EXPENSE_TYPE_COLOR, EXPENSE_TYPE_LABEL, expenseSummary } from '../expenses/approvalSummary';
 
-const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', timesheet: 'Timesheet', ...EXPENSE_TYPE_LABEL };
-const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', timesheet: 'teal', ...EXPENSE_TYPE_COLOR };
+const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', timesheet: 'Timesheet', shift_swap: 'Shift swap', ...EXPENSE_TYPE_LABEL };
+const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', timesheet: 'teal', shift_swap: 'cyan', ...EXPENSE_TYPE_COLOR };
 
 function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
@@ -56,6 +56,11 @@ function Summary({ item }: { item: InboxItem }) {
       extra.push(<Text key="a" size="xs" c="dimmed">Attended {minutesToHm(Number(s.attendanceMin ?? 0))}</Text>);
       if (Array.isArray(s.projects) && s.projects.length) extra.push(<Text key="p" size="xs" c="dimmed">{(s.projects as Array<{ name: string; min: number }>).map((x) => `${x.name} ${minutesToHm(x.min)}`).join(' · ')}</Text>);
       if (s.note) extra.push(<Text key="r" size="xs" c="dimmed">“{String(s.note)}”</Text>);
+      break;
+    case 'shift_swap':
+      main = <>Swap shifts with {String(s.colleague_name)} on {fmtDateShort(String(s.local_date))} <Text span c="dimmed">({String(s.requester_shift_code ?? 'Off')} ⇄ {String(s.colleague_shift_code ?? 'Off')})</Text></>;
+      if (s.reason) extra.push(<Text key="r" size="xs" c="dimmed">“{String(s.reason)}”</Text>);
+      if (s.colleague_note) extra.push(<Text key="n" size="xs" c="dimmed">{String(s.colleague_name)}: “{String(s.colleague_note)}”</Text>);
       break;
     default: {
       const x = expenseSummary(item.objectType, item.objectId, s);

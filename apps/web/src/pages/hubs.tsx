@@ -37,6 +37,7 @@ const FieldVisitsPage = lazy(() => import('./field/FieldVisitsPage'));
 const MyFieldVisitsPage = lazy(() => import('./field/MyFieldVisitsPage'));
 const RostersPage = lazy(() => import('./field/RostersPage'));
 const MyRosterPage = lazy(() => import('./field/MyRosterPage'));
+const MyKioskPage = lazy(() => import('./field/MyKioskPage'));
 const KiosksPage = lazy(() => import('./field/KiosksPage'));
 const LocationsPage = lazy(() => import('./field/LocationsPage'));
 const PeopleDirectoryPage = lazy(() => import('./people/PeopleDirectoryPage'));
@@ -126,7 +127,8 @@ export function MyAttendanceHub() {
   return <Hub title="My attendance" tabs={[
     { path: '/me/attendance', label: 'Attendance', element: <MyAttendancePage /> },
     { path: '/me/attendance/roster', label: 'My roster', element: <MyRosterPage /> },
-    { path: '/me/attendance/visits', label: 'Field visits', element: <MyFieldVisitsPage /> },
+    { path: '/me/attendance/visits', label: 'Visits & breaks', element: <MyFieldVisitsPage /> },
+    { path: '/me/attendance/kiosk', label: 'Kiosk badge', element: <MyKioskPage /> },
   ]} />;
 }
 

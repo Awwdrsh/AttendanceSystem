@@ -38,7 +38,7 @@ import { engageRoutes } from './modules/engage/routes.js';
 import { insightsRoutes } from './modules/insights/routes.js';
 import { filesRoutes } from './modules/files/routes.js';
 
-export const LOG_REDACT = ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-api-key"]', 'res.headers["set-cookie"]'];
+export const LOG_REDACT = ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-api-key"]', 'req.headers["x-kiosk-key"]', 'res.headers["set-cookie"]'];
 
 export interface AppOptions {
   corsOrigins?: string[];

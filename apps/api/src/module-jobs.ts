@@ -3,6 +3,7 @@ import type { Db } from './db/pool.js';
 import { purgeUnattachedFiles } from './modules/files/store.js';
 import { dailyTimeJobs } from './modules/timesheets/service.js';
 import { remindTravelSettlements } from './modules/expenses/jobs.js';
+import { closeStaleBreaks } from './modules/field/jobs.js';
 
 export interface ModuleJobDeps { db: Db; cipher: FieldCipher }
 export type ModuleJob = (deps: ModuleJobDeps, now: Date) => Promise<unknown>;
@@ -15,4 +16,5 @@ export const DAILY_MODULE_JOBS: Record<string, ModuleJob> = {
   filesPurged: (d, now) => purgeUnattachedFiles(d.db, now),
   timesheets: (d, now) => dailyTimeJobs(d.db, now),
   travelSettlementReminders: (d, now) => remindTravelSettlements(d.db, now),
+  staleBreaksClosed: (d, now) => closeStaleBreaks(d.db, now),
 };

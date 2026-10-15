@@ -1,4 +1,4 @@
-import { Avatar, Group, SegmentedControl, Stack, Text } from '@mantine/core';
+import { Avatar, Badge, Group, SegmentedControl, Stack, Text } from '@mantine/core';
 import { useState } from 'react';
 import { attendance as attApi, punch as punchApi } from '../../api';
 import type { TeamTodayRow } from '../../api/types';
@@ -57,10 +57,11 @@ export default function TeamTodayPage() {
         emptyTitle={filter === 'all' ? 'No one on your team yet' : 'No one matches this filter'}
         emptyHint={filter === 'all' ? 'Employees who report to you will appear here.' : 'Switch to Everyone to see the whole team.'}
         columns={[
-          { key: 'emp', header: 'Name', render: (r) => <Group gap="sm" wrap="nowrap">{r.photo_id ? <Avatar src={punchApi.photoUrl(r.photo_id)} size={30} radius="xl" alt={`${r.name_en} clock-in photo`} /> : null}<div><Text size="sm" fw={500}>{r.name_en}</Text><Text size="xs" c="dimmed">{r.emp_code}</Text></div></Group>, sticky: true },
+          { key: 'emp', header: 'Name', render: (r) => <Group gap="sm" wrap="nowrap">{r.photo_id ? <Avatar src={punchApi.photoUrl(r.photo_id)} size={30} radius="xl" alt={`${r.name_en} clock-in photo`} /> : null}<div><Text size="sm" fw={500}>{r.name_en}</Text><Text size="xs" c="dimmed">{r.emp_code}{r.field_place ? ` · at ${r.field_place}` : ''}</Text></div>{r.on_break ? <Badge size="xs" variant="light" color="yellow">On {r.on_break} break</Badge> : null}</Group>, sticky: true },
           { key: 'status', header: 'Status', render: (r) => <StatusBadge status={liveStatus(r.status, { date: date ?? '', today: todayNpt(), firstIn: r.first_in, lastOut: r.last_out }) ?? (r.first_in ? 'Present' : 'NotComputed')} late={r.late_min} remote={r.remote} /> },
           { key: 'in', header: 'First in', align: 'right', render: (r) => <span className="num">{fmtTime(r.first_in)}</span> },
           { key: 'out', header: 'Last out', align: 'right', render: (r) => <span className="num">{fmtTime(r.last_out)}</span> },
+          { key: 'breaks', header: 'Breaks', align: 'right', render: (r) => <span className="num">{r.break_min ? minutesToHm(r.break_min) : '—'}</span> },
           { key: 'worked', header: 'Worked', align: 'right', render: (r) => <span className="num">{r.first_in && !r.last_out && date === todayNpt() ? <>{minutesToHm(Math.max(0, Math.round((Date.now() - Date.parse(r.first_in)) / 60_000)))}<Text span size="xs" c="dimmed"> so far</Text></> : minutesToHm(r.worked_min)}</span> },
         ]} />
     </Stack>
