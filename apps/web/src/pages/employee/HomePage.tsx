@@ -20,6 +20,7 @@ import type { Flag, Punch } from '../../api/types';
 import { HomeTimer } from '../time/HomeTimer';
 import { HomeFieldCard } from '../field/HomeFieldCard';
 import { MyChecklistCard } from '../lifecycle/MyChecklistCard';
+import { HomeCompanyCard } from '../../components/engage/HomeCompanyCard';
 
 export function describeFlag(f: Flag): string {
   switch (f.kind) {
@@ -284,6 +285,8 @@ export default function HomePage() {
           ]} />
         </div>
       ) : null}
+
+      <HomeCompanyCard />
 
       {me.data ? (
         <Grid gap="md">
