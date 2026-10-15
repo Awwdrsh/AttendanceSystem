@@ -36,6 +36,11 @@ export function LeaveApplyForm({ employeeId, onDone }: { employeeId: string; onD
   const [from, setFrom] = useState<string | null>(todayNpt());
   const [to, setTo] = useState<string | null>(todayNpt());
   const [half, setHalf] = useState(false); const [halfWhich, setHalfWhich] = useState<'first_half' | 'second_half'>('first_half');
+  const [hourly, setHourly] = useState(false); const [fromTime, setFromTime] = useState('10:00'); const [toTime, setToTime] = useState('12:00');
+  const selectedType = (types.data?.types ?? []).find((lt) => lt.id === typeId);
+  const canHourly = !!selectedType?.allow_hourly && !!from && from === to;
+  const byHours = hourly && canHourly;
+  const hourWindow = byHours ? { fromTime, toTime } : {};
   const [reason, setReason] = useState(''); const [attachment, setAttachment] = useState('');
   const [preview, setPreview] = useState<LeavePreview | null>(null);
   const [suggestion, setSuggestion] = useState<{ msg: string; paidDays: number; lwpDays: number } | null>(null);
@@ -45,15 +50,16 @@ export function LeaveApplyForm({ employeeId, onDone }: { employeeId: string; onD
 
   useEffect(() => {
     if (!typeId || !from || !to || to < from) { setPreview(null); return; }
-    leaveApi.preview({ employeeId, leaveTypeId: typeId, from, to, ...(half ? { halfDay: halfWhich } : {}) }).then(setPreview).catch(() => setPreview(null));
-  }, [typeId, from, to, half, halfWhich, employeeId]);
+    if (byHours && !(fromTime < toTime)) { setPreview(null); return; }
+    leaveApi.preview({ employeeId, leaveTypeId: typeId, from, to, ...(half && !byHours ? { halfDay: halfWhich } : {}), ...hourWindow }).then(setPreview).catch(() => setPreview(null));
+  }, [typeId, from, to, half, halfWhich, employeeId, byHours, fromTime, toTime]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const bal = (id: string) => balances.data?.balances.find((b) => b.leaveTypeId === id);
   const submit = async () => {
     if (!typeId || !from || !to) return;
     setBusy(true); setSuggestion(null);
     try {
-      const r = await leaveApi.request({ employeeId, leaveTypeId: typeId, from, to, ...(half ? { halfDay: halfWhich } : {}), ...(reason ? { reason } : {}), ...(attachment ? { attachmentKey: attachment } : {}) });
+      const r = await leaveApi.request({ employeeId, leaveTypeId: typeId, from, to, ...(half && !byHours ? { halfDay: halfWhich } : {}), ...hourWindow, ...(reason ? { reason } : {}), ...(attachment ? { attachmentKey: attachment } : {}) });
       toast.ok(`${r.explanation}${r.teamOverlap.length ? ` ${r.teamOverlap.join(', ')} are also off; your manager will see this.` : ''}`, 'Time off requested');
       onDone();
     } catch (e) {
@@ -71,12 +77,23 @@ export function LeaveApplyForm({ employeeId, onDone }: { employeeId: string; onD
         <DateField label="To" value={to} onChange={setTo} holidays={holidays} {...(from ? { minDate: from } : {})} required />
       </SimpleGrid>
       <Group gap="md" wrap="wrap">
-        <Switch label="Half day" {...(!!from && !!to && from !== to ? { description: 'Only for a single day' } : {})} checked={half} onChange={(e) => setHalf(e.currentTarget.checked)} disabled={!!from && !!to && from !== to} />
-        {half ? <Select aria-label="Which half" value={halfWhich} onChange={(v) => v && setHalfWhich(v as typeof halfWhich)} allowDeselect={false} data={[{ value: 'first_half', label: 'First half' }, { value: 'second_half', label: 'Second half' }]} w={160} /> : null}
+        <Switch label="Half day" {...(!!from && !!to && from !== to ? { description: 'Only for a single day' } : {})} checked={half && !byHours} onChange={(e) => { setHalf(e.currentTarget.checked); if (e.currentTarget.checked) setHourly(false); }} disabled={!!from && !!to && from !== to} />
+        {half && !byHours ? <Select aria-label="Which half" value={halfWhich} onChange={(v) => v && setHalfWhich(v as typeof halfWhich)} allowDeselect={false} data={[{ value: 'first_half', label: 'First half' }, { value: 'second_half', label: 'Second half' }]} w={160} /> : null}
+        {selectedType?.allow_hourly ? (
+          <Switch label="By the hour" {...(!canHourly ? { description: 'Only for a single day' } : { description: 'Leave for part of the day, e.g. 10:00 to 12:00' })}
+            checked={byHours} disabled={!canHourly} onChange={(e) => { setHourly(e.currentTarget.checked); if (e.currentTarget.checked) setHalf(false); }} />
+        ) : null}
       </Group>
+      {byHours ? (
+        <SimpleGrid cols={2}>
+          <TextInput type="time" label="From" value={fromTime} onChange={(e) => setFromTime(e.currentTarget.value)} required step={900} />
+          <TextInput type="time" label="To" value={toTime} onChange={(e) => setToTime(e.currentTarget.value)} required step={900}
+            {...(fromTime && toTime && toTime <= fromTime ? { error: 'Must be after the start time' } : {})} />
+        </SimpleGrid>
+      ) : null}
       {preview ? (
         <Alert variant="light" color={preview.balanceAfter < 0 ? 'orange' : 'gray'}>
-          <Text size="sm" fw={600}>{fmtDays(preview.days)} will be deducted</Text>
+          <Text size="sm" fw={600}>{preview.hours ? `${preview.hours} ${preview.hours === 1 ? 'hour' : 'hours'} (${preview.days} of a day)` : fmtDays(preview.days)} will be deducted</Text>
           <Text size="sm" c="dimmed">{preview.explanation}{preview.sandwichApplied ? ' Weekends or holidays between leave days are counted (sandwich rule).' : ''}</Text>
           <Text size="sm" mt={4}>Balance after this request: <Text span fw={600} className="num">{preview.balanceAfter.toFixed(1)}</Text> of {preview.available.toFixed(1)} days</Text>
         </Alert>
@@ -124,8 +141,8 @@ export default function LeavePage() {
           onRowClick={setDetail}
           columns={[
             { key: 'type', header: 'Type', render: (r) => <Text size="sm" fw={500}>{r.type_name}</Text> },
-            { key: 'dates', header: 'Dates', render: (r) => <>{dateRange(r.from_date, r.to_date)}{r.half_day ? <Text span size="sm" c="dimmed">{` (${r.half_day === 'first_half' ? 'first half' : 'second half'})`}</Text> : null}</> },
-            { key: 'days', header: 'Days', render: (r) => <span className="num">{Number(r.days_requested)}</span>, align: 'right' },
+            { key: 'dates', header: 'Dates', render: (r) => <>{dateRange(r.from_date, r.to_date)}{r.half_day ? <Text span size="sm" c="dimmed">{` (${r.half_day === 'first_half' ? 'first half' : 'second half'})`}</Text> : null}{r.from_time ? <Text span size="sm" c="dimmed" className="num">{` ${r.from_time}–${r.to_time}`}</Text> : null}</> },
+            { key: 'days', header: 'Days', render: (r) => <span className="num">{Number(r.days_requested)}{r.hours ? <Text span size="xs" c="dimmed">{` (${Number(r.hours)} h)`}</Text> : null}</span>, align: 'right' },
             { key: 'status', header: 'Status', render: (r) => <StatusBadge status={r.status} /> },
             { key: 'actions', header: '', align: 'right', render: (r) => (r.status === 'pending' || (r.status === 'approved' && r.from_date > todayNpt())) ? <Button size="xs" variant="subtle" color="red" onClick={(e) => { e.stopPropagation(); void cancel(r); }}>Cancel request</Button> : null },
           ]} />
@@ -140,7 +157,7 @@ export default function LeavePage() {
           <Stack>
             <SimpleGrid cols={2}>
               <Field label="Dates">{dateRange(detail.from_date, detail.to_date)}</Field>
-              <Field label="Days">{Number(detail.days_requested)}{detail.half_day ? ` (${detail.half_day === 'first_half' ? 'first half' : 'second half'})` : ''}</Field>
+              <Field label="Days">{Number(detail.days_requested)}{detail.half_day ? ` (${detail.half_day === 'first_half' ? 'first half' : 'second half'})` : ''}{detail.from_time ? ` (${detail.from_time}–${detail.to_time}, ${Number(detail.hours)} h)` : ''}</Field>
             </SimpleGrid>
             {detail.reason ? <Field label="Reason">{detail.reason}</Field> : null}
             <Timeline active={detail.status === 'pending' ? 0 : 1} bulletSize={14} lineWidth={1}>

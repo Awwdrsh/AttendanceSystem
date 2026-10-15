@@ -15,6 +15,11 @@ import { App } from './App';
 
 document.documentElement.lang = 'en';
 
+// Installable app: the service worker caches the app shell only (never API data). Not in development, where it would cache Vite's modules.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(() => undefined); });
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <MantineProvider theme={theme} defaultColorScheme="light">

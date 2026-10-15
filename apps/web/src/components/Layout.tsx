@@ -14,6 +14,7 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthProvider';
 import { notifications as notifApi, workflow as workflowApi } from '../api';
 import { Brand } from './Brand';
+import { OfflineBanner } from './OfflineBanner';
 import type { Role } from '../api/types';
 
 interface NavItem { to: string; label: string; icon: Icon; roles?: Role[]; employeeOnly?: boolean; keywords?: string[]; match?: string[]; badge?: 'approvals' }
@@ -206,6 +207,7 @@ export function Layout() {
       </AppShell.Navbar>
 
       <AppShell.Main className="hj-main">
+        <OfflineBanner />
         <Suspense fallback={<Center h="60vh"><Loader size="sm" /></Center>}>
           <div className="hj-page"><Outlet /></div>
         </Suspense>

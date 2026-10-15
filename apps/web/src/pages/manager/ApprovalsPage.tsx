@@ -12,6 +12,7 @@ import { useQuery } from '../../lib/useQuery';
 
 const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run' };
 const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand' };
+TYPE_LABEL.tax_declaration = 'Tax savings'; TYPE_COLOR.tax_declaration = 'teal';
 
 function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
@@ -29,7 +30,9 @@ function Summary({ item }: { item: InboxItem }) {
   switch (item.objectType) {
     case 'leave_request': {
       const days = Number(s.days);
-      main = <>{String(s.leaveTypeName ?? s.leaveType)}, {dateRange(s.from, s.to)}{s.halfDay ? ' (half day)' : ''} <Text span c="dimmed">({String(s.days)} {days === 1 ? 'day' : 'days'})</Text></>;
+      main = s.fromTime
+        ? <>{String(s.leaveTypeName ?? s.leaveType)}, {dateRange(s.from, s.to)}, {String(s.fromTime)}–{String(s.toTime)} <Text span c="dimmed">({String(s.hours)} h, {String(s.days)} of a day)</Text></>
+        : <>{String(s.leaveTypeName ?? s.leaveType)}, {dateRange(s.from, s.to)}{s.halfDay ? ' (half day)' : ''} <Text span c="dimmed">({String(s.days)} {days === 1 ? 'day' : 'days'})</Text></>;
       extra.push(<Text key="bal" size="xs" c="dimmed">Balance {Number(s.balanceNow ?? 0).toFixed(1)} to {Number(s.balanceAfter ?? 0).toFixed(1)}</Text>);
       if (Array.isArray(s.teamOverlap) && s.teamOverlap.length) extra.push(<Text key="ov" c="orange.7" size="xs">Also off: {(s.teamOverlap as string[]).join(', ')}</Text>);
       if (s.reason) extra.push(<Text key="r" size="xs" c="dimmed">“{String(s.reason)}”</Text>);
@@ -50,6 +53,15 @@ function Summary({ item }: { item: InboxItem }) {
       main = <>{String(s.run_type).charAt(0).toUpperCase() + String(s.run_type).slice(1)} run for {bsMonthLabel(Number(s.bs_year), Number(s.bs_month))}</>;
       extra.push(<Text key="p" size="xs" c="dimmed">{String(s.payslips)} payslips</Text>, <Text key="n" size="xs" c="dimmed">Net {fmtMoney(String(s.total_net))}</Text>);
       break;
+    case 'tax_declaration': {
+      const fy = Number(s.fiscalYearStart);
+      const parts: Array<[string, unknown]> = [['Life insurance', s.lifePremium], ['Health insurance', s.healthPremium], ['CIT a month', s.citMonthly], ['Other retirement', s.otherRetirementAnnual], ['Medical', s.medicalCost]];
+      main = <>Tax savings for FY {fy}/{String(fy + 1).slice(-2)}: {parts.filter(([, v]) => Number(v) > 0).map(([k, v]) => `${k} ${fmtMoney(String(v))}`).join(', ') || 'nothing declared'}</>;
+      extra.push(<Text key="p" size="xs" c="dimmed">{Number(s.proofs ?? 0)} proof file(s)</Text>);
+      if (s.note) extra.push(<Text key="n" size="xs" c="dimmed">“{String(s.note)}”</Text>);
+      extra.push(<Text key="h" size="xs" c="dimmed">Check the receipts under Payroll, Tax declarations</Text>);
+      break;
+    }
     default:
       main = <Text span c="dimmed">{JSON.stringify(s)}</Text>;
   }

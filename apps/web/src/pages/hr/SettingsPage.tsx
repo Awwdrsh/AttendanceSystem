@@ -5,6 +5,7 @@ import { settings as settingsApi } from '../../api';
 import type { Branch, OrgUnit } from '../../api/types';
 import { DataTable } from '../../components/DataTable';
 import { PageHeader, SectionTitle } from '../../components/PageHeader';
+import { SecurityPolicySettings } from '../../components/SecurityPolicySettings';
 import { addDays, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
@@ -157,6 +158,7 @@ export default function SettingsPage() {
           <Tabs.Tab value="notify">Notifications</Tabs.Tab>
           <Tabs.Tab value="company">Company</Tabs.Tab>
           <Tabs.Tab value="org">Branches and units</Tabs.Tab>
+          <Tabs.Tab value="security">Security</Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="attendance" pt="lg">{q.data ? <AttendanceRules value={val('attendance.policy')} onSaved={reload} /> : null}</Tabs.Panel>
         <Tabs.Panel value="leave" pt="lg">{q.data ? <GenericSettings settingKey="leave.policy" title="Leave" description="Defaults that apply to every leave type unless the type overrides them." value={val('leave.policy')} onSaved={reload} fields={[
@@ -182,6 +184,7 @@ export default function SettingsPage() {
           { key: 'address', label: 'Address', type: 'text' },
           { key: 'pan', label: 'Company PAN', type: 'text', hint: 'Permanent account number from the Inland Revenue Department.' },
           { key: 'ssfEmployerId', label: 'SSF employer ID', type: 'text', hint: 'Social Security Fund registration number.' }]} /> : null}</Tabs.Panel>
+        <Tabs.Panel value="security" pt="lg">{q.data ? <SecurityPolicySettings value={val('security.policy')} onSaved={reload} /> : null}</Tabs.Panel>
         <Tabs.Panel value="org" pt="lg">
           <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg">
             <Stack gap="sm">

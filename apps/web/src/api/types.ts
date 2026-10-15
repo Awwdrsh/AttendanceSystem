@@ -1,6 +1,6 @@
 export type Role = 'admin' | 'hr' | 'manager' | 'employee';
 
-export interface AuthUser { id: string; companyId: string | null; employeeId: string | null; email: string; name: string; roles: Role[]; mustChangePassword: boolean }
+export interface AuthUser { id: string; companyId: string | null; employeeId: string | null; email: string; name: string; roles: Role[]; mustChangePassword: boolean; twoFactorEnabled?: boolean; mustSetUpTwoFactor?: boolean }
 
 export type AttendanceStatus = 'OffShift' | 'Holiday' | 'WeeklyOff' | 'OnLeave' | 'Present' | 'HalfDay' | 'HalfDayLeave' | 'Absent' | 'Incomplete' | 'WFH';
 
@@ -42,17 +42,19 @@ export interface CalendarDay { date: string; bsDate: string | null; weekday: num
 export interface LeaveType {
   id: string; code: string; name_en: string; name_ne: string | null; paid: boolean; statutory: boolean; accrual_basis: string; accrual_days: string; accrual_per_worked_days: number | null;
   max_balance: string | null; carry_forward: boolean; encashable: boolean; certificate_after_days: number | null; allow_half_day: boolean; max_consecutive_days: number | null;
-  min_service_days: number; negative_balance_limit: string; gender_scope: string; sandwich_rule: boolean; expiry_days: number | null; sort_order: number;
+  min_service_days: number; negative_balance_limit: string; gender_scope: string; sandwich_rule: boolean; expiry_days: number | null; sort_order: number; allow_hourly?: boolean;
 }
 export interface LeaveBalance {
   leaveTypeId: string; code: string; nameEn: string; nameNe: string | null; paid: boolean; encashable: boolean; opening: number; accrued: number; taken: number; cancelled: number;
   lapsed: number; carried: number; adjustments: number; compOff: number; encashed: number; pending: number; balance: number; available: number; fiscalYear: string; explanation: string;
 }
-export interface LeavePreview { days: number; explanation: string; sandwichApplied: boolean; balance: number; available: number; balanceAfter: number }
+export interface LeavePreview { days: number; explanation: string; sandwichApplied: boolean; balance: number; available: number; balanceAfter: number; hours?: number }
 export interface LeaveRequest {
   id: string; employee_id: string; emp_code: string; name_en: string; name_ne: string | null; leave_type_id: string; type_code: string; type_name: string; paid: boolean;
   from_date: string; to_date: string; half_day: string | null; days_requested: string; reason: string | null; attachment_key: string | null;
   status: 'pending' | 'approved' | 'rejected' | 'cancelled'; workflow_instance_id: string | null; created_at: string; decided_at: string | null;
+  /** Hourly leave: local HH:MM window and hours. */
+  from_time?: string | null; to_time?: string | null; hours?: string | null;
 }
 export interface TeamCalendarDay { date: string; off: Array<{ employeeId: string; empCode: string; nameEn: string; type: string; status: string; halfDay: string | null }> }
 
@@ -98,7 +100,7 @@ export interface Setting { key: string; description: string; value: Record<strin
 export interface CompanyInfo { company: { id: string; code: string; name_en: string; name_ne: string | null; nameEn: string; nameNe: string | null; logoDataUrl: string | null; address: string | null }; today: { ad: string; bs: string | null } }
 export interface Branch { id: string; code: string; name_en: string; name_ne: string | null }
 export interface OrgUnit { id: string; branch_id: string | null; parent_id: string | null; kind: string; code: string; name_en: string; name_ne: string | null }
-export interface AppUserRow { id: string; employee_id: string | null; email: string; name: string; roles: Role[]; status: string; last_login_at: string | null; created_at: string }
+export interface AppUserRow { id: string; employee_id: string | null; email: string; name: string; roles: Role[]; status: string; last_login_at: string | null; created_at: string; two_factor?: boolean }
 
 export interface RuleVersion { id: string; rule_key: string; jurisdiction: string; valid_from_ad: string; valid_to_ad: string | null; valid_from_bs: string; valid_to_bs: string | null; value: unknown; source_url: string | null; note: string | null; approved_by: string | null; approved_at: string | null; locked: boolean }
 export interface SalaryComponent { code: string; company_id: string; name_en: string; name_ne: string | null; type: string; formula: string | null; condition: string | null; depends_on_payment_days: boolean; taxable: boolean; statutory: boolean; rounding: string; sort_order: number; active: boolean }

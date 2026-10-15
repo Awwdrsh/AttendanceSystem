@@ -1,9 +1,11 @@
-import { Alert, Box, Button, Center, Group, PasswordInput, Stack, Text, TextInput, Title } from '@mantine/core';
+import { Alert, Anchor, Box, Button, Center, Group, PasswordInput, Stack, Text, TextInput, Title } from '@mantine/core';
 import { IconAlertCircle, IconArrowRight } from '@tabler/icons-react';
 import { useMemo, useState, type FormEvent } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthProvider';
 import { errorMessage } from '../api/client';
+import type { AuthUser } from '../api/types';
+import { toast } from '../lib/toast';
 import { Brand } from '../components/Brand';
 
 /** A fixed, made-up morning used as the login illustration: arrivals cluster just before a 10:00 start. */
@@ -41,21 +43,64 @@ function MorningIllustration() {
 }
 
 export default function LoginPage() {
-  const { user, login, loading } = useAuth();
+  const { user, login, completeTwoFactor, loading } = useAuth();
   const nav = useNavigate();
   const loc = useLocation() as { state?: { from?: string } };
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [challenge, setChallenge] = useState<string | null>(null);
+  const [code, setCode] = useState('');
+  const [useRecovery, setUseRecovery] = useState(false);
 
-  if (!loading && user) return <Navigate to={user.mustChangePassword ? '/change-password' : loc.state?.from ?? '/'} replace />;
+  const next = (u: AuthUser) => (u.mustChangePassword ? '/change-password' : u.mustSetUpTwoFactor ? '/setup-two-step' : loc.state?.from ?? '/');
+  if (!loading && user) return <Navigate to={next(user)} replace />;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault(); setBusy(true); setError(null);
-    try { const u = await login(email.trim(), password); nav(u.mustChangePassword ? '/change-password' : loc.state?.from ?? '/', { replace: true }); }
-    catch (err) { setError(errorMessage(err)); } finally { setBusy(false); }
+    try {
+      if (challenge) {
+        const r = await completeTwoFactor(challenge, code.trim());
+        if (r.usedRecoveryCode) toast.info('That recovery code is now used up. Make new ones under Profile, Sign-in security if you are running low.', 'Signed in with a recovery code');
+        nav(next(r.user), { replace: true });
+        return;
+      }
+      const r = await login(email.trim(), password);
+      if ('twoFactorRequired' in r) { setChallenge(r.challenge); setCode(''); return; }
+      nav(next(r), { replace: true });
+    } catch (err) {
+      setError(errorMessage(err));
+      // An expired or used-up challenge means starting again from the password.
+      if (challenge && /expired/i.test(errorMessage(err))) { setChallenge(null); setPassword(''); }
+    } finally { setBusy(false); }
   };
+
+  if (challenge) {
+    return (
+      <Center mih="100vh" p="md" bg="var(--hj-surface)">
+        <Stack w="100%" maw={360} gap="xl" component="form" onSubmit={submit}>
+          <Brand height={24} />
+          <div>
+            <Title order={1} fz={26} fw={700} style={{ letterSpacing: '-0.03em' }}>Two-step sign-in</Title>
+            <Text c="dimmed" size="sm" mt={6}>{useRecovery ? 'Type one of the recovery codes you saved when you turned on two-step sign-in. Each code works once.' : 'Open your authenticator app and type the 6-digit code shown for Hajiri.'}</Text>
+          </div>
+          <Stack gap="md">
+            {error ? <Alert color="red" variant="light" icon={<IconAlertCircle size={18} />}>{error}</Alert> : null}
+            {useRecovery
+              ? <TextInput label="Recovery code" placeholder="XXXX-XXXX-XXXX" value={code} onChange={(e) => setCode(e.currentTarget.value)} required autoFocus size="md" autoComplete="off" className="mono" />
+              : <TextInput label="Code" placeholder="123 456" inputMode="numeric" autoComplete="one-time-code" maxLength={7} value={code} onChange={(e) => setCode(e.currentTarget.value.replace(/[^\d ]/g, ''))} required autoFocus size="md" className="mono" />}
+            <Button type="submit" loading={busy} size="md" fullWidth rightSection={<IconArrowRight size={17} />}>Verify and sign in</Button>
+            <Group justify="space-between">
+              <Anchor component="button" type="button" size="sm" onClick={() => { setUseRecovery(!useRecovery); setCode(''); setError(null); }}>{useRecovery ? 'Use the authenticator app' : 'Lost your phone? Use a recovery code'}</Anchor>
+              <Anchor component="button" type="button" size="sm" c="dimmed" onClick={() => { setChallenge(null); setPassword(''); setError(null); }}>Back</Anchor>
+            </Group>
+          </Stack>
+          <Text size="xs" c="dimmed">No phone and no recovery codes? Ask an administrator to reset your two-step sign-in.</Text>
+        </Stack>
+      </Center>
+    );
+  }
 
   return (
     <Box style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1.1fr)', minHeight: '100vh', background: 'var(--hj-surface)' }} className="hj-login">

@@ -15,6 +15,7 @@ import { useI18n } from '../../i18n';
 import { addDays, fmtDateLong, fmtDateShort, fmtTime, greeting, minutesToHm, relativeTime, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
+import { isOfflineError, queueOfflinePunch } from '../../lib/offlinePunch';
 import type { Flag, Punch } from '../../api/types';
 
 export function describeFlag(f: Flag): string {
@@ -121,6 +122,14 @@ export default function HomePage() {
   const shift = day?.shift_id ? shifts.data?.shifts.find((s) => s.id === day.shift_id) : undefined;
 
   const doPunch = async (direction: 'in' | 'out', why?: string, photo?: string) => {
+    // No connection: keep the tap on this device; it goes to the manager as a correction once back online.
+    const saveOffline = () => {
+      if (!user) return;
+      queueOfflinePunch(user.id, direction);
+      setCamera(null); setReasonOpen(null);
+      toast.info(`Saved on this device at ${fmtTime(new Date().toISOString())}. When you are back online it is sent to your manager as a missed ${direction === 'in' ? 'clock-in' : 'clock-out'} to approve.`, "You're offline");
+    };
+    if (typeof navigator !== 'undefined' && !navigator.onLine) { saveOffline(); return; }
     setBusy(true);
     // One idempotency key per attempted punch; reused only when retrying the same direction so a failed IN never swallows a later OUT.
     let key: string = crypto.randomUUID();
@@ -136,6 +145,7 @@ export default function HomePage() {
       setReasonOpen(null); setReason(''); setCamera(null);
       await Promise.all([today.reload(), me.reload()]);
     } catch (e) {
+      if (isOfflineError(e)) { localStorage.removeItem('hajiri.punchKey'); saveOffline(); return; }
       // Clocking in from home needs a photo: open the camera and retry with it.
       if (e instanceof ApiError && e.status === 400 && (e.details as { code?: string } | undefined)?.code === 'photo_required') { setReasonOpen(null); setCamera({ direction, ...(why ? { reason: why } : {}) }); if (!camera) toast.info('You are clocking in from home, so a quick photo is needed.'); }
       else if (e instanceof ApiError && e.status === 400 && /reason/i.test(e.message)) { setReasonOpen({ direction, message: e.message }); }
