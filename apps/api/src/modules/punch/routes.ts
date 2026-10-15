@@ -14,6 +14,7 @@ import { requireRole } from '../auth/middleware.js';
 import { isAttendanceLocked, listDays, recomputeForPunch } from '../attendance/service.js';
 import { ensurePseudoDevice, nptLocalTime } from './devices.js';
 import { geofence, type GeoLocation } from './geo.js';
+import { fieldPolicy } from '../field/policy.js';
 
 const CLOCK_TOLERANCE_MS = 10 * 60_000;
 
@@ -50,20 +51,26 @@ export function punchRoutes({ db, cipher }: AppDeps): Router {
     const at = serverNow;
     if (Math.abs(clockSkewMs) > CLOCK_TOLERANCE_MS) flags.push('ClockSkew');
 
-    const emp = await db.query<{ company_id: string; emp_code: string; branch_id: string | null; work_from_home: boolean }>(
-      `SELECT e.company_id, e.emp_code, a.branch_id, e.work_from_home FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
+    const emp = await db.query<{ company_id: string; emp_code: string; branch_id: string | null; work_from_home: boolean; field_work: boolean }>(
+      `SELECT e.company_id, e.emp_code, a.branch_id, e.work_from_home, e.field_work FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
         WHERE e.id = $1 AND e.status = 'active'`, [employeeId]);
     const e = emp.rows[0];
     if (!e) throw new NotFoundError('employee not found');
 
     let geo: ReturnType<typeof geofence> = { inside: null, locationId: null, distanceM: null, locationName: null };
-    if (b.lat !== undefined && b.lng !== undefined) {
+    // Geofence policy (Settings, Locations): off ignores locations; flag asks for a reason; block refuses punches outside.
+    const geofenceMode = (await fieldPolicy(db, e.company_id)).geofenceMode;
+    // Locations tied to the person win; otherwise every active location of their branch (or company-wide ones).
+    const locScope = `company_id = $1 AND active AND CASE WHEN EXISTS (SELECT 1 FROM location_assignment la WHERE la.employee_id = $3)
+      THEN id IN (SELECT location_id FROM location_assignment la WHERE la.employee_id = $3) ELSE (branch_id IS NULL OR branch_id = $2) END`;
+    if (geofenceMode === 'off') { /* locations are not checked */ }
+    else if (b.lat !== undefined && b.lng !== undefined) {
       const locs = await db.query<GeoLocation>(
-        `SELECT id, name, lat::float8 AS lat, lng::float8 AS lng, radius_m FROM location WHERE company_id = $1 AND (branch_id IS NULL OR branch_id = $2)`,
-        [e.company_id, e.branch_id]);
+        `SELECT id, name, lat::float8 AS lat, lng::float8 AS lng, radius_m FROM location WHERE ${locScope}`,
+        [e.company_id, e.branch_id, employeeId]);
       geo = geofence(b.lat, b.lng, b.accuracyM ?? 50, locs.rows);
     } else {
-      const any = await db.query('SELECT 1 FROM location WHERE company_id = $1 LIMIT 1', [e.company_id]);
+      const any = await db.query(`SELECT 1 FROM location WHERE ${locScope} LIMIT 1`, [e.company_id, e.branch_id, employeeId]);
       if (any.rows.length) { geo = { inside: false, locationId: null, distanceM: null, locationName: null }; flags.push('NoLocation'); }
     }
     // Work from home: allowed for employees set up for it, and for anyone with an approved work-from-home day.
@@ -80,6 +87,13 @@ export function punchRoutes({ db, cipher }: AppDeps): Router {
       if (!photo && b.direction === 'in' && policy.wfhPhotoRequired !== false) {
         throw new BadRequestError('Take a quick photo to clock in from home.', { code: 'photo_required' });
       }
+    } else if (geo.inside === false && e.field_work) {
+      // Field staff work away from the office by design; the punch is tagged, not questioned.
+      flags.push('Field');
+    } else if (geo.inside === false && geofenceMode === 'block') {
+      throw new BadRequestError(geo.distanceM !== null
+        ? `You are ${geo.distanceM} m from ${geo.locationName}. Clock in when you reach your work location.`
+        : 'Your location is needed to clock in. Allow location access and try again.', { code: 'outside_location' });
     } else if (geo.inside === false) {
       flags.push('OutsideLocation');
       if (!b.reason?.trim()) throw new BadRequestError(geo.distanceM !== null

@@ -74,7 +74,10 @@ export function attendanceRoutes({ db }: AppDeps): Router {
     const rows = await db.query(
       `SELECT e.id AS employee_id, e.emp_code, e.name_en, e.name_ne, v.status, v.first_in, v.last_out, v.late_min, v.worked_min, v.flags,
               coalesce(v.status = 'WFH', false) OR EXISTS (SELECT 1 FROM punch_event p WHERE p.employee_id = e.id AND p.local_date = $2 AND p.raw->>'remote' = 'true') AS remote,
-              (SELECT ph.id FROM punch_photo ph WHERE ph.employee_id = e.id AND ph.local_date = $2 AND ph.image_enc IS NOT NULL ORDER BY ph.punched_at LIMIT 1) AS photo_id
+              (SELECT ph.id FROM punch_photo ph WHERE ph.employee_id = e.id AND ph.local_date = $2 AND ph.image_enc IS NOT NULL ORDER BY ph.punched_at LIMIT 1) AS photo_id,
+              (SELECT wb.kind FROM work_break wb WHERE wb.employee_id = e.id AND wb.ended_at IS NULL AND wb.local_date = $2) AS on_break,
+              (SELECT coalesce(sum(coalesce(wb.minutes, floor(extract(epoch FROM now() - wb.started_at) / 60)::int)), 0)::int FROM work_break wb WHERE wb.employee_id = e.id AND wb.local_date = $2) AS break_min,
+              (SELECT fv.place FROM field_visit fv WHERE fv.employee_id = e.id AND fv.local_date = $2 ORDER BY fv.ended_at IS NULL DESC, fv.started_at DESC LIMIT 1) AS field_place
          FROM employee e LEFT JOIN v_attendance_latest v ON v.employee_id = e.id AND v.local_date = $2
         WHERE e.company_id = $1 AND e.status = 'active'
           AND ($3 OR e.id = $4::uuid OR EXISTS (SELECT 1 FROM employee_assignment a WHERE a.employee_id = e.id AND a.manager_id = $4::uuid AND a.valid @> $2::date))

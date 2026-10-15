@@ -59,6 +59,14 @@ export async function assertManages(db: Queryable, user: AuthUser, employeeId: s
   throw new ForbiddenError('not allowed to act for this employee');
 }
 
+export type Summariser = (db: Queryable, inst: WorkflowInstance) => Promise<Record<string, unknown>>;
+const summarisers = new Map<string, Summariser>();
+
+/** Modules with their own request types register how the approval inbox summarises one request. */
+export function registerSummariser(objectType: string, fn: Summariser): void {
+  summarisers.set(objectType, fn);
+}
+
 /** Each request module registers how an approved/rejected decision is applied to its object. */
 export function registerHandler(objectType: string, fn: DecisionHandler): void {
   handlers.set(objectType, fn);
@@ -298,8 +306,10 @@ export async function summarise(db: Queryable, inst: WorkflowInstance): Promise<
            FROM payroll_run r JOIN payroll_period p ON p.id = r.period_id WHERE r.id = $1`, [inst.object_id]).catch(() => ({ rows: [] as Record<string, unknown>[] }));
       return r.rows[0] ?? {};
     }
-    default:
-      return {};
+    default: {
+      const fn = summarisers.get(inst.object_type);
+      return fn ? fn(db, inst) : {};
+    }
   }
 }
 
