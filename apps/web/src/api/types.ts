@@ -18,7 +18,7 @@ export interface EngineDay {
   ot: { minutes: number; rawMinutes: number; multiplier: number; dayType: string; status: string }; flags: Flag[]; shiftCode: string | null; localDate: string;
 }
 
-export interface Punch { id: string; punched_at: string; local_date?: string; direction: 'in' | 'out' | 'unknown'; verify_mode: string; source: string; device_sn?: string; superseded?: boolean; supersedes_id?: string | null; remote?: boolean }
+export interface Punch { id: string; punched_at: string; local_date?: string; direction: 'in' | 'out' | 'unknown'; verify_mode: string; source: string; device_sn?: string; superseded?: boolean; supersedes_id?: string | null; remote?: boolean; photo_id?: string | null }
 
 export interface Employee {
   id: string; company_id: string; emp_code: string; name_en: string; name_ne: string | null; gender: 'male' | 'female' | 'other' | null; dob: string | null; marital_status: 'single' | 'couple' | null;
@@ -138,6 +138,7 @@ export interface TemplateMeta { id: string; modality: string; vendor_format: str
 export interface Transparency { stored: { en: string[]; ne: string[] }; notStored: { en: string[]; ne: string[] }; retention: unknown; access: { en: string[]; ne: string[] }; withdraw: { en: string; ne: string }; legalBasis: { en: string; ne: string } }
 
 export interface ExceptionRow { id: string; employee_id: string; emp_code: string; name_en: string; name_ne: string | null; local_date: string; bs_date: string | null; status: AttendanceStatus; worked_min: number; late_min: number; early_min: number; ot_min: number; flags: Flag[] }
-export interface TeamTodayRow { employee_id: string; emp_code: string; name_en: string; name_ne: string | null; status: AttendanceStatus | null; first_in: string | null; last_out: string | null; late_min: number | null; worked_min: number | null; flags: Flag[] | null; remote?: boolean }
+export interface TeamTodayRow { employee_id: string; emp_code: string; name_en: string; name_ne: string | null; status: AttendanceStatus | null; first_in: string | null; last_out: string | null; late_min: number | null; worked_min: number | null; flags: Flag[] | null; remote?: boolean; photo_id?: string | null }
+export interface RemotePunch { punch_id: string; employee_id: string; emp_code: string; name_en: string; designation: string | null; punched_at: string; local_date: string; direction: 'in' | 'out' | 'unknown'; photo_id: string | null; photo_purged: boolean | null; location_shared: boolean; accuracy_m: number | null; reason: string | null; flags: string[] | null }
 export interface RosterData { employees: Array<{ id: string; emp_code: string; name_en: string; name_ne: string | null; weekly_off_days: number[]; default_shift_id: string | null }>; roster: Array<{ employee_id: string; local_date: string; shift_id: string | null }> }
 export interface AuditEvent { id: number; occurred_at: string; actor_id: string | null; action: string; table_name: string; row_id: string | null }

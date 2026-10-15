@@ -42,6 +42,7 @@ const SETTINGS: NavItem = { to: '/settings', label: 'Settings', icon: IconSettin
 const JUMPS: Array<{ to: string; label: string; group: string; roles?: Role[]; icon: Icon }> = [
   { to: '/attendance/exceptions', label: 'Attendance exceptions', group: 'Attendance', roles: ['hr'], icon: IconAlertTriangle },
   { to: '/attendance/overtime', label: 'Overtime review', group: 'Attendance', roles: ['hr'], icon: IconClockHour4 },
+  { to: '/attendance/from-home', label: 'Work from home check-ins', group: 'Attendance', roles: ['manager', 'hr'], icon: IconHome },
   { to: '/attendance/fix', label: 'Fix a punch', group: 'Attendance', roles: ['manager', 'hr'], icon: IconClockEdit },
   { to: '/leave/history', label: 'Request history', group: 'Leave', roles: ['hr'], icon: IconListCheck },
   { to: '/leave/balances', label: 'Leave balances', group: 'Leave', roles: ['hr'], icon: IconAdjustments },

@@ -46,6 +46,7 @@ Generated from the route files; every route here is exercised by the API test su
 |---|---|---|
 | GET | `/api/v1/devices` | HR, Admin |
 | POST | `/api/v1/devices/:id/activate` | HR, Admin |
+| POST | `/api/v1/devices/:id/key` | HR, Admin |
 | POST | `/api/v1/devices/:id/disable` | HR, Admin |
 | GET | `/api/v1/devices/:id/mappings` | HR, Admin |
 | POST | `/api/v1/devices/:id/map` | HR, Admin |
@@ -92,6 +93,7 @@ Generated from the route files; every route here is exercised by the API test su
 | POST | `/api/v1/leave/requests` | Signed-in |
 | GET | `/api/v1/leave/requests` | Signed-in |
 | POST | `/api/v1/leave/requests/:id/cancel` | Signed-in |
+| POST | `/api/v1/leave/accrual/run` | HR |
 | POST | `/api/v1/leave/adjust` | HR |
 | GET | `/api/v1/leave/ledger` | Signed-in |
 | GET | `/api/v1/leave/team-calendar` | Signed-in |
@@ -143,10 +145,10 @@ Generated from the route files; every route here is exercised by the API test su
 | GET | `/api/v1/reports/register` | HR, Manager |
 | GET | `/api/v1/reports/ot` | HR, Manager |
 | GET | `/api/v1/reports/late-early` | HR, Manager |
-| GET | `/api/v1/reports/leave-balances` | HR, Manager |
+| GET | `/api/v1/reports/leave-balances` | HR |
 | GET | `/api/v1/reports/headcount` | HR, Manager |
 | GET | `/api/v1/reports/exceptions-summary` | HR, Manager |
-| GET | `/api/v1/reports/devices` | HR, Manager |
+| GET | `/api/v1/reports/devices` | HR |
 | GET | `/api/v1/reports/punch-audit` | HR, Manager |
 
 ## punch
@@ -155,6 +157,8 @@ Generated from the route files; every route here is exercised by the API test su
 |---|---|---|
 | POST | `/api/v1/punch` | Signed-in |
 | GET | `/api/v1/punch/today` | Signed-in |
+| GET | `/api/v1/punch/remote` | Signed-in |
+| GET | `/api/v1/punch/photos/:id` | Signed-in |
 | POST | `/api/v1/punch/manual` | HR |
 
 ## settings

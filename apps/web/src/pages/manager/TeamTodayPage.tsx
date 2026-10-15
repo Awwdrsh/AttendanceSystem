@@ -1,6 +1,6 @@
-import { Group, SegmentedControl, Stack, Text } from '@mantine/core';
+import { Avatar, Group, SegmentedControl, Stack, Text } from '@mantine/core';
 import { useState } from 'react';
-import { attendance as attApi } from '../../api';
+import { attendance as attApi, punch as punchApi } from '../../api';
 import type { TeamTodayRow } from '../../api/types';
 import { DateField } from '../../components/BsDatePicker';
 import { DataTable } from '../../components/DataTable';
@@ -57,7 +57,7 @@ export default function TeamTodayPage() {
         emptyTitle={filter === 'all' ? 'No one on your team yet' : 'No one matches this filter'}
         emptyHint={filter === 'all' ? 'Employees who report to you will appear here.' : 'Switch to Everyone to see the whole team.'}
         columns={[
-          { key: 'emp', header: 'Name', render: (r) => <><Text size="sm" fw={500}>{r.name_en}</Text><Text size="xs" c="dimmed">{r.emp_code}</Text></>, sticky: true },
+          { key: 'emp', header: 'Name', render: (r) => <Group gap="sm" wrap="nowrap">{r.photo_id ? <Avatar src={punchApi.photoUrl(r.photo_id)} size={30} radius="xl" alt={`${r.name_en} clock-in photo`} /> : null}<div><Text size="sm" fw={500}>{r.name_en}</Text><Text size="xs" c="dimmed">{r.emp_code}</Text></div></Group>, sticky: true },
           { key: 'status', header: 'Status', render: (r) => <StatusBadge status={liveStatus(r.status, { date: date ?? '', today: todayNpt(), firstIn: r.first_in, lastOut: r.last_out }) ?? (r.first_in ? 'Present' : 'NotComputed')} late={r.late_min} remote={r.remote} /> },
           { key: 'in', header: 'First in', align: 'right', render: (r) => <span className="num">{fmtTime(r.first_in)}</span> },
           { key: 'out', header: 'Last out', align: 'right', render: (r) => <span className="num">{fmtTime(r.last_out)}</span> },

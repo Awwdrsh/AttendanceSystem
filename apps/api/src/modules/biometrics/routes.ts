@@ -47,13 +47,13 @@ export function biometricsRoutes({ db }: AppDeps): Router {
   r.get('/transparency', (_req, res) => {
     res.json({
       stored: {
-        en: ['Face, fingerprint or palm template produced by the terminal (encrypted; the original image is not kept)', 'Punch time, device and verification method', 'Location only at the moment of a mobile punch'],
-        ne: ['यन्त्रले बनाएको अनुहार, औंठाछाप वा हत्केलाको टेम्प्लेट (इन्क्रिप्ट गरिएको; मूल तस्बिर राखिँदैन)', 'हाजिरीको समय, यन्त्र र प्रमाणीकरण विधि', 'मोबाइल हाजिरीको क्षणमा मात्र स्थान'],
+        en: ['Face, fingerprint or palm template produced by the terminal (encrypted; the original image is not kept)', 'Punch time, device and verification method', 'Location only at the moment of a mobile punch', 'A photo when you clock in from home (encrypted; seen only by you, your manager and HR; deleted automatically after the retention period)'],
+        ne: ['यन्त्रले बनाएको अनुहार, औंठाछाप वा हत्केलाको टेम्प्लेट (इन्क्रिप्ट गरिएको; मूल तस्बिर राखिँदैन)', 'हाजिरीको समय, यन्त्र र प्रमाणीकरण विधि', 'मोबाइल हाजिरीको क्षणमा मात्र स्थान', 'घरबाट हाजिरी गर्दा खिचिएको तस्बिर (इन्क्रिप्ट गरिएको; तपाईं, प्रबन्धक र मानव संसाधनले मात्र हेर्न सक्ने; अवधि सकिएपछि स्वतः मेटिने)'],
       },
       notStored: { en: ['Continuous location tracking', 'Productivity scores or lateness rankings'], ne: ['निरन्तर स्थान ट्र्याकिङ', 'उत्पादकता अंक वा ढिलाइको श्रेणी'] },
       retention: RETENTION,
       access: {
-        en: ['You: your own punches, attendance, corrections and this record', 'Your manager: your attendance status and requests', 'HR: your profile, attendance and payroll; sensitive fields are decrypted on demand and every read is logged'],
+        en: ['You: your own punches, attendance, corrections and this record', 'Your manager: your attendance status, requests and work-from-home photos', 'HR: your profile, attendance and payroll; sensitive fields are decrypted on demand and every read is logged'],
         ne: ['तपाईं: आफ्नै हाजिरी, सुधार र यो अभिलेख', 'तपाईंको प्रबन्धक: तपाईंको हाजिरी स्थिति र अनुरोध', 'मानव संसाधन: प्रोफाइल र हाजिरी; संवेदनशील क्षेत्र आवश्यक पर्दा मात्र खोलिन्छ र हरेक पहुँच लग हुन्छ'],
       },
       withdraw: {

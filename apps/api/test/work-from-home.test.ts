@@ -8,6 +8,8 @@ let db: Db; let app: ReturnType<typeof testApp>; let hr: string; let sita: strin
 const nowIso = () => new Date().toISOString();
 const plusDays = (d: string, n: number) => new Date(new Date(`${d}T00:00:00Z`).getTime() + n * 86_400_000).toISOString().slice(0, 10);
 const home = { lat: 27.80, lng: 85.40, accuracyM: 30, source: 'web' as const };
+// A clock-in from home carries a photo (a tiny JPEG is enough for the API).
+const selfie = `data:image/jpeg;base64,${Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('test-photo')]).toString('base64')}`;
 
 beforeAll(async () => {
   db = await freshDb(); app = testApp(db);
@@ -28,7 +30,7 @@ describe('work from home', () => {
   });
 
   it('an employee allowed to work from home clocks in from home without a reason, tagged remote', async () => {
-    const r = await request(app).post('/api/v1/punch').set(auth(ram)).send({ direction: 'in', clientTime: nowIso(), idempotencyKey: 'wfh-ram-in1', ...home });
+    const r = await request(app).post('/api/v1/punch').set(auth(ram)).send({ direction: 'in', clientTime: nowIso(), idempotencyKey: 'wfh-ram-in1', ...home, selfie });
     expect(r.status).toBe(201);
     expect(r.body.remote).toBe(true);
     expect(r.body.flags).toContain('Remote');
@@ -60,7 +62,7 @@ describe('work from home', () => {
     expect(req.status).toBe(201);
     const inst = (await db.query<{ workflow_instance_id: string }>('SELECT workflow_instance_id FROM regularisation_request WHERE id = $1', [req.body.id])).rows[0]!.workflow_instance_id;
     expect((await request(app).post(`/api/v1/workflow/${inst}/approve`).set(auth(ram)).send({})).status).toBe(200);
-    const r = await request(app).post('/api/v1/punch').set(auth(sita)).send({ direction: 'in', clientTime: nowIso(), idempotencyKey: 'wfh-sita-in2', ...home });
+    const r = await request(app).post('/api/v1/punch').set(auth(sita)).send({ direction: 'in', clientTime: nowIso(), idempotencyKey: 'wfh-sita-in2', ...home, selfie });
     expect(r.status).toBe(201);
     expect(r.body.remote).toBe(true);
   });

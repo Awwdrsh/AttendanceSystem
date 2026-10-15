@@ -6,6 +6,7 @@ const TeamTodayPage = lazy(() => import('./manager/TeamTodayPage'));
 const ExceptionsPage = lazy(() => import('./hr/ExceptionsPage'));
 const OtSlipsPage = lazy(() => import('./hr/OtSlipsPage'));
 const FixPunchPage = lazy(() => import('./manager/FixPunchPage'));
+const RemoteCheckinsPage = lazy(() => import('./manager/RemoteCheckinsPage'));
 const RequestsPage = lazy(() => import('./hr/RequestsPage'));
 const TeamCalendarPage = lazy(() => import('./manager/TeamCalendarPage'));
 const LeaveAdjustPage = lazy(() => import('./hr/LeaveAdjustPage'));
@@ -28,6 +29,7 @@ const MyDataPage = lazy(() => import('./employee/MyDataPage'));
 export function AttendanceHub() {
   return <Hub title="Attendance" tabs={[
     { path: '/attendance', label: 'Today', element: <TeamTodayPage /> },
+    { path: '/attendance/from-home', label: 'Work from home', element: <RemoteCheckinsPage /> },
     { path: '/attendance/exceptions', label: 'Exceptions', element: <ExceptionsPage />, roles: ['hr'] },
     { path: '/attendance/overtime', label: 'Overtime', element: <OtSlipsPage />, roles: ['hr'] },
     { path: '/attendance/fix', label: 'Fix a punch', element: <FixPunchPage /> },

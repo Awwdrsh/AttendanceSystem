@@ -21,6 +21,8 @@ export const settingSchemas = {
     autoClockOutAfterMin: z.number().int().min(0).max(720).default(0),
     regularisationBackdateDays: z.number().int().min(0).max(90).default(30),
     regularisationMonthlyCap: z.number().int().min(0).max(31).default(5),
+    wfhPhotoRequired: z.boolean().default(true),
+    wfhPhotoRetentionDays: z.number().int().min(7).max(365).default(90),
     latePenalty: z.object({ enabled: z.boolean().default(false), lateCount: z.number().int().min(1).default(3), deductionDays: z.number().min(0).max(1).default(0.5) }).default({ enabled: false, lateCount: 3, deductionDays: 0.5 }),
   }),
   'leave.policy': z.object({

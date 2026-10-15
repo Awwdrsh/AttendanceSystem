@@ -90,6 +90,13 @@ function AttendanceRules({ value, onSaved }: { value: Obj; onSaved: () => void }
         <SettingRow label="Corrections per month" description="Maximum attendance corrections an employee can request each month.">{n('regularisationMonthlyCap', { min: 0, max: 31 })}</SettingRow>
       </SettingsSection>
 
+      <SettingsSection title="Work from home">
+        <SettingRow label="Photo at clock-in" description="Ask for a quick photo when someone clocks in from home. Managers and HR see it under Attendance, Work from home.">
+          <Switch checked={p.wfhPhotoRequired !== false} onChange={(e) => setP({ ...p, wfhPhotoRequired: e.currentTarget.checked })} aria-label="Photo at clock-in" />
+        </SettingRow>
+        <SettingRow label="Keep photos for" description="Photos are deleted automatically after this many days.">{n('wfhPhotoRetentionDays', { min: 7, max: 365, suffix: ' days' })}</SettingRow>
+      </SettingsSection>
+
       <SettingsSection title="Late penalty" description="Deduct pay for repeated late arrivals (Sec 38(e)). Applies from the next payroll period.">
         <SettingRow label="Apply late penalty">
           <Switch checked={!!penalty.enabled} onChange={(e) => setP({ ...p, latePenalty: { ...penalty, enabled: e.currentTarget.checked } })} aria-label="Apply late penalty" />

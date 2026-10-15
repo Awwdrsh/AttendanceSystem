@@ -91,6 +91,16 @@ async function drainBatch(deps: WorkerDeps, batch: number): Promise<{ processed:
 }
 
 /** (2) Nightly sweep: last 3 days for every active employee (plan §10.3). */
+/** Wipe work-from-home photos older than each company's retention period (default 90 days); the row stays as a record. */
+export async function purgeExpiredPhotos(deps: WorkerDeps, now = new Date()): Promise<number> {
+  const r = await deps.db.query(
+    `UPDATE punch_photo ph SET image_enc = NULL, purged_at = $1
+       FROM company c LEFT JOIN company_setting s ON s.company_id = c.id AND s.key = 'attendance.policy'
+      WHERE ph.company_id = c.id AND ph.image_enc IS NOT NULL
+        AND ph.created_at < $1::timestamptz - make_interval(days => coalesce((s.value->>'wfhPhotoRetentionDays')::int, 90))`, [now]);
+  return r.rowCount ?? 0;
+}
+
 export async function nightlySweep(deps: WorkerDeps, now = new Date()): Promise<number> {
   const today = localDateOf(now.getTime());
   const from = new Date(localTimeMs(today, '00:00') - 2 * DAY_MIN * MIN_MS);
@@ -262,7 +272,7 @@ export async function runOnce(deps: WorkerDeps, jobs: JobName[] = ALL_JOBS, now 
         case 'offline': out.offline = await detectOfflineDevices(deps, now); break;
         case 'sla': out.sla = await slaReminders(deps, now); break;
         case 'autoClockOut': out.autoClockOut = await autoClockOut(deps, now); break;
-        case 'nightly': out.nightly = await nightlySweep(deps, now); break;
+        case 'nightly': out.nightly = await nightlySweep(deps, now); out.photosPurged = await purgeExpiredPhotos(deps, now); break;
         case 'accrual': out.accrual = await monthlyAccrualIfDue(deps, now); break;
         case 'digest': out.digest = await digestIfDue(deps, now); break;
       }

@@ -1,5 +1,5 @@
-import { Anchor, Button, Grid, Group, Modal, Paper, Stack, Text, Textarea } from '@mantine/core';
-import { IconAlertTriangle, IconClockEdit, IconHome, IconLogin2, IconLogout2 } from '@tabler/icons-react';
+import { Anchor, Avatar, Button, Grid, Group, Modal, Paper, Stack, Text, Textarea, UnstyledButton } from '@mantine/core';
+import { IconAlertTriangle, IconCamera, IconClockEdit, IconHome, IconLogin2, IconLogout2 } from '@tabler/icons-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { dashboard as dashApi, punch as punchApi, regularisation as regApi, shifts as shiftApi } from '../../api';
@@ -10,6 +10,7 @@ import { PageHeader, SectionTitle } from '../../components/PageHeader';
 import { liveStatus, StatusBadge } from '../../components/StatusBadge';
 import { EmptyState } from '../../components/EmptyState';
 import { DateField } from '../../components/BsDatePicker';
+import { CameraCapture } from '../../components/CameraCapture';
 import { useI18n } from '../../i18n';
 import { addDays, fmtDateLong, fmtDateShort, fmtTime, greeting, minutesToHm, relativeTime, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
@@ -88,6 +89,8 @@ export default function HomePage() {
   const [wfhDate, setWfhDate] = useState<string | null>(todayNpt());
   const [wfhReason, setWfhReason] = useState('');
   const [wfhBusy, setWfhBusy] = useState(false);
+  const [camera, setCamera] = useState<{ direction: 'in' | 'out'; reason?: string } | null>(null);
+  const [viewPhoto, setViewPhoto] = useState<{ id: string; at: string } | null>(null);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 30_000); return () => window.clearInterval(id); }, []);
 
@@ -117,7 +120,7 @@ export default function HomePage() {
   const worked = clockedIn ? workedFromPunches(punches, now) : (day?.worked_min ?? workedFromPunches(punches, now));
   const shift = day?.shift_id ? shifts.data?.shifts.find((s) => s.id === day.shift_id) : undefined;
 
-  const doPunch = async (direction: 'in' | 'out', why?: string) => {
+  const doPunch = async (direction: 'in' | 'out', why?: string, photo?: string) => {
     setBusy(true);
     // One idempotency key per attempted punch; reused only when retrying the same direction so a failed IN never swallows a later OUT.
     let key: string = crypto.randomUUID();
@@ -125,15 +128,17 @@ export default function HomePage() {
     localStorage.setItem('hajiri.punchKey', JSON.stringify({ key, direction }));
     try {
       const pos = await getPosition();
-      const res = await punchApi.create({ direction, clientTime: new Date().toISOString(), idempotencyKey: key, source: 'web', ...(pos.lat !== undefined ? { lat: pos.lat, lng: pos.lng, accuracyM: pos.accuracyM } : {}), ...(why ? { reason: why } : {}) });
+      const res = await punchApi.create({ direction, clientTime: new Date().toISOString(), idempotencyKey: key, source: 'web', ...(pos.lat !== undefined ? { lat: pos.lat, lng: pos.lng, accuracyM: pos.accuracyM } : {}), ...(why ? { reason: why } : {}), ...(photo ? { selfie: photo } : {}) });
       localStorage.removeItem('hajiri.punchKey');
       if (res.duplicate) toast.info(`Already recorded: ${directionLabel(res.punch.direction).toLowerCase()} at ${fmtTime(res.punch.punched_at)}.`);
       else toast.ok(res.message ?? `${directionLabel(direction)} at ${fmtTime(res.punch.punched_at)}.`);
       if (pos.denied) toast.info('Location was not available, so this was recorded without it.');
-      setReasonOpen(null); setReason('');
+      setReasonOpen(null); setReason(''); setCamera(null);
       await Promise.all([today.reload(), me.reload()]);
     } catch (e) {
-      if (e instanceof ApiError && e.status === 400 && /reason/i.test(e.message)) { setReasonOpen({ direction, message: e.message }); }
+      // Clocking in from home needs a photo: open the camera and retry with it.
+      if (e instanceof ApiError && e.status === 400 && (e.details as { code?: string } | undefined)?.code === 'photo_required') { setReasonOpen(null); setCamera({ direction, ...(why ? { reason: why } : {}) }); if (!camera) toast.info('You are clocking in from home, so a quick photo is needed.'); }
+      else if (e instanceof ApiError && e.status === 400 && /reason/i.test(e.message)) { setReasonOpen({ direction, message: e.message }); }
       else toast.err(e, direction === 'in' ? 'Clock-in not saved' : 'Clock-out not saved');
     } finally { setBusy(false); }
   };
@@ -194,10 +199,21 @@ export default function HomePage() {
                 </Stack>
               ) : null}
 
-              <Button size="lg" fullWidth loading={busy} onClick={() => doPunch(nextDirection)}
-                leftSection={nextDirection === 'in' ? <IconLogin2 size={18} stroke={1.6} /> : <IconLogout2 size={18} stroke={1.6} />}>
-                {nextDirection === 'in' ? 'Clock in' : 'Clock out'}
-              </Button>
+              {nextDirection === 'in' && (wfhAllowed || wfhToday) ? (
+                <Stack gap={8}>
+                  <Button size="lg" fullWidth loading={busy} onClick={() => setCamera({ direction: 'in' })} leftSection={<IconCamera size={18} stroke={1.6} />}>
+                    Clock in from home
+                  </Button>
+                  <Button variant="subtle" color="gray" size="sm" fullWidth disabled={busy} onClick={() => doPunch('in')} leftSection={<IconLogin2 size={16} stroke={1.6} />}>
+                    At the office? Clock in without a photo
+                  </Button>
+                </Stack>
+              ) : (
+                <Button size="lg" fullWidth loading={busy} onClick={() => doPunch(nextDirection)}
+                  leftSection={nextDirection === 'in' ? <IconLogin2 size={18} stroke={1.6} /> : <IconLogout2 size={18} stroke={1.6} />}>
+                  {nextDirection === 'in' ? 'Clock in' : 'Clock out'}
+                </Button>
+              )}
             </Stack>
           </Paper>
         </Grid.Col>
@@ -220,7 +236,14 @@ export default function HomePage() {
                         <Text size="sm" fw={500} {...(p.superseded ? { td: 'line-through', c: 'dimmed' } : {})}>{directionLabel(p.direction)}</Text>
                         <Text size="xs" c="dimmed">{p.remote ? 'From home' : sourceLabel(p.source)}</Text>
                       </div>
-                      <Text size="sm" className="num" fw={500}>{fmtTime(p.punched_at)}</Text>
+                      <Group gap="sm" wrap="nowrap">
+                        {p.photo_id ? (
+                          <UnstyledButton aria-label="View clock-in photo" onClick={() => setViewPhoto({ id: p.photo_id!, at: p.punched_at })}>
+                            <Avatar src={punchApi.photoUrl(p.photo_id)} size={30} radius="xl" />
+                          </UnstyledButton>
+                        ) : null}
+                        <Text size="sm" className="num" fw={500}>{fmtTime(p.punched_at)}</Text>
+                      </Group>
                     </Group>
                   </Group>
                 ))}
@@ -285,6 +308,12 @@ export default function HomePage() {
             <Button disabled={!reason.trim()} loading={busy} onClick={() => reasonOpen && doPunch(reasonOpen.direction, reason)}>{reasonOpen?.direction === 'out' ? 'Clock out' : 'Clock in'}</Button>
           </Group>
         </Stack>
+      </Modal>
+      <CameraCapture opened={!!camera} onClose={() => setCamera(null)} busy={busy}
+        title={camera?.direction === 'out' ? 'Clock out from home' : 'Clock in from home'} confirmLabel={camera?.direction === 'out' ? 'Clock out' : 'Clock in'}
+        onConfirm={(photo) => { if (camera) void doPunch(camera.direction, camera.reason, photo); }} />
+      <Modal opened={!!viewPhoto} onClose={() => setViewPhoto(null)} title={viewPhoto ? `Clock-in photo, ${fmtTime(viewPhoto.at)}` : ''} centered radius="lg">
+        {viewPhoto ? <img src={punchApi.photoUrl(viewPhoto.id)} alt="Clock-in photo" style={{ width: '100%', borderRadius: 12, display: 'block' }} /> : null}
       </Modal>
       <Modal opened={wfhOpen} onClose={() => setWfhOpen(false)} title="Work from home" centered>
         <Stack>

@@ -34,6 +34,8 @@ export const attendance = {
 export const punch = {
   create: (b: Record<string, unknown>) => post<T.PunchResult>('/punch', b),
   today: () => get<T.TodayCard>('/punch/today'),
+  remote: (q: { from: string; to: string; employeeId?: string }) => get<{ punches: T.RemotePunch[] }>('/punch/remote', q),
+  photoUrl: (id: string) => `/api/v1/punch/photos/${id}`,
   manual: (b: { employeeId: string; localDate: string; time: string; direction: 'in' | 'out'; reason: string }) => post<{ duplicate: boolean; day?: T.EngineDay }>('/punch/manual', b),
 };
 

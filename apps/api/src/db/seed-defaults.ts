@@ -47,7 +47,7 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
   }
 
   const settings: Array<[string, unknown]> = [
-    ['attendance.policy', { version: 'default-v1', otMinThresholdMin: 30, otRoundingMin: 15, requirePreapproval: true, holidayWork: 'substitute_leave', nightWindowEnabled: false, nightPremiumRate: 0, autoClockOutAfterMin: 0, regularisationBackdateDays: 30, regularisationMonthlyCap: 5 }],
+    ['attendance.policy', { version: 'default-v1', otMinThresholdMin: 30, otRoundingMin: 15, requirePreapproval: true, holidayWork: 'substitute_leave', nightWindowEnabled: false, nightPremiumRate: 0, autoClockOutAfterMin: 0, regularisationBackdateDays: 30, regularisationMonthlyCap: 5, wfhPhotoRequired: true, wfhPhotoRetentionDays: 90 }],
     ['leave.policy', { leaveYear: 'fiscal', sandwichRule: false, probationRestriction: true, maxContinuousDays: 30 }],
     ['payroll.policy', { prorationBasis: 'bs_calendar_days', hourlyDivisor: 208, payDay: 25, rounding: 'half_up_rupee', separateApprover: false, encashmentDivisor: 'bs_days' }],
     ['payslip.policy', { language: 'both', numerals: 'latin', passwordProtect: true }],

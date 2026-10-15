@@ -73,7 +73,8 @@ export function attendanceRoutes({ db }: AppDeps): Router {
     const companyWide = hasRole(req.user!, 'hr');
     const rows = await db.query(
       `SELECT e.id AS employee_id, e.emp_code, e.name_en, e.name_ne, v.status, v.first_in, v.last_out, v.late_min, v.worked_min, v.flags,
-              coalesce(v.status = 'WFH', false) OR EXISTS (SELECT 1 FROM punch_event p WHERE p.employee_id = e.id AND p.local_date = $2 AND p.raw->>'remote' = 'true') AS remote
+              coalesce(v.status = 'WFH', false) OR EXISTS (SELECT 1 FROM punch_event p WHERE p.employee_id = e.id AND p.local_date = $2 AND p.raw->>'remote' = 'true') AS remote,
+              (SELECT ph.id FROM punch_photo ph WHERE ph.employee_id = e.id AND ph.local_date = $2 AND ph.image_enc IS NOT NULL ORDER BY ph.punched_at LIMIT 1) AS photo_id
          FROM employee e LEFT JOIN v_attendance_latest v ON v.employee_id = e.id AND v.local_date = $2
         WHERE e.company_id = $1 AND e.status = 'active'
           AND ($3 OR e.id = $4::uuid OR EXISTS (SELECT 1 FROM employee_assignment a WHERE a.employee_id = e.id AND a.manager_id = $4::uuid AND a.valid @> $2::date))
