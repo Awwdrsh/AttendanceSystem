@@ -10,8 +10,8 @@ import { bsMonthLabel, fmtDateShort, fmtMoney, fmtTime, minutesToHm, relativeTim
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 
-const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run' };
-const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand' };
+const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', timesheet: 'Timesheet' };
+const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', timesheet: 'teal' };
 
 function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
@@ -49,6 +49,12 @@ function Summary({ item }: { item: InboxItem }) {
     case 'payroll_run':
       main = <>{String(s.run_type).charAt(0).toUpperCase() + String(s.run_type).slice(1)} run for {bsMonthLabel(Number(s.bs_year), Number(s.bs_month))}</>;
       extra.push(<Text key="p" size="xs" c="dimmed">{String(s.payslips)} payslips</Text>, <Text key="n" size="xs" c="dimmed">Net {fmtMoney(String(s.total_net))}</Text>);
+      break;
+    case 'timesheet':
+      main = <>{minutesToHm(Number(s.totalMin))} logged, {dateRange(s.weekStart, s.weekEnd)}</>;
+      extra.push(<Text key="a" size="xs" c="dimmed">Attended {minutesToHm(Number(s.attendanceMin ?? 0))}</Text>);
+      if (Array.isArray(s.projects) && s.projects.length) extra.push(<Text key="p" size="xs" c="dimmed">{(s.projects as Array<{ name: string; min: number }>).map((x) => `${x.name} ${minutesToHm(x.min)}`).join(' · ')}</Text>);
+      if (s.note) extra.push(<Text key="r" size="xs" c="dimmed">“{String(s.note)}”</Text>);
       break;
     default:
       main = <Text span c="dimmed">{JSON.stringify(s)}</Text>;

@@ -16,6 +16,7 @@ import { addDays, fmtDateLong, fmtDateShort, fmtTime, greeting, minutesToHm, rel
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import type { Flag, Punch } from '../../api/types';
+import { HomeTimer } from '../time/HomeTimer';
 
 export function describeFlag(f: Flag): string {
   switch (f.kind) {
@@ -252,6 +253,8 @@ export default function HomePage() {
           </Paper>
         </Grid.Col>
       </Grid>
+
+      <HomeTimer />
 
       {m ? (
         <div>

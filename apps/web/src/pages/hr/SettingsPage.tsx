@@ -8,6 +8,7 @@ import { PageHeader, SectionTitle } from '../../components/PageHeader';
 import { addDays, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
+import { TimeTrackingSettings } from '../time/TimeSettings';
 
 type Obj = Record<string, unknown>;
 const ICON = { size: 16, stroke: 1.6 } as const;
@@ -154,6 +155,7 @@ export default function SettingsPage() {
           <Tabs.Tab value="attendance">Attendance</Tabs.Tab>
           <Tabs.Tab value="leave">Leave</Tabs.Tab>
           <Tabs.Tab value="payroll">Payroll</Tabs.Tab>
+          <Tabs.Tab value="time">Time tracking</Tabs.Tab>
           <Tabs.Tab value="notify">Notifications</Tabs.Tab>
           <Tabs.Tab value="company">Company</Tabs.Tab>
           <Tabs.Tab value="org">Branches and units</Tabs.Tab>
@@ -171,6 +173,7 @@ export default function SettingsPage() {
           { key: 'rounding', label: 'Rounding', type: 'select', options: [{ value: 'half_up_rupee', label: 'Nearest rupee' }, { value: 'paisa', label: 'Exact to the paisa' }] },
           { key: 'twoApproverThreshold', label: 'Second approver above', type: 'number', hint: 'Payroll runs with a net total above this amount need two approvers.', suffix: ' NPR' },
           { key: 'encashmentDivisor', label: 'Leave encashment divisor', type: 'select', options: [{ value: 'bs_days', label: 'Days in the month' }, { value: 'fixed_30', label: 'Fixed 30 days' }] }]} /> : null}</Tabs.Panel>
+        <Tabs.Panel value="time" pt="lg"><TimeTrackingSettings /></Tabs.Panel>
         <Tabs.Panel value="notify" pt="lg">{q.data ? <GenericSettings settingKey="notifications.policy" title="Notifications" description="When reminders and digests go out." value={val('notifications.policy')} onSaved={reload} fields={[
           { key: 'quietHoursStart', label: 'Quiet hours start', type: 'text', hint: 'HH:MM. No push notifications during quiet hours.' },
           { key: 'quietHoursEnd', label: 'Quiet hours end', type: 'text', hint: 'HH:MM' },
