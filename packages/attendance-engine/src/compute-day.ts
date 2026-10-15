@@ -75,14 +75,25 @@ export function computeDay(input: ComputeDayInput): AttendanceDay {
   } else if (ctx.leave === 'full') {
     status = 'OnLeave';
   } else {
-    if (firstInMs !== null) lateMin = Math.max(0, minutesBetween(startMs + shift.graceInMin * MIN_MS, firstInMs));
-    if (lastOutMs !== null) earlyMin = Math.max(0, minutesBetween(lastOutMs, endMs - shift.graceOutMin * MIN_MS));
+    // Hourly leave moves the expected arrival past a window that starts the shift and the expected departure before a
+    // window that ends it; leave minutes not worked count toward the half-day and absent thresholds.
+    const leave = shortLeaveWindows(ctx.shortLeave, midnight, startMin, crossesMidnight, startMs, endMs);
+    let expectedIn = startMs;
+    for (const w of leave) if (w.fromMs <= expectedIn + shift.graceInMin * MIN_MS && w.toMs > expectedIn) expectedIn = w.toMs;
+    let expectedOut = endMs;
+    for (const w of [...leave].reverse()) if (w.toMs >= expectedOut - shift.graceOutMin * MIN_MS && w.fromMs < expectedOut) expectedOut = w.fromMs;
+    const leaveMin = leave.reduce((sum, w) => sum + minutesBetween(w.fromMs, w.toMs) - pairs.reduce((o, p) => o + overlapMin(w.fromMs, w.toMs, p.inMs, p.outMs), 0), 0);
+    const creditedMin = workedMin + Math.max(0, leaveMin);
+
+    if (firstInMs !== null) lateMin = Math.max(0, minutesBetween(expectedIn + shift.graceInMin * MIN_MS, firstInMs));
+    if (lastOutMs !== null) earlyMin = Math.max(0, minutesBetween(lastOutMs, expectedOut - shift.graceOutMin * MIN_MS));
 
     if (punches.length === 0) status = 'Absent';
     else if (pairs.length === 0) status = 'Incomplete';
-    else if (shift.absentThresholdMin > 0 && workedMin < shift.absentThresholdMin) status = 'Absent';
-    else if (shift.halfDayThresholdMin > 0 && workedMin < shift.halfDayThresholdMin) status = 'HalfDay';
+    else if (shift.absentThresholdMin > 0 && creditedMin < shift.absentThresholdMin) status = 'Absent';
+    else if (shift.halfDayThresholdMin > 0 && creditedMin < shift.halfDayThresholdMin) status = 'HalfDay';
     else status = 'Present';
+    if (leave.length > 0) flags.push({ kind: 'ShortLeave', minutes: leave.reduce((sum, w) => sum + minutesBetween(w.fromMs, w.toMs), 0) });
 
     if ((ctx.leave === 'first_half' || ctx.leave === 'second_half') && status === 'Present') status = 'HalfDayLeave';
     if (ctx.wfh && (status === 'Absent' || status === 'Incomplete')) status = 'WFH';
@@ -105,6 +116,35 @@ export function computeDay(input: ComputeDayInput): AttendanceDay {
     firstInMs, lastOutMs, workedMin, breakMin, lateMin, earlyMin, ot, flags, pairs,
     punchIds: punches.map((p) => p.id),
   }, punches, input);
+}
+
+function overlapMin(a0: number, a1: number, b0: number, b1: number): number {
+  return Math.max(0, Math.min(a1, b1) - Math.max(a0, b0)) / MIN_MS;
+}
+
+/**
+ * Hourly-leave windows as instants, clipped to the scheduled span, sorted and merged. On a shift that crosses midnight a
+ * time before the shift start belongs to the next calendar day.
+ */
+function shortLeaveWindows(windows: Array<{ from: string; to: string }> | undefined, midnight: number, startMin: number, crossesMidnight: boolean,
+  startMs: number, endMs: number): Array<{ fromMs: number; toMs: number }> {
+  if (!windows?.length) return [];
+  const at = (hhmm: string) => { const m = parseHHMM(hhmm); return midnight + (m + (crossesMidnight && m < startMin ? DAY_MIN : 0)) * MIN_MS; };
+  const out: Array<{ fromMs: number; toMs: number }> = [];
+  for (const w of windows) {
+    const fromMs = Math.max(startMs, at(w.from));
+    let toMs = Math.min(endMs, at(w.to));
+    if (toMs <= fromMs && crossesMidnight) toMs = Math.min(endMs, at(w.to) + DAY_MIN * MIN_MS);
+    if (toMs > fromMs) out.push({ fromMs, toMs });
+  }
+  out.sort((a, b) => a.fromMs - b.fromMs);
+  const merged: Array<{ fromMs: number; toMs: number }> = [];
+  for (const w of out) {
+    const last = merged[merged.length - 1];
+    if (last && w.fromMs <= last.toMs) last.toMs = Math.max(last.toMs, w.toMs);
+    else merged.push({ ...w });
+  }
+  return merged;
 }
 
 function finalize(day: Omit<AttendanceDay, 'inputsHash'>, punches: readonly Punch[], input: ComputeDayInput): AttendanceDay {

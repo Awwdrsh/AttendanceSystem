@@ -59,6 +59,10 @@ export const settingSchemas = {
     ssfEmployerId: z.string().max(20).nullish(),
     logoDataUrl: z.string().max(200_000).regex(/^data:image\/(png|jpeg|svg\+xml);base64,/).nullish(),
   }),
+  'security.policy': z.object({
+    /** Roles that must use two-step sign-in; they are sent to set it up at their next sign-in. */
+    require2faRoles: z.array(z.enum(['admin', 'hr', 'manager', 'employee'])).max(4).default([]).transform((a) => [...new Set(a)]),
+  }),
 } as const;
 
 export type SettingKey = keyof typeof settingSchemas;
@@ -71,6 +75,7 @@ export const settingDescriptions: Record<SettingKey, string> = {
   'payslip.policy': 'Payslip language, numerals and PDF protection.',
   'notifications.policy': 'Quiet hours, SLA and escalation timing, digest time.',
   'company.profile': 'Company name, address, PAN, SSF employer ID and logo shown on payslips and the app header.',
+  'security.policy': 'Roles that must use two-step sign-in (an authenticator app code after the password).',
 };
 
 /** Deterministic version tag so recompute notices policy edits (inputs_hash includes policy). */

@@ -46,6 +46,11 @@ export interface DayContext {
   otPreapprovedMin: number | null;
   /** OT minutes already counted this week on other days (for the 24 h/week cap, Sec 30(1)). */
   otMinutesThisWeek: number;
+  /**
+   * Approved hourly (short) leave on this day, local 'HH:MM' windows. Absent or empty = none; the field is left out of
+   * the context entirely when there is none so existing inputs hashes do not change.
+   */
+  shortLeave?: Array<{ from: string; to: string }>;
 }
 
 export type HolidayWorkPolicy = 'substitute_leave' | 'pay' | 'employee_choice';
@@ -110,6 +115,8 @@ export type Flag =
   | { kind: 'MissingOut' }
   | { kind: 'UnpaidLeave' }
   | { kind: 'HalfDayLeave'; half: 'first_half' | 'second_half' }
+  /** Hourly leave inside the shift: these minutes count toward the half-day/absent thresholds and excuse late/early. */
+  | { kind: 'ShortLeave'; minutes: number }
   | { kind: 'AutoClockOut' }
   | { kind: 'UnpairedPunch'; punchId: string };
 

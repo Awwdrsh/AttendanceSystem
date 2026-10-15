@@ -55,7 +55,7 @@ async function recomputeInTx(db: Queryable, employeeId: string, localDate: strin
   const employee = await repo.getEmployee(db, employeeId);
   if (!employee) throw new NotFoundError(`employee ${employeeId} not found`);
 
-  const [branchId, shiftResolved, punches, leave, wfh, otPre, otWeek, policyRaw] = await Promise.all([
+  const [branchId, shiftResolved, punches, leave, wfh, otPre, otWeek, policyRaw, shortLeave] = await Promise.all([
     repo.getBranchId(db, employeeId, localDate),
     repo.resolveShift(db, employeeId, localDate),
     repo.getPunchesAround(db, employeeId, localDate),
@@ -64,6 +64,7 @@ async function recomputeInTx(db: Queryable, employeeId: string, localDate: strin
     repo.approvedOtMinutes(db, employeeId, localDate),
     repo.otMinutesThisWeek(db, employeeId, localDate),
     repo.attendancePolicy(db, employee.company_id),
+    repo.approvedShortLeave(db, employeeId, localDate),
   ]);
   const holiday = await repo.isHoliday(db, employee.company_id, branchId, localDate, employee.gender);
 
@@ -79,6 +80,8 @@ async function recomputeInTx(db: Queryable, employeeId: string, localDate: strin
     otEligible: employee.ot_eligible,
     otPreapprovedMin: otPre,
     otMinutesThisWeek: otWeek,
+    // Only present when there is hourly leave, so days without it keep their existing inputs hash.
+    ...(shortLeave.length ? { shortLeave } : {}),
   };
 
   const policy = policyFromSettings(policyRaw);

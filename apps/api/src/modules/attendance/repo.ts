@@ -87,7 +87,7 @@ export async function isHoliday(db: Queryable, companyId: string, branchId: stri
 export async function approvedLeave(db: Queryable, employeeId: string, localDate: string): Promise<{ cover: LeaveCover; paid: boolean; leaveTypeId: string | null }> {
   const r = await db.query<{ half_day: 'first_half' | 'second_half' | null; paid: boolean; leave_type_id: string }>(
     `SELECT lr.half_day, lt.paid, lr.leave_type_id FROM leave_request lr JOIN leave_type lt ON lt.id = lr.leave_type_id
-      WHERE lr.employee_id = $1 AND lr.status = 'approved' AND $2::date BETWEEN lr.from_date AND lr.to_date
+      WHERE lr.employee_id = $1 AND lr.status = 'approved' AND $2::date BETWEEN lr.from_date AND lr.to_date AND lr.from_time IS NULL
       ORDER BY lr.decided_at DESC LIMIT 1`, [employeeId, localDate]);
   const row = r.rows[0];
   if (row) return { cover: row.half_day ?? 'full', paid: row.paid, leaveTypeId: row.leave_type_id };
@@ -97,6 +97,14 @@ export async function approvedLeave(db: Queryable, employeeId: string, localDate
     `SELECT 1 FROM regularisation_request WHERE employee_id = $1 AND local_date = $2 AND kind = 'half_day' AND status = 'approved' LIMIT 1`, [employeeId, localDate]);
   if (reg.rows.length > 0) return { cover: 'second_half', paid: true, leaveTypeId: null };
   return { cover: 'none', paid: true, leaveTypeId: null };
+}
+
+/** Approved hourly leave windows on the date ('HH:MM'); empty when there is none. */
+export async function approvedShortLeave(db: Queryable, employeeId: string, localDate: string): Promise<Array<{ from: string; to: string }>> {
+  const r = await db.query<{ from: string; to: string }>(
+    `SELECT to_char(from_time, 'HH24:MI') AS from, to_char(to_time, 'HH24:MI') AS to FROM leave_request
+      WHERE employee_id = $1 AND status = 'approved' AND from_date = $2::date AND from_time IS NOT NULL ORDER BY from_time`, [employeeId, localDate]);
+  return r.rows;
 }
 
 export async function approvedWfh(db: Queryable, employeeId: string, localDate: string): Promise<boolean> {
@@ -150,6 +158,7 @@ export interface RangeEmployee extends EmployeeRow {}
 export interface DayInputs {
   shift: (Shift & { id: string }) | null; punches: Punch[]; holiday: boolean; leave: LeaveCover; wfh: boolean;
   otPreapprovedMin: number | null; otMinutesThisWeek: number; stored: { status: string; late_min: number; ot_min: number } | null;
+  shortLeave: Array<{ from: string; to: string }>;
 }
 
 const addDays = (d: string, n: number) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
@@ -180,8 +189,9 @@ export async function loadRangeInputs(db: Queryable, companyId: string, employee
       `SELECT p.id, p.employee_id, p.punched_at, p.direction, p.verify_mode, p.source FROM punch_event p
         WHERE p.employee_id = ANY($1) AND p.punched_at >= $2 AND p.punched_at < $3 AND NOT EXISTS (SELECT 1 FROM punch_event s WHERE s.supersedes_id = p.id)
         ORDER BY p.punched_at, p.id`, [ids, new Date(localMidnightMs(from) - DAY_MIN * MIN_MS), new Date(localMidnightMs(to) + 3 * DAY_MIN * MIN_MS)]),
-    db.query<{ employee_id: string; from_date: Date; to_date: Date; half_day: 'first_half' | 'second_half' | null }>(
-      `SELECT lr.employee_id, lr.from_date, lr.to_date, lr.half_day FROM leave_request lr WHERE lr.employee_id = ANY($1) AND lr.status = 'approved'
+    db.query<{ employee_id: string; from_date: Date; to_date: Date; half_day: 'first_half' | 'second_half' | null; from_hm: string | null; to_hm: string | null }>(
+      `SELECT lr.employee_id, lr.from_date, lr.to_date, lr.half_day, to_char(lr.from_time, 'HH24:MI') AS from_hm, to_char(lr.to_time, 'HH24:MI') AS to_hm
+         FROM leave_request lr WHERE lr.employee_id = ANY($1) AND lr.status = 'approved'
         AND lr.to_date >= $2 AND lr.from_date <= $3 ORDER BY lr.decided_at DESC NULLS LAST`, [ids, from, to]),
     db.query<{ employee_id: string; local_date: Date; approved_min: number | null }>(
       `SELECT employee_id, local_date, approved_min FROM ot_request WHERE employee_id = ANY($1) AND status = 'approved' AND local_date BETWEEN $2 AND $3 ORDER BY decided_at DESC NULLS LAST`, [ids, from, to]),
@@ -220,7 +230,9 @@ export async function loadRangeInputs(db: Queryable, companyId: string, employee
       else if (rosterBy.has(k)) shiftId = rosterBy.get(k)!.shift_id;
       else shiftId = sa.rows.find((r) => r.employee_id === e.id && inRange(r.valid, d))?.shift_id ?? null;
       const branchId = assign.rows.find((r) => r.employee_id === e.id && inRange(r.valid, d))?.branch_id ?? null;
-      const lv = leave.rows.find((r) => r.employee_id === e.id && iso(r.from_date) <= d && d <= iso(r.to_date));
+      const lv = leave.rows.find((r) => r.employee_id === e.id && !r.from_hm && iso(r.from_date) <= d && d <= iso(r.to_date));
+      const shortLeave = leave.rows.filter((r) => r.employee_id === e.id && r.from_hm && r.to_hm && iso(r.from_date) === d)
+        .map((r) => ({ from: r.from_hm!, to: r.to_hm! })).sort((a, b) => a.from.localeCompare(b.from));
       const leaveCover: LeaveCover = lv ? (lv.half_day ?? 'full') : halfReg.has(k) ? 'second_half' : 'none';
       const ws = addDays(d, -new Date(`${d}T00:00:00Z`).getUTCDay());
       let week = 0;
@@ -231,7 +243,7 @@ export async function loadRangeInputs(db: Queryable, companyId: string, employee
         punches: all.filter((p) => p.at >= lo && p.at < hi),
         holiday: holidays.rows.some((h) => iso(h.local_date) === d && (h.branch_id === null || h.branch_id === branchId) && (h.gender_scope === 'all' || h.gender_scope === e.gender)),
         leave: leaveCover, wfh: wfhReg.has(k), otPreapprovedMin: otBy.get(k)?.approved_min ?? null, otMinutesThisWeek: week,
-        stored: storedBy.get(k) ?? null,
+        stored: storedBy.get(k) ?? null, shortLeave,
       });
     }
   }
