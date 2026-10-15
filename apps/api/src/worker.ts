@@ -8,6 +8,7 @@ import { dateRange, enqueueRecompute, recomputeDay } from './modules/attendance/
 import { runLeaveCatchUp, runMonthlyAccrual } from './modules/leave/accrual.js';
 import { dailyDigest, deliverQueued, LogSender, notify, notifyRole, userIdForEmployee, userIdsWithRole, WebhookSender, type Sender } from './modules/notifications/service.js';
 import { ensurePseudoDevice, nptLocalTime } from './modules/punch/devices.js';
+import { DAILY_MODULE_JOBS } from './module-jobs.js';
 
 export interface WorkerDeps { db: Db; logger: Logger; cipher: FieldCipher; senders?: Sender[] }
 
@@ -272,7 +273,13 @@ export async function runOnce(deps: WorkerDeps, jobs: JobName[] = ALL_JOBS, now 
         case 'offline': out.offline = await detectOfflineDevices(deps, now); break;
         case 'sla': out.sla = await slaReminders(deps, now); break;
         case 'autoClockOut': out.autoClockOut = await autoClockOut(deps, now); break;
-        case 'nightly': out.nightly = await nightlySweep(deps, now); out.photosPurged = await purgeExpiredPhotos(deps, now); break;
+        case 'nightly':
+          out.nightly = await nightlySweep(deps, now); out.photosPurged = await purgeExpiredPhotos(deps, now);
+          for (const [name, fn] of Object.entries(DAILY_MODULE_JOBS)) {
+            try { out[name] = await fn({ db: deps.db, cipher: deps.cipher }, now); }
+            catch (e) { deps.logger.error({ err: e, job: name }, 'module job failed'); out[name] = { error: (e as Error).message }; }
+          }
+          break;
         case 'accrual': out.accrual = await monthlyAccrualIfDue(deps, now); break;
         case 'digest': out.digest = await digestIfDue(deps, now); break;
       }

@@ -22,6 +22,21 @@ import { settingsRoutes } from './modules/settings/routes.js';
 import { payrollRoutes } from './modules/payroll/routes.js';
 import { biometricsRoutes } from './modules/biometrics/routes.js';
 import { dashboardRoutes } from './modules/dashboard/routes.js';
+import { peopleRoutes } from './modules/people/routes.js';
+import { documentsRoutes } from './modules/documents/routes.js';
+import { lifecycleRoutes } from './modules/lifecycle/routes.js';
+import { helpdeskRoutes } from './modules/helpdesk/routes.js';
+import { timesheetsRoutes } from './modules/timesheets/routes.js';
+import { fieldRoutes } from './modules/field/routes.js';
+import { kioskRoutes } from './modules/kiosk/routes.js';
+import { expensesRoutes } from './modules/expenses/routes.js';
+import { performanceRoutes } from './modules/performance/routes.js';
+import { learningRoutes } from './modules/learning/routes.js';
+import { hiringRoutes } from './modules/hiring/routes.js';
+import { careersRoutes } from './modules/careers/routes.js';
+import { engageRoutes } from './modules/engage/routes.js';
+import { insightsRoutes } from './modules/insights/routes.js';
+import { filesRoutes } from './modules/files/routes.js';
 
 export const LOG_REDACT = ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-api-key"]', 'res.headers["set-cookie"]'];
 
@@ -55,6 +70,8 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
     }));
   // Session tokens travel in the Authorization and Cookie headers; never write them to the request log.
   if (logger) app.use(pinoHttp({ logger: logger.child({}, { redact: { paths: LOG_REDACT, censor: '[redacted]' } }), autoLogging: { ignore: (req) => req.url === '/health' } }));
+  // Uploads (files, public job applications) carry a base64 file of up to 4 MB; everything else stays small.
+  app.use(['/api/v1/files', '/api/v1/public/careers'], express.json({ limit: '6mb' }));
   app.use(express.json({ limit: '2mb' }));
   app.use(express.text({ type: 'text/csv', limit: '10mb' }));
 
@@ -84,6 +101,8 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
 
   const api = express.Router();
   api.use('/auth', authRoutes(db, { secureCookie: deps.secureCookie, ...(deps.pepper ? { pepper: deps.pepper } : {}) }));
+  api.use('/public/careers', careersRoutes(deps));   // public careers page and job applications (no session)
+  api.use('/kiosk', kioskRoutes(deps));              // shared clock-in tablets authenticate with their own kiosk key
   api.use(requireAuth);                       // everything below needs a session; roles are checked per route
   api.use(requirePasswordChanged);            // accounts flagged must_change_password can only use /auth
   api.use('/employees', employeeRoutes(deps));
@@ -101,6 +120,19 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
   api.use('/payroll', payrollRoutes(deps));
   api.use('/biometrics', biometricsRoutes(deps));
   api.use('/dashboard', dashboardRoutes(deps));
+  api.use('/files', filesRoutes(deps));
+  api.use('/people', peopleRoutes(deps));
+  api.use('/documents', documentsRoutes(deps));
+  api.use('/lifecycle', lifecycleRoutes(deps));
+  api.use('/helpdesk', helpdeskRoutes(deps));
+  api.use('/time', timesheetsRoutes(deps));
+  api.use('/field', fieldRoutes(deps));
+  api.use('/expenses', expensesRoutes(deps));
+  api.use('/performance', performanceRoutes(deps));
+  api.use('/learning', learningRoutes(deps));
+  api.use('/hiring', hiringRoutes(deps));
+  api.use('/engage', engageRoutes(deps));
+  api.use('/insights', insightsRoutes(deps));
   app.use('/api/v1', api);
 
   if (opts.webDist) {

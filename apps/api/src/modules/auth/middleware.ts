@@ -99,3 +99,10 @@ export async function assertManages(db: Queryable, user: AuthUser, employeeId: s
 
 /** Same as assertManages (kept for callers written against the earlier name). */
 export const assertEmployeeAccess = assertManages;
+
+/** The signed-in user's company; accounts without one (none exist outside tests) cannot use company data. */
+export function companyIdOf(req: Request): string {
+  const id = req.user?.companyId;
+  if (!id) throw new ForbiddenError('this account is not linked to a company');
+  return id;
+}

@@ -3,22 +3,27 @@ import { Navigate, Route, Routes, useParams } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { RequireRole } from './auth/RequireRole';
 import { useAuth } from './auth/AuthProvider';
-import { AttendanceHub, LeaveHub, PayrollHub, ProfileHub, SettingsHub } from './pages/hubs';
+import {
+  AttendanceHub, EMPLOYEES_HUB_PATHS, EmployeesHub, EngageHub, ExpensesHub, GrowthHub, HiringHub, LeaveHub, MyAttendanceHub, MyClaimsHub, MyPayHub,
+  PayrollHub, PeopleHub, PerformanceHub, ProfileHub, SettingsHub, TimesheetHub,
+} from './pages/hubs';
 
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const ChangePasswordPage = lazy(() => import('./pages/ChangePasswordPage'));
 const HomePage = lazy(() => import('./pages/employee/HomePage'));
-const MyAttendancePage = lazy(() => import('./pages/employee/MyAttendancePage'));
 const LeavePage = lazy(() => import('./pages/employee/LeavePage'));
-const PayslipsPage = lazy(() => import('./pages/employee/PayslipsPage'));
 const PayslipDetailPage = lazy(() => import('./pages/employee/PayslipDetailPage'));
 const NotificationsPage = lazy(() => import('./pages/employee/NotificationsPage'));
 const ApprovalsPage = lazy(() => import('./pages/manager/ApprovalsPage'));
 const DashboardPage = lazy(() => import('./pages/hr/DashboardPage'));
-const EmployeesPage = lazy(() => import('./pages/hr/EmployeesPage'));
 const EmployeeDetailPage = lazy(() => import('./pages/hr/EmployeeDetailPage'));
 const ReportsPage = lazy(() => import('./pages/hr/ReportsPage'));
 const RunWizardPage = lazy(() => import('./pages/payroll/RunWizardPage'));
+const MyTicketsPage = lazy(() => import('./pages/helpdesk/MyTicketsPage'));
+const HelpdeskPage = lazy(() => import('./pages/helpdesk/HelpdeskPage'));
+const InsightsPage = lazy(() => import('./pages/insights/InsightsPage'));
+const CareersPage = lazy(() => import('./pages/hiring/CareersPage'));
+const KioskPage = lazy(() => import('./pages/field/KioskPage'));
 
 /** Everyone lands where their work is: employees on their own day, HR on the overview, managers on approvals. */
 function Home() {
@@ -47,13 +52,22 @@ export function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/careers/*" element={<CareersPage />} />
+      <Route path="/kiosk" element={<KioskPage />} />
       <Route element={<RequireRole />}>
         <Route path="/change-password" element={<ChangePasswordPage />} />
         <Route element={<Layout />}>
           <Route path="/" element={<Home />} />
-          <Route path="/me/attendance" element={<MyAttendancePage />} />
+          <Route path="/me/attendance/*" element={<MyAttendanceHub />} />
+          <Route path="/me/timesheet" element={<TimesheetHub />} />
+          <Route path="/me/claims/*" element={<MyClaimsHub />} />
+          <Route path="/me/growth/*" element={<GrowthHub />} />
+          <Route path="/me/help" element={<MyTicketsPage />} />
+          <Route path="/people/*" element={<PeopleHub />} />
+          <Route path="/engage/*" element={<EngageHub />} />
           <Route path="/me/leave" element={<LeavePage />} />
-          <Route path="/me/payslips" element={<PayslipsPage />} />
+          <Route path="/me/payslips" element={<MyPayHub />} />
+          <Route path="/me/payslips/tax" element={<MyPayHub />} />
           <Route path="/me/payslips/:id" element={<PayslipDetailPage />} />
           <Route path="/me/notifications" element={<NotificationsPage />} />
           <Route path="/me/profile/*" element={<ProfileHub />} />
@@ -61,10 +75,15 @@ export function App() {
             <Route path="/approvals" element={<ApprovalsPage />} />
             <Route path="/attendance/*" element={<AttendanceHub />} />
             <Route path="/leave/*" element={<LeaveHub />} />
+            <Route path="/expenses/*" element={<ExpensesHub />} />
+            <Route path="/performance/*" element={<PerformanceHub />} />
+            <Route path="/hiring/*" element={<HiringHub />} />
           </Route>
           <Route element={<RequireRole roles={['hr']} />}>
             <Route path="/overview" element={<DashboardPage />} />
-            <Route path="/employees" element={<EmployeesPage />} />
+            {EMPLOYEES_HUB_PATHS.map((p) => <Route key={p} path={p} element={<EmployeesHub />} />)}
+            <Route path="/helpdesk" element={<HelpdeskPage />} />
+            <Route path="/insights" element={<InsightsPage />} />
             <Route path="/employees/:id" element={<EmployeeDetailPage />} />
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/settings/*" element={<SettingsHub />} />

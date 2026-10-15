@@ -6,7 +6,8 @@ import {
   IconClockEdit, IconClockHour4, IconCoin, IconFileInvoice, IconFingerprint, IconGavel, IconHome,
   IconLayoutDashboard, IconLogout, IconMoon, IconReceipt2, IconReportAnalytics, IconSearch, IconSelector, IconSun,
   IconUserCircle, IconUserShield, IconUsers, IconAlertTriangle, IconListCheck, IconBeach, IconCash, IconFileCertificate,
-  IconAdjustments, IconSettings, type Icon,
+  IconAdjustments, IconSettings, IconHourglass, IconReceiptRefund, IconTargetArrow, IconLifebuoy, IconAddressBook, IconConfetti,
+  IconUserPlus, IconChartHistogram, IconBriefcase, type Icon,
 } from '@tabler/icons-react';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
@@ -21,17 +22,30 @@ interface NavGroup { id: string; title: string; items: NavItem[]; roles?: Role[]
 const NAV: NavGroup[] = [
   { id: 'me', title: 'My work', items: [
     { to: '/', label: 'Home', icon: IconHome, employeeOnly: true, keywords: ['today', 'clock in', 'clock out', 'punch'] },
-    { to: '/me/attendance', label: 'My attendance', icon: IconCalendarStats, employeeOnly: true },
+    { to: '/me/attendance', label: 'My attendance', icon: IconCalendarStats, employeeOnly: true, keywords: ['field visit', 'roster', 'shift swap'] },
     { to: '/me/leave', label: 'Time off', icon: IconBeach, employeeOnly: true, keywords: ['leave', 'holiday', 'vacation', 'apply'] },
-    { to: '/me/payslips', label: 'Payslips', icon: IconReceipt2, employeeOnly: true, keywords: ['salary', 'pay'] },
+    { to: '/me/timesheet', label: 'Timesheet', icon: IconHourglass, employeeOnly: true, keywords: ['timer', 'project', 'hours', 'log time'] },
+    { to: '/me/payslips', label: 'Payslips', icon: IconReceipt2, employeeOnly: true, keywords: ['salary', 'pay', 'tax'] },
+    { to: '/me/claims', label: 'Claims & travel', icon: IconReceiptRefund, employeeOnly: true, keywords: ['expense', 'reimbursement', 'travel', 'tada', 'advance'] },
+    { to: '/me/growth', label: 'Growth', icon: IconTargetArrow, employeeOnly: true, keywords: ['goals', 'kpi', 'review', 'appraisal', 'training', 'learning', '1-on-1'] },
+    { to: '/me/help', label: 'Help desk', icon: IconLifebuoy, employeeOnly: true, keywords: ['ticket', 'question', 'hr help', 'resign'] },
+  ] },
+  { id: 'company', title: 'Company', items: [
+    { to: '/people', label: 'People', icon: IconAddressBook, keywords: ['directory', 'org chart', 'colleagues'] },
+    { to: '/engage', label: 'Engage', icon: IconConfetti, keywords: ['kudos', 'announcements', 'birthdays', 'surveys', 'polls'] },
   ] },
   { id: 'manage', title: 'Manage', roles: ['manager', 'hr'], items: [
     { to: '/overview', label: 'Overview', icon: IconLayoutDashboard, roles: ['hr'], keywords: ['dashboard'] },
     { to: '/approvals', label: 'Approvals', icon: IconListCheck, roles: ['manager', 'hr'], keywords: ['approve', 'requests', 'inbox'], badge: 'approvals' },
-    { to: '/employees', label: 'Employees', icon: IconUsers, roles: ['hr'], keywords: ['staff', 'people', 'add employee'] },
-    { to: '/attendance', label: 'Attendance', icon: IconClockHour4, roles: ['manager', 'hr'], keywords: ["who's in", 'today', 'exceptions', 'overtime', 'fix punch'] },
+    { to: '/employees', label: 'Employees', icon: IconUsers, roles: ['hr'], keywords: ['staff', 'people', 'add employee', 'onboarding', 'exit', 'documents', 'letters'] },
+    { to: '/attendance', label: 'Attendance', icon: IconClockHour4, roles: ['manager', 'hr'], keywords: ["who's in", 'today', 'exceptions', 'overtime', 'fix punch', 'timesheets', 'roster', 'kiosk'] },
     { to: '/leave', label: 'Leave', icon: IconCalendarEvent, roles: ['manager', 'hr'], keywords: ['calendar', 'balances', 'policies', 'time off'] },
     { to: '/payroll', label: 'Payroll', icon: IconCash, roles: ['hr'], keywords: ['pay run', 'salary', 'tax', 'loans', 'ssf'] },
+    { to: '/expenses', label: 'Expenses & travel', icon: IconReceiptRefund, roles: ['manager', 'hr'], keywords: ['claims', 'reimbursement', 'travel', 'tada'] },
+    { to: '/performance', label: 'Performance', icon: IconTargetArrow, roles: ['manager', 'hr'], keywords: ['goals', 'kpi', 'appraisal', 'review cycle', 'training', 'learning'] },
+    { to: '/hiring', label: 'Hiring', icon: IconUserPlus, roles: ['manager', 'hr'], keywords: ['jobs', 'vacancy', 'candidates', 'interview', 'offer', 'recruitment'] },
+    { to: '/helpdesk', label: 'Help desk', icon: IconLifebuoy, roles: ['hr'], keywords: ['tickets', 'queries'] },
+    { to: '/insights', label: 'Insights', icon: IconChartHistogram, roles: ['hr'], keywords: ['analytics', 'headcount', 'attrition', 'people cost', 'trends'] },
     { to: '/reports', label: 'Reports', icon: IconReportAnalytics, roles: ['hr'], keywords: ['export', 'csv', 'register'] },
   ] },
 ];
@@ -52,6 +66,13 @@ const JUMPS: Array<{ to: string; label: string; group: string; roles?: Role[]; i
   { to: '/payroll/declarations', label: 'Tax declarations', group: 'Payroll', roles: ['hr'], icon: IconFileCertificate },
   { to: '/payroll/loans', label: 'Loans & advances', group: 'Payroll', roles: ['hr'], icon: IconBuildingBank },
   { to: '/payroll/rules', label: 'Tax & SSF rules', group: 'Payroll', roles: ['hr'], icon: IconGavel },
+  { to: '/employees/structure', label: 'Org structure', group: 'Employees', roles: ['hr'], icon: IconBriefcase },
+  { to: '/employees/onboarding', label: 'Onboarding', group: 'Employees', roles: ['hr'], icon: IconUserPlus },
+  { to: '/employees/exits', label: 'Exits', group: 'Employees', roles: ['hr'], icon: IconLogout },
+  { to: '/employees/documents', label: 'Documents & letters', group: 'Employees', roles: ['hr'], icon: IconFileCertificate },
+  { to: '/attendance/timesheets', label: 'Timesheets', group: 'Attendance', roles: ['manager', 'hr'], icon: IconHourglass },
+  { to: '/attendance/rosters', label: 'Rosters & shift swaps', group: 'Attendance', roles: ['manager', 'hr'], icon: IconCalendarEvent },
+  { to: '/attendance/visits', label: 'Field visits', group: 'Attendance', roles: ['manager', 'hr'], icon: IconClockHour4 },
   { to: '/settings/shifts', label: 'Shifts', group: 'Settings', roles: ['hr'], icon: IconClockHour4 },
   { to: '/settings/holidays', label: 'Holidays', group: 'Settings', roles: ['hr'], icon: IconCalendarEvent },
   { to: '/settings/devices', label: 'Devices', group: 'Settings', roles: ['hr'], icon: IconFingerprint },
@@ -62,6 +83,8 @@ const JUMPS: Array<{ to: string; label: string; group: string; roles?: Role[]; i
 const ACCOUNT: NavItem[] = [
   { to: '/me/notifications', label: 'Notifications', icon: IconBell },
   { to: '/me/profile', label: 'Profile & privacy', icon: IconUserCircle },
+  { to: '/me/profile/documents', label: 'My documents', icon: IconFileCertificate },
+  { to: '/me/profile/security', label: 'Sign-in security', icon: IconUserShield },
 ];
 
 function isActive(path: string, to: string): boolean {
