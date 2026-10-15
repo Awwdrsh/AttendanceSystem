@@ -298,9 +298,18 @@ export async function summarise(db: Queryable, inst: WorkflowInstance): Promise<
            FROM payroll_run r JOIN payroll_period p ON p.id = r.period_id WHERE r.id = $1`, [inst.object_id]).catch(() => ({ rows: [] as Record<string, unknown>[] }));
       return r.rows[0] ?? {};
     }
-    default:
-      return {};
+    default: {
+      const fn = summaries.get(inst.object_type);
+      return fn ? fn(db, inst.object_id) : {};
+    }
   }
+}
+
+const summaries = new Map<string, (db: Queryable, objectId: string) => Promise<Record<string, unknown>>>();
+
+/** Modules with their own request types describe them for the approval inbox. */
+export function registerSummary(objectType: string, fn: (db: Queryable, objectId: string) => Promise<Record<string, unknown>>): void {
+  summaries.set(objectType, fn);
 }
 
 export async function timeline(db: Queryable, inst: WorkflowInstance): Promise<Array<Record<string, unknown>>> {

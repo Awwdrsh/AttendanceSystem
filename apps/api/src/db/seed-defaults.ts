@@ -37,6 +37,8 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
     ['regularisation_request', [{ role: 'manager' }]],
     ['ot_request', [{ role: 'manager' }]],
     ['payroll_run', [{ role: 'hr' }]],
+    ['job_requisition', [{ role: 'hr' }]],
+    ['job_offer', [{ role: 'hr' }]],
   ];
   let w = 0;
   for (const [type, steps] of workflows) {
@@ -51,6 +53,7 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
     ['leave.policy', { leaveYear: 'fiscal', sandwichRule: false, probationRestriction: true, maxContinuousDays: 30 }],
     ['payroll.policy', { prorationBasis: 'bs_calendar_days', hourlyDivisor: 208, payDay: 25, rounding: 'half_up_rupee', separateApprover: false, encashmentDivisor: 'bs_days' }],
     ['payslip.policy', { language: 'both', numerals: 'latin', passwordProtect: true }],
+    ['hiring.policy', { retentionDays: 180, careersEnabled: true }],
     ['notifications.policy', { quietHoursStart: '21:00', quietHoursEnd: '07:00', slaHours: 24, escalationHours: 48 }],
   ];
   let s = 0;
