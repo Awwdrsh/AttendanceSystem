@@ -100,7 +100,7 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
   app.use(sameOriginGuard(opts.corsOrigins ?? []));
 
   const api = express.Router();
-  api.use('/auth', authRoutes(db, { secureCookie: deps.secureCookie, ...(deps.pepper ? { pepper: deps.pepper } : {}) }));
+  api.use('/auth', authRoutes(db, { secureCookie: deps.secureCookie, cipher: deps.cipher, ...(deps.pepper ? { pepper: deps.pepper } : {}) }));
   api.use('/public/careers', careersRoutes(deps));   // public careers page and job applications (no session)
   api.use('/kiosk', kioskRoutes(deps));              // shared clock-in tablets authenticate with their own kiosk key
   api.use(requireAuth);                       // everything below needs a session; roles are checked per route

@@ -66,7 +66,7 @@ export async function assertManages(db: Queryable, user: AuthUser, employeeId: s
   throw new ForbiddenError('not allowed to act for this employee');
 }
 
-/** Same as registerSummariser (kept for the lifecycle and help desk modules). */
+/** Same as registerSummariser (used by lifecycle, help desk and tax savings). */
 export type SummaryFn = Summariser;
 export const registerSummary = registerSummariser;
 /** Each request module registers how an approved/rejected decision is applied to its object. */
@@ -276,8 +276,9 @@ export async function inboxFor(db: Queryable, user: AuthUser): Promise<InboxItem
 export async function summarise(db: Queryable, inst: WorkflowInstance): Promise<Record<string, unknown>> {
   switch (inst.object_type) {
     case 'leave_request': {
-      const r = await db.query<{ from_date: string; to_date: string; half_day: string | null; days_requested: string; reason: string | null; type_code: string; type_name: string; leave_type_id: string; employee_id: string }>(
-        `SELECT lr.from_date, lr.to_date, lr.half_day, lr.days_requested, lr.reason, lt.code AS type_code, lt.name_en AS type_name, lr.leave_type_id, lr.employee_id
+      const r = await db.query<{ from_date: string; to_date: string; half_day: string | null; days_requested: string; reason: string | null; type_code: string; type_name: string; leave_type_id: string; employee_id: string; from_time: string | null; to_time: string | null; hours: string | null }>(
+        `SELECT lr.from_date, lr.to_date, lr.half_day, lr.days_requested, lr.reason, lt.code AS type_code, lt.name_en AS type_name, lr.leave_type_id, lr.employee_id,
+                to_char(lr.from_time, 'HH24:MI') AS from_time, to_char(lr.to_time, 'HH24:MI') AS to_time, lr.hours
            FROM leave_request lr JOIN leave_type lt ON lt.id = lr.leave_type_id WHERE lr.id = $1`, [inst.object_id]);
       const lr = r.rows[0];
       if (!lr) return {};
@@ -291,6 +292,7 @@ export async function summarise(db: Queryable, inst: WorkflowInstance): Promise<
         leaveType: lr.type_code, leaveTypeName: lr.type_name, from: lr.from_date, to: lr.to_date, halfDay: lr.half_day, days: Number(lr.days_requested),
         reason: lr.reason, balanceNow: Number(bal.rows[0]?.balance ?? 0), balanceAfter: Number(bal.rows[0]?.balance ?? 0) - Number(lr.days_requested),
         teamOverlap: overlap.rows.map((x) => x.name_en),
+        ...(lr.from_time ? { fromTime: lr.from_time, toTime: lr.to_time, hours: Number(lr.hours) } : {}),
       };
     }
     case 'regularisation_request': {

@@ -1,13 +1,17 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import type { Db } from '../../db/pool.js';
-import { passwordPolicyError } from '../../crypto.js';
+import { passwordPolicyError, sha256Hex } from '../../crypto.js';
 import { BadRequestError, NotFoundError } from '../../errors.js';
 import { audit } from '../../audit.js';
+import type { FieldCipher } from '../../crypto.js';
 import { requireAuth, requirePasswordChanged, requireRole, SESSION_COOKIE } from './middleware.js';
-import { changePassword, createUser, login, logout, ROLES, SESSION_TTL_MS } from './service.js';
+import {
+  changePassword, completeTwoFactorLogin, createUser, listSessions, login, logout, revokeOtherSessions, revokeSession, ROLES, SESSION_TTL_MS,
+} from './service.js';
+import { adminResetTwoFactor, beginSetup, confirmSetup, disableTwoFactor, regenerateRecoveryCodes, twoFactorStatus } from './two-factor.js';
 
-export interface AuthOptions { pepper?: string; secureCookie: boolean }
+export interface AuthOptions { pepper?: string; secureCookie: boolean; cipher?: FieldCipher }
 
 // Per-IP throttle on FAILED logins (plan §12.6; a shared store comes with multi-replica deploys). Successful sign-ins are
 // not counted, so a whole office behind one NAT address can sign in at 9 am; guessing from one address still stops at 30.
@@ -28,6 +32,10 @@ function recordFailure(ip: string): void {
 
 export function authRoutes(db: Db, opts: AuthOptions): Router {
   const r = Router();
+  const cipherOf = (): FieldCipher => {
+    if (!opts.cipher) throw new Error('two-step sign-in needs the field encryption key');
+    return opts.cipher;
+  };
 
   r.post('/login', async (req, res) => {
     const b = z.object({ email: z.string().email().max(200), password: z.string().min(1).max(128) }).parse(req.body);
@@ -37,9 +45,24 @@ export function authRoutes(db: Db, opts: AuthOptions): Router {
     try {
       session = await login(db, b.email, b.password, { ip: req.ip ?? '', userAgent: req.get('user-agent') ?? '', ...(opts.pepper ? { pepper: opts.pepper } : {}) });
     } catch (e) { recordFailure(ip); throw e; }
+    if ('twoFactorRequired' in session) return res.json({ twoFactorRequired: true, challenge: session.challenge });
     const { user, token } = session;
     res.cookie(SESSION_COOKIE, token, { httpOnly: true, sameSite: 'lax', secure: opts.secureCookie, maxAge: SESSION_TTL_MS, path: '/' });
     return res.json({ user, token });
+  });
+
+  /** Second sign-in step: the 6-digit code from the authenticator app, or a one-time recovery code. */
+  r.post('/login/2fa', async (req, res) => {
+    const b = z.object({ challenge: z.string().min(20).max(100), code: z.string().trim().min(6).max(20) }).parse(req.body);
+    const ip = req.ip ?? 'unknown';
+    if (throttled(ip)) return res.status(429).json({ error: 'too many failed sign-in attempts; try again in 15 minutes' });
+    let session: Awaited<ReturnType<typeof completeTwoFactorLogin>>;
+    try {
+      session = await completeTwoFactorLogin(db, cipherOf(), b.challenge, b.code, { ip: req.ip ?? '', userAgent: req.get('user-agent') ?? '' });
+    } catch (e) { recordFailure(ip); throw e; }
+    const { user, token, method } = session;
+    res.cookie(SESSION_COOKIE, token, { httpOnly: true, sameSite: 'lax', secure: opts.secureCookie, maxAge: SESSION_TTL_MS, path: '/' });
+    return res.json({ user, token, ...(method === 'recovery' ? { usedRecoveryCode: true } : {}) });
   });
 
   r.post('/logout', requireAuth, async (req, res) => {
@@ -59,8 +82,51 @@ export function authRoutes(db: Db, opts: AuthOptions): Router {
     res.json({ ok: true });
   });
 
+  // ---------------------------------------------------------------- two-step sign-in (self)
+  // These work before the password-change / two-step gates so a user who must set it up can do so.
+  r.get('/2fa', requireAuth, async (req, res) => { res.json(await twoFactorStatus(db, req.user!)); });
+
+  r.post('/2fa/setup', requireAuth, async (req, res) => {
+    if (req.user!.mustChangePassword) throw new BadRequestError('choose a new password first');
+    res.json(await beginSetup(db, cipherOf(), req.user!));
+  });
+
+  r.post('/2fa/enable', requireAuth, async (req, res) => {
+    const b = z.object({ code: z.string().trim().min(6).max(10) }).parse(req.body);
+    const recoveryCodes = await confirmSetup(db, cipherOf(), req.user!, b.code);
+    // The current session has just proved the second factor.
+    if (req.sessionToken) await db.query('UPDATE session SET two_factor = true WHERE token_hash = $1', [sha256Hex(req.sessionToken)]);
+    res.json({ recoveryCodes });
+  });
+
+  r.post('/2fa/recovery-codes', requireAuth, async (req, res) => {
+    const b = z.object({ code: z.string().trim().min(6).max(20) }).parse(req.body);
+    res.json({ recoveryCodes: await regenerateRecoveryCodes(db, cipherOf(), req.user!, b.code) });
+  });
+
+  r.post('/2fa/disable', requireAuth, async (req, res) => {
+    const b = z.object({ password: z.string().min(1).max(128), code: z.string().trim().min(6).max(20) }).parse(req.body);
+    await disableTwoFactor(db, cipherOf(), req.user!, b.password, b.code, opts.pepper);
+    res.json({ ok: true });
+  });
+
+  // ---------------------------------------------------------------- my sessions
+  r.get('/sessions', requireAuth, async (req, res) => { res.json({ sessions: await listSessions(db, req.user!.id, req.sessionToken) }); });
+  r.post('/sessions/revoke-others', requireAuth, async (req, res) => { res.json({ revoked: await revokeOtherSessions(db, req.user!.id, req.sessionToken) }); });
+  r.delete('/sessions/:id', requireAuth, async (req, res) => {
+    await revokeSession(db, req.user!.id, z.uuid().parse(req.params.id), req.sessionToken);
+    res.json({ ok: true });
+  });
+
   // Account administration needs a real (not temporary) password, like the rest of the API.
   r.use('/users', requireAuth, requirePasswordChanged);
+
+  /** Lost phone: an admin clears another user's two-step sign-in (audited); they set it up again at next sign-in. */
+  r.post('/users/:id/2fa/reset', requireRole('admin'), async (req, res) => {
+    const b = z.object({ reason: z.string().trim().min(3).max(300) }).parse(req.body);
+    await adminResetTwoFactor(db, req.user!, z.uuid().parse(req.params.id), b.reason);
+    res.json({ ok: true });
+  });
 
   /** A user can only be linked to an employee of the same company. */
   async function assertEmployeeInCompany(employeeId: string | null | undefined, companyId: string | null): Promise<void> {
@@ -71,7 +137,7 @@ export function authRoutes(db: Db, opts: AuthOptions): Router {
 
   r.get('/users', requireRole('hr'), async (req, res) => {
     const rows = await db.query(
-      `SELECT id, employee_id, email, name, roles, status, last_login_at, created_at FROM app_user WHERE company_id = $1 ORDER BY created_at`,
+      `SELECT id, employee_id, email, name, roles, status, last_login_at, created_at, totp_enabled_at IS NOT NULL AS two_factor FROM app_user WHERE company_id = $1 ORDER BY created_at`,
       [req.user!.companyId]);
     res.json({ users: rows.rows });
   });

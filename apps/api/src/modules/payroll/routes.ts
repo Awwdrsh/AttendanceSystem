@@ -10,6 +10,7 @@ import { lockAttendance } from '../attendance/service.js';
 import { ssfSheetCsv } from './exports.js';
 import { renderPayslipHtml } from './payslip-html.js';
 import { salarySheet, salarySheetCsv, salarySheetHtml } from './salary-sheet.js';
+import { decideTaxSavings, pendingTaxSavings, submitTaxSavings, taxSavingsRoutes } from './tax-savings.js';
 import { approveRun, bonusAllocation, computeRun, ensurePeriod, getPeriod, getRun, lockRun, preflight, publishRun, reviewRun } from './service.js';
 
 const STATUTORY_KEYS = new Set(['tax.schedule', 'tax.deductions', 'ssf.rates', 'pf.rates', 'ot.multiplier', 'festival.allowance', 'min_wage', 'bonus.caps', 'ssf.deposit_days', 'tds.deposit_days']);
@@ -17,9 +18,13 @@ const payrollRole = requireRole('hr');
 /** Salary figures, declarations and profit are never negative; a negative CIT or premium would raise net pay. */
 const amount = money.refine((v) => !v.startsWith('-'), 'must not be negative');
 
-export function payrollRoutes({ db, cipher }: AppDeps): Router {
+export function payrollRoutes(deps: AppDeps): Router {
+  const { db, cipher } = deps;
   const r = Router();
   const cid = (req: { user?: { companyId: string | null } }) => req.user!.companyId!;
+
+  // Employees' tax savings self-service (any signed-in user; rules inside).
+  r.use('/tax-savings', taxSavingsRoutes(deps));
 
   // ---------------------------------------------------------------- rule versions (plan §6.13)
   r.get('/rules', payrollRole, async (req, res) => {
@@ -186,8 +191,14 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     await assertManages(db, req.user!, employeeId);
     if (employeeId !== req.user!.employeeId && !hasRole(req.user!, 'hr')) throw new ForbiddenError();
     const rows = await db.query('SELECT d.* FROM tax_declaration d JOIN employee e ON e.id = d.employee_id WHERE d.employee_id = $1 AND d.fiscal_year_start = $2 AND e.company_id = $3', [employeeId, q.fiscalYearStart, cid(req)]);
-    res.json({ declaration: rows.rows[0] ?? null });
+    const pending = rows.rows[0] || (await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, cid(req)])).rows[0]
+      ? await pendingTaxSavings(db, employeeId, q.fiscalYearStart) : null;
+    res.json({ declaration: rows.rows[0] ?? null, pending });
   });
+  /**
+   * HR entering a declaration for someone else records it as verified (HR is the verifier). Everyone's own declaration —
+   * including an HR user's — goes to HR as a tax savings request and only counts for payroll once approved.
+   */
   r.put('/declarations', async (req, res) => {
     const b = z.object({ employeeId: z.uuid().optional(), fiscalYearStart: z.number().int(), lifePremium: amount.default('0'), healthPremium: amount.default('0'), citMonthly: amount.default('0'),
       medicalCost: amount.default('0'), otherRetirementAnnual: amount.default('0'), submit: z.boolean().default(true) }).parse(req.body);
@@ -195,24 +206,51 @@ export function payrollRoutes({ db, cipher }: AppDeps): Router {
     if (!employeeId) throw new BadRequestError('employeeId required');
     await assertManages(db, req.user!, employeeId);
     if (employeeId !== req.user!.employeeId && !hasRole(req.user!, 'hr')) throw new ForbiddenError();
+    const emp = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, cid(req)]);
+    if (!emp.rows[0]) throw new NotFoundError('employee not found');
+    const { employeeId: _e, fiscalYearStart, submit, ...values } = b;
+    if (employeeId === req.user!.employeeId) {
+      if (!submit) throw new BadRequestError('drafts are not kept; submit the declaration when it is ready');
+      const client = await db.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`tax_savings:${employeeId}`]);
+        const request = await submitTaxSavings(client, req.user!, cid(req), employeeId, fiscalYearStart, values);
+        await client.query('COMMIT');
+        return res.json({ ok: true, requestId: request.id, status: 'pending' });
+      } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+    }
     await db.query(
-      `INSERT INTO tax_declaration (employee_id, fiscal_year_start, life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO tax_declaration (employee_id, fiscal_year_start, life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, status, verified_by, verified_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CASE WHEN $8 = 'verified' THEN now() END)
        ON CONFLICT (employee_id, fiscal_year_start) DO UPDATE SET life_premium = EXCLUDED.life_premium, health_premium = EXCLUDED.health_premium, cit_monthly = EXCLUDED.cit_monthly,
-         medical_cost = EXCLUDED.medical_cost, other_retirement_annual = EXCLUDED.other_retirement_annual, status = EXCLUDED.status, verified_by = NULL, verified_at = NULL, updated_at = now()`,
-      [employeeId, b.fiscalYearStart, b.lifePremium, b.healthPremium, b.citMonthly, b.medicalCost, b.otherRetirementAnnual, b.submit ? 'submitted' : 'draft']);
+         medical_cost = EXCLUDED.medical_cost, other_retirement_annual = EXCLUDED.other_retirement_annual, status = EXCLUDED.status, verified_by = EXCLUDED.verified_by,
+         verified_at = EXCLUDED.verified_at, updated_at = now()`,
+      [employeeId, fiscalYearStart, b.lifePremium, b.healthPremium, b.citMonthly, b.medicalCost, b.otherRetirementAnnual, submit ? 'verified' : 'draft', submit ? req.user!.id : null]);
     await audit(db, { actorId: req.user!.id, action: 'upsert', table: 'tax_declaration', rowId: employeeId, after: b });
-    res.json({ ok: true });
+    return res.json({ ok: true, status: submit ? 'verified' : 'draft' });
   });
   r.post('/declarations/:employeeId/verify', payrollRole, async (req, res) => {
     const employeeId = z.uuid().parse(req.params.employeeId);
-    const b = z.object({ fiscalYearStart: z.number().int(), decision: z.enum(['verified', 'rejected']) }).parse(req.body);
+    const b = z.object({ fiscalYearStart: z.number().int(), decision: z.enum(['verified', 'rejected']), reason: z.string().trim().max(500).optional() }).parse(req.body);
+    const emp = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, cid(req)]);
+    if (!emp.rows[0]) throw new NotFoundError('declaration not found');
+    const pending = await pendingTaxSavings(db, employeeId, b.fiscalYearStart);
+    if (pending) {
+      const client = await db.connect();
+      try {
+        await client.query('BEGIN');
+        await decideTaxSavings(client, req.user!, pending, b.decision === 'verified' ? 'approved' : 'rejected', b.reason ?? null);
+        await client.query('COMMIT');
+      } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+      return res.json({ ok: true });
+    }
     const rows = await db.query(
       `UPDATE tax_declaration d SET status = $3, verified_by = $4, verified_at = now() FROM employee e
         WHERE d.employee_id = e.id AND d.employee_id = $1 AND d.fiscal_year_start = $2 AND e.company_id = $5 RETURNING d.id`, [employeeId, b.fiscalYearStart, b.decision, req.user!.id, cid(req)]);
     if (!rows.rows[0]) throw new NotFoundError('declaration not found');
     await audit(db, { actorId: req.user!.id, action: b.decision, table: 'tax_declaration', rowId: employeeId });
-    res.json({ ok: true });
+    return res.json({ ok: true });
   });
 
   r.get('/loans', payrollRole, async (req, res) => {

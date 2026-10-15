@@ -1,7 +1,8 @@
-import { Avatar, Button, Drawer, Group, MultiSelect, PasswordInput, SimpleGrid, Stack, Text, TextInput } from '@mantine/core';
+import { Avatar, Badge, Button, Drawer, Group, Modal, MultiSelect, PasswordInput, SimpleGrid, Stack, Text, TextInput } from '@mantine/core';
 import { IconPlus } from '@tabler/icons-react';
 import { useState } from 'react';
 import { auth as authApi } from '../../api';
+import { security } from '../../api/security';
 import type { AppUserRow, Role } from '../../api/types';
 import { useAuth } from '../../auth/AuthProvider';
 import { DataTable } from '../../components/DataTable';
@@ -17,7 +18,8 @@ const ROLE_LABEL: Record<Role, string> = { admin: 'Admin', hr: 'HR', manager: 'M
 const ROLE_OPTIONS = ROLES.map((r) => ({ value: r, label: ROLE_LABEL[r] }));
 
 export default function UsersPage() {
-  const { hasRole } = useAuth();
+  const { hasRole, user: me } = useAuth();
+  const [resetFor, setResetFor] = useState<AppUserRow | null>(null); const [resetReason, setResetReason] = useState('');
   const q = useQuery(() => authApi.users(), []);
   const [open, setOpen] = useState(false);
   const [email, setEmail] = useState(''); const [name, setName] = useState(''); const [password, setPassword] = useState(''); const [roles, setRoles] = useState<string[]>(['employee']); const [employeeId, setEmployeeId] = useState<string | null>(null);
@@ -44,9 +46,26 @@ export default function UsersPage() {
             : <Text size="sm">{u.roles.map((r) => ROLE_LABEL[r as Role] ?? r).join(', ')}</Text> },
           { key: 'emp', header: 'Employee record', render: (u) => u.employee_id ? <Text size="sm">Linked</Text> : <Text size="sm" c="dimmed">Not linked</Text> },
           { key: 'last', header: 'Last sign-in', render: (u) => <Text size="sm" c={u.last_login_at ? 'inherit' : 'dimmed'}>{u.last_login_at ? relativeTime(u.last_login_at) : 'Never'}</Text> },
+          { key: 'two', header: 'Two-step', render: (u) => (
+            <Group gap={6} wrap="nowrap">
+              {u.two_factor ? <Badge size="sm" color="teal" variant="light">On</Badge> : <Text size="sm" c="dimmed">Off</Text>}
+              {isAdmin && u.two_factor && u.id !== me?.id ? <Button size="compact-xs" variant="subtle" onClick={() => { setResetFor(u); setResetReason(''); }}>Reset</Button> : null}
+            </Group>) },
           { key: 'status', header: 'Status', render: (u) => <StatusBadge status={u.status} /> },
           { key: 'a', header: '', align: 'right', render: (u) => isAdmin ? <Button size="xs" variant="subtle" color={u.status === 'active' ? 'red' : 'gray'} onClick={async () => { try { await authApi.updateUser(u.id, { status: u.status === 'active' ? 'disabled' : 'active' }); await q.reload(); } catch (e) { toast.err(e); } }}>{u.status === 'active' ? 'Disable' : 'Activate'}</Button> : null },
         ]} />
+      <Modal opened={!!resetFor} onClose={() => setResetFor(null)} title={<Text fw={600}>Reset two-step sign-in</Text>} centered>
+        <Stack>
+          <Text size="sm" c="dimmed">For a lost or replaced phone. {resetFor?.name} is signed out everywhere and signs in with their password only until they set two-step sign-in up again (straight away if their role requires it).</Text>
+          <TextInput label="Reason" description="Kept in the audit log." value={resetReason} onChange={(e) => setResetReason(e.currentTarget.value)} placeholder="Lost phone" />
+          <Group justify="flex-end">
+            <Button color="red" disabled={resetReason.trim().length < 3} onClick={async () => {
+              if (!resetFor) return;
+              try { await security.resetUser(resetFor.id, resetReason.trim()); toast.ok(`Two-step sign-in reset for ${resetFor.name}.`); setResetFor(null); await q.reload(); } catch (e) { toast.err(e); }
+            }}>Reset</Button>
+          </Group>
+        </Stack>
+      </Modal>
       <Drawer opened={open} onClose={() => setOpen(false)} title="Add user" position="right" size="md">
         <Stack gap="md">
           <SimpleGrid cols={{ base: 1, sm: 2 }}>

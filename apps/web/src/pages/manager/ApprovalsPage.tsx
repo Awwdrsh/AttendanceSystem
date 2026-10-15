@@ -12,8 +12,8 @@ import { useQuery } from '../../lib/useQuery';
 import { EXPENSE_TYPE_COLOR, EXPENSE_TYPE_LABEL, expenseSummary } from '../expenses/approvalSummary';
 import { ProfileChangeSummary } from '../../components/people/ProfileChangeSummary';
 
-const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', timesheet: 'Timesheet', shift_swap: 'Shift swap', letter_request: 'Letter request', probation_review: 'Probation', resignation: 'Resignation', job_requisition: 'Hiring request', job_offer: 'Job offer', profile_change: 'Profile change', training_nomination: 'Training', ...EXPENSE_TYPE_LABEL };
-const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', timesheet: 'teal', shift_swap: 'cyan', letter_request: 'indigo', probation_review: 'violet', resignation: 'red', job_requisition: 'pink', job_offer: 'green', profile_change: 'cyan', training_nomination: 'lime', ...EXPENSE_TYPE_COLOR };
+const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', timesheet: 'Timesheet', shift_swap: 'Shift swap', letter_request: 'Letter request', probation_review: 'Probation', resignation: 'Resignation', job_requisition: 'Hiring request', job_offer: 'Job offer', profile_change: 'Profile change', training_nomination: 'Training', tax_declaration: 'Tax savings', ...EXPENSE_TYPE_LABEL };
+const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', timesheet: 'teal', shift_swap: 'cyan', letter_request: 'indigo', probation_review: 'violet', resignation: 'red', job_requisition: 'pink', job_offer: 'green', profile_change: 'cyan', training_nomination: 'lime', tax_declaration: 'yellow', ...EXPENSE_TYPE_COLOR };
 
 function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
@@ -31,7 +31,9 @@ function Summary({ item }: { item: InboxItem }) {
   switch (item.objectType) {
     case 'leave_request': {
       const days = Number(s.days);
-      main = <>{String(s.leaveTypeName ?? s.leaveType)}, {dateRange(s.from, s.to)}{s.halfDay ? ' (half day)' : ''} <Text span c="dimmed">({String(s.days)} {days === 1 ? 'day' : 'days'})</Text></>;
+      main = s.fromTime
+        ? <>{String(s.leaveTypeName ?? s.leaveType)}, {dateRange(s.from, s.to)}, {String(s.fromTime)}–{String(s.toTime)} <Text span c="dimmed">({String(s.hours)} h, {String(s.days)} of a day)</Text></>
+        : <>{String(s.leaveTypeName ?? s.leaveType)}, {dateRange(s.from, s.to)}{s.halfDay ? ' (half day)' : ''} <Text span c="dimmed">({String(s.days)} {days === 1 ? 'day' : 'days'})</Text></>;
       extra.push(<Text key="bal" size="xs" c="dimmed">Balance {Number(s.balanceNow ?? 0).toFixed(1)} to {Number(s.balanceAfter ?? 0).toFixed(1)}</Text>);
       if (Array.isArray(s.teamOverlap) && s.teamOverlap.length) extra.push(<Text key="ov" c="orange.7" size="xs">Also off: {(s.teamOverlap as string[]).join(', ')}</Text>);
       if (s.reason) extra.push(<Text key="r" size="xs" c="dimmed">“{String(s.reason)}”</Text>);
@@ -85,6 +87,15 @@ function Summary({ item }: { item: InboxItem }) {
       if (Number(s.cost) > 0) extra.push(<Text key="c" size="xs" c="dimmed">Cost {fmtMoney(String(s.cost))}</Text>);
       if (s.reason) extra.push(<Text key="r" size="xs" c="dimmed">“{String(s.reason)}”</Text>);
       break;
+    case 'tax_declaration': {
+      const fy = Number(s.fiscalYearStart);
+      const parts: Array<[string, unknown]> = [['Life insurance', s.lifePremium], ['Health insurance', s.healthPremium], ['CIT a month', s.citMonthly], ['Other retirement', s.otherRetirementAnnual], ['Medical', s.medicalCost]];
+      main = <>Tax savings for FY {fy}/{String(fy + 1).slice(-2)}: {parts.filter(([, v]) => Number(v) > 0).map(([k, v]) => `${k} ${fmtMoney(String(v))}`).join(', ') || 'nothing declared'}</>;
+      extra.push(<Text key="p" size="xs" c="dimmed">{Number(s.proofs ?? 0)} proof file(s)</Text>);
+      if (s.note) extra.push(<Text key="n" size="xs" c="dimmed">“{String(s.note)}”</Text>);
+      extra.push(<Text key="h" size="xs" c="dimmed">Check the receipts under Payroll, Tax declarations</Text>);
+      break;
+    }
     default: {
       const x = expenseSummary(item.objectType, item.objectId, s);
       if (x) { main = x.main; extra.push(...x.extra); break; }

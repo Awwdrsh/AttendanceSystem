@@ -1,7 +1,7 @@
 import { post } from './client';
 
 export type UploadPurpose = 'employee_document' | 'company_document' | 'expense_receipt' | 'travel_bill' | 'helpdesk_attachment'
-  | 'training_certificate' | 'profile_change' | 'hiring_cv' | 'avatar';
+  | 'training_certificate' | 'profile_change' | 'hiring_cv' | 'avatar' | 'tax_proof';
 
 export interface UploadedFile { id: string; filename: string; mime: string; bytes: number; purpose: UploadPurpose }
 

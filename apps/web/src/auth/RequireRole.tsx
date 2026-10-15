@@ -11,6 +11,7 @@ export function RequireRole({ roles }: { roles?: Role[] }) {
   if (loading) return <Center h="60vh"><Loader /></Center>;
   if (!user) return <Navigate to="/login" replace state={{ from: loc.pathname }} />;
   if (user.mustChangePassword && loc.pathname !== '/change-password') return <Navigate to="/change-password" replace />;
+  if (!user.mustChangePassword && user.mustSetUpTwoFactor && loc.pathname !== '/setup-two-step') return <Navigate to="/setup-two-step" replace />;
   if (roles && roles.length && !hasRole(...roles)) return <EmptyState title="Not available for your role" hint="Ask HR if you believe you need access to this page." />;
   return <Outlet />;
 }

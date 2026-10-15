@@ -5,14 +5,14 @@ import type { AppDeps } from '../../deps.js';
 import type { Queryable } from '../../db/pool.js';
 import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
-import { isoDate } from '../../validation.js';
+import { hhmm, isoDate } from '../../validation.js';
 import { adToBs, fiscalYear, fiscalYearOf } from '@hajiri/bs-calendar';
 import { hasRole, requireRole } from '../auth/middleware.js';
 import { dateRange, enqueueRecompute } from '../attendance/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
 import { assertManages, cancelWorkflow, nptToday, registerHandler, startWorkflow, type DecisionContext } from '../workflow/service.js';
 import {
-  assertNoOverlap, balances, computeLeaveDays, eventDaysUsed, getEmployeeLite, getLeaveType, hasLockedDay, leaveTypeByCode, ledgerBalance, pendingDays, type LeaveTypeRow,
+  assertNoOverlap, balances, computeHourlyLeave, computeLeaveDays, eventDaysUsed, getEmployeeLite, getLeaveType, hasLockedDay, leaveTypeByCode, ledgerBalance, pendingDays, type LeaveTypeRow,
 } from './service.js';
 import { allocateAnnualLeave, runLeaveCatchUp } from './accrual.js';
 
@@ -54,12 +54,23 @@ const typeBody = z.object({
   encashable: z.boolean().default(false), certificateAfterDays: z.number().int().min(0).nullable().optional(), allowHalfDay: z.boolean().default(true),
   maxConsecutiveDays: z.number().int().min(1).nullable().optional(), minServiceDays: z.number().int().min(0).default(0), negativeBalanceLimit: z.number().min(0).default(0),
   genderScope: z.enum(['all', 'female', 'male']).default('all'), sandwichRule: z.boolean().default(false), expiryDays: z.number().int().min(1).nullable().optional(),
-  eventDays: z.number().min(0.5).max(365).nullable().optional(),
+  eventDays: z.number().min(0.5).max(365).nullable().optional(), allowHourly: z.boolean().default(false),
 });
 
 /** Columns that define a statutory entitlement (Labour Act Ch. 9) — not editable through the API once statutory. */
 const STATUTORY_LOCKED = new Set(['accrualBasis', 'accrualDays', 'accrualPerWorkedDays', 'maxBalance', 'paid', 'genderScope', 'expiryDays', 'eventDays']);
 
+
+/** An hourly request names both times, a single date and no half day; returns null for day-based requests. */
+function hourlyWindow(b: { from: string; to: string; halfDay?: string | undefined; fromTime?: string | undefined; toTime?: string | undefined }): { fromTime: string; toTime: string } | null {
+  if (b.fromTime === undefined && b.toTime === undefined) return null;
+  if (!b.fromTime || !b.toTime) throw new BadRequestError('give both a start and an end time for hourly leave');
+  if (b.from !== b.to) throw new BadRequestError('hourly leave must be on a single date');
+  if (b.halfDay) throw new BadRequestError('choose either a half day or hours, not both');
+  return { fromTime: b.fromTime, toTime: b.toTime };
+}
+
+const hoursOf = (calc: object): number => ('hours' in calc ? Number(calc.hours) : 0);
 
 /** Keys actually present in the request body: PATCH must not apply schema defaults to untouched fields. */
 function provided<T extends Record<string, unknown>>(parsed: T, body: unknown): Partial<T> {
@@ -88,10 +99,11 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const b = typeBody.parse(req.body);
     const ins = await db.query<{ id: string }>(
       `INSERT INTO leave_type (company_id, code, name_en, name_ne, paid, statutory, accrual_basis, accrual_days, accrual_per_worked_days, max_balance, carry_forward, encashable,
-         certificate_after_days, allow_half_day, max_consecutive_days, min_service_days, negative_balance_limit, gender_scope, sandwich_rule, expiry_days, event_days, sort_order)
-       VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 100) RETURNING id`,
+         certificate_after_days, allow_half_day, max_consecutive_days, min_service_days, negative_balance_limit, gender_scope, sandwich_rule, expiry_days, event_days, sort_order, allow_hourly)
+       VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 100, $21) RETURNING id`,
       [companyOf(req), b.code, b.nameEn, b.nameNe ?? null, b.paid, b.accrualBasis, b.accrualDays, b.accrualPerWorkedDays ?? null, b.maxBalance ?? null, b.carryForward, b.encashable,
-        b.certificateAfterDays ?? null, b.allowHalfDay, b.maxConsecutiveDays ?? null, b.minServiceDays, b.negativeBalanceLimit, b.genderScope, b.sandwichRule, b.expiryDays ?? null, b.eventDays ?? null]);
+        b.certificateAfterDays ?? null, b.allowHalfDay, b.maxConsecutiveDays ?? null, b.minServiceDays, b.negativeBalanceLimit, b.genderScope, b.sandwichRule, b.expiryDays ?? null, b.eventDays ?? null,
+        b.allowHourly && b.paid && (b.eventDays ?? null) === null]);
     await audit(db, { actorId: req.user!.id, action: 'create', table: 'leave_type', rowId: ins.rows[0]!.id, after: b });
     res.status(201).json({ id: ins.rows[0]!.id });
   });
@@ -109,7 +121,11 @@ export function leaveRoutes({ db }: AppDeps): Router {
       ['accrualPerWorkedDays', 'accrual_per_worked_days'], ['maxBalance', 'max_balance'], ['carryForward', 'carry_forward'], ['encashable', 'encashable'],
       ['certificateAfterDays', 'certificate_after_days'], ['allowHalfDay', 'allow_half_day'], ['maxConsecutiveDays', 'max_consecutive_days'], ['minServiceDays', 'min_service_days'],
       ['negativeBalanceLimit', 'negative_balance_limit'], ['genderScope', 'gender_scope'], ['sandwichRule', 'sandwich_rule'], ['expiryDays', 'expiry_days'], ['eventDays', 'event_days'],
+      ['allowHourly', 'allow_hourly'],
     ];
+    if (b.allowHourly && (!(b.paid ?? cur.rows[0].paid) || (b.eventDays !== undefined ? b.eventDays : cur.rows[0].event_days) !== null)) {
+      throw new BadRequestError('only paid leave with a balance can be taken by the hour');
+    }
     const sets: string[] = []; const vals: unknown[] = [id];
     for (const [k, col] of map) if (b[k] !== undefined) { vals.push(b[k]); sets.push(`${col} = $${vals.length}`); }
     if (sets.length) await db.query(`UPDATE leave_type SET ${sets.join(', ')} WHERE id = $1`, vals);
@@ -131,7 +147,8 @@ export function leaveRoutes({ db }: AppDeps): Router {
 
   /** Preview the deduction before submitting (plan §13.5 computed line). */
   r.get('/preview', async (req, res) => {
-    const q = z.object({ employeeId: z.uuid().optional(), leaveTypeId: z.uuid(), from: isoDate, to: isoDate, halfDay: z.enum(['first_half', 'second_half']).optional() }).parse(req.query);
+    const q = z.object({ employeeId: z.uuid().optional(), leaveTypeId: z.uuid(), from: isoDate, to: isoDate, halfDay: z.enum(['first_half', 'second_half']).optional(),
+      fromTime: hhmm.optional(), toTime: hhmm.optional() }).parse(req.query);
     const employeeId = q.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
     const emp = await getEmployeeLite(db, employeeId);
@@ -139,7 +156,9 @@ export function leaveRoutes({ db }: AppDeps): Router {
     if (!emp || !type || emp.company_id !== type.company_id || emp.company_id !== req.user!.companyId) throw new NotFoundError('employee or leave type not found');
     await assertManages(db, req.user!, employeeId);
     const policy = await leavePolicy(emp.company_id);
-    const calc = await computeLeaveDays(db, emp, type, q.from, q.to, q.halfDay ?? null, policy.sandwichRule);
+    const hourly = hourlyWindow(q);
+    const calc = hourly ? await computeHourlyLeave(db, emp, type, q.from, hourly.fromTime, hourly.toTime)
+      : await computeLeaveDays(db, emp, type, q.from, q.to, q.halfDay ?? null, policy.sandwichRule);
     if (type.event_days !== null) {
       const left = Number(type.event_days) - (await eventDaysUsed(db, employeeId, type.id, q.from, q.to));
       return res.json({ ...calc, balance: Number(type.event_days), available: left, balanceAfter: left - calc.days });
@@ -154,6 +173,8 @@ export function leaveRoutes({ db }: AppDeps): Router {
   r.post('/requests', async (req, res) => {
     const b = z.object({
       employeeId: z.uuid().optional(), leaveTypeId: z.uuid(), from: isoDate, to: isoDate, halfDay: z.enum(['first_half', 'second_half']).optional(),
+      /** Hourly (short) leave: a window on a single day, e.g. 10:00–12:00. */
+      fromTime: hhmm.optional(), toTime: hhmm.optional(),
       reason: z.string().max(1000).optional(), attachmentKey: z.string().max(200).optional(),
       /** HR only: record full-day leave on a past day that already shows as worked (e.g. a mis-attributed punch). */
       override: z.boolean().optional(),
@@ -179,7 +200,9 @@ export function leaveRoutes({ db }: AppDeps): Router {
     if (policy.probationRestriction && emp.probation_end && b.from <= emp.probation_end && !type.statutory && type.paid) {
       throw new BadRequestError(`${type.name_en} cannot be taken during probation (ends ${emp.probation_end})`);
     }
-    const calc = await computeLeaveDays(db, emp, type, b.from, b.to, b.halfDay ?? null, policy.sandwichRule);
+    const hourly = hourlyWindow(b);
+    const calc = hourly ? await computeHourlyLeave(db, emp, type, b.from, hourly.fromTime, hourly.toTime)
+      : await computeLeaveDays(db, emp, type, b.from, b.to, b.halfDay ?? null, policy.sandwichRule);
     // The company's maxContinuousDays policy limits discretionary leave only; a statutory entitlement cannot be capped by policy.
     const maxRun = type.max_consecutive_days ?? (type.statutory ? null : policy.maxContinuousDays);
     if (maxRun !== null && calc.days > maxRun) throw new BadRequestError(`${type.name_en} cannot exceed ${maxRun} consecutive days`);
@@ -198,7 +221,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
     }
     // Full-day leave cannot replace a past day the employee is already recorded as having worked; that would turn a worked day
     // into leave (and unpaid leave into a pay cut). Half days are fine; HR can override for a mis-attributed punch.
-    if (!b.halfDay && !b.override) {
+    if (!b.halfDay && !hourly && !b.override) {
       const worked = await db.query<{ local_date: string }>(
         `SELECT local_date::text FROM v_attendance_latest WHERE employee_id = $1 AND local_date = ANY($2::date[]) AND local_date < $3::date AND status IN ('Present', 'WFH') ORDER BY local_date`,
         [employeeId, calc.workingDays, nptToday()]);
@@ -232,12 +255,15 @@ export function leaveRoutes({ db }: AppDeps): Router {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`leave:${employeeId}`]);
       await assertNoOverlap(client, employeeId, b.from, b.to);
       const ins = await client.query<{ id: string }>(
-        `INSERT INTO leave_request (employee_id, leave_type_id, from_date, to_date, half_day, days_requested, reason, attachment_key, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-        [employeeId, type.id, b.from, b.to, b.halfDay ?? null, calc.days, b.reason ?? null, b.attachmentKey ?? null, req.user!.id]);
+        `INSERT INTO leave_request (employee_id, leave_type_id, from_date, to_date, half_day, days_requested, reason, attachment_key, created_by, from_time, to_time, hours)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
+        [employeeId, type.id, b.from, b.to, b.halfDay ?? null, calc.days, b.reason ?? null, b.attachmentKey ?? null, req.user!.id,
+          hourly?.fromTime ?? null, hourly?.toTime ?? null, hourly ? hoursOf(calc) : null]);
       requestId = ins.rows[0]!.id;
+      const when = hourly ? `${bsRange(b.from, b.to)} ${hourly.fromTime}–${hourly.toTime}` : bsRange(b.from, b.to);
       const inst = await startWorkflow(client, {
         companyId: emp.company_id, objectType: 'leave_request', objectId: requestId, employeeId,
-        title: 'Leave request to approve', body: `${type.name_en} ${bsRange(b.from, b.to)} (${calc.days} day(s))${b.reason ? `: ${b.reason}` : ''}`,
+        title: 'Leave request to approve', body: `${type.name_en} ${when} (${hourly ? `${hoursOf(calc)} hour(s), ` : ''}${calc.days} day(s))${b.reason ? `: ${b.reason}` : ''}`,
       });
       await client.query('UPDATE leave_request SET workflow_instance_id = $2 WHERE id = $1', [requestId, inst.id]);
       await audit(client, { actorId: req.user!.id, action: 'create', table: 'leave_request', rowId: requestId, after: { ...b, days: calc.days } });
@@ -254,7 +280,8 @@ export function leaveRoutes({ db }: AppDeps): Router {
     if (q.employeeId) await assertManages(db, u, q.employeeId);
     const rows = await db.query(
       `SELECT lr.id, lr.employee_id, e.emp_code, e.name_en, e.name_ne, lr.leave_type_id, lt.code AS type_code, lt.name_en AS type_name, lt.paid,
-              lr.from_date, lr.to_date, lr.half_day, lr.days_requested, lr.reason, lr.attachment_key, lr.status, lr.workflow_instance_id, lr.created_at, lr.decided_at
+              lr.from_date, lr.to_date, lr.half_day, lr.days_requested, lr.reason, lr.attachment_key, lr.status, lr.workflow_instance_id, lr.created_at, lr.decided_at,
+              to_char(lr.from_time, 'HH24:MI') AS from_time, to_char(lr.to_time, 'HH24:MI') AS to_time, lr.hours
          FROM leave_request lr JOIN employee e ON e.id = lr.employee_id JOIN leave_type lt ON lt.id = lr.leave_type_id
          LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
         WHERE e.company_id = $1
@@ -357,8 +384,9 @@ export function leaveRoutes({ db }: AppDeps): Router {
   r.get('/team-calendar', async (req, res) => {
     const q = z.object({ from: isoDate, to: isoDate }).parse(req.query);
     const u = req.user!;
-    const rows = await db.query<{ employee_id: string; emp_code: string; name_en: string; from_date: string; to_date: string; half_day: string | null; type_code: string; status: string }>(
-      `SELECT lr.employee_id, e.emp_code, e.name_en, lr.from_date, lr.to_date, lr.half_day, lt.code AS type_code, lr.status
+    const rows = await db.query<{ employee_id: string; emp_code: string; name_en: string; from_date: string; to_date: string; half_day: string | null; type_code: string; status: string; from_time: string | null; to_time: string | null }>(
+      `SELECT lr.employee_id, e.emp_code, e.name_en, lr.from_date, lr.to_date, lr.half_day, lt.code AS type_code, lr.status,
+              to_char(lr.from_time, 'HH24:MI') AS from_time, to_char(lr.to_time, 'HH24:MI') AS to_time
          FROM leave_request lr JOIN employee e ON e.id = lr.employee_id JOIN leave_type lt ON lt.id = lr.leave_type_id
          LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
         WHERE e.company_id = $1 AND lr.status IN ('pending', 'approved') AND lr.from_date <= $3::date AND lr.to_date >= $2::date
@@ -368,7 +396,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const days = new Map<string, Array<Record<string, unknown>>>();
     for (const lr of rows.rows) {
       for (const d of dateRange(lr.from_date < q.from ? q.from : lr.from_date, lr.to_date > q.to ? q.to : lr.to_date)) {
-        days.set(d, [...(days.get(d) ?? []), { employeeId: lr.employee_id, empCode: lr.emp_code, nameEn: lr.name_en, type: lr.type_code, status: lr.status, halfDay: lr.half_day }]);
+        days.set(d, [...(days.get(d) ?? []), { employeeId: lr.employee_id, empCode: lr.emp_code, nameEn: lr.name_en, type: lr.type_code, status: lr.status, halfDay: lr.half_day, ...(lr.from_time ? { fromTime: lr.from_time, toTime: lr.to_time } : {}) }]);
       }
     }
     res.json({ days: [...days.entries()].sort().map(([date, off]) => ({ date, off })) });

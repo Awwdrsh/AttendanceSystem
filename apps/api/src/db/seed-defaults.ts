@@ -25,8 +25,10 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
     const r = await db.query(
       `INSERT INTO leave_type (company_id, code, name_en, name_ne, paid, statutory, accrual_basis, accrual_days, accrual_per_worked_days, max_balance,
          carry_forward, encashable, certificate_after_days, allow_half_day, gender_scope, sandwich_rule, expiry_days, sort_order)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) ON CONFLICT (company_id, code) DO NOTHING`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) ON CONFLICT (company_id, code) DO NOTHING RETURNING id`,
       [companyId, ...t, i]);
+    // Home and sick leave can be taken by the hour from the start (HR can switch it off; re-seeding never turns it back on).
+    if (r.rows[0] && (t[0] === 'HOME' || t[0] === 'SICK')) await db.query('UPDATE leave_type SET allow_hourly = true WHERE id = $1', [r.rows[0].id]);
     n += r.rowCount ?? 0;
   }
   // Event-based statutory leave: paid days per event (maternity 60 of 98, maternity-care 15, mourning 13), not a balance.
@@ -48,6 +50,7 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
     ['job_offer', [{ role: 'hr' }]],
     ['profile_change', [{ role: 'hr' }]],
     ['training_nomination', [{ role: 'manager' }]],
+    ['tax_declaration', [{ role: 'hr' }]],
   ];
   let w = 0;
   for (const [type, steps] of workflows) {

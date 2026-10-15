@@ -3,6 +3,7 @@ import { weekdayOf } from '@hajiri/bs-calendar';
 import type { Queryable } from '../../db/pool.js';
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors.js';
 import { dateRange } from '../attendance/service.js';
+import { resolveShift } from '../attendance/repo.js';
 import { nptToday } from '../workflow/service.js';
 
 export interface LeaveTypeRow {
@@ -13,6 +14,8 @@ export interface LeaveTypeRow {
   sandwich_rule: boolean; expiry_days: number | null; sort_order: number;
   /** Paid days per event for event-based statutory leave (maternity, maternity-care, mourning); null for balance-based types. */
   event_days: string | null;
+  /** Can be taken by the hour (short leave). */
+  allow_hourly: boolean;
 }
 
 export interface EmployeeLite {
@@ -77,6 +80,37 @@ export async function computeLeaveDays(db: Queryable, emp: EmployeeLite, type: L
   if (!working.length) throw new BadRequestError('the selected range contains no working days');
   return { days: working.length, workingDays: working, excludedDays: nonWorking, sandwichApplied: false,
     explanation: nonWorking.length ? `${working.length} working day(s) will be deducted; ${nonWorking.length} weekly-off/holiday day(s) excluded` : `${working.length} working day(s) will be deducted` };
+}
+
+/** Shortest hourly leave that can be requested. */
+export const HOURLY_MIN_MINUTES = 30;
+
+/**
+ * Hourly (short) leave on one working day: the window must sit inside the day's (daytime) shift, and is deducted as
+ * minutes ÷ scheduled working minutes of that shift (span minus the fixed break), to 2 decimals. Only paid,
+ * balance-based leave types with allow_hourly can be taken this way, so payroll never has to price a fraction of a day.
+ */
+export async function computeHourlyLeave(db: Queryable, emp: EmployeeLite, type: LeaveTypeRow, date: string, fromTime: string, toTime: string): Promise<DaysComputation & { hours: number; minutes: number }> {
+  if (!type.allow_hourly) throw new BadRequestError(`${type.name_en} cannot be taken by the hour`);
+  if (!type.paid || type.event_days !== null) throw new BadRequestError('only paid leave with a balance can be taken by the hour');
+  const { working } = await workingDaysBetween(db, emp, date, date);
+  if (!working.length) throw new BadRequestError('hourly leave must be on a working day');
+  const shift = await resolveShift(db, emp.id, date);
+  if (!shift) throw new BadRequestError('there is no shift on this day to take hourly leave from');
+  const toMin = (s: string) => Number(s.slice(0, 2)) * 60 + Number(s.slice(3, 5));
+  const start = toMin(shift.start); const end = toMin(shift.end);
+  if (end <= start) throw new BadRequestError('hourly leave is not available on shifts that cross midnight; apply for a half or full day');
+  const f = toMin(fromTime); const t = toMin(toTime);
+  if (t <= f) throw new BadRequestError('the end time must be after the start time');
+  if (f < start || t > end) throw new BadRequestError(`hourly leave must be within your shift (${shift.start}–${shift.end})`);
+  const minutes = t - f;
+  if (minutes < HOURLY_MIN_MINUTES) throw new BadRequestError(`hourly leave must be at least ${HOURLY_MIN_MINUTES} minutes`);
+  const scheduled = end - start - shift.breakMinutes;
+  if (scheduled <= 0 || minutes >= scheduled) throw new BadRequestError('this covers the whole working day; apply for a full day instead');
+  const days = Math.max(0.01, Math.round((minutes / scheduled) * 100) / 100);
+  const hours = Math.round((minutes / 60) * 100) / 100;
+  return { days, hours, minutes, workingDays: [date], excludedDays: [], sandwichApplied: false,
+    explanation: `${hours} hour(s) of a ${Math.round((scheduled / 60) * 100) / 100}-hour working day = ${days} day(s) will be deducted` };
 }
 
 /** Gap (calendar days) within which requests of the same event-based type are treated as one event. */

@@ -86,6 +86,8 @@ export async function preflight(db: Queryable, companyId: string, run: RunRow): 
   if (Number(pendingReg.rows[0]?.n) > 0) warnings.push({ code: 'pending_regularisations', message: 'Regularisation requests still pending', count: Number(pendingReg.rows[0]!.n) });
   const pendingLeave = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM leave_request WHERE employee_id = ANY($1) AND status = 'pending' AND from_date <= $3 AND to_date >= $2`, [ids, p.start_ad, p.end_ad]);
   if (Number(pendingLeave.rows[0]?.n) > 0) warnings.push({ code: 'pending_leave', message: 'Leave requests pending that affect this period', count: Number(pendingLeave.rows[0]!.n) });
+  const pendingTax = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM tax_declaration_request WHERE employee_id = ANY($1) AND status = 'pending'`, [ids]);
+  if (Number(pendingTax.rows[0]?.n) > 0) warnings.push({ code: 'pending_tax_savings', message: 'Tax savings declarations awaiting HR verification (they do not reduce tax until approved)', count: Number(pendingTax.rows[0]!.n) });
   const otDetected = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM ot_slip WHERE employee_id = ANY($1) AND local_date BETWEEN $2 AND $3 AND status = 'detected'`, [ids, p.start_ad, p.end_ad]);
   if (Number(otDetected.rows[0]?.n) > 0) warnings.push({ code: 'ot_unapproved', message: 'Detected overtime not yet approved (only approved hours are paid)', count: Number(otDetected.rows[0]!.n) });
   const payouts = await payoutPreview(db, companyId, run.id, run.run_type, emps.filter((e) => e.assignment).map((e) => e.id));
@@ -97,7 +99,7 @@ export async function preflight(db: Queryable, companyId: string, run: RunRow): 
 }
 
 // ---------------------------------------------------------------- compute (plan §11.1, §13.6 step 3)
-interface EmpRow {
+export interface EmpRow {
   id: string; emp_code: string; name_en: string; name_ne: string | null; gender: 'male' | 'female' | 'other' | null; marital_status: 'single' | 'couple' | null;
   is_resident: boolean; regime: 'ssf' | 'pf' | 'none'; remote_area_class: 'A' | 'B' | 'C' | 'D' | null; disability: boolean; ot_eligible: boolean; festival_month: number | null;
   join_date: string | null; exit_date: string | null; assignment: { structure_version_id: string; base_amounts: Record<string, string>; valid: string } | null;
@@ -117,7 +119,7 @@ export function blendSegments(segments: Array<{ base_amounts: Record<string, str
   return out;
 }
 
-async function activeEmployees(db: Queryable, companyId: string, p: PeriodRow, run: RunRow): Promise<EmpRow[]> {
+export async function activeEmployees(db: Queryable, companyId: string, p: PeriodRow, run: RunRow): Promise<EmpRow[]> {
   const only = Array.isArray(run.params.employeeIds) ? (run.params.employeeIds as string[]) : null;
   const r = await db.query<EmpRow>(
     `SELECT e.id, e.emp_code, e.name_en, e.name_ne, e.gender, e.marital_status, e.is_resident, e.regime, e.remote_area_class, e.disability, e.ot_eligible, e.festival_month,
@@ -134,7 +136,7 @@ async function activeEmployees(db: Queryable, companyId: string, p: PeriodRow, r
   return r.rows;
 }
 
-async function componentsFor(db: Queryable, companyId: string, structureVersionId: string): Promise<ComponentDef[]> {
+export async function componentsFor(db: Queryable, companyId: string, structureVersionId: string): Promise<ComponentDef[]> {
   const v = await db.query<{ components: Array<{ code: string }> }>('SELECT components FROM salary_structure_version WHERE id = $1', [structureVersionId]);
   if (!v.rows[0]) throw new BadRequestError('salary structure version not found');
   const codes = v.rows[0].components.map((c) => c.code);
@@ -231,7 +233,7 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
         if (t?.recurringTaxable) recurringOverride = { taxable: t.recurringTaxable, retirement: t.recurringRetirement ?? '0' };
       }
       const decl = await client.query<{ life_premium: string; health_premium: string; cit_monthly: string; medical_cost: string; other_retirement_annual: string }>(
-        `SELECT life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual FROM tax_declaration WHERE employee_id = $1 AND fiscal_year_start = $2 AND status IN ('submitted', 'verified')`, [emp.id, fy.startYear]);
+        `SELECT life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual FROM tax_declaration WHERE employee_id = $1 AND fiscal_year_start = $2 AND status = 'verified'`, [emp.id, fy.startYear]);
       const dcl = decl.rows[0];
       const loans = await client.query<{ id: string; emi: string; principal: string; paid: string; kind: 'loan' | 'advance' }>(
         `SELECT l.id, l.emi, l.principal, l.kind, coalesce((SELECT sum(i.amount) FROM loan_installment i WHERE i.loan_id = l.id), 0)::text AS paid

@@ -174,7 +174,7 @@ export async function dailyDigest(db: Queryable, companyId: string, localDate: s
     `SELECT e.emp_code, e.name_en FROM employee e
       WHERE e.company_id = $1 AND e.status = 'active'
         AND NOT EXISTS (SELECT 1 FROM punch_event p WHERE p.employee_id = e.id AND p.local_date = $2)
-        AND NOT EXISTS (SELECT 1 FROM leave_request l WHERE l.employee_id = e.id AND l.status = 'approved' AND $2::date BETWEEN l.from_date AND l.to_date)
+        AND NOT EXISTS (SELECT 1 FROM leave_request l WHERE l.employee_id = e.id AND l.status = 'approved' AND $2::date BETWEEN l.from_date AND l.to_date AND l.from_time IS NULL)
         AND NOT EXISTS (SELECT 1 FROM holiday h WHERE h.company_id = e.company_id AND h.local_date = $2 AND h.branch_id IS NULL AND NOT h.optional)
         AND NOT (extract(dow from $2::date)::int = ANY(e.weekly_off_days))
       ORDER BY e.emp_code`, [companyId, localDate]);

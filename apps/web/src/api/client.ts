@@ -29,6 +29,13 @@ export function qs(params?: Query): string {
 }
 
 export const PASSWORD_CHANGE_MESSAGE = 'password change required';
+export const TWO_FACTOR_SETUP_MESSAGE = 'two-step sign-in setup required';
+const twoFactorListeners = new Set<() => void>();
+/** Fired when the company requires two-step sign-in for this account and it is not set up yet. */
+export function onTwoFactorSetupRequired(fn: () => void): () => void {
+  twoFactorListeners.add(fn);
+  return () => twoFactorListeners.delete(fn);
+}
 
 /** Turn an error response body into an ApiError (pure; unit-tested). */
 export function normalizeError(status: number, data: unknown): ApiError {
@@ -66,6 +73,7 @@ export async function api<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
   if (!res.ok) {
     const err = normalizeError(res.status, data);
     if (res.status === 403 && err.message === PASSWORD_CHANGE_MESSAGE) for (const l of passwordListeners) l();
+    if (res.status === 403 && err.message === TWO_FACTOR_SETUP_MESSAGE) for (const l of twoFactorListeners) l();
     throw err;
   }
   return data as T;

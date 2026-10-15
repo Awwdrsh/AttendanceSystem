@@ -85,7 +85,7 @@ export function settingsRoutes({ db }: AppDeps): Router {
         const x = inputs.get(`${e.id}|${d}`)!;
         const employed = (!e.join_date || d >= e.join_date) && (!e.exit_date || d <= e.exit_date);
         if (!x.shift || !employed) continue;
-        const ctx: DayContext = { holiday: x.holiday, weeklyOff: e.weekly_off_days.includes(weekdayOf(d)), leave: x.leave, wfh: x.wfh, otEligible: e.ot_eligible, otPreapprovedMin: x.otPreapprovedMin, otMinutesThisWeek: x.otMinutesThisWeek };
+        const ctx: DayContext = { holiday: x.holiday, weeklyOff: e.weekly_off_days.includes(weekdayOf(d)), leave: x.leave, wfh: x.wfh, otEligible: e.ot_eligible, otPreapprovedMin: x.otPreapprovedMin, otMinutesThisWeek: x.otMinutesThisWeek, ...(x.shortLeave.length ? { shortLeave: x.shortLeave } : {}) };
         const day = computeDay({ employeeId: e.id, localDate: d, shift: x.shift, punches: x.punches, ctx, policy: proposed });
         if (day.lateMin > 0) counts.late++;
         if (day.status === 'HalfDay') counts.halfDay++;

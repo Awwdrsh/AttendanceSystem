@@ -10,6 +10,7 @@ import {
 
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const ChangePasswordPage = lazy(() => import('./pages/ChangePasswordPage'));
+const TwoStepSetupPage = lazy(() => import('./pages/employee/TwoStepSetupPage'));
 const HomePage = lazy(() => import('./pages/employee/HomePage'));
 const LeavePage = lazy(() => import('./pages/employee/LeavePage'));
 const PayslipDetailPage = lazy(() => import('./pages/employee/PayslipDetailPage'));
@@ -56,6 +57,7 @@ export function App() {
       <Route path="/kiosk" element={<KioskPage />} />
       <Route element={<RequireRole />}>
         <Route path="/change-password" element={<ChangePasswordPage />} />
+        <Route path="/setup-two-step" element={<TwoStepSetupPage />} />
         <Route element={<Layout />}>
           <Route path="/" element={<Home />} />
           <Route path="/me/attendance/*" element={<MyAttendanceHub />} />

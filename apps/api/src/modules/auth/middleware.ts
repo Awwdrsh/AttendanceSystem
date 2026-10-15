@@ -5,6 +5,7 @@ import { ForbiddenError, NotFoundError, UnauthorizedError } from '../../errors.j
 import { resolveSession, type AuthUser, type Role } from './service.js';
 
 export const SESSION_COOKIE = 'hajiri_session';
+export const TWO_FACTOR_SETUP_MESSAGE = 'two-step sign-in setup required';
 
 declare module 'express-serve-static-core' {
   interface Request { user?: AuthUser; sessionToken?: string; authMethod?: 'cookie' | 'bearer' }
@@ -62,6 +63,8 @@ export function requireAuth(req: Request, _res: Response, next: NextFunction): v
 /** Users created with a temporary password must change it before using anything but /auth. */
 export function requirePasswordChanged(req: Request, _res: Response, next: NextFunction): void {
   if (req.user?.mustChangePassword) return next(new ForbiddenError('password change required'));
+  // The company requires two-step sign-in for this role: nothing but /auth works until it is set up.
+  if (req.user?.mustSetUpTwoFactor) return next(new ForbiddenError(TWO_FACTOR_SETUP_MESSAGE));
   next();
 }
 
