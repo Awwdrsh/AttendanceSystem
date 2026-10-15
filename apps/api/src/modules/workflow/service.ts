@@ -38,6 +38,13 @@ export type DecisionHandler = (db: Queryable, objectId: string, state: 'approved
 
 const handlers = new Map<string, DecisionHandler>();
 
+/** Inbox card context for object types owned by other modules (expense claims, travel, ...). */
+export type Summariser = (db: Queryable, inst: WorkflowInstance) => Promise<Record<string, unknown>>;
+const summarisers = new Map<string, Summariser>();
+export function registerSummariser(objectType: string, fn: Summariser): void {
+  summarisers.set(objectType, fn);
+}
+
 /** Today's calendar date in Nepal (UTC+05:45). Never use new Date().toISOString() for "today": between 00:00 and 05:45 NPT it is still yesterday in UTC. */
 export function nptToday(): string { return localDateOf(Date.now()); }
 
@@ -302,8 +309,10 @@ export async function summarise(db: Queryable, inst: WorkflowInstance): Promise<
       const { summariseTimesheet } = await import('../timesheets/service.js');
       return summariseTimesheet(db, inst.object_id);
     }
-    default:
-      return {};
+    default: {
+      const fn = summarisers.get(inst.object_type);
+      return fn ? fn(db, inst) : {};
+    }
   }
 }
 

@@ -9,9 +9,10 @@ import { PageHeader } from '../../components/PageHeader';
 import { bsMonthLabel, fmtDateShort, fmtMoney, fmtTime, minutesToHm, relativeTime } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
+import { EXPENSE_TYPE_COLOR, EXPENSE_TYPE_LABEL, expenseSummary } from '../expenses/approvalSummary';
 
-const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', timesheet: 'Timesheet' };
-const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', timesheet: 'teal' };
+const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', timesheet: 'Timesheet', ...EXPENSE_TYPE_LABEL };
+const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', timesheet: 'teal', ...EXPENSE_TYPE_COLOR };
 
 function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
@@ -56,8 +57,11 @@ function Summary({ item }: { item: InboxItem }) {
       if (Array.isArray(s.projects) && s.projects.length) extra.push(<Text key="p" size="xs" c="dimmed">{(s.projects as Array<{ name: string; min: number }>).map((x) => `${x.name} ${minutesToHm(x.min)}`).join(' · ')}</Text>);
       if (s.note) extra.push(<Text key="r" size="xs" c="dimmed">“{String(s.note)}”</Text>);
       break;
-    default:
+    default: {
+      const x = expenseSummary(item.objectType, item.objectId, s);
+      if (x) { main = x.main; extra.push(...x.extra); break; }
       main = <Text span c="dimmed">{JSON.stringify(s)}</Text>;
+    }
   }
   return (
     <>
