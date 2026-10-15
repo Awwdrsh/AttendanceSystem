@@ -66,6 +66,10 @@ export async function assertManages(db: Queryable, user: AuthUser, employeeId: s
   throw new ForbiddenError('not allowed to act for this employee');
 }
 
+/** Same as registerSummariser (kept for the lifecycle and help desk modules). */
+export type SummaryFn = Summariser;
+export const registerSummary = registerSummariser;
+
 /** Each request module registers how an approved/rejected decision is applied to its object. */
 export function registerHandler(objectType: string, fn: DecisionHandler): void {
   handlers.set(objectType, fn);

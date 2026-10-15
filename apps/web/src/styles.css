@@ -102,3 +102,4 @@ h1, h2, h3, .mantine-Title-root { letter-spacing: -0.02em; }
 .mantine-Badge-root { letter-spacing: 0.01em; }
 .hj-main { background-image: radial-gradient(rgba(11, 15, 23, 0.06) 1px, transparent 1px); background-size: 22px 22px; }
 [data-mantine-color-scheme='dark'] .hj-main { background-image: radial-gradient(rgba(232, 236, 239, 0.05) 1px, transparent 1px); }
+.hj-row-hover:hover { background: var(--hj-line-soft); }

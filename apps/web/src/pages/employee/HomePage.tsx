@@ -18,6 +18,7 @@ import { useQuery } from '../../lib/useQuery';
 import type { Flag, Punch } from '../../api/types';
 import { HomeTimer } from '../time/HomeTimer';
 import { HomeFieldCard } from '../field/HomeFieldCard';
+import { MyChecklistCard } from '../lifecycle/MyChecklistCard';
 
 export function describeFlag(f: Flag): string {
   switch (f.kind) {
@@ -170,6 +171,8 @@ export default function HomePage() {
           <Text size="sm" c="dimmed">{wfhAllowed ? 'You can clock in from home. Your clock-ins away from the office are marked Remote.' : 'Your work-from-home day is approved. Clock in from wherever you are.'}</Text>
         </Group>
       ) : null}
+
+      <MyChecklistCard />
 
       <Grid gap="md">
         <Grid.Col span={{ base: 12, md: 7 }}>

@@ -11,8 +11,8 @@ import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import { EXPENSE_TYPE_COLOR, EXPENSE_TYPE_LABEL, expenseSummary } from '../expenses/approvalSummary';
 
-const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', timesheet: 'Timesheet', shift_swap: 'Shift swap', letter_request: 'Letter request', ...EXPENSE_TYPE_LABEL };
-const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', timesheet: 'teal', shift_swap: 'cyan', letter_request: 'indigo', ...EXPENSE_TYPE_COLOR };
+const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', timesheet: 'Timesheet', shift_swap: 'Shift swap', letter_request: 'Letter request', probation_review: 'Probation', resignation: 'Resignation', ...EXPENSE_TYPE_LABEL };
+const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', timesheet: 'teal', shift_swap: 'cyan', letter_request: 'indigo', probation_review: 'teal', resignation: 'red', ...EXPENSE_TYPE_COLOR };
 
 function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase();

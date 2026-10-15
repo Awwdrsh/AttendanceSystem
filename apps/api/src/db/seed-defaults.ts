@@ -42,6 +42,8 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
     ['timesheet', [{ role: 'manager' }]],
     ['shift_swap', [{ role: 'manager' }]],
     ['letter_request', [{ role: 'hr' }]],
+    ['probation_review', [{ role: 'hr' }]],
+    ['resignation', [{ role: 'manager' }, { role: 'hr' }]],
   ];
   let w = 0;
   for (const [type, steps] of workflows) {
