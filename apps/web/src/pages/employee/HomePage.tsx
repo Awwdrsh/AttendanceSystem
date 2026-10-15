@@ -16,6 +16,7 @@ import { addDays, fmtDateLong, fmtDateShort, fmtTime, greeting, minutesToHm, rel
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import type { Flag, Punch } from '../../api/types';
+import { HomeFieldCard } from '../field/HomeFieldCard';
 
 export function describeFlag(f: Flag): string {
   switch (f.kind) {
@@ -32,6 +33,8 @@ export function describeFlag(f: Flag): string {
     case 'ClockSkew': return 'Your device clock was off, so server time was used';
     case 'OutsideLocation': return 'Clocked outside your work location (flagged for review)';
     case 'NoLocation': return 'Location was not available';
+    case 'Field': return 'Recorded on a field visit';
+    case 'Kiosk': return 'Recorded at a kiosk';
     default: return f.kind;
   }
 }
@@ -59,7 +62,7 @@ function workedFromPunches(punches: Punch[], now: number): number {
 }
 
 export const directionLabel = (d: string) => (d === 'in' ? 'Clocked in' : d === 'out' ? 'Clocked out' : 'Recorded');
-export const sourceLabel = (s: string) => ({ web: 'Web', mobile: 'Mobile', device: 'Terminal', manual: 'Added by HR', regularisation: 'Correction' } as Record<string, string>)[s] ?? s;
+export const sourceLabel = (s: string) => ({ web: 'Web', mobile: 'Mobile', device: 'Terminal', manual: 'Added by HR', regularisation: 'Correction', kiosk: 'Kiosk', field: 'Field visit' } as Record<string, string>)[s] ?? s;
 const requestKind = (k: string) => ({ leave: 'Time off', ot: 'Overtime', overtime: 'Overtime', regularisation: 'Attendance correction', correction: 'Attendance correction' } as Record<string, string>)[k] ?? k.charAt(0).toUpperCase() + k.slice(1).replace(/_/g, ' ');
 
 const CORRECTION: Record<string, string> = { wfh: 'Work from home', missed_punch: 'Missed punch', on_duty: 'On duty elsewhere', half_day: 'Half day', shift_change: 'Shift change' };
@@ -252,6 +255,8 @@ export default function HomePage() {
           </Paper>
         </Grid.Col>
       </Grid>
+
+      <HomeFieldCard key={punches.length} onChange={() => void today.reload()} />
 
       {m ? (
         <div>

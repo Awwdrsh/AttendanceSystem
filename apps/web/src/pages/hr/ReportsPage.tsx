@@ -1,7 +1,8 @@
 import { Box, Button, Group, Paper, Stack, Text, ThemeIcon } from '@mantine/core';
-import { IconAlertTriangle, IconBeach, IconCalendarEvent, IconCalendarStats, IconClockHour4, IconClockPlus, IconDeviceDesktop, IconDownload, IconFingerprint, IconUsers } from '@tabler/icons-react';
+import { IconAlertTriangle, IconBeach, IconCalendarEvent, IconCalendarStats, IconClockHour4, IconClockPlus, IconDeviceDesktop, IconDownload, IconFingerprint, IconMapPin, IconCoffee, IconUsers } from '@tabler/icons-react';
 import { useState, type ReactNode } from 'react';
 import { reports as repApi } from '../../api';
+import { download } from '../../api/client';
 import { BsMonthPicker, DateField } from '../../components/BsDatePicker';
 import { EmployeePicker } from '../../components/EmployeePicker';
 import { PageHeader } from '../../components/PageHeader';
@@ -35,6 +36,10 @@ export default function ReportsPage() {
     { key: 'ot', icon: ico(IconClockPlus), title: 'Overtime register', desc: 'Detected and approved overtime hours by day type and rate.', inputs: range, onExport: () => dl('ot', { from, to }, `ot-${from}_${to}.csv`) },
     { key: 'late', icon: ico(IconClockHour4), title: 'Late arrivals and early exits', desc: 'Count and minutes per employee across the date range.', inputs: range, onExport: () => dl('late-early', { from, to }, `late-early-${from}_${to}.csv`) },
     { key: 'exceptions', icon: ico(IconAlertTriangle), title: 'Exceptions summary', desc: 'Missing punches, absences, late arrivals and overtime flags per day.', inputs: range, onExport: () => dl('exceptions-summary', { from, to }, `exceptions-${from}_${to}.csv`) },
+    { key: 'breaks', icon: ico(IconCoffee), title: 'Breaks', desc: 'Every break with its type, start, end, minutes and whether it ran over the limit (up to 92 days).', inputs: range,
+      onExport: () => (from && to ? download(`/field/breaks?from=${from}&to=${to}&format=csv`, `breaks-${from}_${to}.csv`).catch((e) => toast.err(e, 'Export failed')) : toast.info('Pick the dates first, then export.')) },
+    { key: 'visits', icon: ico(IconMapPin), title: 'Field visits', desc: 'Client and site visits with place, purpose, arrival, departure, outcome and location (up to 92 days).', inputs: range,
+      onExport: () => (from && to ? download(`/field/visits?from=${from}&to=${to}&format=csv`, `field-visits-${from}_${to}.csv`).catch((e) => toast.err(e, 'Export failed')) : toast.info('Pick the dates first, then export.')) },
     { key: 'leave', icon: ico(IconBeach), title: 'Leave balances and liability', desc: 'Balance per leave type, with encashment liability at current basic pay.', onExport: () => dl('leave-balances', {}, 'leave-balances.csv') },
     { key: 'headcount', icon: ico(IconUsers), title: 'Headcount', desc: 'By branch, unit, employment type and gender.', onExport: () => dl('headcount', {}, 'headcount.csv') },
     { key: 'devices', icon: ico(IconDeviceDesktop), title: 'Device health', desc: 'Last seen, firmware, punches today and offline status for each terminal.', onExport: () => dl('devices', {}, 'devices.csv') },
