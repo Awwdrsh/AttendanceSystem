@@ -9,9 +9,10 @@ import { PageHeader } from '../../components/PageHeader';
 import { bsMonthLabel, fmtDateShort, fmtMoney, fmtTime, minutesToHm, relativeTime } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
+import { ProfileChangeSummary } from '../../components/people/ProfileChangeSummary';
 
-const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run' };
-const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand' };
+const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', profile_change: 'Profile change' };
+const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', profile_change: 'cyan' };
 
 function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
@@ -49,6 +50,9 @@ function Summary({ item }: { item: InboxItem }) {
     case 'payroll_run':
       main = <>{String(s.run_type).charAt(0).toUpperCase() + String(s.run_type).slice(1)} run for {bsMonthLabel(Number(s.bs_year), Number(s.bs_month))}</>;
       extra.push(<Text key="p" size="xs" c="dimmed">{String(s.payslips)} payslips</Text>, <Text key="n" size="xs" c="dimmed">Net {fmtMoney(String(s.total_net))}</Text>);
+      break;
+    case 'profile_change':
+      main = <ProfileChangeSummary summary={s} />;
       break;
     default:
       main = <Text span c="dimmed">{JSON.stringify(s)}</Text>;

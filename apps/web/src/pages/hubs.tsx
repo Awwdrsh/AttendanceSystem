@@ -42,6 +42,7 @@ const LocationsPage = lazy(() => import('./field/LocationsPage'));
 const PeopleDirectoryPage = lazy(() => import('./people/PeopleDirectoryPage'));
 const OrgChartPage = lazy(() => import('./people/OrgChartPage'));
 const OrgStructurePage = lazy(() => import('./people/OrgStructurePage'));
+const ChangeRequestsPage = lazy(() => import('./people/ChangeRequestsPage'));
 const MyDocumentsPage = lazy(() => import('./documents/MyDocumentsPage'));
 const DocumentsAdminPage = lazy(() => import('./documents/DocumentsAdminPage'));
 const OnboardingPage = lazy(() => import('./lifecycle/OnboardingPage'));
@@ -172,7 +173,7 @@ export function EngageHub() {
 }
 
 /** Tab paths of the Employees hub; App registers each one explicitly so they win over /employees/:id. */
-export const EMPLOYEES_HUB_PATHS = ['/employees', '/employees/structure', '/employees/onboarding', '/employees/exits', '/employees/documents'];
+export const EMPLOYEES_HUB_PATHS = ['/employees', '/employees/structure', '/employees/onboarding', '/employees/exits', '/employees/documents', '/employees/requests'];
 
 export function EmployeesHub() {
   return <Hub title="Employees" tabs={[
@@ -181,6 +182,7 @@ export function EmployeesHub() {
     { path: '/employees/onboarding', label: 'Onboarding', element: <OnboardingPage /> },
     { path: '/employees/exits', label: 'Exits', element: <ExitsPage /> },
     { path: '/employees/documents', label: 'Documents & letters', element: <DocumentsAdminPage /> },
+    { path: '/employees/requests', label: 'Change requests', element: <ChangeRequestsPage /> },
   ]} />;
 }
 
