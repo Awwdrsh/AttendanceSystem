@@ -10,8 +10,8 @@ import { bsMonthLabel, fmtDateShort, fmtMoney, fmtTime, minutesToHm, relativeTim
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 
-const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run' };
-const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand' };
+const TYPE_LABEL: Record<string, string> = { leave_request: 'Leave', regularisation_request: 'Attendance correction', ot_request: 'Overtime', payroll_run: 'Payroll run', probation_review: 'Probation', resignation: 'Resignation' };
+const TYPE_COLOR: Record<string, string> = { leave_request: 'blue', regularisation_request: 'orange', ot_request: 'grape', payroll_run: 'brand', probation_review: 'teal', resignation: 'red' };
 
 function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
@@ -51,7 +51,12 @@ function Summary({ item }: { item: InboxItem }) {
       extra.push(<Text key="p" size="xs" c="dimmed">{String(s.payslips)} payslips</Text>, <Text key="n" size="xs" c="dimmed">Net {fmtMoney(String(s.total_net))}</Text>);
       break;
     default:
-      main = <Text span c="dimmed">{JSON.stringify(s)}</Text>;
+      // Modules describe their own requests with a headline, a muted detail and an optional quoted note.
+      if (typeof s.headline === 'string') {
+        main = <>{s.headline}</>;
+        if (typeof s.detail === 'string') extra.push(<Text key="d" size="xs" c="dimmed">{s.detail}</Text>);
+        if (typeof s.note === 'string' && s.note) extra.push(<Text key="n" size="xs" c="dimmed">“{s.note}”</Text>);
+      } else main = <Text span c="dimmed">{JSON.stringify(s)}</Text>;
   }
   return (
     <>
