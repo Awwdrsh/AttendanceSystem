@@ -298,6 +298,10 @@ export async function summarise(db: Queryable, inst: WorkflowInstance): Promise<
            FROM payroll_run r JOIN payroll_period p ON p.id = r.period_id WHERE r.id = $1`, [inst.object_id]).catch(() => ({ rows: [] as Record<string, unknown>[] }));
       return r.rows[0] ?? {};
     }
+    case 'timesheet': {
+      const { summariseTimesheet } = await import('../timesheets/service.js');
+      return summariseTimesheet(db, inst.object_id);
+    }
     default:
       return {};
   }
