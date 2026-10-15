@@ -8,6 +8,7 @@ import { BadRequestError, ConflictError, ForbiddenError, HttpError, NotFoundErro
 import { lockAttendance } from '../attendance/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
 import { resolveRules } from './rules.js';
+import { claimPayouts, payoutPreview, previewMessage, releaseRunPayouts, settleRunPayouts, withPayoutComponents } from '../expenses/payroll.js';
 
 export interface PeriodRow { id: string; company_id: string; bs_year: number; bs_month: number; start_ad: string; end_ad: string; days: number; attendance_locked_at: Date | null }
 export interface RunRow {
@@ -87,6 +88,8 @@ export async function preflight(db: Queryable, companyId: string, run: RunRow): 
   if (Number(pendingLeave.rows[0]?.n) > 0) warnings.push({ code: 'pending_leave', message: 'Leave requests pending that affect this period', count: Number(pendingLeave.rows[0]!.n) });
   const otDetected = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM ot_slip WHERE employee_id = ANY($1) AND local_date BETWEEN $2 AND $3 AND status = 'detected'`, [ids, p.start_ad, p.end_ad]);
   if (Number(otDetected.rows[0]?.n) > 0) warnings.push({ code: 'ot_unapproved', message: 'Detected overtime not yet approved (only approved hours are paid)', count: Number(otDetected.rows[0]!.n) });
+  const payouts = await payoutPreview(db, companyId, run.id, run.run_type, emps.filter((e) => e.assignment).map((e) => e.id));
+  if (payouts.count > 0) warnings.push({ code: 'expense_payouts', message: previewMessage(payouts), count: payouts.count, employees: payouts.employees });
 
   const joiners = emps.filter((e) => e.join_date && e.join_date >= p.start_ad && e.join_date <= p.end_ad).map((e) => e.emp_code);
   const leavers = emps.filter((e) => e.exit_date && e.exit_date >= p.start_ad && e.exit_date <= p.end_ad).map((e) => e.emp_code);
@@ -179,6 +182,7 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
     await client.query('BEGIN');
     await client.query('DELETE FROM payslip_line WHERE payslip_id IN (SELECT id FROM payslip WHERE run_id = $1)', [runId]);
     await client.query('DELETE FROM payslip WHERE run_id = $1', [runId]);
+    await releaseRunPayouts(client, runId);
     for (const emp of emps) {
       if (!emp.assignment) continue;
       let components = componentCache.get(emp.assignment.structure_version_id);
@@ -235,6 +239,9 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
       const loanInputs: LoanInput[] = loans.rows.map((l) => ({ id: l.id, emi: l.emi, remaining: D(l.principal).minus(l.paid).toFixed(2), kind: l.kind })).filter((l) => D(l.remaining).gt(0));
       const inputs = (await client.query<{ component_code: string; amount: string; note: string | null }>('SELECT component_code, amount, note FROM payroll_input WHERE run_id = $1 AND employee_id = $2', [runId, emp.id])).rows
         .map((i) => ({ code: i.component_code, amount: i.amount, ...(i.note ? { note: i.note } : {}) }));
+      // Approved expense claims and travel settlements: paid (or recovered) once, as non-taxable one-time lines.
+      const payouts = await claimPayouts(client, companyId, runId, run.run_type, emp.id);
+      if (payouts.length) { inputs.push(...payouts); components = await withPayoutComponents(client, companyId, components, payouts); }
 
       // Festival allowance proration (Sec 37(3)): months of service inside the fiscal year, bounded by join and exit dates.
       const serviceFrom = emp.join_date && emp.join_date > fy.startAd ? emp.join_date : fy.startAd;
@@ -419,6 +426,7 @@ export async function lockRun(db: Db, companyId: string, runId: string, actorId:
         await client.query(`UPDATE loan SET status = 'closed' WHERE id = $1 AND principal <= (SELECT coalesce(sum(amount), 0) FROM loan_installment WHERE loan_id = $1)`, [li.loanId]);
       }
     }
+    await settleRunPayouts(client, runId);
     await audit(client, { actorId, action: 'lock', table: 'payroll_run', rowId: runId, after: { attendanceLocked: n } });
     await client.query('COMMIT');
     return { attendanceLocked: n };
