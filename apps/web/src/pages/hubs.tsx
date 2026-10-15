@@ -55,6 +55,7 @@ const MyGoalsPage = lazy(() => import('./performance/MyGoalsPage'));
 const MyReviewsPage = lazy(() => import('./performance/MyReviewsPage'));
 const OneOnOnesPage = lazy(() => import('./performance/OneOnOnesPage'));
 const MyLearningPage = lazy(() => import('./performance/MyLearningPage'));
+const FeedbackPage = lazy(() => import('./performance/FeedbackPage'));
 const TeamGoalsPage = lazy(() => import('./performance/TeamGoalsPage'));
 const ReviewCyclesPage = lazy(() => import('./performance/ReviewCyclesPage'));
 const LearningAdminPage = lazy(() => import('./performance/LearningAdminPage'));
@@ -149,6 +150,7 @@ export function GrowthHub() {
     { path: '/me/growth', label: 'Goals', element: <MyGoalsPage /> },
     { path: '/me/growth/reviews', label: 'Reviews', element: <MyReviewsPage /> },
     { path: '/me/growth/one-on-ones', label: '1-on-1s', element: <OneOnOnesPage /> },
+    { path: '/me/growth/feedback', label: 'Feedback', element: <FeedbackPage /> },
     { path: '/me/growth/learning', label: 'Learning', element: <MyLearningPage /> },
   ]} />;
 }
