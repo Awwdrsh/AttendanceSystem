@@ -16,6 +16,7 @@ import { addDays, fmtDateLong, fmtDateShort, fmtTime, greeting, minutesToHm, rel
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import type { Flag, Punch } from '../../api/types';
+import { HomeCompanyCard } from '../../components/engage/HomeCompanyCard';
 
 export function describeFlag(f: Flag): string {
   switch (f.kind) {
@@ -264,6 +265,8 @@ export default function HomePage() {
           ]} />
         </div>
       ) : null}
+
+      <HomeCompanyCard />
 
       {me.data ? (
         <Grid gap="md">

@@ -64,6 +64,7 @@ const InterviewsPage = lazy(() => import('./hiring/InterviewsPage'));
 const RequisitionsPage = lazy(() => import('./hiring/RequisitionsPage'));
 const EngageFeedPage = lazy(() => import('./engage/EngageFeedPage'));
 const SurveysPage = lazy(() => import('./engage/SurveysPage'));
+const SuggestionsPage = lazy(() => import('./engage/SuggestionsPage'));
 
 export function AttendanceHub() {
   return <Hub title="Attendance" tabs={[
@@ -168,6 +169,7 @@ export function EngageHub() {
   return <Hub title="Engage" tabs={[
     { path: '/engage', label: 'Feed', element: <EngageFeedPage /> },
     { path: '/engage/surveys', label: 'Surveys & polls', element: <SurveysPage /> },
+    { path: '/engage/suggestions', label: 'Suggestions', element: <SuggestionsPage />, roles: ['hr'] },
   ]} />;
 }
 
