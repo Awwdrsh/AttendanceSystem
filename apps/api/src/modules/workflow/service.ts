@@ -298,6 +298,12 @@ export async function summarise(db: Queryable, inst: WorkflowInstance): Promise<
            FROM payroll_run r JOIN payroll_period p ON p.id = r.period_id WHERE r.id = $1`, [inst.object_id]).catch(() => ({ rows: [] as Record<string, unknown>[] }));
       return r.rows[0] ?? {};
     }
+    case 'training_nomination': {
+      const r = await db.query(
+        `SELECT c.title AS course_title, c.delivery, c.cost, e.reason, s.starts_at FROM lrn_enrollment e JOIN lrn_course c ON c.id = e.course_id
+           LEFT JOIN lrn_session s ON s.id = e.session_id WHERE e.id = $1`, [inst.object_id]);
+      return r.rows[0] ?? {};
+    }
     default:
       return {};
   }
