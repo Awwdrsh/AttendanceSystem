@@ -21,6 +21,8 @@ import { HomeTimer } from '../time/HomeTimer';
 import { HomeFieldCard } from '../field/HomeFieldCard';
 import { MyChecklistCard } from '../lifecycle/MyChecklistCard';
 import { HomeCompanyCard } from '../../components/engage/HomeCompanyCard';
+import { LateClockInModal, WhosOutCard } from '../attendance-tools/HomeAttendanceExtras';
+import { MyTodoCard } from '../tasks/MyTodoCard';
 
 export function describeFlag(f: Flag): string {
   switch (f.kind) {
@@ -91,6 +93,7 @@ export default function HomePage() {
   const shifts = useQuery(() => shiftApi.list(), [], { enabled: !!user?.employeeId });
   const [busy, setBusy] = useState(false);
   const [reasonOpen, setReasonOpen] = useState<{ direction: 'in' | 'out'; message: string } | null>(null);
+  const [lateBlocked, setLateBlocked] = useState<string | null>(null);
   const [reason, setReason] = useState('');
   const [wfhOpen, setWfhOpen] = useState(false);
   const [wfhDate, setWfhDate] = useState<string | null>(todayNpt());
@@ -155,6 +158,7 @@ export default function HomePage() {
       // Clocking in from home needs a photo: open the camera and retry with it.
       if (e instanceof ApiError && e.status === 400 && (e.details as { code?: string } | undefined)?.code === 'photo_required') { setReasonOpen(null); setCamera({ direction, ...(why ? { reason: why } : {}) }); if (!camera) toast.info('You are clocking in from home, so a quick photo is needed.'); }
       else if (e instanceof ApiError && e.status === 400 && /reason/i.test(e.message)) { setReasonOpen({ direction, message: e.message }); }
+      else if (e instanceof ApiError && e.status === 409 && (e.details as { code?: string } | undefined)?.code === 'late_blocked') { setLateBlocked(e.message); }
       else toast.err(e, direction === 'in' ? 'Clock-in not saved' : 'Clock-out not saved');
     } finally { setBusy(false); }
   };
@@ -286,7 +290,10 @@ export default function HomePage() {
         </div>
       ) : null}
 
+      <MyTodoCard />
+      <WhosOutCard />
       <HomeCompanyCard />
+      <LateClockInModal message={lateBlocked} onClose={() => setLateBlocked(null)} />
 
       {me.data ? (
         <Grid gap="md">

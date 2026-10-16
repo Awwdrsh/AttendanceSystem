@@ -25,6 +25,7 @@ const HelpdeskPage = lazy(() => import('./pages/helpdesk/HelpdeskPage'));
 const InsightsPage = lazy(() => import('./pages/insights/InsightsPage'));
 const CareersPage = lazy(() => import('./pages/hiring/CareersPage'));
 const KioskPage = lazy(() => import('./pages/field/KioskPage'));
+const TasksPage = lazy(() => import('./pages/tasks/TasksPage'));
 
 /** Everyone lands where their work is: employees on their own day, HR on the overview, managers on approvals. */
 function Home() {
@@ -65,6 +66,8 @@ export function App() {
           <Route path="/me/claims/*" element={<MyClaimsHub />} />
           <Route path="/me/growth/*" element={<GrowthHub />} />
           <Route path="/me/help" element={<MyTicketsPage />} />
+          <Route path="/tasks" element={<TasksPage />} />
+          <Route path="/tasks/:boardId" element={<TasksPage />} />
           <Route path="/people/*" element={<PeopleHub />} />
           <Route path="/engage/*" element={<EngageHub />} />
           <Route path="/me/leave" element={<LeavePage />} />

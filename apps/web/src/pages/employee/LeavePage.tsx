@@ -95,6 +95,7 @@ export function LeaveApplyForm({ employeeId, onDone }: { employeeId: string; onD
         <Alert variant="light" color={preview.balanceAfter < 0 ? 'orange' : 'gray'}>
           <Text size="sm" fw={600}>{preview.hours ? `${preview.hours} ${preview.hours === 1 ? 'hour' : 'hours'} (${preview.days} of a day)` : fmtDays(preview.days)} will be deducted</Text>
           <Text size="sm" c="dimmed">{preview.explanation}{preview.sandwichApplied ? ' Weekends or holidays between leave days are counted (sandwich rule).' : ''}</Text>
+          {preview.bridge ? <Text size="sm" c="dimmed" mt={4}>Also, {preview.bridge.explanation.charAt(0).toLowerCase()}{preview.bridge.explanation.slice(1)}.</Text> : null}
           <Text size="sm" mt={4}>Balance after this request: <Text span fw={600} className="num">{preview.balanceAfter.toFixed(1)}</Text> of {preview.available.toFixed(1)} days</Text>
         </Alert>
       ) : null}

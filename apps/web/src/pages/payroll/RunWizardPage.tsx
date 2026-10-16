@@ -1,3 +1,4 @@
+import { PayrollAttendanceCheck } from '../attendance-tools/PayrollAttendanceCheck';
 import { Alert, Badge, Button, Group, Modal, Paper, ScrollArea, Select, SimpleGrid, Stack, Stepper, Table, Text, TextInput, Textarea } from '@mantine/core';
 import { IconAlertCircle, IconAlertTriangle, IconCalculator, IconCheck, IconChevronLeft, IconCircleCheck, IconDownload, IconInfoCircle, IconLock, IconPlus, IconSend, IconShieldCheck } from '@tabler/icons-react';
 import { useEffect, useState, type ReactNode } from 'react';
@@ -131,6 +132,7 @@ export default function RunWizardPage() {
           <IssueList items={pf.blockers} kind="blocker" />
           <IssueList items={pf.warnings} kind="warning" />
         </SimpleGrid> : <EmptyState compact icon={<IconShieldCheck size={20} stroke={1.6} />} title="Checks not run yet" hint="Run the checks to see anything that would stop this run from calculating correctly." />}
+        {run.run_type === 'regular' ? <PayrollAttendanceCheck bsYear={period.bs_year} bsMonth={period.bs_month} /> : null}
         <StepNav>
           {pf && !pf.ok && hasRole('hr') && canCompute ? <Button variant="default" color="orange" leftSection={<IconAlertTriangle {...ICON} />} onClick={() => setOverride(true)}>Calculate anyway</Button> : null}
           {pf?.ok ? <Button onClick={() => setStep(1)}>Continue to inputs</Button> : <Button variant="default" disabled>Continue to inputs</Button>}

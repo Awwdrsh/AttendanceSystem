@@ -67,6 +67,9 @@ const InterviewsPage = lazy(() => import('./hiring/InterviewsPage'));
 const RequisitionsPage = lazy(() => import('./hiring/RequisitionsPage'));
 const EngageFeedPage = lazy(() => import('./engage/EngageFeedPage'));
 const SurveysPage = lazy(() => import('./engage/SurveysPage'));
+const AttendanceIssuesPage = lazy(() => import('./attendance-tools/AttendanceIssuesPage'));
+const LatePenaltiesPage = lazy(() => import('./attendance-tools/LatePenaltiesPage'));
+const AttendanceUploadPage = lazy(() => import('./attendance-tools/AttendanceUploadPage'));
 const SuggestionsPage = lazy(() => import('./engage/SuggestionsPage'));
 
 export function AttendanceHub() {
@@ -80,6 +83,9 @@ export function AttendanceHub() {
     { path: '/attendance/visits', label: 'Field visits', element: <FieldVisitsPage /> },
     { path: '/attendance/projects', label: 'Projects', element: <ProjectsPage />, roles: ['hr'] },
     { path: '/attendance/kiosks', label: 'Kiosks', element: <KiosksPage />, roles: ['hr'] },
+    { path: '/attendance/issues', label: 'Issues', element: <AttendanceIssuesPage /> },
+    { path: '/attendance/penalties', label: 'Late penalties', element: <LatePenaltiesPage />, roles: ['hr'] },
+    { path: '/attendance/upload', label: 'Upload', element: <AttendanceUploadPage />, roles: ['hr'] },
     { path: '/attendance/fix', label: 'Fix a punch', element: <FixPunchPage /> },
   ]} />;
 }
