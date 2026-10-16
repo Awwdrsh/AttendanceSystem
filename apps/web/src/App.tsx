@@ -3,9 +3,10 @@ import { Navigate, Route, Routes, useParams } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { RequireRole } from './auth/RequireRole';
 import { useAuth } from './auth/AuthProvider';
+import { FeatureRoute, FeaturesProvider } from './lib/features';
 import {
   AttendanceHub, EMPLOYEES_HUB_PATHS, EmployeesHub, EngageHub, ExpensesHub, GrowthHub, HiringHub, LeaveHub, MyAttendanceHub, MyClaimsHub, MyPayHub,
-  PayrollHub, PeopleHub, PerformanceHub, ProfileHub, SettingsHub, TimesheetHub,
+  PayrollHub, PeopleHub, PerformanceHub, ProfileHub, ReportsHub, SettingsHub, TimesheetHub,
 } from './pages/hubs';
 
 const LoginPage = lazy(() => import('./pages/LoginPage'));
@@ -18,7 +19,7 @@ const NotificationsPage = lazy(() => import('./pages/employee/NotificationsPage'
 const ApprovalsPage = lazy(() => import('./pages/manager/ApprovalsPage'));
 const DashboardPage = lazy(() => import('./pages/hr/DashboardPage'));
 const EmployeeDetailPage = lazy(() => import('./pages/hr/EmployeeDetailPage'));
-const ReportsPage = lazy(() => import('./pages/hr/ReportsPage'));
+
 const RunWizardPage = lazy(() => import('./pages/payroll/RunWizardPage'));
 const MyTicketsPage = lazy(() => import('./pages/helpdesk/MyTicketsPage'));
 const HelpdeskPage = lazy(() => import('./pages/helpdesk/HelpdeskPage'));
@@ -58,13 +59,13 @@ export function App() {
       <Route element={<RequireRole />}>
         <Route path="/change-password" element={<ChangePasswordPage />} />
         <Route path="/setup-two-step" element={<TwoStepSetupPage />} />
-        <Route element={<Layout />}>
+        <Route element={<FeaturesProvider><Layout /></FeaturesProvider>}>
           <Route path="/" element={<Home />} />
           <Route path="/me/attendance/*" element={<MyAttendanceHub />} />
           <Route path="/me/timesheet" element={<TimesheetHub />} />
           <Route path="/me/claims/*" element={<MyClaimsHub />} />
           <Route path="/me/growth/*" element={<GrowthHub />} />
-          <Route path="/me/help" element={<MyTicketsPage />} />
+          <Route path="/me/help" element={<FeatureRoute feature="helpdesk"><MyTicketsPage /></FeatureRoute>} />
           <Route path="/people/*" element={<PeopleHub />} />
           <Route path="/engage/*" element={<EngageHub />} />
           <Route path="/me/leave" element={<LeavePage />} />
@@ -84,10 +85,10 @@ export function App() {
           <Route element={<RequireRole roles={['hr']} />}>
             <Route path="/overview" element={<DashboardPage />} />
             {EMPLOYEES_HUB_PATHS.map((p) => <Route key={p} path={p} element={<EmployeesHub />} />)}
-            <Route path="/helpdesk" element={<HelpdeskPage />} />
+            <Route path="/helpdesk" element={<FeatureRoute feature="helpdesk"><HelpdeskPage /></FeatureRoute>} />
             <Route path="/insights" element={<InsightsPage />} />
             <Route path="/employees/:id" element={<EmployeeDetailPage />} />
-            <Route path="/reports" element={<ReportsPage />} />
+            <Route path="/reports/*" element={<ReportsHub />} />
             <Route path="/settings/*" element={<SettingsHub />} />
           </Route>
           <Route element={<RequireRole roles={['hr']} />}>

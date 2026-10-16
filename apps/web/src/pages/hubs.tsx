@@ -68,6 +68,16 @@ const RequisitionsPage = lazy(() => import('./hiring/RequisitionsPage'));
 const EngageFeedPage = lazy(() => import('./engage/EngageFeedPage'));
 const SurveysPage = lazy(() => import('./engage/SurveysPage'));
 const SuggestionsPage = lazy(() => import('./engage/SuggestionsPage'));
+const FeaturesPage = lazy(() => import('./hr/FeaturesPage'));
+const ReportsPage = lazy(() => import('./hr/ReportsPage'));
+const ReportBuilderPage = lazy(() => import('./hr/ReportBuilderPage'));
+
+export function ReportsHub() {
+  return <Hub title="Reports" tabs={[
+    { path: '/reports', label: 'Catalogue', element: <ReportsPage /> },
+    { path: '/reports/builder', label: 'Build a report', element: <ReportBuilderPage /> },
+  ]} />;
+}
 
 export function AttendanceHub() {
   return <Hub title="Attendance" tabs={[
@@ -75,11 +85,11 @@ export function AttendanceHub() {
     { path: '/attendance/from-home', label: 'Work from home', element: <RemoteCheckinsPage /> },
     { path: '/attendance/exceptions', label: 'Exceptions', element: <ExceptionsPage />, roles: ['hr'] },
     { path: '/attendance/overtime', label: 'Overtime', element: <OtSlipsPage />, roles: ['hr'] },
-    { path: '/attendance/timesheets', label: 'Timesheets', element: <TimesheetsReviewPage /> },
+    { path: '/attendance/timesheets', label: 'Timesheets', element: <TimesheetsReviewPage />, feature: 'time' },
     { path: '/attendance/rosters', label: 'Rosters', element: <RostersPage /> },
-    { path: '/attendance/visits', label: 'Field visits', element: <FieldVisitsPage /> },
-    { path: '/attendance/projects', label: 'Projects', element: <ProjectsPage />, roles: ['hr'] },
-    { path: '/attendance/kiosks', label: 'Kiosks', element: <KiosksPage />, roles: ['hr'] },
+    { path: '/attendance/visits', label: 'Field visits', element: <FieldVisitsPage />, feature: 'field' },
+    { path: '/attendance/projects', label: 'Projects', element: <ProjectsPage />, roles: ['hr'], feature: 'time' },
+    { path: '/attendance/kiosks', label: 'Kiosks', element: <KiosksPage />, roles: ['hr'], feature: 'field' },
     { path: '/attendance/fix', label: 'Fix a punch', element: <FixPunchPage /> },
   ]} />;
 }
@@ -112,6 +122,7 @@ export function SettingsHub() {
     { path: '/settings/devices', label: 'Devices', element: <DevicesPage /> },
     { path: '/settings/locations', label: 'Locations', element: <LocationsPage /> },
     { path: '/settings/users', label: 'Users & roles', element: <UsersPage /> },
+    { path: '/settings/features', label: 'Features', element: <FeaturesPage /> },
     { path: '/settings/setup', label: 'Setup checklist', element: <SetupPage /> },
   ]} />;
 }
@@ -120,7 +131,7 @@ export function ProfileHub() {
   const { user } = useAuth();
   return <Hub title="Profile" tabs={[
     { path: '/me/profile', label: 'Profile', element: <ProfilePage /> },
-    { path: '/me/profile/documents', label: 'Documents & letters', element: <MyDocumentsPage />, show: !!user?.employeeId },
+    { path: '/me/profile/documents', label: 'Documents & letters', element: <MyDocumentsPage />, show: !!user?.employeeId, feature: 'documents' },
     { path: '/me/profile/security', label: 'Sign-in security', element: <SecurityPage /> },
     { path: '/me/profile/privacy', label: 'Privacy & my data', element: <MyDataPage />, show: !!user?.employeeId },
   ]} />;
@@ -130,8 +141,8 @@ export function MyAttendanceHub() {
   return <Hub title="My attendance" tabs={[
     { path: '/me/attendance', label: 'Attendance', element: <MyAttendancePage /> },
     { path: '/me/attendance/roster', label: 'My roster', element: <MyRosterPage /> },
-    { path: '/me/attendance/visits', label: 'Visits & breaks', element: <MyFieldVisitsPage /> },
-    { path: '/me/attendance/kiosk', label: 'Kiosk badge', element: <MyKioskPage /> },
+    { path: '/me/attendance/visits', label: 'Visits & breaks', element: <MyFieldVisitsPage />, feature: 'field' },
+    { path: '/me/attendance/kiosk', label: 'Kiosk badge', element: <MyKioskPage />, feature: 'field' },
   ]} />;
 }
 
@@ -144,23 +155,23 @@ export function MyPayHub() {
 
 export function MyClaimsHub() {
   return <Hub title="Claims & travel" tabs={[
-    { path: '/me/claims', label: 'Expense claims', element: <MyClaimsPage /> },
-    { path: '/me/claims/travel', label: 'Travel', element: <MyTravelPage /> },
+    { path: '/me/claims', label: 'Expense claims', element: <MyClaimsPage />, feature: 'expenses' },
+    { path: '/me/claims/travel', label: 'Travel', element: <MyTravelPage />, feature: 'expenses' },
   ]} />;
 }
 
 export function GrowthHub() {
   return <Hub title="Growth" tabs={[
-    { path: '/me/growth', label: 'Goals', element: <MyGoalsPage /> },
-    { path: '/me/growth/reviews', label: 'Reviews', element: <MyReviewsPage /> },
-    { path: '/me/growth/one-on-ones', label: '1-on-1s', element: <OneOnOnesPage /> },
-    { path: '/me/growth/feedback', label: 'Feedback', element: <FeedbackPage /> },
-    { path: '/me/growth/learning', label: 'Learning', element: <MyLearningPage /> },
+    { path: '/me/growth', label: 'Goals', element: <MyGoalsPage />, feature: 'performance' },
+    { path: '/me/growth/reviews', label: 'Reviews', element: <MyReviewsPage />, feature: 'performance' },
+    { path: '/me/growth/one-on-ones', label: '1-on-1s', element: <OneOnOnesPage />, feature: 'performance' },
+    { path: '/me/growth/feedback', label: 'Feedback', element: <FeedbackPage />, feature: 'performance' },
+    { path: '/me/growth/learning', label: 'Learning', element: <MyLearningPage />, feature: 'learning' },
   ]} />;
 }
 
 export function TimesheetHub() {
-  return <Hub title="Timesheet" tabs={[{ path: '/me/timesheet', label: 'Timesheet', element: <MyTimesheetPage /> }]} />;
+  return <Hub title="Timesheet" tabs={[{ path: '/me/timesheet', label: 'Timesheet', element: <MyTimesheetPage />, feature: 'time' }]} />;
 }
 
 export function PeopleHub() {
@@ -173,8 +184,8 @@ export function PeopleHub() {
 export function EngageHub() {
   return <Hub title="Engage" tabs={[
     { path: '/engage', label: 'Feed', element: <EngageFeedPage /> },
-    { path: '/engage/surveys', label: 'Surveys & polls', element: <SurveysPage /> },
-    { path: '/engage/suggestions', label: 'Suggestions', element: <SuggestionsPage />, roles: ['hr'] },
+    { path: '/engage/surveys', label: 'Surveys & polls', element: <SurveysPage />, feature: 'surveys' },
+    { path: '/engage/suggestions', label: 'Suggestions', element: <SuggestionsPage />, roles: ['hr'], feature: 'suggestions' },
   ]} />;
 }
 
@@ -185,34 +196,34 @@ export function EmployeesHub() {
   return <Hub title="Employees" tabs={[
     { path: '/employees', label: 'Directory', element: <EmployeesPage /> },
     { path: '/employees/structure', label: 'Org structure', element: <OrgStructurePage /> },
-    { path: '/employees/onboarding', label: 'Onboarding', element: <OnboardingPage /> },
-    { path: '/employees/exits', label: 'Exits', element: <ExitsPage /> },
-    { path: '/employees/documents', label: 'Documents & letters', element: <DocumentsAdminPage /> },
+    { path: '/employees/onboarding', label: 'Onboarding', element: <OnboardingPage />, feature: 'lifecycle' },
+    { path: '/employees/exits', label: 'Exits', element: <ExitsPage />, feature: 'lifecycle' },
+    { path: '/employees/documents', label: 'Documents & letters', element: <DocumentsAdminPage />, feature: 'documents' },
     { path: '/employees/requests', label: 'Change requests', element: <ChangeRequestsPage /> },
   ]} />;
 }
 
 export function ExpensesHub() {
   return <Hub title="Expenses & travel" tabs={[
-    { path: '/expenses', label: 'Claims', element: <ClaimsReviewPage /> },
-    { path: '/expenses/travel', label: 'Travel', element: <TravelReviewPage /> },
-    { path: '/expenses/policies', label: 'Policies', element: <ExpensePoliciesPage />, roles: ['hr'] },
+    { path: '/expenses', label: 'Claims', element: <ClaimsReviewPage />, feature: 'expenses' },
+    { path: '/expenses/travel', label: 'Travel', element: <TravelReviewPage />, feature: 'expenses' },
+    { path: '/expenses/policies', label: 'Policies', element: <ExpensePoliciesPage />, roles: ['hr'], feature: 'expenses' },
   ]} />;
 }
 
 export function PerformanceHub() {
   return <Hub title="Performance" tabs={[
-    { path: '/performance', label: 'Goals', element: <TeamGoalsPage /> },
-    { path: '/performance/reviews', label: 'Review cycles', element: <ReviewCyclesPage /> },
-    { path: '/performance/learning', label: 'Learning', element: <LearningAdminPage /> },
+    { path: '/performance', label: 'Goals', element: <TeamGoalsPage />, feature: 'performance' },
+    { path: '/performance/reviews', label: 'Review cycles', element: <ReviewCyclesPage />, feature: 'performance' },
+    { path: '/performance/learning', label: 'Learning', element: <LearningAdminPage />, feature: 'learning' },
   ]} />;
 }
 
 export function HiringHub() {
   return <Hub title="Hiring" tabs={[
-    { path: '/hiring', label: 'Jobs', element: <JobsPage /> },
-    { path: '/hiring/pipeline', label: 'Candidates', element: <PipelinePage /> },
-    { path: '/hiring/interviews', label: 'Interviews', element: <InterviewsPage /> },
-    { path: '/hiring/requisitions', label: 'Requisitions', element: <RequisitionsPage /> },
+    { path: '/hiring', label: 'Jobs', element: <JobsPage />, feature: 'hiring' },
+    { path: '/hiring/pipeline', label: 'Candidates', element: <PipelinePage />, feature: 'hiring' },
+    { path: '/hiring/interviews', label: 'Interviews', element: <InterviewsPage />, feature: 'hiring' },
+    { path: '/hiring/requisitions', label: 'Requisitions', element: <RequisitionsPage />, feature: 'hiring' },
   ]} />;
 }

@@ -3,18 +3,22 @@ import type { ReactNode } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthProvider';
 import type { Role } from '../api/types';
+import type { FeatureKey } from '../api/catalog';
+import { useFeatures } from '../lib/features';
 import { EmbeddedContext } from './embedded';
 import { PageHeader } from './PageHeader';
 
 
-export interface HubTab { path: string; label: string; element: ReactNode; roles?: Role[]; show?: boolean }
+/** `feature` hides the tab while that module is switched off under Settings → Features. */
+export interface HubTab { path: string; label: string; element: ReactNode; roles?: Role[]; show?: boolean; feature?: FeatureKey }
 
 /** One page with a title and tabs; each tab has its own URL so links and the back button work. */
 export function Hub({ title, subtitle, tabs }: { title: string; subtitle?: string; tabs: HubTab[] }) {
   const { hasRole } = useAuth();
+  const { on } = useFeatures();
   const loc = useLocation();
   const nav = useNavigate();
-  const visible = tabs.filter((t) => t.show !== false && (!t.roles || hasRole(...t.roles)));
+  const visible = tabs.filter((t) => t.show !== false && on(t.feature) && (!t.roles || hasRole(...t.roles)));
   const path = loc.pathname.replace(/\/$/, '');
   const active = visible.find((t) => t.path === path);
   if (!active) return visible[0] ? <Navigate to={visible[0].path} replace /> : <Navigate to="/" replace />;

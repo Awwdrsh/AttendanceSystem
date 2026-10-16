@@ -21,6 +21,7 @@ import { HomeTimer } from '../time/HomeTimer';
 import { HomeFieldCard } from '../field/HomeFieldCard';
 import { MyChecklistCard } from '../lifecycle/MyChecklistCard';
 import { HomeCompanyCard } from '../../components/engage/HomeCompanyCard';
+import { IfFeature } from '../../lib/features';
 
 export function describeFlag(f: Flag): string {
   switch (f.kind) {
@@ -183,7 +184,7 @@ export default function HomePage() {
         </Group>
       ) : null}
 
-      <MyChecklistCard />
+      <IfFeature feature="lifecycle"><MyChecklistCard /></IfFeature>
 
       <Grid gap="md">
         <Grid.Col span={{ base: 12, md: 7 }}>
@@ -271,8 +272,8 @@ export default function HomePage() {
         </Grid.Col>
       </Grid>
 
-      <HomeTimer />
-      <HomeFieldCard key={punches.length} onChange={() => void today.reload()} />
+      <IfFeature feature="time"><HomeTimer /></IfFeature>
+      <IfFeature feature="field"><HomeFieldCard key={punches.length} onChange={() => void today.reload()} /></IfFeature>
 
       {m ? (
         <div>
