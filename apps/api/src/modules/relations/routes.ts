@@ -90,22 +90,24 @@ export function relationsRoutes({ db, cipher }: AppDeps): Router {
     const b = z.object({
       category: z.enum(GRIEVANCE_CATEGORIES), subject: text(160), description: text(8000), concerns: z.string().trim().max(500).nullish(),
       fileIds: z.array(uuid).max(5).default([]),
+      excludeUserIds: z.array(uuid).max(10).default([]),
     }).parse(req.body);
     const out = await tx(db, async (c) => {
       const id = await newId(c);
       const number = await nextNumber(c, 'grievance', companyId);
       await c.query(
-        `INSERT INTO grievance (id, company_id, number, employee_id, user_id, category, subject_enc, description_enc, concerns_enc)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        `INSERT INTO grievance (id, company_id, number, employee_id, user_id, category, subject_enc, description_enc, concerns_enc, excluded_user_ids)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [id, companyId, number, u.employeeId, u.id, b.category, encText(cipher, b.subject, grievanceAad(companyId, id, 'subject')),
-          encText(cipher, b.description, grievanceAad(companyId, id, 'description')), b.concerns ? encText(cipher, b.concerns, grievanceAad(companyId, id, 'concerns')) : null]);
+          encText(cipher, b.description, grievanceAad(companyId, id, 'description')), b.concerns ? encText(cipher, b.concerns, grievanceAad(companyId, id, 'concerns')) : null, b.excludeUserIds]);
       for (const fileId of b.fileIds) {
         await attachFile(c, { companyId, fileId, userId: u.id, purpose: 'grievance_attachment', attachedTo: `grievance:${id}` });
         await c.query('INSERT INTO grievance_file (grievance_id, file_id) VALUES ($1, $2)', [id, fileId]);
       }
       await audit(c, { actorId: u.id, action: 'create', table: 'grievance', rowId: id, after: { number, category: b.category } });
       // The notice says only that a grievance arrived: no names, no subject.
-      for (const userId of await grievanceHandlers(c, { company_id: companyId, user_id: u.id, excluded_user_ids: [] })) {
+      // People the complainant names (e.g. the person the complaint is about) never see it, not even the arrival notice.
+      for (const userId of await grievanceHandlers(c, { company_id: companyId, user_id: u.id, excluded_user_ids: b.excludeUserIds })) {
         await notify(c, { companyId, userId, template: 'relations.grievance.new', title: `New grievance G-${number}`, body: 'A confidential grievance was filed. Open Employee relations, Grievances to review it.', payload: { grievanceId: id } });
       }
       return { id, number };
@@ -220,6 +222,13 @@ export function relationsRoutes({ db, cipher }: AppDeps): Router {
       if (!['submitted', 'under_review', 'hearing_scheduled'].includes(g.status)) throw new ConflictError(`this grievance is ${g.status}`);
       if (b.excludeUserIds !== undefined && role !== 'hr') throw new ForbiddenError('only HR can exclude people from a case');
       if (b.excludeUserIds?.includes(req.user!.id)) throw new BadRequestError('you cannot exclude yourself; ask another HR person');
+      if (b.excludeUserIds !== undefined) {
+        // Exclusions only grow (an admin may lift one), and nobody can make themselves the sole handler of a case.
+        const removed = g.excluded_user_ids.filter((x) => !b.excludeUserIds!.includes(x));
+        if (removed.length && !hasRole(req.user!, 'admin')) throw new ForbiddenError('only an administrator can lift an exclusion');
+        const others = (await grievanceHandlers(c, { company_id: g.company_id, user_id: g.user_id, excluded_user_ids: b.excludeUserIds })).filter((x) => x !== req.user!.id);
+        if (!others.length) throw new BadRequestError('at least one other HR or committee member must be able to handle this case');
+      }
       let status = b.status ?? g.status;
       if (b.hearingAt) status = 'hearing_scheduled';
       if (status === 'hearing_scheduled' && !(b.hearingAt ?? g.hearing_at)) throw new BadRequestError('set the hearing date and time');
@@ -850,6 +859,10 @@ export function relationsRoutes({ db, cipher }: AppDeps): Router {
     const action = z.enum(['approve', 'reject', 'revoke']).parse(req.params.action);
     const companyId = companyIdOf(req);
     const next = { approve: 'approved', reject: 'rejected', revoke: 'revoked' }[action];
+    if (action === 'approve' && !hasRole(req.user!, 'admin')) {
+      const own = await db.query('SELECT 1 FROM registered_device WHERE id = $1 AND employee_id = $2', [id, req.user!.employeeId ?? null]);
+      if (own.rows[0]) throw new ForbiddenError('someone else must approve your own clock-in device');
+    }
     const from = action === 'revoke' ? ['approved', 'pending'] : ['pending'];
     const u = await db.query<{ employee_id: string; label: string }>(
       `UPDATE registered_device SET status = $3, decided_by = $4, decided_at = now() WHERE id = $1 AND company_id = $2 AND status = ANY($5::text[]) RETURNING employee_id, label`,

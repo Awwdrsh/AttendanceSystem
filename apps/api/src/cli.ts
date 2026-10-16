@@ -5,7 +5,7 @@
  *      the new admin must change it at first sign-in)
  *   seed-defaults [--company DEMO]        leave types, workflows, settings, rule versions, salary components
  *   reset-password --email <email> --password <pw>
- *   seed-demo-suite --yes [--company DEMO] [--only a,b]   sample data for every HR module (DATABASE_URL must be set)
+ *   seed-demo-suite --database <url> --yes [--company DEMO] [--only a,b]   sample data for every HR module (never the .env database)
  */
 import { loadConfig, loadDatabaseUrl } from './config.js';
 import { createPool } from './db/pool.js';
@@ -56,16 +56,23 @@ try {
       break;
     }
     case 'seed-demo-suite': {
-      // Sample data for every HR module, through the real API. DATABASE_URL must name the target database explicitly.
-      if (!process.env.DATABASE_URL || !args.includes('--yes')) {
-        throw new Error('seed-demo-suite adds sample people data. Set DATABASE_URL to the demo database and add --yes to confirm.');
+      // Sample data for every HR module, through the real API. The target must be named on the command line and must not
+      // be the database in apps/api/.env (the live one): a mistyped command can never fill production with demo people.
+      const target = opt('database');
+      if (!target || !args.includes('--yes')) {
+        throw new Error('seed-demo-suite adds sample people data. Name the demo database with --database <url> and add --yes to confirm.');
       }
+      const live = (await import('dotenv')).parse(await import('node:fs').then((fs) => { try { return fs.readFileSync(new URL('../.env', import.meta.url)); } catch { return ''; } })).DATABASE_URL;
+      const norm = (u: string) => u.replace(/\/+$/, '').toLowerCase();
+      if (live && norm(live) === norm(target)) throw new Error('refusing to add demo data to the database in apps/api/.env (the live database)');
+      const demoDb = createPool(target);
       const cfg = loadConfig();
       const { seedDemoSuite } = await import('./db/demo-suite/index.js');
       const only = opt('only')?.split(',').map((s) => s.trim()).filter(Boolean);
-      const out = await seedDemoSuite(db, FieldCipher.fromBase64(cfg.DATA_ENCRYPTION_KEY), cfg.PASSWORD_PEPPER, { company: opt('company', 'DEMO')!, ...(only ? { only } : {}) });
+      const out = await seedDemoSuite(demoDb, FieldCipher.fromBase64(cfg.DATA_ENCRYPTION_KEY), cfg.PASSWORD_PEPPER, { company: opt('company', 'DEMO')!, ...(only ? { only } : {}) });
       console.log(`done: ${out.done.join(', ') || 'nothing new'}; already there: ${out.skipped.join(', ') || 'none'}`);
       if (out.failed.length) { console.log(`failed: ${out.failed.map((f) => f.section).join(', ')}`); process.exitCode = 1; }
+      await demoDb.end();
       break;
     }
     default:

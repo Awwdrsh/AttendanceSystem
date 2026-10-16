@@ -23,7 +23,7 @@ const norm = (t: string): string | null => { const m = HHMM.exec(t.trim()); retu
 export const UPLOAD_TEMPLATE = 'emp_code,date_bs,in_time,out_time,note\nE001,2083-06-29,09:05,17:10,Device was offline\n';
 export const MAX_UPLOAD_ROWS = 2000;
 
-export async function checkUpload(db: Queryable, companyId: string, csv: string): Promise<{ rows: UploadRow[]; errors: string[] }> {
+export async function checkUpload(db: Queryable, companyId: string, csv: string, selfEmployeeId: string | null = null): Promise<{ rows: UploadRow[]; errors: string[] }> {
   const table = parseCsv(csv.replace(/^﻿/, ''));
   if (!table.length) return { rows: [], errors: ['The file is empty.'] };
   const header = table[0]!.map((h) => h.trim().toLowerCase().replace(/\s+/g, '_'));
@@ -52,6 +52,7 @@ export async function checkUpload(db: Queryable, companyId: string, csv: string)
     if (!row.empCode) row.errors.push('Employee code is missing.');
     else if (!e) row.errors.push(`No employee with code ${row.empCode}.`);
     else if (e.status !== 'active') row.errors.push(`${e.name_en} is not active.`);
+    else if (selfEmployeeId && e.id === selfEmployeeId) row.errors.push('You cannot upload your own attendance; ask another HR person.');
     else { row.employeeId = e.id; row.name = e.name_en; }
     try {
       if (iBs >= 0 && cell(iBs)) { row.dateBs = cell(iBs); row.date = bsToAd(parseBs(row.dateBs)); }

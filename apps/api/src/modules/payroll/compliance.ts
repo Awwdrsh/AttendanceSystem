@@ -7,7 +7,7 @@ import type { AppDeps } from '../../deps.js';
 import type { Queryable } from '../../db/pool.js';
 import { audit } from '../../audit.js';
 import { bsLabel } from '../../bsdate.js';
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors.js';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { isoDate, money } from '../../validation.js';
 import { companyIdOf, hasModule, requireModule } from '../auth/middleware.js';
 import { parseCsv } from '../employees/routes.js';
@@ -63,7 +63,7 @@ function sstShare(tds: string, tax: TaxSnap | null | undefined): Decimal {
   return D(tds).times(D(first.tax)).div(D(tax.annualTax)).toDecimalPlaces(2);
 }
 
-export async function annualSummaries(db: Queryable, cipher: AppDeps['cipher'], companyId: string, fiscalYearStart: number, employeeIds: string[] | null, opts: { revealIds?: boolean } = {}): Promise<AnnualSummary[]> {
+export async function annualSummaries(db: Queryable, cipher: AppDeps['cipher'], companyId: string, fiscalYearStart: number, employeeIds: string[] | null, opts: { revealIds?: boolean; publishedOnly?: boolean } = {}): Promise<AnnualSummary[]> {
   const fy = fiscalYear(fiscalYearStart);
   const emps = await db.query<{ id: string; emp_code: string; name_en: string; designation: string | null; department: string | null; join_date: string | null; exit_date: string | null; pan_enc: Buffer | null; ssf_id: string | null; pf_id: string | null; cit_id: string | null }>(
     `SELECT e.id, e.emp_code, e.name_en, e.designation, e.join_date::text, e.exit_date::text, e.pan_enc, e.ssf_id, e.pf_id, e.cit_id,
@@ -81,7 +81,8 @@ export async function annualSummaries(db: Queryable, cipher: AppDeps['cipher'], 
     `SELECT ps.id, ps.employee_id, p.bs_year, p.bs_month, ps.gross::text, ps.taxable::text, ps.tds::text, ps.inputs_snapshot->'result'->'tax' AS tax, p.start_ad::text
        FROM payslip ps JOIN payroll_run r ON r.id = ps.run_id JOIN payroll_period p ON p.id = r.period_id
       WHERE ps.employee_id = ANY($1) AND r.company_id = $2 AND r.locked_at IS NOT NULL AND p.start_ad BETWEEN $3 AND $4
-      ORDER BY p.start_ad, r.locked_at`, [ids, companyId, fy.startAd, fy.endAd]);
+        AND (NOT $5::boolean OR ps.published_at IS NOT NULL)
+      ORDER BY p.start_ad, r.locked_at`, [ids, companyId, fy.startAd, fy.endAd, opts.publishedOnly ?? false]);
   const lines = await db.query<{ payslip_id: string; component_code: string; type: string; name_en: string; amount: string; sort_order: number }>(
     `SELECT l.payslip_id, l.component_code, l.type, l.name_en, l.amount::text, l.sort_order FROM payslip_line l WHERE l.payslip_id = ANY($1) AND l.type IN ('earning', 'deduction', 'employer_contribution')`,
     [slips.rows.map((s) => s.id)]);
@@ -234,10 +235,11 @@ ${current.deductions.map((l) => `<tr><td>Less ${esc(l.name)}</td><td class="n">$
 }
 
 /** The latest locked regular payslip (for the salary certificate's current salary). */
-async function lastPayslip(db: Queryable, employeeId: string): Promise<{ lines: Array<{ name: string; amount: string; type: string }>; gross: string; net: string; label: string } | null> {
+async function lastPayslip(db: Queryable, employeeId: string, publishedOnly = false): Promise<{ lines: Array<{ name: string; amount: string; type: string }>; gross: string; net: string; label: string } | null> {
   const r = await db.query<{ id: string; gross: string; net: string; bs_year: number; bs_month: number }>(
     `SELECT ps.id, ps.gross::text, ps.net::text, p.bs_year, p.bs_month FROM payslip ps JOIN payroll_run r ON r.id = ps.run_id JOIN payroll_period p ON p.id = r.period_id
-      WHERE ps.employee_id = $1 AND r.locked_at IS NOT NULL AND r.run_type = 'regular' ORDER BY p.start_ad DESC LIMIT 1`, [employeeId]);
+      WHERE ps.employee_id = $1 AND r.locked_at IS NOT NULL AND r.run_type = 'regular' AND (NOT $2::boolean OR ps.published_at IS NOT NULL)
+      ORDER BY p.start_ad DESC LIMIT 1`, [employeeId, publishedOnly]);
   const ps = r.rows[0];
   if (!ps) return null;
   const lines = await db.query<{ name_en: string; amount: string; type: string }>(
@@ -413,7 +415,8 @@ export function complianceRoutes({ db, cipher }: AppDeps): Router {
     const b = z.object({ employeeId: z.uuid(), reason: z.string().trim().min(3).max(500) }).parse(req.body);
     const companyId = companyIdOf(req);
     const run = await getRun(db, companyId, runId);
-    if (!['computed', 'reviewed', 'approved', 'locked'].includes(run.status)) throw new ConflictError('calculate the run before holding anyone\'s pay');
+    if (!['computed', 'reviewed', 'approved'].includes(run.status)) throw new ConflictError(run.status === 'locked' ? 'this run is locked and paid; pay can only be held before the run is locked' : 'calculate the run before holding anyone\'s pay');
+    if (b.employeeId === req.user!.employeeId) throw new ForbiddenError('someone else must hold or release your own pay');
     const ps = await db.query<{ net: string }>('SELECT net::text FROM payslip WHERE run_id = $1 AND employee_id = $2', [runId, b.employeeId]);
     if (!ps.rows[0]) throw new NotFoundError('this employee has no payslip in the run');
     if (!D(ps.rows[0].net).gt(0)) throw new ConflictError('there is no net pay to hold');
@@ -437,6 +440,7 @@ export function complianceRoutes({ db, cipher }: AppDeps): Router {
     const hold = h.rows[0];
     if (!hold) throw new NotFoundError('hold not found');
     if (hold.status !== 'held') throw new ConflictError(`this pay is already ${hold.status}`);
+    if (hold.employee_id === req.user!.employeeId) throw new ForbiddenError('someone else must hold or release your own pay');
     const run = await getRun(db, companyId, hold.run_id);
     if (!run.locked_at) throw new ConflictError('lock the pay run first, or cancel the hold to pay normally in this run');
     if (b.mode === 'outside') {
@@ -475,13 +479,15 @@ export function complianceRoutes({ db, cipher }: AppDeps): Router {
     if (!own && !hasModule(req.user!, 'payroll')) throw new NotFoundError('employee not found');
     await assertEmployee(db, companyId, employeeId);
     const fy = q.fiscalYearStart ?? currentFiscalYearStart();
-    const [s] = await annualSummaries(db, cipher, companyId, fy, [employeeId], { revealIds: true });
+    // People outside payroll only see pay HR has published.
+    const publishedOnly = !hasModule(req.user!, 'payroll');
+    const [s] = await annualSummaries(db, cipher, companyId, fy, [employeeId], { revealIds: true, publishedOnly });
     if (!s) throw new NotFoundError('employee not found');
     const co = await companyProfile(db, companyId);
     const issuedOn = bsLabel(nptToday());
     if (!own) await audit(db, { actorId: req.user!.id, action: 'certificate', table: 'employee', rowId: employeeId, after: { kind: q.kind, fiscalYearStart: fy } });
     if (q.kind === 'tax') return sendHtml(res, taxCertificateHtml(co, s, issuedOn));
-    const last = await lastPayslip(db, employeeId);
+    const last = await lastPayslip(db, employeeId, publishedOnly);
     const current = last ? { lines: last.lines.filter((l) => l.type === 'earning').map((l) => ({ name: l.name, amount: l.amount })), gross: last.gross,
       deductions: last.lines.filter((l) => l.type === 'deduction').map((l) => ({ name: l.name, amount: l.amount })), net: last.net, asOf: last.label } : null;
     return sendHtml(res, salaryCertificateHtml(co, s, current, issuedOn, q.purpose ?? null));

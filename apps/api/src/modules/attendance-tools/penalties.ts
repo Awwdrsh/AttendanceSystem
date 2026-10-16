@@ -2,7 +2,7 @@ import { bsMonthBounds } from '@hajiri/bs-calendar';
 import type { Queryable } from '../../db/pool.js';
 import { audit } from '../../audit.js';
 import { bsMonthName } from '../../bsdate.js';
-import { ConflictError, NotFoundError } from '../../errors.js';
+import { ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { ledgerBalance, pendingDays } from '../leave/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
 import type { LatePenaltyRule } from './policy.js';
@@ -120,11 +120,12 @@ export async function applyPenalties(db: Queryable, companyId: string, bsYear: n
   return { applied, skipped };
 }
 
-export async function reversePenalty(db: Queryable, companyId: string, id: string, reason: string, actorId: string): Promise<void> {
+export async function reversePenalty(db: Queryable, companyId: string, id: string, reason: string, actorId: string, actorEmployeeId: string | null = null): Promise<void> {
   const r = await db.query<{ employee_id: string; bs_year: number; bs_month: number; status: string; rule: { allocations?: Array<{ leaveTypeId: string; days: number }> } }>(
     'SELECT employee_id, bs_year, bs_month, status, rule FROM late_penalty WHERE id = $1 AND company_id = $2 FOR UPDATE', [id, companyId]);
   const p = r.rows[0];
   if (!p) throw new NotFoundError('penalty not found');
+  if (actorEmployeeId && p.employee_id === actorEmployeeId) throw new ForbiddenError('someone else must reverse your own late penalty');
   if (p.status !== 'applied') throw new ConflictError('this penalty is already reversed');
   if (await monthLocked(db, companyId, p.bs_year, p.bs_month)) throw new ConflictError('the payroll for this month is locked; the penalty can no longer be reversed');
   const { endAd } = bsMonthBounds(p.bs_year, p.bs_month);

@@ -159,10 +159,10 @@ function coerce(type: ColType, v: unknown, column: string): unknown {
 
 /** Build the parameterised SQL for a definition. `$1` is the company, `$2` today; user values follow. */
 export function buildAdhocQuery(def: AdhocDefinition, companyId: string, today: string, limit: number) {
-  const ds = ADHOC_DATASETS[def.dataset];
+  const ds = Object.hasOwn(ADHOC_DATASETS, def.dataset) ? ADHOC_DATASETS[def.dataset] : undefined;
   if (!ds) throw new BadRequestError('unknown dataset');
   const col = (k: string) => {
-    const c = ds.columns[k];
+    const c = Object.hasOwn(ds.columns, k) ? ds.columns[k] : undefined;
     if (!c) throw new BadRequestError(`unknown column "${k}" for ${ds.label}`);
     return c;
   };

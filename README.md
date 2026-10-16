@@ -38,8 +38,8 @@ cd hajiri
 That installs Node.js, pnpm and PostgreSQL 18 if missing, creates the databases and your company, generates all secrets,
 applies the schema, seeds statutory defaults, creates the admin user (credentials printed once into `.admin-credentials`)
 and builds the web app. Re-running is safe. Omit `--company` to get a demo company with sample employees; then
-`DATABASE_URL=<demo database> pnpm --filter @hajiri/api cli seed-demo-suite --yes` fills every HR module with sample data
-(it refuses to run without an explicit database).
+`pnpm --filter @hajiri/api cli seed-demo-suite --database <demo database url> --yes` fills every HR module with sample
+data (it refuses the live database named in `apps/api/.env`).
 
 ## Run
 

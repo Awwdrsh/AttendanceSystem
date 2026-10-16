@@ -1,13 +1,13 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import { z } from 'zod';
 import { adToBs, bsMonthBounds } from '@hajiri/bs-calendar';
 import type { AppDeps } from '../../deps.js';
 import type { Db, Queryable } from '../../db/pool.js';
 import { audit } from '../../audit.js';
 import { bsRange } from '../../bsdate.js';
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors.js';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { isoDate } from '../../validation.js';
-import { companyIdOf, hasModule, MODULE_ROLES, requireModule, requireRole } from '../auth/middleware.js';
+import { companyIdOf, hasModule, hasRole, MODULE_ROLES, requireModule, requireRole } from '../auth/middleware.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
 import { approversFor, assertManages, getInstance, nptToday } from '../workflow/service.js';
 import { attendanceIssues, summarise } from './issues.js';
@@ -15,6 +15,9 @@ import { applyPenalties, monthLocked, penaltyPreview, reversePenalty } from './p
 import { extrasPolicy, extrasPolicySchema, saveExtrasPolicy } from './policy.js';
 import { checkUpload, importUpload, UPLOAD_TEMPLATE } from './upload.js';
 import { scopeEmployeeIds, whosOut } from './whosout.js';
+
+/** The acting person's own employee id, so nobody but an administrator edits their own attendance or penalties. */
+const selfOf = (req: Request): string | null => (req.user && !hasRole(req.user, 'admin') ? (req.user.employeeId ?? null) : null);
 
 const addDays = (iso: string, n: number): string => new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 const month = z.object({ bsYear: z.coerce.number().int().min(2000).max(2100), bsMonth: z.coerce.number().int().min(1).max(12) });
@@ -80,6 +83,7 @@ export function attendanceToolsRoutes({ db }: AppDeps): Router {
     const b = month.extend({ employeeIds: z.array(z.uuid()).max(2000).optional() }).parse(req.body);
     const policy = await extrasPolicy(db, companyId);
     if (!policy.latePenalty.enabled) throw new ConflictError('turn the late-arrival penalty on first');
+    if (b.employeeIds && selfOf(req) && b.employeeIds.includes(selfOf(req)!)) throw new ForbiddenError('someone else must apply your own late penalty');
     const out = await tx(db, (c) => applyPenalties(c, companyId, b.bsYear, b.bsMonth, policy.latePenalty, b.employeeIds ?? null, req.user!.id));
     res.json(out);
   });
@@ -87,7 +91,7 @@ export function attendanceToolsRoutes({ db }: AppDeps): Router {
   r.post('/penalties/:id/reverse', requireModule('attendance'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const b = z.object({ reason: z.string().trim().min(3).max(300) }).parse(req.body);
-    await tx(db, (c) => reversePenalty(c, companyIdOf(req), id, b.reason, req.user!.id));
+    await tx(db, (c) => reversePenalty(c, companyIdOf(req), id, b.reason, req.user!.id, selfOf(req)));
     res.json({ ok: true });
   });
 
@@ -164,14 +168,14 @@ export function attendanceToolsRoutes({ db }: AppDeps): Router {
   const uploadBody = z.object({ csv: z.string().min(1).max(1_000_000), filename: z.string().max(200).optional() });
   r.post('/upload/check', requireModule('attendance'), async (req, res) => {
     const b = uploadBody.parse(req.body);
-    const out = await checkUpload(db, companyIdOf(req), b.csv);
+    const out = await checkUpload(db, companyIdOf(req), b.csv, selfOf(req));
     res.json({ errors: out.errors, rows: out.rows, valid: out.rows.filter((x) => !x.errors.length).length, invalid: out.rows.filter((x) => x.errors.length).length });
   });
 
   r.post('/upload/import', requireModule('attendance'), async (req, res) => {
     const companyId = companyIdOf(req);
     const b = uploadBody.extend({ reason: z.string().trim().min(5).max(300) }).parse(req.body);
-    const checked = await checkUpload(db, companyId, b.csv);
+    const checked = await checkUpload(db, companyId, b.csv, selfOf(req));
     if (checked.errors.length) throw new BadRequestError(checked.errors.join(' '));
     const bad = checked.rows.filter((x) => x.errors.length);
     if (bad.length) throw new BadRequestError(`${bad.length} row(s) have errors; fix them or remove them and upload again`, { rows: bad.map((x) => ({ line: x.line, errors: x.errors })) });

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { localDateOf, localTimeMs } from '@hajiri/attendance-engine';
 import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors.js';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { assertManages, hasModule, hasRole, requireModule, requireRole } from '../auth/middleware.js';
 import { attendancePolicy } from '../attendance/repo.js';
 import { parsePhoto, photoAad, PHOTO_MAX_BYTES } from './photo.js';
@@ -202,6 +202,7 @@ export function punchRoutes({ db, cipher }: AppDeps): Router {
   /** HR manual entry with reason (plan §5.2); audited; day recomputed. */
   r.post('/manual', requireModule('attendance'), async (req, res) => {
     const b = z.object({ employeeId: z.uuid(), localDate: isoDate, time: hhmm, direction: z.enum(['in', 'out']), reason: z.string().min(3).max(300) }).parse(req.body);
+    if (b.employeeId === req.user!.employeeId && !hasRole(req.user!, 'admin')) throw new ForbiddenError('someone else must add punches to your own attendance');
     const emp = await db.query<{ emp_code: string }>('SELECT emp_code FROM employee WHERE id = $1 AND company_id = $2', [b.employeeId, req.user!.companyId]);
     if (!emp.rows[0]) throw new NotFoundError('employee not found');
     if (await isAttendanceLocked(db, b.employeeId, b.localDate)) throw new ConflictError('this day is locked by payroll; raise a supplementary correction instead');

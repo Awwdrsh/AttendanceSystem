@@ -96,7 +96,19 @@ describe('grievances', () => {
     expect((await api(member).patch(`/grievances/${gid}`, { excludeUserIds: [hrUser] })).status).toBe(403);
     expect((await api(hr).patch(`/grievances/${gid}`, { excludeUserIds: [memberUser] })).status).toBe(200);
     expect((await api(member).get(`/grievances/${gid}`)).status).toBe(404);
-    expect((await api(hr).patch(`/grievances/${gid}`, { excludeUserIds: [] })).status).toBe(200);
+    // Exclusions only grow: HR cannot lift one (an administrator can).
+    expect((await api(hr).patch(`/grievances/${gid}`, { excludeUserIds: [] })).status).toBe(403);
+    const admin = (await loginAs(db, app, ['admin'])).token;
+    expect((await api(admin).patch(`/grievances/${gid}`, { excludeUserIds: [] })).status).toBe(200);
+  });
+
+  it('nobody can make themselves the only handler of a grievance', async () => {
+    const handlers = (await db.query<{ id: string }>(
+      `SELECT id FROM app_user WHERE company_id = $1 AND id <> $2 AND id <> $3 AND ('hr' = ANY(roles) OR 'admin' = ANY(roles) OR id IN (SELECT user_id FROM grievance_committee_member))`,
+      [DEMO.companyId, hrUser, sitaUser])).rows.map((r) => r.id);
+    expect(handlers.length).toBeGreaterThan(0);
+    const r = await api(hr).patch(`/grievances/${gid}`, { excludeUserIds: handlers });
+    expect(r.status).toBe(400);
   });
 
   it('the committee schedules a hearing and decides; the employee appeals once and HR (not the decider) hears it', async () => {
