@@ -7,7 +7,7 @@ import type { Db, Queryable } from '../../db/pool.js';
 import type { AppDeps } from '../../deps.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { hhmm, isoDate, uuid } from '../../validation.js';
-import { companyIdOf, hasRole, requireRole } from '../auth/middleware.js';
+import { companyIdOf, hasModule, hasRole, MODULE_ROLES, requireModule, requireRole } from '../auth/middleware.js';
 import type { AuthUser } from '../auth/service.js';
 import { sendReport } from '../reports/csv.js';
 import { assertManages, cancelWorkflow, nptToday, startWorkflow } from '../workflow/service.js';
@@ -49,7 +49,7 @@ async function readableEmployee(db: Queryable, req: Request, employeeId: string 
   if (!employeeId || employeeId === u.employeeId) return ownEmployee(req);
   const r = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, companyIdOf(req)]);
   if (!r.rows[0]) throw new NotFoundError('employee not found');
-  await assertManages(db, u, employeeId);
+  await assertManages(db, u, employeeId, 'attendance');
   return employeeId;
 }
 
@@ -180,14 +180,14 @@ async function weekView(db: Queryable, companyId: string, employeeId: string, we
 
 type Scope = 'own' | 'team' | 'all';
 function scopeOf(u: AuthUser, asked: Scope | undefined): Scope {
-  const s = asked ?? (hasRole(u, 'hr') ? 'all' : hasRole(u, 'manager') ? 'team' : 'own');
-  if (s === 'all' && !hasRole(u, 'hr')) throw new ForbiddenError('Only HR can see everyone\'s time.');
-  if (s === 'team' && !hasRole(u, 'hr', 'manager')) throw new ForbiddenError('Only managers can see their team\'s time.');
+  const s = asked ?? (hasModule(u, 'attendance') ? 'all' : hasRole(u, 'manager') ? 'team' : 'own');
+  if (s === 'all' && !hasModule(u, 'attendance')) throw new ForbiddenError('Only HR can see everyone\'s time.');
+  if (s === 'team' && !hasRole(u, ...MODULE_ROLES.attendance, 'manager')) throw new ForbiddenError('Only managers can see their team\'s time.');
   return s;
 }
 /** SQL filter on employee alias `emp` for a scope; parameters $n = scope, $n+1 = viewer's employee id. */
 const scopeSql = (n: number) => `(CASE $${n}::text WHEN 'own' THEN emp.id = $${n + 1}::uuid
-  WHEN 'team' THEN (emp.id = $${n + 1}::uuid OR EXISTS (SELECT 1 FROM employee_assignment sa WHERE sa.employee_id = emp.id AND sa.manager_id = $${n + 1}::uuid AND sa.valid @> current_date))
+  WHEN 'team' THEN (emp.id = $${n + 1}::uuid OR hj_manages($${n + 1}::uuid, emp.id, current_date))
   ELSE true END)`;
 
 export function timesheetsRoutes({ db }: AppDeps): Router {
@@ -198,7 +198,7 @@ export function timesheetsRoutes({ db }: AppDeps): Router {
     res.json({ policy: await loadTimePolicy(db, companyIdOf(req)) });
   });
 
-  r.put('/settings', requireRole('hr'), async (req, res) => {
+  r.put('/settings', requireModule('attendance'), async (req, res) => {
     const companyId = companyIdOf(req);
     const value = timePolicySchema.parse(req.body);
     const before = await loadTimePolicy(db, companyId);
@@ -215,18 +215,18 @@ export function timesheetsRoutes({ db }: AppDeps): Router {
     const rows = await db.query(
       `SELECT c.id, c.name, c.notes, c.archived, (SELECT count(*)::int FROM time_project p WHERE p.client_id = c.id AND p.status = 'active') AS active_projects
          FROM time_client c WHERE c.company_id = $1 AND ($2::boolean OR NOT c.archived) ORDER BY c.archived, lower(c.name)`,
-      [companyIdOf(req), req.query.all === '1' && hasRole(req.user!, 'hr')]);
+      [companyIdOf(req), req.query.all === '1' && hasModule(req.user!, 'attendance')]);
     res.json({ clients: rows.rows });
   });
 
-  r.post('/clients', requireRole('hr'), async (req, res) => {
+  r.post('/clients', requireModule('attendance'), async (req, res) => {
     const b = z.object({ name, notes: z.string().trim().max(500).nullable().optional() }).parse(req.body);
     const ins = await db.query<{ id: string }>('INSERT INTO time_client (company_id, name, notes) VALUES ($1, $2, $3) RETURNING id, name, notes, archived', [companyIdOf(req), b.name, b.notes || null]);
     await audit(db, { actorId: req.user!.id, action: 'create', table: 'time_client', rowId: ins.rows[0]!.id, after: b });
     res.status(201).json({ client: ins.rows[0] });
   });
 
-  r.patch('/clients/:id', requireRole('hr'), async (req, res) => {
+  r.patch('/clients/:id', requireModule('attendance'), async (req, res) => {
     const id = uuid.parse(req.params.id);
     const b = z.object({ name: name.optional(), notes: z.string().trim().max(500).nullable().optional(), archived: z.boolean().optional() }).parse(req.body);
     const u = await db.query(
@@ -241,7 +241,7 @@ export function timesheetsRoutes({ db }: AppDeps): Router {
   // ---------------------------------------------------------------- projects
   /** Employees see the active projects they may log to; HR with all=1 sees every project with its members. */
   r.get('/projects', async (req, res) => {
-    const hr = hasRole(req.user!, 'hr');
+    const hr = hasModule(req.user!, 'attendance');
     const all = hr && req.query.all === '1';
     const rows = await db.query(
       `SELECT p.id, p.code, p.name, p.color, p.billable, p.bill_rate, p.budget_hours, p.all_members, p.status, p.client_id, c.name AS client_name,
@@ -277,7 +277,7 @@ export function timesheetsRoutes({ db }: AppDeps): Router {
     if (!r0.rows[0]) throw new BadRequestError('Client not found.');
   }
 
-  r.post('/projects', requireRole('hr'), async (req, res) => {
+  r.post('/projects', requireModule('attendance'), async (req, res) => {
     const companyId = companyIdOf(req);
     const b = projectBody.parse(req.body);
     const id = await tx(db, async (c) => {
@@ -294,7 +294,7 @@ export function timesheetsRoutes({ db }: AppDeps): Router {
     res.status(201).json({ id });
   });
 
-  r.patch('/projects/:id', requireRole('hr'), async (req, res) => {
+  r.patch('/projects/:id', requireModule('attendance'), async (req, res) => {
     const companyId = companyIdOf(req);
     const id = uuid.parse(req.params.id);
     const b = projectBody.partial().parse(req.body);
@@ -319,7 +319,7 @@ export function timesheetsRoutes({ db }: AppDeps): Router {
   // ---------------------------------------------------------------- activities
   r.get('/activities', async (req, res) => {
     const q = z.object({ projectId: uuid.optional(), all: z.enum(['0', '1']).optional() }).parse(req.query);
-    const all = q.all === '1' && hasRole(req.user!, 'hr');
+    const all = q.all === '1' && hasModule(req.user!, 'attendance');
     const rows = await db.query(
       `SELECT a.id, a.name, a.project_id, p.name AS project_name, a.archived FROM time_activity a LEFT JOIN time_project p ON p.id = a.project_id
         WHERE a.company_id = $1 AND ($2::boolean OR NOT a.archived) AND ($3::uuid IS NULL OR a.project_id IS NULL OR a.project_id = $3)
@@ -327,7 +327,7 @@ export function timesheetsRoutes({ db }: AppDeps): Router {
     res.json({ activities: rows.rows });
   });
 
-  r.post('/activities', requireRole('hr'), async (req, res) => {
+  r.post('/activities', requireModule('attendance'), async (req, res) => {
     const companyId = companyIdOf(req);
     const b = z.object({ name: z.string().trim().min(1).max(80), projectId: uuid.nullable().optional() }).parse(req.body);
     if (b.projectId) {
@@ -339,7 +339,7 @@ export function timesheetsRoutes({ db }: AppDeps): Router {
     res.status(201).json({ activity: ins.rows[0] });
   });
 
-  r.patch('/activities/:id', requireRole('hr'), async (req, res) => {
+  r.patch('/activities/:id', requireModule('attendance'), async (req, res) => {
     const id = uuid.parse(req.params.id);
     const b = z.object({ name: z.string().trim().min(1).max(80).optional(), archived: z.boolean().optional() }).parse(req.body);
     const u = await db.query('UPDATE time_activity SET name = coalesce($3, name), archived = coalesce($4, archived) WHERE id = $1 AND company_id = $2 RETURNING id, name, project_id, archived',
@@ -579,7 +579,7 @@ export function timesheetsRoutes({ db }: AppDeps): Router {
       `SELECT t.employee_id, to_char(t.week_start, 'YYYY-MM-DD') AS week_start, e.emp_code, e.name_en FROM timesheet t JOIN employee e ON e.id = t.employee_id WHERE t.id = $1 AND t.company_id = $2`, [id, companyId]);
     const row = t.rows[0];
     if (!row) throw new NotFoundError('timesheet not found');
-    await assertManages(db, req.user!, row.employee_id);
+    await assertManages(db, req.user!, row.employee_id, 'attendance');
     const ts = await db.query(`SELECT ${TS_COLS} FROM timesheet t LEFT JOIN app_user u ON u.id = t.decided_by WHERE t.id = $1`, [id]);
     res.json({ employee: { id: row.employee_id, empCode: row.emp_code, name: row.name_en }, ...(await weekView(db, companyId, row.employee_id, row.week_start)), submission: ts.rows[0] });
   });
@@ -588,7 +588,7 @@ export function timesheetsRoutes({ db }: AppDeps): Router {
   r.get('/team-week', async (req, res) => {
     const q = z.object({ weekStart: isoDate.optional(), scope: z.enum(['team', 'all']).optional() }).parse(req.query);
     const u = req.user!;
-    const scope = scopeOf(u, q.scope ?? (hasRole(u, 'hr') ? 'all' : 'team'));
+    const scope = scopeOf(u, q.scope ?? (hasModule(u, 'attendance') ? 'all' : 'team'));
     const weekStart = weekStartOf(q.weekStart ?? nptToday());
     const rows = await db.query(
       `SELECT emp.id AS employee_id, emp.emp_code, emp.name_en,

@@ -3,11 +3,14 @@ import { z } from 'zod';
 import { recomputeQueuedFor } from '../attendance/service.js';
 import type { AppDeps } from '../../deps.js';
 import { NotFoundError } from '../../errors.js';
+import { flowRoutes } from './flow-routes.js';
 import { act, canView, getInstance, inboxFor, summarise, timeline } from './service.js';
 
 /** Approvals inbox and one-tap decisions (plan §5.8, §13.5). */
-export function workflowRoutes({ db }: AppDeps): Router {
+export function workflowRoutes(deps: AppDeps): Router {
+  const { db } = deps;
   const r = Router();
+  r.use(flowRoutes(deps));   // flows, groups, delegates, preview, verify (before /:id)
 
   r.get('/inbox', async (req, res) => {
     res.json({ items: await inboxFor(db, req.user!) });

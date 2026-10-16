@@ -6,7 +6,7 @@ import { audit } from '../../audit.js';
 import { bsLabel } from '../../bsdate.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { hhmm, isoDate, money } from '../../validation.js';
-import { companyIdOf, hasRole, requireRole } from '../auth/middleware.js';
+import { companyIdOf, hasModule, hasRole, MODULE_ROLES, requireModule, requireRole } from '../auth/middleware.js';
 import type { AuthUser } from '../auth/service.js';
 import { attachFile, readFile, sendStoredFile } from '../files/store.js';
 import { notify } from '../notifications/service.js';
@@ -79,7 +79,7 @@ async function managerUnit(db: Queryable, employeeId: string | null | undefined)
 
 /** HR sees every job; a manager sees the jobs they manage, created, or that belong to their department. */
 async function canSeeJob(db: Queryable, user: AuthUser, job: Pick<JobRow, 'hiring_manager_id' | 'created_by' | 'org_unit_id'>): Promise<boolean> {
-  if (hasRole(user, 'hr')) return true;
+  if (hasModule(user, 'hiring')) return true;
   if (!hasRole(user, 'manager')) return false;
   if (job.created_by === user.id) return true;
   if (user.employeeId && job.hiring_manager_id === user.employeeId) return true;
@@ -118,7 +118,7 @@ function validateJob(b: Partial<Pick<JobInput, 'experienceMin' | 'experienceMax'
 
 export function hiringRoutes({ db, cipher }: AppDeps): Router {
   const r = Router();
-  const staff = requireRole('manager', 'hr');
+  const staff = requireRole('manager', ...MODULE_ROLES.hiring);
 
   const loadJob = async (req: Request, id: string): Promise<JobRow> => {
     const j = await db.query<JobRow>('SELECT * FROM hiring_job WHERE id = $1 AND company_id = $2', [id, companyIdOf(req)]);
@@ -155,7 +155,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
 
   r.get('/requisitions', staff, async (req, res) => {
     const companyId = companyIdOf(req);
-    const hr = hasRole(req.user!, 'hr');
+    const hr = hasModule(req.user!, 'hiring');
     const unit = hr ? null : await managerUnit(db, req.user!.employeeId);
     const rows = await db.query(
       `SELECT q.*, ou.name_en AS department, b.name_en AS branch, u.name AS raised_by_name, re.name_en AS replacing_name,
@@ -200,7 +200,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
     await tx(db, async (c) => {
       const q = (await c.query<{ raised_by: string; status: string }>('SELECT raised_by, status FROM hiring_requisition WHERE id = $1 AND company_id = $2 FOR UPDATE', [id, companyId])).rows[0];
       if (!q) throw new NotFoundError('request not found');
-      if (q.raised_by !== req.user!.id && !hasRole(req.user!, 'hr')) throw new NotFoundError('request not found');
+      if (q.raised_by !== req.user!.id && !hasModule(req.user!, 'hiring')) throw new NotFoundError('request not found');
       if (!['pending', 'approved'].includes(q.status)) throw new ConflictError(`this request is already ${q.status}`);
       await c.query(`UPDATE hiring_requisition SET status = 'cancelled', decided_at = coalesce(decided_at, now()) WHERE id = $1`, [id]);
       await cancelWorkflow(c, 'job_requisition', id);
@@ -214,7 +214,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
   r.get('/jobs', staff, async (req, res) => {
     const companyId = companyIdOf(req);
     const q = z.object({ status: z.enum(['draft', 'open', 'closed']).optional() }).parse(req.query);
-    const hr = hasRole(req.user!, 'hr');
+    const hr = hasModule(req.user!, 'hiring');
     const unit = hr ? null : await managerUnit(db, req.user!.employeeId);
     const rows = await db.query(
       `SELECT ${JOB_COLS},
@@ -231,7 +231,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
     res.json({ jobs: rows.rows, companyCode: code });
   });
 
-  r.post('/jobs', requireRole('hr'), async (req, res) => {
+  r.post('/jobs', requireModule('hiring'), async (req, res) => {
     const companyId = companyIdOf(req);
     const b = jobBody.parse(req.body);
     validateJob(b);
@@ -262,7 +262,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
     res.json({ job: full.rows[0], stageCounts: Object.fromEntries(counts.rows.map((x) => [x.stage, x.n])) });
   });
 
-  r.patch('/jobs/:id', requireRole('hr'), async (req, res) => {
+  r.patch('/jobs/:id', requireModule('hiring'), async (req, res) => {
     const companyId = companyIdOf(req);
     const id = z.uuid().parse(req.params.id);
     const raw = jobBody.partial().parse(req.body);
@@ -298,7 +298,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
     res.json({ ok: true });
   });
 
-  r.post('/jobs/:id/publish', requireRole('hr'), async (req, res) => {
+  r.post('/jobs/:id/publish', requireModule('hiring'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const job = await loadJob(req, id);
     if (job.status === 'open') return res.json({ ok: true });
@@ -310,7 +310,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
     return res.json({ ok: true });
   });
 
-  r.post('/jobs/:id/close', requireRole('hr'), async (req, res) => {
+  r.post('/jobs/:id/close', requireModule('hiring'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     await loadJob(req, id);
     await db.query(`UPDATE hiring_job SET status = 'closed', closed_at = now(), updated_at = now() WHERE id = $1`, [id]);
@@ -334,7 +334,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
     res.json({ applications: rows.rows, stages: job.stages });
   });
 
-  r.post('/jobs/:id/applications', requireRole('hr'), async (req, res) => {
+  r.post('/jobs/:id/applications', requireModule('hiring'), async (req, res) => {
     const companyId = companyIdOf(req);
     const job = await loadJob(req, z.uuid().parse(req.params.id));
     const b = z.object({
@@ -455,7 +455,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
     res.json({ ok: true, emailed });
   });
 
-  r.post('/applications/:id/reopen', requireRole('hr'), async (req, res) => {
+  r.post('/applications/:id/reopen', requireModule('hiring'), async (req, res) => {
     await tx(db, async (c) => {
       const { app } = await loadApp(c, req, z.uuid().parse(req.params.id), { lock: true });
       if (!['rejected', 'withdrawn'].includes(app.status)) throw new ConflictError(`this application is ${app.status}`);
@@ -475,7 +475,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
   });
 
   /** Everything held about a candidate, for a data access request. HR only, audited. */
-  r.get('/applications/:id/export', requireRole('hr'), async (req, res) => {
+  r.get('/applications/:id/export', requireModule('hiring'), async (req, res) => {
     const { app } = await loadApp(db, req, z.uuid().parse(req.params.id));
     const cand = (await db.query('SELECT id, name, email, phone, created_at, purged_at FROM hiring_candidate WHERE id = $1', [app.candidate_id])).rows[0];
     const apps = (await db.query<{ id: string }>(
@@ -543,8 +543,8 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
   r.get('/interviews', async (req, res) => {
     const companyId = companyIdOf(req);
     const q = z.object({ scope: z.enum(['mine', 'all']).default('mine'), from: isoDate.optional(), to: isoDate.optional() }).parse(req.query);
-    if (q.scope === 'all' && !hasRole(req.user!, 'manager', 'hr')) throw new ForbiddenError('only managers and HR can see all interviews');
-    const hr = hasRole(req.user!, 'hr');
+    if (q.scope === 'all' && !hasRole(req.user!, 'manager', ...MODULE_ROLES.hiring)) throw new ForbiddenError('only managers and HR can see all interviews');
+    const hr = hasModule(req.user!, 'hiring');
     const unit = hr ? null : await managerUnit(db, req.user!.employeeId);
     const rows = await db.query(
       `SELECT i.id, i.application_id, i.title, i.starts_at, i.duration_min, i.mode, i.location, i.status, i.panel,
@@ -616,7 +616,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
 
   // ------------------------------------------------------------ offers
 
-  r.post('/applications/:id/offers', requireRole('hr'), async (req, res) => {
+  r.post('/applications/:id/offers', requireModule('hiring'), async (req, res) => {
     const b = z.object({
       designation: z.string().trim().min(2).max(120), salary: money.refine((s) => Number(s) > 0, 'salary must be above zero'), joinDate: isoDate,
       expiresOn: isoDate.nullable().optional(), notes: optText(4000),
@@ -667,7 +667,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
     }));
   });
 
-  r.post('/offers/:id/respond', requireRole('hr'), async (req, res) => {
+  r.post('/offers/:id/respond', requireModule('hiring'), async (req, res) => {
     const { response } = z.object({ response: z.enum(['accepted', 'declined']) }).parse(req.body);
     await tx(db, async (c) => {
       const { o, app } = await loadOffer(c, req, z.uuid().parse(req.params.id), true);
@@ -679,7 +679,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
     res.json({ ok: true });
   });
 
-  r.post('/offers/:id/withdraw', requireRole('hr'), async (req, res) => {
+  r.post('/offers/:id/withdraw', requireModule('hiring'), async (req, res) => {
     await tx(db, async (c) => {
       const { o, app } = await loadOffer(c, req, z.uuid().parse(req.params.id), true);
       if (!['pending_approval', 'approved', 'accepted'].includes(o.status)) throw new ConflictError(`this offer is ${o.status.replace('_', ' ')}`);
@@ -751,7 +751,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
     res.json({ users: users.rows, orgUnits: units.rows, branches: branches.rows, shifts: shifts.rows });
   });
 
-  r.get('/reports', requireRole('hr'), async (req, res) => {
+  r.get('/reports', requireModule('hiring'), async (req, res) => {
     const companyId = companyIdOf(req);
     const q = z.object({ from: isoDate.optional(), to: isoDate.optional() }).parse(req.query);
     const params = [companyId, q.from ?? null, q.to ?? null];
@@ -786,7 +786,7 @@ export function hiringRoutes({ db, cipher }: AppDeps): Router {
 
   r.get('/policy', staff, async (req, res) => { res.json({ policy: await hiringPolicy(db, companyIdOf(req)) }); });
 
-  r.put('/policy', requireRole('hr'), async (req, res) => {
+  r.put('/policy', requireModule('hiring'), async (req, res) => {
     const companyId = companyIdOf(req);
     const b = z.object({ retentionDays: z.number().int().min(30).max(1095), careersEnabled: z.boolean() }).parse(req.body);
     await db.query(

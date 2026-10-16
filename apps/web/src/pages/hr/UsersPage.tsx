@@ -7,14 +7,14 @@ import type { AppUserRow, Role } from '../../api/types';
 import { useAuth } from '../../auth/AuthProvider';
 import { DataTable } from '../../components/DataTable';
 import { EmployeePicker } from '../../components/EmployeePicker';
+import { ROLE_HELP, ROLE_LABEL } from '../../lib/access';
 import { PageHeader } from '../../components/PageHeader';
 import { StatusBadge } from '../../components/StatusBadge';
 import { relativeTime } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 
-const ROLES: Role[] = ['admin', 'hr', 'manager', 'employee'];
-const ROLE_LABEL: Record<Role, string> = { admin: 'Admin', hr: 'HR', manager: 'Manager', employee: 'Employee' };
+const ROLES: Role[] = ['admin', 'hr', 'manager', 'employee', 'payroll_admin', 'attendance_admin', 'recruiter', 'executive'];
 const ROLE_OPTIONS = ROLES.map((r) => ({ value: r, label: ROLE_LABEL[r] }));
 
 export default function UsersPage() {
@@ -75,6 +75,7 @@ export default function UsersPage() {
           <PasswordInput label="Temporary password" description="At least 12 characters. They will be asked to change it at first sign-in." value={password} onChange={(e) => setPassword(e.currentTarget.value)} required
             {...(password.length > 0 && password.length < 12 ? { error: `${12 - password.length} more ${12 - password.length === 1 ? 'character' : 'characters'} needed` } : {})} />
           <MultiSelect label="Roles" description="Combine roles if someone does more than one job." data={ROLE_OPTIONS} value={roles} onChange={setRoles} />
+          {roles.map((r) => <Text key={r} size="xs" c="dimmed">{ROLE_LABEL[r as Role]}: {ROLE_HELP[r as Role]}</Text>)}
           <EmployeePicker label="Employee record" description="Optional. Links this sign-in to an employee so they can see their own attendance and payslips." value={employeeId} onChange={setEmployeeId} />
           <Group justify="flex-end" gap="xs">
             <Button variant="default" onClick={() => setOpen(false)}>Cancel</Button>

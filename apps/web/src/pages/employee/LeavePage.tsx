@@ -13,6 +13,7 @@ import { StatusBadge, statusLabel } from '../../components/StatusBadge';
 import { fmtAd, fmtDateShort, fmtTime, NPT_OFFSET_MIN, todayNpt, addDays } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
+import { ApprovalChainPreview } from '../../components/ApprovalChainPreview';
 
 const fmtDays = (n: number) => `${Number.isInteger(n) ? n : n.toFixed(1)} ${n === 1 ? 'day' : 'days'}`;
 
@@ -91,6 +92,7 @@ export function LeaveApplyForm({ employeeId, onDone }: { employeeId: string; onD
             {...(fromTime && toTime && toTime <= fromTime ? { error: 'Must be after the start time' } : {})} />
         </SimpleGrid>
       ) : null}
+      <ApprovalChainPreview objectType="leave_request" employeeId={employeeId} />
       {preview ? (
         <Alert variant="light" color={preview.balanceAfter < 0 ? 'orange' : 'gray'}>
           <Text size="sm" fw={600}>{preview.hours ? `${preview.hours} ${preview.hours === 1 ? 'hour' : 'hours'} (${preview.days} of a day)` : fmtDays(preview.days)} will be deducted</Text>

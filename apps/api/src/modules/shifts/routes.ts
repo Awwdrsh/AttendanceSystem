@@ -5,7 +5,7 @@ import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
 import { ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { hhmm, isoDate } from '../../validation.js';
-import { hasRole, requireRole } from '../auth/middleware.js';
+import { hasModule, hasRole, MODULE_ROLES, requireModule, requireRole } from '../auth/middleware.js';
 import { dateRange, enqueueRecompute } from '../attendance/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
 import { assertManages, nptToday } from '../workflow/service.js';
@@ -126,7 +126,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     genderScope: z.enum(['all', 'female']).default('all'), optional: z.boolean().default(false),
   });
 
-  r.post('/holidays', requireRole('hr'), async (req, res) => {
+  r.post('/holidays', requireModule('attendance'), async (req, res) => {
     const b = holidayBody.parse(req.body);
     await assertBranch(req.user!.companyId, b.branchId);
     // The UNIQUE constraint treats NULL branch_id as distinct, so company-wide duplicates must be refused explicitly.
@@ -142,7 +142,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     res.status(201).json({ id: ins.rows[0]!.id, recomputeQueued: ids.length });
   });
 
-  r.patch('/holidays/:id', requireRole('hr'), async (req, res) => {
+  r.patch('/holidays/:id', requireModule('attendance'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const b = provided(holidayBody.partial().parse(req.body), req.body);
     await assertBranch(req.user!.companyId, b.branchId);
@@ -160,7 +160,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     res.json({ ok: true });
   });
 
-  r.delete('/holidays/:id', requireRole('hr'), async (req, res) => {
+  r.delete('/holidays/:id', requireModule('attendance'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const del = await db.query<{ local_date: string }>('DELETE FROM holiday WHERE id = $1 AND company_id = $2 RETURNING local_date', [id, req.user!.companyId]);
     if (!del.rows[0]) throw new NotFoundError('holiday not found');
@@ -171,7 +171,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   });
 
   /** Load the default MoHA-style list for a BS year (only 2083 shipped; plan §16.7 SOP updates it each Chaitra). */
-  r.post('/holidays/import-default', requireRole('hr'), async (req, res) => {
+  r.post('/holidays/import-default', requireModule('attendance'), async (req, res) => {
     const b = z.object({ bsYear: z.number().int() }).parse(req.body);
     if (b.bsYear !== 2083) return res.status(400).json({ error: 'default list available for BS 2083 only; add others via POST /shifts/holidays' });
     let inserted = 0;
@@ -199,7 +199,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     res.json({ locations: rows.rows });
   });
   const locationBody = z.object({ name: z.string().min(1).max(80), branchId: z.uuid().nullable().optional(), lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180), radiusM: z.number().int().min(20).max(5000).default(150) });
-  r.post('/locations', requireRole('hr'), async (req, res) => {
+  r.post('/locations', requireModule('attendance'), async (req, res) => {
     const b = locationBody.parse(req.body);
     await assertBranch(req.user!.companyId, b.branchId);
     const ins = await db.query<{ id: string }>('INSERT INTO location (company_id, branch_id, name, lat, lng, radius_m) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
@@ -207,7 +207,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     await audit(db, { actorId: req.user!.id, action: 'create', table: 'location', rowId: ins.rows[0]!.id, after: b });
     res.status(201).json({ id: ins.rows[0]!.id });
   });
-  r.patch('/locations/:id', requireRole('hr'), async (req, res) => {
+  r.patch('/locations/:id', requireModule('attendance'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const b = provided(locationBody.partial().parse(req.body), req.body);
     await assertBranch(req.user!.companyId, b.branchId);
@@ -217,7 +217,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     await audit(db, { actorId: req.user!.id, action: 'update', table: 'location', rowId: id, after: b });
     res.json({ ok: true });
   });
-  r.delete('/locations/:id', requireRole('hr'), async (req, res) => {
+  r.delete('/locations/:id', requireModule('attendance'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const d = await db.query('DELETE FROM location WHERE id = $1 AND company_id = $2', [id, req.user!.companyId]);
     if (!d.rowCount) throw new NotFoundError('location not found');
@@ -234,7 +234,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     if (q.employeeId) {
       const emp = await db.query<{ weekly_off_days: number[] }>('SELECT weekly_off_days FROM employee WHERE id = $1 AND company_id = $2', [q.employeeId, req.user!.companyId]);
       if (!emp.rows[0]) throw new NotFoundError('employee not found');
-      await assertManages(db, req.user!, q.employeeId); // self, their manager or HR only
+      await assertManages(db, req.user!, q.employeeId, 'attendance'); // self, their manager or HR only
       weeklyOff = emp.rows[0].weekly_off_days;
     }
     const hol = await db.query<{ local_date: string; name_en: string; name_ne: string | null; gender_scope: string; optional: boolean; branch_id: string | null }>(
@@ -250,26 +250,26 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   });
 
   // ---------------------------------------------------------------- roster (plan §5.3)
-  r.get('/roster', requireRole('hr', 'manager'), async (req, res) => {
+  r.get('/roster', requireRole(...MODULE_ROLES.attendance, 'manager'), async (req, res) => {
     const q = z.object({ from: isoDate, to: isoDate, branchId: z.uuid().optional() }).parse(req.query);
     // Line managers roster their own reports only; HR sees the company.
-    const teamOnly = !hasRole(req.user!, 'hr');
+    const teamOnly = !hasModule(req.user!, 'attendance');
     const emps = await db.query(
       `SELECT e.id, e.emp_code, e.name_en, e.name_ne, e.weekly_off_days,
               (SELECT s.shift_id FROM shift_assignment s WHERE s.employee_id = e.id AND s.valid @> $2::date) AS default_shift_id
          FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
         WHERE e.company_id = $1 AND e.status = 'active' AND ($3::uuid IS NULL OR a.branch_id = $3)
-          AND (NOT $4 OR a.manager_id = $5::uuid OR e.id = $5::uuid) ORDER BY e.emp_code`,
+          AND (NOT $4 OR hj_manages($5::uuid, e.id, current_date) OR e.id = $5::uuid) ORDER BY e.emp_code`,
       [req.user!.companyId, q.from, q.branchId ?? null, teamOnly, req.user!.employeeId]);
     const rows = await db.query(
       `SELECT r.employee_id, r.local_date, r.shift_id FROM roster r JOIN employee e ON e.id = r.employee_id
         LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
-        WHERE e.company_id = $1 AND r.local_date BETWEEN $2 AND $3 AND (NOT $4 OR a.manager_id = $5::uuid OR e.id = $5::uuid)`,
+        WHERE e.company_id = $1 AND r.local_date BETWEEN $2 AND $3 AND (NOT $4 OR hj_manages($5::uuid, e.id, current_date) OR e.id = $5::uuid)`,
       [req.user!.companyId, q.from, q.to, teamOnly, req.user!.employeeId]);
     res.json({ employees: emps.rows, roster: rows.rows });
   });
 
-  r.put('/roster', requireRole('hr', 'manager'), async (req, res) => {
+  r.put('/roster', requireRole(...MODULE_ROLES.attendance, 'manager'), async (req, res) => {
     const b = z.object({ rows: z.array(z.object({ employeeId: z.uuid(), localDate: isoDate, shiftId: z.uuid().nullable() })).min(1).max(5000) }).parse(req.body);
     const client = await db.connect();
     try {
@@ -301,22 +301,22 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     res.json({ upserted: b.rows.length });
   });
 
-  r.delete('/roster', requireRole('hr', 'manager'), async (req, res) => {
+  r.delete('/roster', requireRole(...MODULE_ROLES.attendance, 'manager'), async (req, res) => {
     const b = z.object({ employeeId: z.uuid(), localDate: isoDate }).parse(req.body);
-    await assertManages(db, req.user!, b.employeeId);
+    await assertManages(db, req.user!, b.employeeId, 'attendance');
     const d = await db.query('DELETE FROM roster r USING employee e WHERE e.id = r.employee_id AND r.employee_id = $1 AND r.local_date = $2 AND e.company_id = $3', [b.employeeId, b.localDate, req.user!.companyId]);
     if (d.rowCount) await enqueueRecompute(db, [b], 'roster_removed');
     res.json({ deleted: d.rowCount ?? 0 });
   });
 
   /** Copy last week's roster rows onto the week starting weekStart (plan §5.3 "copy last week"). */
-  r.post('/roster/copy-week', requireRole('hr', 'manager'), async (req, res) => {
+  r.post('/roster/copy-week', requireRole(...MODULE_ROLES.attendance, 'manager'), async (req, res) => {
     const b = z.object({ weekStart: isoDate }).parse(req.body);
-    const teamOnly = !hasRole(req.user!, 'hr');
+    const teamOnly = !hasModule(req.user!, 'attendance');
     const rows = await db.query<{ employee_id: string; local_date: string; shift_id: string | null }>(
       `SELECT r.employee_id, r.local_date, r.shift_id FROM roster r JOIN employee e ON e.id = r.employee_id
         LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
-        WHERE e.company_id = $1 AND r.local_date >= $2::date - 7 AND r.local_date < $2::date AND (NOT $3 OR a.manager_id = $4::uuid)`,
+        WHERE e.company_id = $1 AND r.local_date >= $2::date - 7 AND r.local_date < $2::date AND (NOT $3 OR hj_manages($4::uuid, e.id, current_date))`,
       [req.user!.companyId, b.weekStart, teamOnly, req.user!.employeeId]);
     const items: Array<{ employeeId: string; localDate: string }> = [];
     let skippedLocked = 0;
@@ -334,14 +334,14 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   });
 
   /** Publish: tell each rostered employee their shifts for the range. */
-  r.post('/roster/publish', requireRole('hr', 'manager'), async (req, res) => {
+  r.post('/roster/publish', requireRole(...MODULE_ROLES.attendance, 'manager'), async (req, res) => {
     const b = z.object({ from: isoDate, to: isoDate }).parse(req.body);
     // A line manager publishes only their own team's roster; HR publishes for the company.
-    const teamOnly = !hasRole(req.user!, 'hr');
+    const teamOnly = !hasModule(req.user!, 'attendance');
     const rows = await db.query<{ employee_id: string; n: string }>(
       `SELECT r.employee_id, count(*)::text AS n FROM roster r JOIN employee e ON e.id = r.employee_id
         LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
-        WHERE e.company_id = $1 AND r.local_date BETWEEN $2 AND $3 AND (NOT $4 OR a.manager_id = $5::uuid) GROUP BY r.employee_id`,
+        WHERE e.company_id = $1 AND r.local_date BETWEEN $2 AND $3 AND (NOT $4 OR hj_manages($5::uuid, e.id, current_date)) GROUP BY r.employee_id`,
       [req.user!.companyId, b.from, b.to, teamOnly, req.user!.employeeId]);
     for (const row of rows.rows) {
       const userId = await userIdForEmployee(db, row.employee_id);
@@ -353,7 +353,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   });
 
   // ---------------------------------------------------------------- assignments
-  r.post('/assign', requireRole('hr'), async (req, res) => {
+  r.post('/assign', requireModule('attendance'), async (req, res) => {
     const b = z.object({ employeeId: z.uuid(), shiftId: z.uuid(), from: isoDate }).parse(req.body);
     const own = await db.query('SELECT 1 FROM employee e JOIN shift s ON s.company_id = e.company_id WHERE e.id = $1 AND s.id = $2 AND e.company_id = $3', [b.employeeId, b.shiftId, req.user!.companyId]);
     if (!own.rows[0]) throw new NotFoundError('employee or shift not found');
@@ -377,7 +377,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     res.json({ shifts: rows.rows });
   });
 
-  r.post('/', requireRole('hr'), async (req, res) => {
+  r.post('/', requireModule('attendance'), async (req, res) => {
     const b = shiftBody.parse(req.body);
     const ins = await db.query<{ id: string }>(
       `INSERT INTO shift (company_id, code, name_en, name_ne, start_time, end_time, grace_in_min, grace_out_min, early_in_window_min, late_out_window_min,
@@ -396,7 +396,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
     res.json({ shift: rows.rows[0] });
   });
 
-  r.patch('/:id', requireRole('hr'), async (req, res) => {
+  r.patch('/:id', requireModule('attendance'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const b = provided(shiftBody.partial().parse(req.body), req.body);
     const before = await db.query(`SELECT ${SHIFT_COLS} FROM shift s WHERE s.id = $1 AND s.company_id = $2`, [id, req.user!.companyId]);
@@ -420,7 +420,7 @@ export function shiftsRoutes({ db }: AppDeps): Router {
   });
 
   /** Refuse to delete a shift that employees still use; the UI reassigns first (plan §13.8 destructive-action rule). */
-  r.delete('/:id', requireRole('hr'), async (req, res) => {
+  r.delete('/:id', requireModule('attendance'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     if (!(await db.query('SELECT 1 FROM shift WHERE id = $1 AND company_id = $2', [id, req.user!.companyId])).rows[0]) throw new NotFoundError('shift not found');
     const used = await db.query<{ assignments: string; roster: string }>(

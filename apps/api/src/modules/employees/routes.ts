@@ -85,6 +85,9 @@ async function linkDesignation(db: { query: AppDeps['db']['query'] }, employeeId
 /** Search text is matched literally: % and _ typed by the user are not wildcards. */
 export const likeEscape = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
+/** Specialist admins need the employee list and cards (not PAN, bank or edits) to do payroll and attendance work. */
+const READ_ALL = ['payroll_admin', 'attendance_admin'] as const;
+
 export function employeeRoutes({ db, cipher }: AppDeps): Router {
   const r = Router();
 
@@ -97,8 +100,8 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
     if (owner) throw new ConflictError(`this PAN is already recorded for employee ${owner}`);
   };
 
-  // HR lists the whole company; a manager lists only their direct reports and themselves.
-  r.get('/', requireRole('hr', 'manager'), async (req, res) => {
+  // HR (and the payroll and attendance admins, read-only) list the whole company; a manager lists the people they manage and themselves.
+  r.get('/', requireRole('hr', 'manager', ...READ_ALL), async (req, res) => {
     const q = z.object({ status: z.enum(['active', 'exited']).optional(), search: z.string().max(100).optional(), branchId: z.uuid().optional(), pan: z.string().regex(PAN_RE).optional() }).parse(req.query);
     if (q.pan && !hasRole(req.user!, 'hr')) return res.status(403).json({ error: 'PAN lookup requires HR' });
     const rows = await db.query(
@@ -107,16 +110,16 @@ export function employeeRoutes({ db, cipher }: AppDeps): Router {
         WHERE e.company_id = $1 AND ($2::text IS NULL OR e.status = $2)
           AND ($3::text IS NULL OR e.emp_code ILIKE '%' || $3 || '%' OR e.name_en ILIKE '%' || $3 || '%' OR e.name_ne ILIKE '%' || $3 || '%')
           AND ($4::uuid IS NULL OR a.branch_id = $4) AND ($5::text IS NULL OR e.pan_bidx = $5)
-          AND ($6 OR e.id = $7::uuid OR a.manager_id = $7::uuid)
+          AND ($6 OR e.id = $7::uuid OR hj_manages($7::uuid, e.id, current_date))
         ORDER BY e.emp_code`, [req.user!.companyId, q.status ?? null, q.search ? likeEscape(q.search) : null, q.branchId ?? null, q.pan ? cipher.blindIndex(q.pan) : null,
-          hasRole(req.user!, 'hr'), req.user!.employeeId]);
+          hasRole(req.user!, 'hr', ...READ_ALL), req.user!.employeeId]);
     if (q.pan) await audit(db, { actorId: req.user!.id, action: 'pan_lookup', table: 'employee', after: { matches: rows.rows.length } });
     res.json({ employees: rows.rows });
   });
 
   r.get('/:id', async (req, res) => {
     const id = z.uuid().parse(req.params.id);
-    await assertManages(db, req.user!, id);
+    if (!hasRole(req.user!, ...READ_ALL)) await assertManages(db, req.user!, id);
     const rows = await db.query(
       `SELECT ${PUBLIC_COLS} FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
         WHERE e.id = $1 AND e.company_id = $2`, [id, req.user!.companyId]);

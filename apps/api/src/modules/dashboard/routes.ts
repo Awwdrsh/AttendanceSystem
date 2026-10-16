@@ -10,7 +10,7 @@ import { listDays } from '../attendance/service.js';
 export function dashboardRoutes({ db }: AppDeps): Router {
   const r = Router();
 
-  r.get('/executive', requireRole('hr', 'manager'), async (req, res) => {
+  r.get('/executive', requireRole('hr', 'manager', 'executive'), async (req, res) => {
     const cid = req.user!.companyId;
     const today = localDateOf(Date.now());
     let monthStart = today;
@@ -60,7 +60,7 @@ export function dashboardRoutes({ db }: AppDeps): Router {
       ],
       otMinutesThisMonth: ot.rows[0]!.minutes,
       // Payroll totals are HR-only; managers get the attendance tiles.
-      lastPayrollRun: hasRole(req.user!, 'hr') ? lastRun.rows[0] ?? null : null,
+      lastPayrollRun: hasRole(req.user!, 'hr', 'payroll_admin', 'executive') ? lastRun.rows[0] ?? null : null,
     });
   });
 

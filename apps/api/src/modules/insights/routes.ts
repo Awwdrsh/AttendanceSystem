@@ -2,7 +2,7 @@ import { Router, type Request } from 'express';
 import { z } from 'zod';
 import type { AppDeps } from '../../deps.js';
 import { BadRequestError } from '../../errors.js';
-import { companyIdOf, requireRole } from '../auth/middleware.js';
+import { companyIdOf, requireModule } from '../auth/middleware.js';
 import { toCsv } from '../reports/csv.js';
 import { nptToday } from '../workflow/service.js';
 import { computeInsights, DATASETS } from './service.js';
@@ -17,7 +17,7 @@ const filterQuery = z.object({
 /** Workforce insights for HR: headcount, attrition, demographics, people cost, overtime, leave and attendance trends. */
 export function insightsRoutes({ db }: AppDeps): Router {
   const r = Router();
-  r.use(requireRole('hr'));
+  r.use(requireModule('insights'));
 
   const filters = async (req: Request) => {
     const q = filterQuery.parse(req.query);

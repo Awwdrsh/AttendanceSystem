@@ -3,9 +3,10 @@ import { localDateOf } from '@hajiri/attendance-engine';
 import type { Queryable } from '../../db/pool.js';
 import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
-import { hasRole } from '../auth/middleware.js';
+import { hasRole, hasModule, type HrModule } from '../auth/middleware.js';
 import type { AuthUser } from '../auth/service.js';
-import { notify, userIdsWithRole } from '../notifications/service.js';
+import { notify } from '../notifications/service.js';
+import { chooseFlow, fellBackToHr, kindOf, resolveStep, stepsForAmount, visibleNotes, type FlowStep } from './flows.js';
 
 /**
  * Generic multi-level approval engine (plan §5.8): one workflow_instance per request object, steps copied from the
@@ -13,7 +14,7 @@ import { notify, userIdsWithRole } from '../notifications/service.js';
  * business effect (ledger posting, punch creation, ...) in the same transaction as the decision.
  */
 export type WorkflowState = 'pending' | 'approved' | 'rejected' | 'cancelled';
-export interface WorkflowStep { role: string }
+export type WorkflowStep = FlowStep;
 
 export interface WorkflowInstance {
   id: string;
@@ -26,6 +27,9 @@ export interface WorkflowInstance {
   state: WorkflowState;
   created_at: Date;
   completed_at: Date | null;
+  routing?: Array<{ step: number; at: string; notes: string[] }>;
+  amount?: string | null;
+  flow_id?: string | null;
 }
 
 export interface DecisionContext {
@@ -50,8 +54,8 @@ export function nptToday(): string { return localDateOf(Date.now()); }
 
 /** True when managerEmployeeId is the line manager of employeeId on `asOf` (default today, NPT). */
 export async function isManagerOf(db: Queryable, managerEmployeeId: string, employeeId: string, asOf = nptToday()): Promise<boolean> {
-  const r = await db.query('SELECT 1 FROM employee_assignment WHERE employee_id = $1 AND manager_id = $2 AND valid @> $3::date', [employeeId, managerEmployeeId, asOf]);
-  return r.rows.length > 0;
+  const r = await db.query<{ ok: boolean }>('SELECT hj_manages($1::uuid, $2::uuid, $3::date) AS ok', [managerEmployeeId, employeeId, asOf]);
+  return r.rows[0]?.ok === true;
 }
 
 /**
@@ -59,8 +63,9 @@ export async function isManagerOf(db: Queryable, managerEmployeeId: string, empl
  * their company; a manager only for direct reports (and self); everyone for themselves. Throws ForbiddenError otherwise.
  * Callers must separately verify the employee belongs to the user's company (404 for other companies).
  */
-export async function assertManages(db: Queryable, user: AuthUser, employeeId: string): Promise<void> {
+export async function assertManages(db: Queryable, user: AuthUser, employeeId: string, area?: HrModule): Promise<void> {
   if (hasRole(user, 'hr')) return;
+  if (area && hasModule(user, area)) return;
   if (user.employeeId === employeeId) return;
   if (hasRole(user, 'manager') && user.employeeId && (await isManagerOf(db, user.employeeId, employeeId))) return;
   throw new ForbiddenError('not allowed to act for this employee');
@@ -82,6 +87,8 @@ export interface StartWorkflowInput {
   /** Notification shown to the first approver. */
   title: string;
   body: string;
+  /** Money requests (NPR): steps with an amount threshold apply only at or above it. */
+  amount?: number | null;
 }
 
 export async function getInstance(db: Queryable, id: string): Promise<WorkflowInstance | null> {
@@ -94,28 +101,23 @@ export async function instanceForObject(db: Queryable, objectType: string, objec
   return r.rows[0] ?? null;
 }
 
-/** Users who may act on a step: manager → the subject's line manager (falls back to HR); other roles → role holders. */
-export async function approversFor(db: Queryable, companyId: string, employeeId: string | null, role: string, cache?: Map<string, string[]>): Promise<string[]> {
-  const cacheKey = `${companyId}|${employeeId ?? ''}|${role}`;
+/**
+ * Users who may act on a step (see flows.ts): line manager, manager's manager, department or branch head, a role, a
+ * named user or a group, with away approvers handed to their delegate and HR as the last resort. A plain role string
+ * is accepted for older callers ('manager' or a role name).
+ */
+export async function approversForStep(db: Queryable, companyId: string, employeeId: string | null, step: WorkflowStep | string, cache?: Map<string, string[]>): Promise<string[]> {
+  const st: WorkflowStep = typeof step === 'string' ? { role: step } : step;
+  const cacheKey = `${companyId}|${employeeId ?? ''}|${JSON.stringify(st)}`;
   const hit = cache?.get(cacheKey);
   if (hit) return hit;
-  const ids = await approversUncached(db, companyId, employeeId, role);
+  const ids = (await resolveStep(db, companyId, employeeId, st, nptToday())).users;
   cache?.set(cacheKey, ids);
   return ids;
 }
 
-async function approversUncached(db: Queryable, companyId: string, employeeId: string | null, role: string): Promise<string[]> {
-  if (role === 'manager') {
-    if (employeeId) {
-      const r = await db.query<{ id: string }>(
-        `SELECT u.id FROM employee_assignment a JOIN app_user u ON u.employee_id = a.manager_id AND u.status = 'active'
-          WHERE a.employee_id = $1 AND a.valid @> current_date`, [employeeId]);
-      if (r.rows.length) return r.rows.map((x) => x.id);
-    }
-    return userIdsWithRole(db, companyId, 'hr');
-  }
-  return userIdsWithRole(db, companyId, role);
-}
+/** Same as approversForStep (kept for callers written against the role-only steps). */
+export const approversFor = approversForStep;
 
 /** Admins may act anywhere, nobody may decide their own request. */
 export async function canAct(db: Queryable, user: AuthUser, inst: WorkflowInstance, cache?: Map<string, string[]>): Promise<boolean> {
@@ -125,9 +127,9 @@ export async function canAct(db: Queryable, user: AuthUser, inst: WorkflowInstan
   if (hasRole(user, 'admin')) return true;
   const step = inst.steps[inst.current_step];
   if (!step) return false;
-  // HR supervises line managers: it may decide any manager step (plan §3 HR "fix punch on behalf", delegation).
-  if (step.role === 'manager' && hasRole(user, 'hr')) return true;
-  const ids = await approversFor(db, inst.company_id, inst.employee_id, step.role, cache);
+  // HR supervises line managers and heads: it may decide any reporting-line step (plan §3 HR "fix punch on behalf", delegation).
+  if (['manager', 'manager2', 'department_head', 'branch_head'].includes(kindOf(step)) && hasRole(user, 'hr')) return true;
+  const ids = await approversForStep(db, inst.company_id, inst.employee_id, step, cache);
   return ids.includes(user.id);
 }
 
@@ -143,12 +145,13 @@ export async function canView(db: Queryable, user: AuthUser, inst: WorkflowInsta
 }
 
 export async function startWorkflow(db: Queryable, input: StartWorkflowInput): Promise<WorkflowInstance> {
-  const def = await db.query<{ steps: WorkflowStep[] }>(
-    'SELECT steps FROM workflow_definition WHERE company_id = $1 AND object_type = $2', [input.companyId, input.objectType]);
-  const steps = def.rows[0]?.steps?.length ? def.rows[0].steps : [{ role: 'manager' }];
+  // The chain is fixed when the request is made (the most specific flow, then amount thresholds); who fills each step
+  // is worked out when someone looks, so manager changes and delegations apply to requests already waiting.
+  const flow = await chooseFlow(db, input.companyId, input.objectType, input.employeeId);
+  const steps = stepsForAmount(flow.steps, input.amount ?? null);
   const r = await db.query<WorkflowInstance>(
-    `INSERT INTO workflow_instance (company_id, object_type, object_id, employee_id, steps) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-    [input.companyId, input.objectType, input.objectId, input.employeeId, JSON.stringify(steps)]);
+    `INSERT INTO workflow_instance (company_id, object_type, object_id, employee_id, steps, amount, flow_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+    [input.companyId, input.objectType, input.objectId, input.employeeId, JSON.stringify(steps), input.amount ?? null, flow.flowId]);
   const inst = r.rows[0]!;
   await notifyStepApprovers(db, inst, input.title, input.body);
   return inst;
@@ -157,7 +160,14 @@ export async function startWorkflow(db: Queryable, input: StartWorkflowInput): P
 async function notifyStepApprovers(db: Queryable, inst: WorkflowInstance, title: string, body: string): Promise<void> {
   const step = inst.steps[inst.current_step];
   if (!step) return;
-  const ids = await approversFor(db, inst.company_id, inst.employee_id, step.role);
+  const res = await resolveStep(db, inst.company_id, inst.employee_id, step, nptToday());
+  const notes = visibleNotes(res);
+  // Approver away, delegated or nobody set: say so on the request so the requester and HR can see why it went where it did.
+  if (notes.length || fellBackToHr(res)) {
+    await db.query(`UPDATE workflow_instance SET routing = routing || $2::jsonb WHERE id = $1`,
+      [inst.id, JSON.stringify([{ step: inst.current_step, at: new Date().toISOString(), notes }])]);
+  }
+  const ids = res.users;
   for (const userId of ids) {
     await notify(db, {
       companyId: inst.company_id, userId, template: `${inst.object_type}.pending`, title, body,
@@ -193,7 +203,7 @@ export async function act(db: Queryable, input: ActInput): Promise<WorkflowState
     // Delegation is recorded, never assumed: only HR/admin may act on behalf of someone, and only for a real approver of this step.
     if (!hasRole(input.user, 'hr')) throw new ForbiddenError('only HR may act on behalf of another approver');
     const step = inst.steps[inst.current_step];
-    const ids = step ? await approversFor(db, inst.company_id, inst.employee_id, step.role) : [];
+    const ids = step ? await approversForStep(db, inst.company_id, inst.employee_id, step) : [];
     if (!ids.includes(input.onBehalfOf) || input.onBehalfOf === input.user.id) throw new BadRequestError('onBehalfOf must be an approver for this step');
   }
 
@@ -237,7 +247,7 @@ export async function pendingOlderThan(db: Queryable, hours: number): Promise<Ar
   const out: Array<{ instance: WorkflowInstance; approvers: string[] }> = [];
   for (const inst of r.rows) {
     const step = inst.steps[inst.current_step];
-    out.push({ instance: inst, approvers: step ? await approversFor(db, inst.company_id, inst.employee_id, step.role) : [] });
+    out.push({ instance: inst, approvers: step ? await approversForStep(db, inst.company_id, inst.employee_id, step) : [] });
   }
   return out;
 }
@@ -251,6 +261,8 @@ export interface InboxItem {
   createdAt: Date;
   employee: { id: string; empCode: string; nameEn: string; nameNe: string | null } | null;
   summary: Record<string, unknown>;
+  /** Why this step reached you, when it was rerouted (approver away, delegated, nobody set). */
+  routing: string[];
 }
 
 /** Everything the user can decide right now, with enough context for a one-tap decision. */
@@ -267,6 +279,7 @@ export async function inboxFor(db: Queryable, user: AuthUser): Promise<InboxItem
       createdAt: row.created_at,
       employee: row.employee_id ? { id: row.employee_id, empCode: row.emp_code ?? '', nameEn: row.name_en ?? '', nameNe: row.name_ne } : null,
       summary: await summarise(db, row),
+      routing: (row.routing ?? []).filter((x) => x.step === row.current_step).flatMap((x) => x.notes),
     });
   }
   return items;

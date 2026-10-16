@@ -10,7 +10,7 @@ import { hours, nptHHMM, sendReport } from './csv.js';
 const fmt = z.object({ format: z.enum(['json', 'csv']).optional() });
 
 /** Row filter for employee-level reports: HR sees everyone; a manager sees direct reports and themselves. `h` and `u` are the placeholder numbers. */
-const team = (h: number, u: number) => `($${h} OR e.id = $${u}::uuid OR EXISTS (SELECT 1 FROM employee_assignment ta WHERE ta.employee_id = e.id AND ta.manager_id = $${u}::uuid AND ta.valid @> current_date))`;
+const team = (h: number, u: number) => `($${h} OR e.id = $${u}::uuid OR hj_manages($${u}::uuid, e.id, current_date))`;
 const range = fmt.extend({ from: isoDate, to: isoDate });
 
 /** Reports (plan §5.10): JSON by default, `?format=csv` for Excel. HR sees the company; managers see their direct reports; salary-based and device reports are HR only. */

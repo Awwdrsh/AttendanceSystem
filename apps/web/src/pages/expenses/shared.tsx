@@ -13,6 +13,7 @@ import { Field } from '../../components/Kpi';
 import { addDays, bsMonthLabel, fmtAd, fmtDateShort, fmtMoney, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
+import { ApprovalChainPreview } from '../../components/ApprovalChainPreview';
 
 // ---------------------------------------------------------------- labels
 export const CLAIM_STATUS: Record<ClaimStatus, { label: string; color: string }> = {
@@ -145,6 +146,7 @@ export function ClaimForm({ policy, claim, onDone }: { policy: ExpensePolicy; cl
       })}
       <Button variant="subtle" leftSection={<IconPlus size={16} />} onClick={() => setLines((ls) => [...ls, blankLine()])} w="fit-content" disabled={lines.length >= 50}>Add another expense</Button>
       <Issues issues={(check?.issues ?? []).filter((i) => i.item === undefined)} />
+      <ApprovalChainPreview objectType="expense_claim" amount={check ? Number(check.total) : null} />
       <Group justify="space-between" wrap="wrap">
         <Text size="sm">Total <Text span fw={700}>{check ? money(check.total) : '—'}</Text></Text>
         <Group gap="xs">
@@ -326,6 +328,7 @@ export function TravelForm({ policy, onDone }: { policy: ExpensePolicy; onDone: 
         <TextInput label="Fares and other costs (NPR)" description="Tickets, taxis; not meals or lodging" inputMode="decimal" placeholder="0" value={estimated} onChange={(e) => setEstimated(e.currentTarget.value.replace(/[^\d.]/g, ''))} />
         <TextInput label="Advance needed (NPR)" description="Paid with your salary, or in cash by HR" inputMode="decimal" placeholder="0" value={advance} onChange={(e) => setAdvance(e.currentTarget.value.replace(/[^\d.]/g, ''))} />
       </SimpleGrid>
+      <ApprovalChainPreview objectType="travel_request" amount={(Number(estimated) || 0) + (quote ? Number(quote.daAmount) + Number(quote.lodgingLimit) : 0)} />
       <Group justify="flex-end"><Button onClick={submit} loading={busy} disabled={!ok}>Request approval</Button></Group>
     </Stack>
   );

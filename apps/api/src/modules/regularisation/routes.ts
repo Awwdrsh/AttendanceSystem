@@ -8,7 +8,7 @@ import type { Queryable } from '../../db/pool.js';
 import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { isoDate } from '../../validation.js';
-import { hasRole } from '../auth/middleware.js';
+import { hasModule, hasRole } from '../auth/middleware.js';
 import { enqueueRecompute, isAttendanceLocked, recomputeQueuedFor } from '../attendance/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
 import { act, assertManages, cancelWorkflow, nptToday, registerHandler, startWorkflow, type DecisionContext } from '../workflow/service.js';
@@ -86,7 +86,7 @@ export function regularisationRoutes({ db }: AppDeps): Router {
     const onBehalf = employeeId !== u.employeeId;
     const emp = await db.query<{ company_id: string; status: string }>('SELECT company_id, status FROM employee WHERE id = $1', [employeeId]);
     if (!emp.rows[0] || emp.rows[0].company_id !== u.companyId) throw new NotFoundError('employee not found');
-    if (onBehalf) await assertManages(db, u, employeeId);
+    if (onBehalf) await assertManages(db, u, employeeId, 'attendance');
     if (b.kind === 'missed_punch' && (!b.punchTime || !b.punchDirection)) throw new BadRequestError('punchTime and punchDirection are required for a missed punch');
     if (b.kind === 'shift_change') {
       if (!b.shiftId) throw new BadRequestError('shiftId is required for a shift change');
@@ -104,7 +104,7 @@ export function regularisationRoutes({ db }: AppDeps): Router {
     // Work-from-home days are planned ahead (up to 60 days); every other correction is for a day that has happened.
     if (b.kind === 'wfh' ? daysAhead > 60 : daysAhead > 0) throw new BadRequestError(b.kind === 'wfh' ? 'work from home can be requested up to 60 days ahead' : 'cannot regularise a future date');
     const pol = await policy(emp.rows[0].company_id);
-    const isHr = hasRole(u, 'hr');
+    const isHr = hasModule(u, 'attendance');
     if (!isHr) {
       const ageDays = Math.floor((new Date(`${today}T00:00:00Z`).getTime() - new Date(`${b.localDate}T00:00:00Z`).getTime()) / 86_400_000);
       if (ageDays > pol.backdateDays) throw new BadRequestError(`corrections can only be requested within ${pol.backdateDays} days`);
@@ -147,16 +147,16 @@ export function regularisationRoutes({ db }: AppDeps): Router {
   r.get('/', async (req, res) => {
     const q = z.object({ employeeId: z.uuid().optional(), status: z.enum(['pending', 'approved', 'rejected', 'cancelled']).optional(), from: isoDate.optional(), to: isoDate.optional(), scope: z.enum(['own', 'team', 'all']).optional() }).parse(req.query);
     const u = req.user!;
-    const scope = q.scope ?? (hasRole(u, 'hr') ? 'all' : hasRole(u, 'manager') ? 'team' : 'own');
-    if (scope === 'all' && !hasRole(u, 'hr')) throw new ForbiddenError('scope all requires HR');
-    if (q.employeeId) await assertManages(db, u, q.employeeId);
+    const scope = q.scope ?? (hasModule(u, 'attendance') ? 'all' : hasRole(u, 'manager') ? 'team' : 'own');
+    if (scope === 'all' && !hasModule(u, 'attendance')) throw new ForbiddenError('scope all requires HR');
+    if (q.employeeId) await assertManages(db, u, q.employeeId, 'attendance');
     const rows = await db.query(
       `SELECT rr.id, rr.employee_id, e.emp_code, e.name_en, rr.local_date, rr.kind, rr.punch_time, rr.punch_direction, rr.shift_id, rr.reason, rr.attachment_key, rr.status,
               rr.workflow_instance_id, rr.resulting_punch_id, rr.created_by, rr.created_at, rr.decided_at
          FROM regularisation_request rr JOIN employee e ON e.id = rr.employee_id LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
         WHERE e.company_id = $1 AND ($2::uuid IS NULL OR rr.employee_id = $2) AND ($3::text IS NULL OR rr.status = $3)
           AND ($4::date IS NULL OR rr.local_date >= $4) AND ($5::date IS NULL OR rr.local_date <= $5)
-          AND CASE $6 WHEN 'own' THEN rr.employee_id = $7::uuid WHEN 'team' THEN (a.manager_id = $7::uuid OR rr.employee_id = $7::uuid) ELSE true END
+          AND CASE $6 WHEN 'own' THEN rr.employee_id = $7::uuid WHEN 'team' THEN (hj_manages($7::uuid, rr.employee_id, current_date) OR rr.employee_id = $7::uuid) ELSE true END
         ORDER BY rr.created_at DESC LIMIT 500`, [u.companyId, q.employeeId ?? null, q.status ?? null, q.from ?? null, q.to ?? null, scope, u.employeeId]);
     res.json({ requests: rows.rows });
   });
@@ -166,7 +166,7 @@ export function regularisationRoutes({ db }: AppDeps): Router {
     const r0 = await db.query<{ employee_id: string; status: string; company_id: string }>('SELECT rr.employee_id, rr.status, e.company_id FROM regularisation_request rr JOIN employee e ON e.id = rr.employee_id WHERE rr.id = $1', [id]);
     const rr = r0.rows[0];
     if (!rr || rr.company_id !== req.user!.companyId) throw new NotFoundError('request not found');
-    await assertManages(db, req.user!, rr.employee_id);
+    await assertManages(db, req.user!, rr.employee_id, 'attendance');
     // Approved corrections already produced a punch/decision; they cannot be undone here (a new request or HR adjustment supersedes).
     if (rr.status !== 'pending') throw new ConflictError(`only pending requests can be cancelled (status ${rr.status})`);
     // Conditional update: an approval landing at the same moment wins, and the cancel reports the conflict.

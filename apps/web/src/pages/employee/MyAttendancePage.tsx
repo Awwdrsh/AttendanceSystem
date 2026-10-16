@@ -16,6 +16,7 @@ import { bsMonthLabel, fmtDateLong, fmtTime, minutesToHm, todayNpt } from '../..
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import { describeFlag, sourceLabel } from './HomePage';
+import { ApprovalChainPreview } from '../../components/ApprovalChainPreview';
 
 export function CorrectionForm({ employeeId, date, onDone }: { employeeId: string; date: string; onDone: () => void }) {
   const { t } = useI18n();
@@ -46,6 +47,7 @@ export function CorrectionForm({ employeeId, date, onDone }: { employeeId: strin
       ) : null}
       {kind === 'shift_change' ? <Select label="Shift worked" value={shiftId} onChange={setShiftId} placeholder="Choose a shift" data={(shifts.data?.shifts ?? []).map((s) => ({ value: s.id, label: `${s.name_en || s.code}, ${s.start} to ${s.end}` }))} /> : null}
       <Textarea label={t('reason')} required value={reason} onChange={(e) => setReason(e.currentTarget.value)} autosize minRows={2} description="Your manager sees this when reviewing the request." />
+      <ApprovalChainPreview objectType="regularisation_request" employeeId={employeeId} />
       <Group justify="flex-end"><Button loading={busy} disabled={reason.trim().length < 3 || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)} onClick={submit}>Send request</Button></Group>
     </Stack>
   );
