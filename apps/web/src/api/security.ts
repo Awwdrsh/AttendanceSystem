@@ -22,9 +22,9 @@ export const security = {
 
 // ---------------------------------------------------------------- tax savings
 
-export interface DeclarationValues { lifePremium: string; healthPremium: string; citMonthly: string; medicalCost: string; otherRetirementAnnual: string }
+export interface DeclarationValues { lifePremium: string; healthPremium: string; citMonthly: string; medicalCost: string; otherRetirementAnnual: string; donation: string }
 export interface TaxSavingsRequest {
-  id: string; employee_id: string; fiscal_year_start: number; life_premium: string; health_premium: string; cit_monthly: string; medical_cost: string; other_retirement_annual: string;
+  id: string; employee_id: string; fiscal_year_start: number; life_premium: string; health_premium: string; cit_monthly: string; medical_cost: string; other_retirement_annual: string; donation?: string;
   note: string | null; status: 'pending' | 'approved' | 'rejected' | 'cancelled'; created_at: string; decided_at: string | null; decision_note: string | null;
   proofs?: Array<{ id: string; filename: string; mime: string; bytes: number }>;
 }

@@ -15,6 +15,7 @@ import { bsMonthLabel, fmtAd, fmtMoney, fmtTime } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import { SalarySheet } from './SalarySheet';
+import { RunHolds } from './compliance/RunHolds';
 
 const ORDER = ['draft', 'preflight_failed', 'computed', 'reviewed', 'approved', 'locked', 'disbursed', 'filed'];
 const stepOf = (s: string) => ({ draft: 0, preflight_failed: 0, computed: 2, reviewed: 3, approved: 3, locked: 4, disbursed: 4, filed: 4 }[s] ?? 0);
@@ -221,6 +222,7 @@ export default function RunWizardPage() {
             </ScrollArea.Autosize>
           </Paper>
         )}
+        {run.computed_at ? <RunHolds runId={id} slips={slips} canHold={['computed', 'reviewed', 'approved', 'locked'].includes(run.status)} /> : null}
         <Textarea label="Reviewer notes" description="Saved with the review." value={notes} onChange={(e) => setNotes(e.currentTarget.value)} autosize minRows={2} disabled={locked} />
         <StepNav onBack={() => setStep(1)}>
           {run.computed_at ? <Button variant="default" onClick={() => setStep(4)}>Preview salary sheet</Button> : null}

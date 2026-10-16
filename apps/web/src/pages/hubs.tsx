@@ -17,6 +17,10 @@ const AssignmentsPage = lazy(() => import('./payroll/AssignmentsPage'));
 const DeclarationsPage = lazy(() => import('./payroll/DeclarationsPage'));
 const LoansPage = lazy(() => import('./payroll/LoansPage'));
 const RulesPage = lazy(() => import('./payroll/RulesPage'));
+const PayrollReportsPage = lazy(() => import('./payroll/compliance/PayrollReportsPage'));
+const OptimumCitPage = lazy(() => import('./payroll/compliance/OptimumCitPage'));
+const OpeningBalancesPage = lazy(() => import('./payroll/compliance/OpeningBalancesPage'));
+const HeldPayPage = lazy(() => import('./payroll/compliance/HeldPayPage'));
 const SettingsPage = lazy(() => import('./hr/SettingsPage'));
 const ShiftsPage = lazy(() => import('./hr/ShiftsPage'));
 const HolidaysPage = lazy(() => import('./hr/HolidaysPage'));
@@ -100,6 +104,10 @@ export function PayrollHub() {
     { path: '/payroll/assignments', label: 'Employee salaries', element: <AssignmentsPage /> },
     { path: '/payroll/declarations', label: 'Tax declarations', element: <DeclarationsPage /> },
     { path: '/payroll/loans', label: 'Loans & advances', element: <LoansPage /> },
+    { path: '/payroll/reports', label: 'Reports', element: <PayrollReportsPage /> },
+    { path: '/payroll/optimum-cit', label: 'Optimum CIT', element: <OptimumCitPage /> },
+    { path: '/payroll/held-pay', label: 'Held pay', element: <HeldPayPage /> },
+    { path: '/payroll/opening-balances', label: 'Opening balances', element: <OpeningBalancesPage /> },
     { path: '/payroll/rules', label: 'Tax & SSF rules', element: <RulesPage /> },
   ]} />;
 }

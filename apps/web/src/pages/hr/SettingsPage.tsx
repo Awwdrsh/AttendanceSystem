@@ -173,7 +173,8 @@ export default function SettingsPage() {
           { key: 'hourlyDivisor', label: 'Hourly divisor for overtime', type: 'number', hint: 'Default 208 (26 × 8); 240 is also common.' },
           { key: 'payDay', label: 'Pay day', type: 'number', hint: 'Day of the Nepali month salaries are paid.' },
           { key: 'rounding', label: 'Rounding', type: 'select', options: [{ value: 'half_up_rupee', label: 'Nearest rupee' }, { value: 'paisa', label: 'Exact to the paisa' }] },
-          { key: 'twoApproverThreshold', label: 'Second approver above', type: 'number', hint: 'Payroll runs with a net total above this amount need two approvers.', suffix: ' NPR' },
+          { key: 'separateApprover', label: 'A different HR user approves', type: 'boolean', hint: 'The person who prepares a pay run cannot also approve it.' },
+          { key: 'publishOnLock', label: 'Publish payslips when a run is locked', type: 'boolean', hint: 'Otherwise HR publishes them from the pay run when ready.' },
           { key: 'encashmentDivisor', label: 'Leave encashment divisor', type: 'select', options: [{ value: 'bs_days', label: 'Days in the month' }, { value: 'fixed_30', label: 'Fixed 30 days' }] }]} /> : null}</Tabs.Panel>
         <Tabs.Panel value="time" pt="lg"><TimeTrackingSettings /></Tabs.Panel>
         <Tabs.Panel value="notify" pt="lg">{q.data ? <GenericSettings settingKey="notifications.policy" title="Notifications" description="When reminders and digests go out." value={val('notifications.policy')} onSaved={reload} fields={[
