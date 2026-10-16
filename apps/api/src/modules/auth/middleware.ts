@@ -81,20 +81,45 @@ export function hasRole(user: AuthUser, ...roles: Role[]): boolean {
   return user.roles.includes('admin') || roles.some((r) => user.roles.includes(r));
 }
 
-/** Manager relationship: direct reports via the assignment valid on the given Nepal date (default today). */
+/**
+ * Manager relationship on the given Nepal date (default today): the line manager, the head of the employee's
+ * department (or of a department above it) or the head of their branch. Defined once in SQL as hj_manages().
+ */
 export async function isManagerOf(db: Queryable, managerEmployeeId: string, employeeId: string, onDate = nptToday()): Promise<boolean> {
-  const r = await db.query('SELECT 1 FROM employee_assignment WHERE employee_id = $1 AND manager_id = $2 AND valid @> $3::date', [employeeId, managerEmployeeId, onDate]);
-  return r.rows.length > 0;
+  const r = await db.query<{ ok: boolean }>('SELECT hj_manages($1::uuid, $2::uuid, $3::date) AS ok', [managerEmployeeId, employeeId, onDate]);
+  return r.rows[0]?.ok === true;
 }
 
 /**
- * Who may see or act for an employee: HR and admin company-wide; a manager only for direct reports; everyone
- * for themselves. An employee of another company is reported as not found so ids cannot be enumerated across tenants.
+ * SQL fragment for "the viewer manages this employee" (same rule as isManagerOf), for list queries.
+ * `viewer` and `date` are SQL expressions (usually placeholders), `target` the employee id column.
  */
-export async function assertManages(db: Queryable, user: AuthUser, employeeId: string): Promise<void> {
+export const managesSql = (viewer: string, target: string, date = 'current_date') => `hj_manages(${viewer}::uuid, ${target}, ${date})`;
+
+/**
+ * Who may work in each HR area besides hr and admin. Specialist roles never see other areas; executive is read-only.
+ * Keep this the single place that decides; routes call requireModule()/hasModule().
+ */
+export const MODULE_ROLES = {
+  payroll: ['hr', 'payroll_admin'],
+  attendance: ['hr', 'attendance_admin'],
+  hiring: ['hr', 'recruiter'],
+  insights: ['hr', 'executive'],
+} as const satisfies Record<string, readonly Role[]>;
+export type HrModule = keyof typeof MODULE_ROLES;
+
+export const requireModule = (m: HrModule) => requireRole(...MODULE_ROLES[m]);
+export const hasModule = (user: AuthUser, m: HrModule): boolean => hasRole(user, ...MODULE_ROLES[m]);
+
+/**
+ * Who may see or act for an employee: HR and admin company-wide; a manager only for direct reports; everyone
+ * for themselves; with `area`, that area's specialist role (e.g. attendance_admin) as well. An employee of another company is reported as not found so ids cannot be enumerated across tenants.
+ */
+export async function assertManages(db: Queryable, user: AuthUser, employeeId: string, area?: HrModule): Promise<void> {
   const inCompany = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, user.companyId]);
   if (inCompany.rows.length === 0) throw new NotFoundError('employee not found');
   if (hasRole(user, 'hr')) return;
+  if (area && hasModule(user, area)) return;
   if (user.employeeId === employeeId) return;
   if (hasRole(user, 'manager') && user.employeeId && (await isManagerOf(db, user.employeeId, employeeId))) return;
   throw new ForbiddenError('not allowed to access this employee');

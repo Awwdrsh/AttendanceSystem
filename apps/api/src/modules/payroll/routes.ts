@@ -5,7 +5,7 @@ import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { isoDate, money } from '../../validation.js';
-import { assertManages, hasRole, requireRole } from '../auth/middleware.js';
+import { assertManages, hasModule, requireModule, requireRole } from '../auth/middleware.js';
 import { lockAttendance } from '../attendance/service.js';
 import { ssfSheetCsv } from './exports.js';
 import { renderPayslipHtml } from './payslip-html.js';
@@ -14,7 +14,7 @@ import { decideTaxSavings, pendingTaxSavings, submitTaxSavings, taxSavingsRoutes
 import { approveRun, bonusAllocation, computeRun, ensurePeriod, getPeriod, getRun, lockRun, preflight, publishRun, reviewRun } from './service.js';
 
 const STATUTORY_KEYS = new Set(['tax.schedule', 'tax.deductions', 'ssf.rates', 'pf.rates', 'ot.multiplier', 'festival.allowance', 'min_wage', 'bonus.caps', 'ssf.deposit_days', 'tds.deposit_days']);
-const payrollRole = requireRole('hr');
+const payrollRole = requireModule('payroll');
 /** Salary figures, declarations and profit are never negative; a negative CIT or premium would raise net pay. */
 const amount = money.refine((v) => !v.startsWith('-'), 'must not be negative');
 
@@ -46,7 +46,7 @@ export function payrollRoutes(deps: AppDeps): Router {
     await audit(db, { actorId: req.user!.id, action: 'create', table: 'rule_version', rowId: rows.rows[0]!.id, after: b });
     res.status(201).json({ id: rows.rows[0]!.id });
   });
-  r.post('/rules/:id/approve', requireRole('hr'), async (req, res) => {
+  r.post('/rules/:id/approve', requireModule('payroll'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const rows = await db.query('UPDATE rule_version SET approved_by = $2, approved_at = now() WHERE id = $1 RETURNING id', [id, req.user!.id]);
     if (!rows.rows[0]) throw new NotFoundError('rule not found');
@@ -189,7 +189,7 @@ export function payrollRoutes(deps: AppDeps): Router {
     const employeeId = q.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
     await assertManages(db, req.user!, employeeId);
-    if (employeeId !== req.user!.employeeId && !hasRole(req.user!, 'hr')) throw new ForbiddenError();
+    if (employeeId !== req.user!.employeeId && !hasModule(req.user!, 'payroll')) throw new ForbiddenError();
     const rows = await db.query('SELECT d.* FROM tax_declaration d JOIN employee e ON e.id = d.employee_id WHERE d.employee_id = $1 AND d.fiscal_year_start = $2 AND e.company_id = $3', [employeeId, q.fiscalYearStart, cid(req)]);
     const pending = rows.rows[0] || (await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, cid(req)])).rows[0]
       ? await pendingTaxSavings(db, employeeId, q.fiscalYearStart) : null;
@@ -205,7 +205,7 @@ export function payrollRoutes(deps: AppDeps): Router {
     const employeeId = b.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
     await assertManages(db, req.user!, employeeId);
-    if (employeeId !== req.user!.employeeId && !hasRole(req.user!, 'hr')) throw new ForbiddenError();
+    if (employeeId !== req.user!.employeeId && !hasModule(req.user!, 'payroll')) throw new ForbiddenError();
     const emp = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, cid(req)]);
     if (!emp.rows[0]) throw new NotFoundError('employee not found');
     const { employeeId: _e, fiscalYearStart, submit, ...values } = b;
@@ -349,7 +349,7 @@ export function payrollRoutes(deps: AppDeps): Router {
     if (['draft', 'preflight_failed'].includes(run.status)) await db.query(`UPDATE payroll_run SET status = $2, preflight = $3 WHERE id = $1`, [run.id, pf.ok ? 'draft' : 'preflight_failed', JSON.stringify(pf)]);
     res.json(pf);
   });
-  r.post('/runs/:id/lock-attendance', requireRole('hr'), async (req, res) => {
+  r.post('/runs/:id/lock-attendance', requireModule('payroll'), async (req, res) => {
     const run = await getRun(db, cid(req), z.uuid().parse(req.params.id));
     const p = await getPeriod(db, cid(req), run.period_id);
     const n = await lockAttendance(db, cid(req), p.start_ad, p.end_ad);
@@ -401,7 +401,7 @@ export function payrollRoutes(deps: AppDeps): Router {
     await reviewRun(db, cid(req), z.uuid().parse(req.params.id), req.user!.id, b.notes);
     res.json({ ok: true });
   });
-  r.post('/runs/:id/approve', requireRole('hr'), async (req, res) => {
+  r.post('/runs/:id/approve', requireModule('payroll'), async (req, res) => {
     const result = await approveRun(db, cid(req), z.uuid().parse(req.params.id), { id: req.user!.id, roles: req.user!.roles });
     res.json({ ok: true, ...result });
   });
@@ -429,7 +429,7 @@ export function payrollRoutes(deps: AppDeps): Router {
 
   // ---------------------------------------------------------------- payslips (employee self-service, plan §13.7)
   const canSeePayslip = (user: NonNullable<typeof r extends never ? never : import('../auth/service.js').AuthUser>, employeeId: string) =>
-    hasRole(user, 'hr') || user.employeeId === employeeId;
+    hasModule(user, 'payroll') || user.employeeId === employeeId;
 
   r.get('/payslips', async (req, res) => {
     const q = z.object({ employeeId: z.uuid().optional(), fiscalYearStart: z.coerce.number().int().optional() }).parse(req.query);
@@ -437,7 +437,7 @@ export function payrollRoutes(deps: AppDeps): Router {
     if (!employeeId) throw new BadRequestError('employeeId required');
     await assertManages(db, req.user!, employeeId);          // 404 outside the company, 403 for unrelated employees
     if (!canSeePayslip(req.user!, employeeId)) throw new ForbiddenError('payslips are visible to the employee and to HR only');
-    const onlyPublished = !hasRole(req.user!, 'hr');
+    const onlyPublished = !hasModule(req.user!, 'payroll');
     const rows = await db.query(
       `SELECT ps.id, ps.run_id, r.run_type, p.bs_year, p.bs_month, ps.paid_days, ps.lop_days, ps.ot_hours, ps.gross, ps.tds, ps.total_deductions, ps.net, ps.published_at, r.locked_at
          FROM payslip ps JOIN payroll_run r ON r.id = ps.run_id JOIN payroll_period p ON p.id = r.period_id
@@ -456,7 +456,7 @@ export function payrollRoutes(deps: AppDeps): Router {
     const row = ps.rows[0];
     if (!row || row.company_id !== req.user!.companyId) throw new NotFoundError('payslip not found');
     if (!canSeePayslip(req.user!, row.employee_id)) throw new ForbiddenError();
-    if (!hasRole(req.user!, 'hr') && !row.published_at) throw new NotFoundError('payslip not found');
+    if (!hasModule(req.user!, 'payroll') && !row.published_at) throw new NotFoundError('payslip not found');
     const lines = await db.query('SELECT component_code AS code, type, name_en, name_ne, amount, basis, sort_order FROM payslip_line WHERE payslip_id = $1 ORDER BY sort_order', [id]);
     return { row, lines: lines.rows as Array<{ code: string; type: string; name_en: string; name_ne: string | null; amount: string; basis: unknown; sort_order: number }> };
   }

@@ -8,7 +8,7 @@ import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { money } from '../../validation.js';
 import type { AuthUser } from '../auth/service.js';
-import { companyIdOf, hasRole } from '../auth/middleware.js';
+import { companyIdOf, hasModule, hasRole } from '../auth/middleware.js';
 import { attachFile, fileMeta, readFile, sendStoredFile } from '../files/store.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
 import { act, cancelWorkflow, nptToday, registerHandler, registerSummary, startWorkflow, type DecisionContext } from '../workflow/service.js';
@@ -207,7 +207,7 @@ export function taxSavingsRoutes({ db, cipher }: AppDeps): Router {
     const companyId = companyIdOf(req);
     const employeeId = q.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('this account is not linked to an employee');
-    if (employeeId !== req.user!.employeeId && !hasRole(req.user!, 'hr')) throw new ForbiddenError();
+    if (employeeId !== req.user!.employeeId && !hasModule(req.user!, 'payroll')) throw new ForbiddenError();
     const emp = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, companyId]);
     if (!emp.rows[0]) throw new NotFoundError('employee not found');
     const fy = q.fiscalYearStart ?? currentFiscalYearStart();
@@ -266,7 +266,7 @@ export function taxSavingsRoutes({ db, cipher }: AppDeps): Router {
     const companyId = companyIdOf(req);
     const employeeId = b.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('this account is not linked to an employee');
-    if (employeeId !== req.user!.employeeId && !hasRole(req.user!, 'hr')) throw new ForbiddenError();
+    if (employeeId !== req.user!.employeeId && !hasModule(req.user!, 'payroll')) throw new ForbiddenError();
     const emp = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, companyId]);
     if (!emp.rows[0]) throw new NotFoundError('employee not found');
     res.json(await estimateTax(db, companyId, employeeId, b.fiscalYearStart ?? currentFiscalYearStart(), b.proposed ? fromValues(b.proposed) : null));
@@ -280,7 +280,7 @@ export function taxSavingsRoutes({ db, cipher }: AppDeps): Router {
     const row = await db.query<RequestRow>('SELECT * FROM tax_declaration_request WHERE id = $1 AND company_id = $2', [id, companyId]);
     const x = row.rows[0];
     const own = x && x.employee_id === req.user!.employeeId;
-    if (!x || (!own && !hasRole(req.user!, 'hr')) || !x.proof_file_ids.includes(fileId)) throw new NotFoundError('file not found');
+    if (!x || (!own && !hasModule(req.user!, 'payroll')) || !x.proof_file_ids.includes(fileId)) throw new NotFoundError('file not found');
     const file = await readFile(db, cipher, companyId, fileId);
     if (!own) await audit(db, { actorId: req.user!.id, action: 'view_file', table: 'tax_declaration_request', rowId: id, after: { fileId } });
     sendStoredFile(res, file, { download: req.query.download === '1' });

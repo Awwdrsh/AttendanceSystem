@@ -43,7 +43,7 @@ function scopeFilter(u: AuthUser, scope: Scope, alias: string, first: number): {
   if (scope === 'team') {
     if (!hasRole(u, 'manager', 'hr') || !u.employeeId) throw new ForbiddenError('only managers can see their team');
     return {
-      sql: `(${alias}.employee_id = $${first} OR EXISTS (SELECT 1 FROM employee_assignment a WHERE a.employee_id = ${alias}.employee_id AND a.manager_id = $${first} AND a.valid @> current_date))`,
+      sql: `(${alias}.employee_id = $${first} OR hj_manages($${first}::uuid, ${alias}.employee_id, current_date))`,
       params: [u.employeeId],
     };
   }
@@ -209,7 +209,7 @@ export function expensesRoutes({ db, cipher }: AppDeps): Router {
   const submitClaim = async (client: Queryable, companyId: string, claimId: string, employeeId: string, title: string, total: string) => {
     const emp = await employeeOf(client, companyId, employeeId);
     const inst = await startWorkflow(client, {
-      companyId, objectType: 'expense_claim', objectId: claimId, employeeId,
+      companyId, objectType: 'expense_claim', objectId: claimId, employeeId, amount: Number(total),
       title: 'Expense claim to approve', body: `${emp.name_en}: ${title}, ${rs(total)}`,
     });
     await client.query(`UPDATE expense_claim SET status = 'pending', submitted_at = now(), workflow_instance_id = $2, updated_at = now() WHERE id = $1`, [claimId, inst.id]);
@@ -447,7 +447,7 @@ export function expensesRoutes({ db, cipher }: AppDeps): Router {
           q.days, q.nights, q.daRate, q.lodgingRate, q.daAmount, q.lodgingLimit, req.user!.id]);
       const id = ins.rows[0]!.id;
       const inst = await startWorkflow(client, {
-        companyId, objectType: 'travel_request', objectId: id, employeeId,
+        companyId, objectType: 'travel_request', objectId: id, employeeId, amount: Number(ceiling.toString()),
         title: 'Travel request to approve', body: `${emp.name_en}: ${b.destination}, ${bsRange(b.fromDate, b.toDate)}${advance.gt(0) ? `, advance ${rs(advance)}` : ''}`,
       });
       await client.query('UPDATE travel_request SET workflow_instance_id = $2 WHERE id = $1', [id, inst.id]);
@@ -622,7 +622,7 @@ export function expensesRoutes({ db, cipher }: AppDeps): Router {
       }
       const emp = await employeeOf(client, companyId, t.employee_id);
       const inst = await startWorkflow(client, {
-        companyId, objectType: 'travel_settlement', objectId: sid, employeeId: t.employee_id,
+        companyId, objectType: 'travel_settlement', objectId: sid, employeeId: t.employee_id, amount: Number(entitlement.toString()),
         title: 'Travel settlement to approve', body: `${emp.name_en}: ${t.destination}, ${net.gte(0) ? `pay ${rs(net)}` : `recover ${rs(net.neg())}`}`,
       });
       await client.query('UPDATE travel_settlement SET workflow_instance_id = $2 WHERE id = $1', [sid, inst.id]);

@@ -9,6 +9,7 @@ import { runLeaveCatchUp, runMonthlyAccrual } from './modules/leave/accrual.js';
 import { dailyDigest, deliverQueued, LogSender, notify, notifyRole, userIdForEmployee, userIdsWithRole, WebhookSender, type Sender } from './modules/notifications/service.js';
 import { ensurePseudoDevice, nptLocalTime } from './modules/punch/devices.js';
 import { DAILY_MODULE_JOBS } from './module-jobs.js';
+import { approversForStep, type WorkflowStep } from './modules/workflow/service.js';
 
 export interface WorkerDeps { db: Db; logger: Logger; cipher: FieldCipher; senders?: Sender[] }
 
@@ -174,7 +175,7 @@ export async function detectOfflineDevices(deps: WorkerDeps, now = new Date()): 
 /** (5) Approval SLA reminders (24 h) and escalation to HR (48 h), once per instance per day (plan §5.8, §13.5). */
 export async function slaReminders(deps: WorkerDeps, now = new Date()): Promise<{ reminded: number; escalated: number }> {
   const { db } = deps;
-  const rows = await db.query<{ id: string; company_id: string; object_type: string; employee_id: string | null; steps: Array<{ role: string }>; current_step: number; created_at: Date; name_en: string | null; manager_user: string | null; sla_hours: number; escalation_hours: number; reminded_today: boolean; escalated_today: boolean }>(
+  const rows = await db.query<{ id: string; company_id: string; object_type: string; employee_id: string | null; steps: WorkflowStep[]; current_step: number; created_at: Date; name_en: string | null; manager_user: string | null; sla_hours: number; escalation_hours: number; reminded_today: boolean; escalated_today: boolean }>(
     `SELECT w.id, w.company_id, w.object_type, w.employee_id, w.steps, w.current_step, w.created_at, e.name_en,
             (SELECT u.id FROM employee_assignment a JOIN app_user u ON u.employee_id = a.manager_id WHERE a.employee_id = w.employee_id AND a.valid @> current_date AND u.status = 'active' LIMIT 1) AS manager_user,
             coalesce((p.value->>'slaHours')::int, 24) AS sla_hours, coalesce((p.value->>'escalationHours')::int, 48) AS escalation_hours,
@@ -189,8 +190,9 @@ export async function slaReminders(deps: WorkerDeps, now = new Date()): Promise<
     const step = w.steps[w.current_step];
     const subject = `${w.object_type.replace(/_/g, ' ')}${w.name_en ? ` from ${w.name_en}` : ''}`;
     if (ageH >= w.sla_hours && !w.reminded_today) {
-      let targets = step?.role === 'manager' && w.manager_user ? [w.manager_user] : await userIdsWithRole(db, w.company_id, step?.role ?? 'hr');
-      if (targets.length === 0) targets = await userIdsWithRole(db, w.company_id, 'hr');   // nobody holds the role: HR must act
+      // The same resolution as the inbox: line manager, heads, groups or named people, with delegates and HR as the last resort.
+      let targets = step ? await approversForStep(db, w.company_id, w.employee_id, step) : [];
+      if (targets.length === 0) targets = await userIdsWithRole(db, w.company_id, 'hr');
       for (const userId of targets) {
         await notify(db, { companyId: w.company_id, userId, template: 'workflow.sla', title: `Approval waiting ${Math.floor(ageH)} h: ${subject}`,
           body: `A ${subject} has been waiting for your decision for ${Math.floor(ageH)} hours.`, payload: { instanceId: w.id, objectType: w.object_type }, channels: ['push', 'email'] });

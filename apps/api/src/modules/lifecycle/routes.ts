@@ -152,7 +152,7 @@ export function lifecycleRoutes({ db, cipher }: AppDeps): Router {
          FROM lifecycle_case c JOIN employee e ON e.id = c.employee_id LEFT JOIN lifecycle_template t ON t.id = c.template_id
          LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> greatest(current_date, c.anchor_date)
         WHERE c.company_id = $1 AND ($2::text IS NULL OR c.kind = $2) AND ($3::text IS NULL OR c.status = $3)
-          AND ($4 OR a.manager_id = $5::uuid)
+          AND ($4 OR hj_manages($5::uuid, e.id, greatest(current_date, c.anchor_date)))
         ORDER BY c.status = 'active' DESC, c.anchor_date DESC LIMIT 500`,
       [companyIdOf(req), q.kind ?? null, q.status ?? null, isHr(req), req.user!.employeeId]);
     res.json({ cases: rows.rows });
@@ -328,7 +328,7 @@ export function lifecycleRoutes({ db, cipher }: AppDeps): Router {
          FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date LEFT JOIN employee m ON m.id = a.manager_id
         WHERE e.company_id = $1 AND e.status = 'active' AND e.probation_end IS NOT NULL AND e.confirmed_on IS NULL
           AND (e.exit_date IS NULL OR e.exit_date >= current_date)
-          AND e.probation_end <= current_date + $2::int AND ($3 OR a.manager_id = $4::uuid)
+          AND e.probation_end <= current_date + $2::int AND ($3 OR hj_manages($4::uuid, e.id, current_date))
         ORDER BY e.probation_end`, [companyIdOf(req), q.within, isHr(req), req.user!.employeeId]);
     res.json({ employees: rows.rows });
   });
@@ -394,7 +394,7 @@ export function lifecycleRoutes({ db, cipher }: AppDeps): Router {
       `SELECT ${exitCols} FROM employee_exit x JOIN employee e ON e.id = x.employee_id
          LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> least(current_date, coalesce(x.accepted_lwd, x.proposed_lwd))
         WHERE x.company_id = $1 AND ($2::text IS NULL OR x.status = $2 OR ($2 = 'open' AND x.status IN ('pending', 'accepted')))
-          AND ($3 OR a.manager_id = $4::uuid)
+          AND ($3 OR hj_manages($4::uuid, e.id, least(current_date, coalesce(x.accepted_lwd, x.proposed_lwd))))
         ORDER BY x.status IN ('pending', 'accepted') DESC, coalesce(x.accepted_lwd, x.proposed_lwd) DESC LIMIT 500`,
       [companyIdOf(req), q.status ?? null, isHr(req), req.user!.employeeId]);
     res.json({ exits: rows.rows });

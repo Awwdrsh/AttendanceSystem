@@ -9,7 +9,7 @@ import { hashPassword, sha256Hex } from '../../crypto.js';
 import type { Queryable } from '../../db/pool.js';
 import { BadRequestError, ConflictError, ForbiddenError, HttpError, NotFoundError } from '../../errors.js';
 import { isoDate } from '../../validation.js';
-import { assertManages, companyIdOf, hasRole, requireRole } from '../auth/middleware.js';
+import { assertManages, companyIdOf, hasModule, hasRole, MODULE_ROLES, requireModule, requireRole } from '../auth/middleware.js';
 import { dateRange, isAttendanceLocked } from '../attendance/service.js';
 import { readFile, saveFile } from '../files/store.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
@@ -37,7 +37,7 @@ function checkRange(from: string, to: string, maxDays = MAX_RANGE_DAYS): void {
 
 /** HR sees everyone, a manager their direct reports (on that day) and themselves, everyone else only themselves. */
 function scopeSql(alias: string, dateExpr: string, p: { all: number; me: number; mgr: number }): string {
-  return `($${p.all} OR ${alias}.employee_id = $${p.me}::uuid OR ($${p.mgr} AND EXISTS (SELECT 1 FROM employee_assignment a WHERE a.employee_id = ${alias}.employee_id AND a.manager_id = $${p.me}::uuid AND a.valid @> ${dateExpr})))`;
+  return `($${p.all} OR ${alias}.employee_id = $${p.me}::uuid OR ($${p.mgr} AND hj_manages($${p.me}::uuid, ${alias}.employee_id, ${dateExpr})))`;
 }
 
 async function employeeOf(db: Queryable, req: Request): Promise<{ id: string; company_id: string; emp_code: string; name_en: string; field_work: boolean }> {
@@ -69,7 +69,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     res.json({ policy: await fieldPolicy(db, companyIdOf(req)) });
   });
 
-  r.put('/policy', requireRole('hr'), async (req, res) => {
+  r.put('/policy', requireModule('attendance'), async (req, res) => {
     const companyId = companyIdOf(req);
     const value = fieldPolicySchema.parse(req.body);
     const before = await fieldPolicy(db, companyId);
@@ -141,7 +141,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     const q = rangeQuery.extend({ overOnly: z.enum(['1', 'true']).optional(), format: z.enum(['json', 'csv']).optional() }).parse(req.query);
     checkRange(q.from, q.to);
     const u = req.user!;
-    if (q.employeeId) await assertManages(db, u, q.employeeId);
+    if (q.employeeId) await assertManages(db, u, q.employeeId, 'attendance');
     const rows = await db.query(
       `SELECT b.id, b.employee_id, e.emp_code, e.name_en, b.local_date, b.kind, b.paid, b.max_min, b.started_at, b.ended_at,
               coalesce(b.minutes, floor(extract(epoch FROM now() - b.started_at) / 60)::int) AS minutes, b.over_limit, b.ended_at IS NULL AS open
@@ -149,7 +149,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
         WHERE b.company_id = $1 AND b.local_date BETWEEN $2 AND $3 AND ($4::uuid IS NULL OR b.employee_id = $4) AND (NOT $8 OR b.over_limit)
           AND ${scopeSql('b', 'b.local_date', { all: 5, me: 6, mgr: 7 })}
         ORDER BY b.started_at DESC LIMIT 2000`,
-      [companyIdOf(req), q.from, q.to, q.employeeId ?? null, hasRole(u, 'hr'), u.employeeId, hasRole(u, 'manager'), !!q.overOnly]);
+      [companyIdOf(req), q.from, q.to, q.employeeId ?? null, hasModule(u, 'attendance'), u.employeeId, hasRole(u, 'manager'), !!q.overOnly]);
     if (q.format === 'csv') {
       return sendReport(res, 'csv', `breaks-${q.from}-${q.to}`, [
         { key: 'emp_code', header: 'Employee code' }, { key: 'name_en', header: 'Name' }, { key: 'date_bs', header: 'Date (BS)' },
@@ -221,7 +221,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     const q = rangeQuery.extend({ format: z.enum(['json', 'csv']).optional() }).parse(req.query);
     checkRange(q.from, q.to);
     const u = req.user!;
-    if (q.employeeId) await assertManages(db, u, q.employeeId);
+    if (q.employeeId) await assertManages(db, u, q.employeeId, 'attendance');
     const rows = await db.query(
       `SELECT v.id, v.employee_id, e.emp_code, e.name_en, e.designation, v.local_date, v.place, v.purpose, v.started_at, v.ended_at, v.outcome,
               v.start_lat::float8 AS start_lat, v.start_lng::float8 AS start_lng, v.start_accuracy_m, v.end_lat::float8 AS end_lat, v.end_lng::float8 AS end_lng, v.end_accuracy_m,
@@ -231,7 +231,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
         WHERE v.company_id = $1 AND v.local_date BETWEEN $2 AND $3 AND ($4::uuid IS NULL OR v.employee_id = $4)
           AND ${scopeSql('v', 'v.local_date', { all: 5, me: 6, mgr: 7 })}
         ORDER BY v.started_at DESC LIMIT 2000`,
-      [companyIdOf(req), q.from, q.to, q.employeeId ?? null, hasRole(u, 'hr'), u.employeeId, hasRole(u, 'manager')]);
+      [companyIdOf(req), q.from, q.to, q.employeeId ?? null, hasModule(u, 'attendance'), u.employeeId, hasRole(u, 'manager')]);
     if (q.format === 'csv') {
       return sendReport(res, 'csv', `field-visits-${q.from}-${q.to}`, [
         { key: 'emp_code', header: 'Employee code' }, { key: 'name_en', header: 'Name' }, { key: 'date_bs', header: 'Date (BS)' },
@@ -248,7 +248,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     const v = await db.query<{ employee_id: string; photo_file_id: string | null }>('SELECT employee_id, photo_file_id FROM field_visit WHERE id = $1 AND company_id = $2', [id, companyId]);
     const row = v.rows[0];
     if (!row) throw new NotFoundError('visit not found');
-    await assertManages(db, req.user!, row.employee_id);
+    await assertManages(db, req.user!, row.employee_id, 'attendance');
     if (!row.photo_file_id) throw new NotFoundError('this visit has no photo');
     const f = await readFile(db, cipher, companyId, row.photo_file_id);
     if (req.user!.employeeId !== row.employee_id) await audit(db, { actorId: req.user!.id, action: 'view_photo', table: 'field_visit', rowId: id });
@@ -267,7 +267,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     if (branchId && !(await db.query('SELECT 1 FROM branch WHERE id = $1 AND company_id = $2', [branchId, companyId])).rows[0]) throw new NotFoundError('branch not found');
   };
 
-  r.get('/locations', requireRole('hr', 'manager'), async (req, res) => {
+  r.get('/locations', requireRole(...MODULE_ROLES.attendance, 'manager'), async (req, res) => {
     const rows = await db.query(
       `SELECT l.id, l.name, l.address, l.branch_id, b.name_en AS branch_name, l.lat::float8 AS lat, l.lng::float8 AS lng, l.radius_m, l.active,
               coalesce((SELECT array_agg(employee_id) FROM location_assignment a WHERE a.location_id = l.id), '{}') AS employee_ids
@@ -275,7 +275,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     res.json({ locations: rows.rows });
   });
 
-  r.post('/locations', requireRole('hr'), async (req, res) => {
+  r.post('/locations', requireModule('attendance'), async (req, res) => {
     const companyId = companyIdOf(req);
     const b = locationBody.parse(req.body);
     await assertBranch(companyId, b.branchId);
@@ -286,7 +286,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     res.status(201).json({ id: ins.rows[0]!.id });
   });
 
-  r.put('/locations/:id', requireRole('hr'), async (req, res) => {
+  r.put('/locations/:id', requireModule('attendance'), async (req, res) => {
     const companyId = companyIdOf(req);
     const id = z.uuid().parse(req.params.id);
     const b = locationBody.parse(req.body);
@@ -298,7 +298,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     res.json({ ok: true });
   });
 
-  r.delete('/locations/:id', requireRole('hr'), async (req, res) => {
+  r.delete('/locations/:id', requireModule('attendance'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const d = await db.query('DELETE FROM location WHERE id = $1 AND company_id = $2', [id, companyIdOf(req)]);
     if (!d.rowCount) throw new NotFoundError('location not found');
@@ -307,7 +307,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
   });
 
   /** Staff settings for field work: the field-work switch, work from home, and locations tied to a person. */
-  r.get('/staff', requireRole('hr'), async (req, res) => {
+  r.get('/staff', requireModule('attendance'), async (req, res) => {
     const rows = await db.query(
       `SELECT e.id, e.emp_code, e.name_en, e.designation, e.field_work, e.work_from_home, b.name_en AS branch_name,
               coalesce((SELECT array_agg(location_id) FROM location_assignment la WHERE la.employee_id = e.id), '{}') AS location_ids,
@@ -318,7 +318,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     res.json({ staff: rows.rows });
   });
 
-  r.put('/staff/:employeeId', requireRole('hr'), async (req, res) => {
+  r.put('/staff/:employeeId', requireModule('attendance'), async (req, res) => {
     const companyId = companyIdOf(req);
     const employeeId = z.uuid().parse(req.params.employeeId);
     const b = z.object({ fieldWork: z.boolean().optional(), locationIds: z.array(z.uuid()).max(50).optional() }).parse(req.body);
@@ -351,7 +351,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     if (locationId && !(await db.query('SELECT 1 FROM location WHERE id = $1 AND company_id = $2', [locationId, companyId])).rows[0]) throw new NotFoundError('location not found');
   };
 
-  r.get('/kiosks', requireRole('hr'), async (req, res) => {
+  r.get('/kiosks', requireModule('attendance'), async (req, res) => {
     const rows = await db.query(
       `SELECT k.id, k.name, k.branch_id, b.name_en AS branch_name, k.location_id, l.name AS location_name, k.selfie_required, k.status,
               k.paired_at, k.last_seen_at, k.created_at, k.revoked_at, (k.locked_until IS NOT NULL AND k.locked_until > now()) AS locked,
@@ -362,7 +362,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     res.json({ kiosks: rows.rows });
   });
 
-  r.post('/kiosks', requireRole('hr'), async (req, res) => {
+  r.post('/kiosks', requireModule('attendance'), async (req, res) => {
     const companyId = companyIdOf(req);
     const b = kioskBody.parse(req.body);
     await assertBranch(companyId, b.branchId);
@@ -376,7 +376,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     res.status(201).json({ id, ...pairing });
   });
 
-  r.put('/kiosks/:id', requireRole('hr'), async (req, res) => {
+  r.put('/kiosks/:id', requireModule('attendance'), async (req, res) => {
     const companyId = companyIdOf(req);
     const id = z.uuid().parse(req.params.id);
     const b = kioskBody.parse(req.body);
@@ -390,7 +390,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
   });
 
   /** A fresh one-time code (to pair a replacement tablet); the old tablet keeps working until the new one pairs. */
-  r.post('/kiosks/:id/pairing-code', requireRole('hr'), async (req, res) => {
+  r.post('/kiosks/:id/pairing-code', requireModule('attendance'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const k = await db.query<{ status: string }>('SELECT status FROM kiosk WHERE id = $1 AND company_id = $2', [id, companyIdOf(req)]);
     if (!k.rows[0]) throw new NotFoundError('kiosk not found');
@@ -400,7 +400,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     res.json(pairing);
   });
 
-  r.post('/kiosks/:id/revoke', requireRole('hr'), async (req, res) => {
+  r.post('/kiosks/:id/revoke', requireModule('attendance'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const u = await db.query(`UPDATE kiosk SET status = 'revoked', key_hash = NULL, pairing_code_hash = NULL, pairing_expires_at = NULL, revoked_at = now()
                                WHERE id = $1 AND company_id = $2 AND status <> 'revoked'`, [id, companyIdOf(req)]);
@@ -409,7 +409,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     res.json({ ok: true });
   });
 
-  r.post('/kiosks/:id/unlock', requireRole('hr'), async (req, res) => {
+  r.post('/kiosks/:id/unlock', requireModule('attendance'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const u = await db.query('UPDATE kiosk SET locked_until = NULL, failed_attempts = 0 WHERE id = $1 AND company_id = $2', [id, companyIdOf(req)]);
     if (!u.rowCount) throw new NotFoundError('kiosk not found');
@@ -431,7 +431,7 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     res.json({ ok: true });
   });
 
-  r.post('/staff/:employeeId/kiosk-reset', requireRole('hr'), async (req, res) => {
+  r.post('/staff/:employeeId/kiosk-reset', requireModule('attendance'), async (req, res) => {
     const companyId = companyIdOf(req);
     const employeeId = z.uuid().parse(req.params.employeeId);
     await assertEmployeeInCompany(db, companyId, employeeId);
@@ -512,11 +512,11 @@ export function fieldRoutes({ db, cipher, pepper }: AppDeps): Router {
     const u = req.user!;
     const companyId = companyIdOf(req);
     if (q.scope === 'team') {
-      if (!hasRole(u, 'hr', 'manager')) throw new ForbiddenError('only managers and HR see team swaps');
+      if (!hasRole(u, ...MODULE_ROLES.attendance, 'manager')) throw new ForbiddenError('only managers and HR see team swaps');
       const rows = await db.query(
         `${swapSelect} WHERE s.company_id = $1 AND ($2::date IS NULL OR s.local_date >= $2) AND ($3::date IS NULL OR s.local_date <= $3)
-           AND ($4 OR EXISTS (SELECT 1 FROM employee_assignment a WHERE a.employee_id IN (s.requester_id, s.colleague_id) AND a.manager_id = $5::uuid AND a.valid @> s.local_date))
-         ORDER BY s.local_date DESC, s.created_at DESC LIMIT 500`, [companyId, q.from ?? null, q.to ?? null, hasRole(u, 'hr'), u.employeeId]);
+           AND ($4 OR (hj_manages($5::uuid, s.requester_id, s.local_date) OR hj_manages($5::uuid, s.colleague_id, s.local_date)))
+         ORDER BY s.local_date DESC, s.created_at DESC LIMIT 500`, [companyId, q.from ?? null, q.to ?? null, hasModule(u, 'attendance'), u.employeeId]);
       return res.json({ swaps: rows.rows });
     }
     if (!u.employeeId) return res.json({ swaps: [] });

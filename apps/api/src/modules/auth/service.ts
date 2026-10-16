@@ -6,8 +6,12 @@ import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors.
 import type { FieldCipher } from '../../crypto.js';
 import { consumeCode, isTwoFactorRequired, requiredTwoFactorRoles } from './two-factor.js';
 
-export type Role = 'admin' | 'hr' | 'manager' | 'employee';
-export const ROLES: Role[] = ['admin', 'hr', 'manager', 'employee'];
+export type Role = 'admin' | 'hr' | 'manager' | 'employee' | 'payroll_admin' | 'attendance_admin' | 'recruiter' | 'executive';
+/**
+ * admin and hr see everything; the specialist roles split HR work by module (payroll, attendance and leave, hiring,
+ * read-only executive dashboards); manager covers the people a user manages (line reports, department, branch).
+ */
+export const ROLES: Role[] = ['admin', 'hr', 'manager', 'employee', 'payroll_admin', 'attendance_admin', 'recruiter', 'executive'];
 
 export interface AuthUser {
   id: string;
@@ -26,10 +30,14 @@ export interface AuthUser {
 interface UserRow {
   id: string; company_id: string | null; employee_id: string | null; email: string; name: string; password_hash: string;
   roles: Role[]; status: string; must_change_password: boolean; failed_logins: number; locked_until: Date | null; totp_enabled_at: Date | null;
+  is_head?: boolean;
 }
 
+/** A department or branch head manages people even when the account was not given the manager role. */
+const effectiveRoles = (r: UserRow): Role[] => (r.is_head && !r.roles.includes('manager') ? [...r.roles, 'manager'] : r.roles);
+
 const toUser = (r: UserRow, requiredRoles: Role[] = []): AuthUser => ({
-  id: r.id, companyId: r.company_id, employeeId: r.employee_id, email: r.email, name: r.name, roles: r.roles, mustChangePassword: r.must_change_password,
+  id: r.id, companyId: r.company_id, employeeId: r.employee_id, email: r.email, name: r.name, roles: effectiveRoles(r), mustChangePassword: r.must_change_password,
   twoFactorEnabled: r.totp_enabled_at != null,
   mustSetUpTwoFactor: r.totp_enabled_at == null && isTwoFactorRequired(r.roles, requiredRoles),
 });
@@ -52,7 +60,8 @@ async function startSession(db: Queryable, row: UserRow, meta: SessionMeta, twoF
   await db.query('INSERT INTO session (token_hash, user_id, expires_at, ip, user_agent, two_factor) VALUES ($1, $2, $3::timestamptz, $4, $5, $6)',
     [sha256Hex(token), row.id, new Date(Date.now() + SESSION_TTL_MS), meta.ip ?? null, meta.userAgent?.slice(0, 200) ?? null, twoFactor]);
   await audit(db, { actorId: row.id, action: 'login', table: 'app_user', rowId: row.id, ...(twoFactor ? { after: { twoFactor: true } } : {}) });
-  return { user: toUser(row, await requiredTwoFactorRoles(db, row.company_id)), token };
+  const head = await db.query<{ h: boolean }>('SELECT hj_is_head($1) AS h', [row.employee_id]);
+  return { user: toUser({ ...row, is_head: head.rows[0]?.h ?? false }, await requiredTwoFactorRoles(db, row.company_id)), token };
 }
 
 async function recordFailedLogin(db: Queryable, userId: string, action: string): Promise<void> {
@@ -134,7 +143,7 @@ const DUMMY_HASH = 'scrypt$32768$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAA
 
 export async function resolveSession(db: Queryable, token: string): Promise<AuthUser | null> {
   const r = await db.query<UserRow & { last_seen_at: Date; required_roles: Role[] | null }>(
-    `SELECT u.*, s.last_seen_at,
+    `SELECT u.*, s.last_seen_at, hj_is_head(u.employee_id) AS is_head,
             (SELECT cs.value->'require2faRoles' FROM company_setting cs WHERE cs.company_id = u.company_id AND cs.key = 'security.policy') AS required_roles
        FROM session s JOIN app_user u ON u.id = s.user_id
       WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.status = 'active'

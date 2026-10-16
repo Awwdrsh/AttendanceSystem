@@ -5,12 +5,11 @@ import { localDateOf, localTimeMs } from '@hajiri/attendance-engine';
 import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors.js';
-import { assertManages, hasRole } from '../auth/middleware.js';
+import { assertManages, hasModule, hasRole, requireModule, requireRole } from '../auth/middleware.js';
 import { attendancePolicy } from '../attendance/repo.js';
 import { parsePhoto, photoAad, PHOTO_MAX_BYTES } from './photo.js';
 import { hhmm, isoDate } from '../../validation.js';
 import { sha256Hex } from '../../crypto.js';
-import { requireRole } from '../auth/middleware.js';
 import { isAttendanceLocked, listDays, recomputeForPunch } from '../attendance/service.js';
 import { ensurePseudoDevice, nptLocalTime } from './devices.js';
 import { geofence, type GeoLocation } from './geo.js';
@@ -160,8 +159,8 @@ export function punchRoutes({ db, cipher }: AppDeps): Router {
     if (q.to < q.from) throw new BadRequestError('"to" is before "from"');
     if (Date.parse(q.to) - Date.parse(q.from) > 92 * 86_400_000) throw new BadRequestError('pick a range of 3 months or less');
     const u = req.user!;
-    if (q.employeeId) await assertManages(db, u, q.employeeId);
-    const all = hasRole(u, 'hr');
+    if (q.employeeId) await assertManages(db, u, q.employeeId, 'attendance');
+    const all = hasModule(u, 'attendance');
     const rows = await db.query(
       `SELECT p.id AS punch_id, p.employee_id, e.emp_code, e.name_en, e.designation, p.punched_at, p.local_date::text, p.direction,
               ph.id AS photo_id, ph.purged_at IS NOT NULL AS photo_purged,
@@ -171,7 +170,7 @@ export function punchRoutes({ db, cipher }: AppDeps): Router {
         WHERE e.company_id = $1 AND p.local_date BETWEEN $2 AND $3 AND p.raw->>'remote' = 'true'
           AND NOT EXISTS (SELECT 1 FROM punch_event s WHERE s.supersedes_id = p.id)
           AND ($4::uuid IS NULL OR p.employee_id = $4)
-          AND ($5 OR p.employee_id = $6::uuid OR ($7 AND EXISTS (SELECT 1 FROM employee_assignment a WHERE a.employee_id = e.id AND a.manager_id = $6::uuid AND a.valid @> p.local_date)))
+          AND ($5 OR p.employee_id = $6::uuid OR ($7 AND hj_manages($6::uuid, e.id, p.local_date)))
         ORDER BY p.punched_at DESC LIMIT 1000`,
       [u.companyId, q.from, q.to, q.employeeId ?? null, all, u.employeeId, hasRole(u, 'manager')]);
     res.json({ punches: rows.rows });
@@ -184,7 +183,7 @@ export function punchRoutes({ db, cipher }: AppDeps): Router {
       'SELECT employee_id, punch_id, mime, image_enc, company_id FROM punch_photo WHERE id = $1', [id]);
     const row = r0.rows[0];
     if (!row || row.company_id !== req.user!.companyId) throw new NotFoundError('photo not found');
-    await assertManages(db, req.user!, row.employee_id);
+    await assertManages(db, req.user!, row.employee_id, 'attendance');
     if (!row.image_enc) throw new NotFoundError('this photo was deleted after the retention period');
     if (req.user!.employeeId !== row.employee_id) await audit(db, { actorId: req.user!.id, action: 'view_photo', table: 'punch_photo', rowId: id });
     const data = Buffer.from(cipher.decrypt(row.image_enc, photoAad(row.employee_id, row.punch_id)), 'base64');
@@ -195,7 +194,7 @@ export function punchRoutes({ db, cipher }: AppDeps): Router {
   });
 
   /** HR manual entry with reason (plan §5.2); audited; day recomputed. */
-  r.post('/manual', requireRole('hr'), async (req, res) => {
+  r.post('/manual', requireModule('attendance'), async (req, res) => {
     const b = z.object({ employeeId: z.uuid(), localDate: isoDate, time: hhmm, direction: z.enum(['in', 'out']), reason: z.string().min(3).max(300) }).parse(req.body);
     const emp = await db.query<{ emp_code: string }>('SELECT emp_code FROM employee WHERE id = $1 AND company_id = $2', [b.employeeId, req.user!.companyId]);
     if (!emp.rows[0]) throw new NotFoundError('employee not found');

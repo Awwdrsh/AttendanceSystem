@@ -7,7 +7,7 @@ import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { hhmm, isoDate } from '../../validation.js';
 import { adToBs, fiscalYear, fiscalYearOf } from '@hajiri/bs-calendar';
-import { hasRole, requireRole } from '../auth/middleware.js';
+import { hasModule, hasRole, requireModule, requireRole } from '../auth/middleware.js';
 import { dateRange, enqueueRecompute } from '../attendance/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
 import { assertManages, cancelWorkflow, nptToday, registerHandler, startWorkflow, type DecisionContext } from '../workflow/service.js';
@@ -95,7 +95,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const rows = await db.query('SELECT * FROM leave_type WHERE company_id = $1 ORDER BY sort_order, code', [req.user!.companyId]);
     res.json({ types: rows.rows });
   });
-  r.post('/types', requireRole('hr'), async (req, res) => {
+  r.post('/types', requireModule('attendance'), async (req, res) => {
     const b = typeBody.parse(req.body);
     const ins = await db.query<{ id: string }>(
       `INSERT INTO leave_type (company_id, code, name_en, name_ne, paid, statutory, accrual_basis, accrual_days, accrual_per_worked_days, max_balance, carry_forward, encashable,
@@ -107,7 +107,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
     await audit(db, { actorId: req.user!.id, action: 'create', table: 'leave_type', rowId: ins.rows[0]!.id, after: b });
     res.status(201).json({ id: ins.rows[0]!.id });
   });
-  r.patch('/types/:id', requireRole('hr'), async (req, res) => {
+  r.patch('/types/:id', requireModule('attendance'), async (req, res) => {
     const id = z.uuid().parse(req.params.id);
     const b = provided(typeBody.partial().parse(req.body), req.body);
     const cur = await db.query<LeaveTypeRow>('SELECT * FROM leave_type WHERE id = $1 AND company_id = $2', [id, req.user!.companyId]);
@@ -140,7 +140,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
     if (!employeeId) throw new BadRequestError('employeeId required');
     const emp = await getEmployeeLite(db, employeeId);
     if (!emp || emp.company_id !== req.user!.companyId) throw new NotFoundError('employee not found');
-    await assertManages(db, req.user!, employeeId);
+    await assertManages(db, req.user!, employeeId, 'attendance');
     await allocateAnnualLeave(db, emp.company_id, nptToday(), employeeId);
     res.json({ employeeId, balances: await balances(db, emp, q.asOf ?? nptToday()) });
   });
@@ -154,7 +154,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const emp = await getEmployeeLite(db, employeeId);
     const type = await getLeaveType(db, q.leaveTypeId);
     if (!emp || !type || emp.company_id !== type.company_id || emp.company_id !== req.user!.companyId) throw new NotFoundError('employee or leave type not found');
-    await assertManages(db, req.user!, employeeId);
+    await assertManages(db, req.user!, employeeId, 'attendance');
     const policy = await leavePolicy(emp.company_id);
     const hourly = hourlyWindow(q);
     const calc = hourly ? await computeHourlyLeave(db, emp, type, q.from, hourly.fromTime, hourly.toTime)
@@ -179,14 +179,14 @@ export function leaveRoutes({ db }: AppDeps): Router {
       /** HR only: record full-day leave on a past day that already shows as worked (e.g. a mis-attributed punch). */
       override: z.boolean().optional(),
     }).parse(req.body);
-    if (b.override && !hasRole(req.user!, 'hr')) throw new ForbiddenError('only HR can override the worked-day check');
+    if (b.override && !hasModule(req.user!, 'attendance')) throw new ForbiddenError('only HR can override the worked-day check');
     if (b.to < b.from) throw new BadRequestError('to must be on or after from');
     const employeeId = b.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
     const emp = await getEmployeeLite(db, employeeId);
     const type = await getLeaveType(db, b.leaveTypeId);
     if (!emp || !type || emp.company_id !== type.company_id || emp.company_id !== req.user!.companyId) throw new NotFoundError('employee or leave type not found');
-    await assertManages(db, req.user!, employeeId);
+    await assertManages(db, req.user!, employeeId, 'attendance');
     if (emp.status !== 'active') throw new BadRequestError('employee is not active');
     if (emp.join_date && b.from < emp.join_date) throw new BadRequestError(`leave cannot start before the joining date ${emp.join_date}`);
     if (emp.exit_date && b.to > emp.exit_date) throw new BadRequestError(`leave cannot end after the exit date ${emp.exit_date}`);
@@ -275,9 +275,9 @@ export function leaveRoutes({ db }: AppDeps): Router {
   r.get('/requests', async (req, res) => {
     const q = z.object({ employeeId: z.uuid().optional(), status: z.enum(['pending', 'approved', 'rejected', 'cancelled']).optional(), from: isoDate.optional(), to: isoDate.optional(), scope: z.enum(['own', 'team', 'all']).optional() }).parse(req.query);
     const u = req.user!;
-    const scope = q.scope ?? (hasRole(u, 'hr') ? 'all' : hasRole(u, 'manager') ? 'team' : 'own');
-    if (scope === 'all' && !hasRole(u, 'hr')) throw new ForbiddenError('scope all requires HR');
-    if (q.employeeId) await assertManages(db, u, q.employeeId);
+    const scope = q.scope ?? (hasModule(u, 'attendance') ? 'all' : hasRole(u, 'manager') ? 'team' : 'own');
+    if (scope === 'all' && !hasModule(u, 'attendance')) throw new ForbiddenError('scope all requires HR');
+    if (q.employeeId) await assertManages(db, u, q.employeeId, 'attendance');
     const rows = await db.query(
       `SELECT lr.id, lr.employee_id, e.emp_code, e.name_en, e.name_ne, lr.leave_type_id, lt.code AS type_code, lt.name_en AS type_name, lt.paid,
               lr.from_date, lr.to_date, lr.half_day, lr.days_requested, lr.reason, lr.attachment_key, lr.status, lr.workflow_instance_id, lr.created_at, lr.decided_at,
@@ -288,7 +288,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
           AND ($2::uuid IS NULL OR lr.employee_id = $2)
           AND ($3::text IS NULL OR lr.status = $3)
           AND ($4::date IS NULL OR lr.to_date >= $4) AND ($5::date IS NULL OR lr.from_date <= $5)
-          AND CASE $6 WHEN 'own' THEN lr.employee_id = $7::uuid WHEN 'team' THEN (a.manager_id = $7::uuid OR lr.employee_id = $7::uuid) ELSE true END
+          AND CASE $6 WHEN 'own' THEN lr.employee_id = $7::uuid WHEN 'team' THEN (hj_manages($7::uuid, lr.employee_id, current_date) OR lr.employee_id = $7::uuid) ELSE true END
         ORDER BY lr.created_at DESC LIMIT 500`,
       [u.companyId, q.employeeId ?? null, q.status ?? null, q.from ?? null, q.to ?? null, scope, u.employeeId]);
     res.json({ requests: rows.rows });
@@ -323,7 +323,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
   });
 
   /** Run leave accrual catch-up now: missed months of the current fiscal year and missing annual allocations (idempotent). */
-  r.post('/accrual/run', requireRole('hr'), async (req, res) => {
+  r.post('/accrual/run', requireModule('attendance'), async (req, res) => {
     const summary = await runLeaveCatchUp(db, companyOf(req), nptToday());
     const postings = summary.months.reduce((a, m) => a + m.postings, 0) + summary.annualPostings;
     await audit(db, { actorId: req.user!.id, action: 'accrual_catch_up', table: 'leave_ledger', rowId: companyOf(req), after: { postings, months: summary.months.length } });
@@ -331,7 +331,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
   });
 
   /** HR ledger adjustments and allocations (audited). */
-  r.post('/adjust', requireRole('hr'), async (req, res) => {
+  r.post('/adjust', requireModule('attendance'), async (req, res) => {
     const b = z.object({ employeeId: z.uuid(), leaveTypeId: z.uuid(), deltaDays: z.number().min(-365).max(365).refine((n) => n !== 0, 'deltaDays cannot be 0'), reason: z.string().min(3).max(500), effectiveDate: isoDate.optional(), kind: z.enum(['adjustment', 'allocation', 'carry_forward']).default('adjustment') }).parse(req.body);
     const emp = await getEmployeeLite(db, b.employeeId);
     const type = await getLeaveType(db, b.leaveTypeId);
@@ -372,7 +372,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
     if (!employeeId) throw new BadRequestError('employeeId required');
     const own = await db.query('SELECT 1 FROM employee WHERE id = $1 AND company_id = $2', [employeeId, req.user!.companyId]);
     if (!own.rows[0]) throw new NotFoundError('employee not found');
-    await assertManages(db, req.user!, employeeId);
+    await assertManages(db, req.user!, employeeId, 'attendance');
     const rows = await db.query(
       `SELECT l.id, l.leave_type_id, t.code, l.posted_at, l.effective_date, l.delta_days, l.reason, l.ref_type, l.ref_id, l.expires_on, l.note
          FROM leave_ledger l JOIN leave_type t ON t.id = l.leave_type_id WHERE l.employee_id = $1 AND ($2::uuid IS NULL OR l.leave_type_id = $2) ORDER BY l.effective_date DESC, l.posted_at DESC LIMIT 500`,
@@ -390,9 +390,9 @@ export function leaveRoutes({ db }: AppDeps): Router {
          FROM leave_request lr JOIN employee e ON e.id = lr.employee_id JOIN leave_type lt ON lt.id = lr.leave_type_id
          LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
         WHERE e.company_id = $1 AND lr.status IN ('pending', 'approved') AND lr.from_date <= $3::date AND lr.to_date >= $2::date
-          AND ($4 OR a.manager_id = $5::uuid OR lr.employee_id = $5::uuid
+          AND ($4 OR hj_manages($5::uuid, lr.employee_id, current_date) OR lr.employee_id = $5::uuid
                OR a.manager_id = (SELECT manager_id FROM employee_assignment m WHERE m.employee_id = $5::uuid AND m.valid @> current_date))
-        ORDER BY lr.from_date`, [u.companyId, q.from, q.to, hasRole(u, 'hr'), u.employeeId]);
+        ORDER BY lr.from_date`, [u.companyId, q.from, q.to, hasModule(u, 'attendance'), u.employeeId]);
     const days = new Map<string, Array<Record<string, unknown>>>();
     for (const lr of rows.rows) {
       for (const d of dateRange(lr.from_date < q.from ? q.from : lr.from_date, lr.to_date > q.to ? q.to : lr.to_date)) {
