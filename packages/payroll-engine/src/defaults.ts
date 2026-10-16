@@ -33,6 +33,7 @@ export const DEFAULT_RULES: RuleSet = {
   'tax.deductions': {
     retirementCap: '500000', retirementFraction: '0.333333', retirementDivisor: '3', lifePremiumCap: '40000', healthPremiumCap: '20000',
     remoteArea: { A: '50000', B: '40000', C: '30000', D: '10000' }, disabilityExtraFraction: '0.5', medicalCreditRate: '0.15', medicalCreditCap: '1500', femaleRebate: '0.10',
+    donationCap: '100000', donationFraction: '0.05',
   },
   'ssf.rates': { employee: '0.11', employer: '0.20', allocation: { medical: '0.01', accident: '0.014', dependent: '0.0027', old_age: '0.2833' } },
   'pf.rates': { employee: '0.10', employer: '0.10', gratuity: '0.0833' },

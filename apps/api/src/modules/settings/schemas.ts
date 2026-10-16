@@ -38,6 +38,7 @@ export const settingSchemas = {
     rounding: z.enum(['half_up_rupee', 'paisa']).default('half_up_rupee'),
     separateApprover: z.boolean().default(false),
     encashmentDivisor: z.enum(['bs_days', 'fixed_30']).default('bs_days'),
+    publishOnLock: z.boolean().default(false),
   }),
   'payslip.policy': z.object({
     language: z.enum(['both', 'en', 'ne']).default('both'),
@@ -71,7 +72,7 @@ export const SETTING_KEYS = Object.keys(settingSchemas) as SettingKey[];
 export const settingDescriptions: Record<SettingKey, string> = {
   'attendance.policy': 'Overtime threshold/rounding/approval, holiday work, night premium, auto clock-out, regularisation limits. Statutory OT caps (4 h/day, 24 h/week) cannot be raised.',
   'leave.policy': 'Leave year, sandwich rule, probation restriction, maximum continuous days.',
-  'payroll.policy': 'Proration basis, hourly divisor, pay day, rounding, whether a different HR user must approve, encashment divisor.',
+  'payroll.policy': 'Proration basis, hourly divisor, pay day, rounding, whether a different HR user must approve, encashment divisor, whether payslips are published on lock.',
   'payslip.policy': 'Payslip language, numerals and PDF protection.',
   'notifications.policy': 'Quiet hours, SLA and escalation timing, digest time.',
   'company.profile': 'Company name, address, PAN, SSF employer ID and logo shown on payslips and the app header.',

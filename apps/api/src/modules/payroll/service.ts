@@ -11,6 +11,7 @@ import { resolveRules } from './rules.js';
 import { claimPayouts, payoutPreview, previewMessage, releaseRunPayouts, settleRunPayouts, withPayoutComponents } from '../expenses/payroll.js';
 import { penaltyPreview, penaltyUnpaidDays } from '../attendance-tools/penalties.js';
 import { extrasPolicy } from '../attendance-tools/policy.js';
+import { claimReleases, effectiveCit, holdPreflight, openingBalance, releaseRunClaims, settleRunReleases, syncRunHolds, withReleaseComponent } from './compliance-service.js';
 
 export interface PeriodRow { id: string; company_id: string; bs_year: number; bs_month: number; start_ad: string; end_ad: string; days: number; attendance_locked_at: Date | null }
 export interface RunRow {
@@ -39,7 +40,7 @@ export async function getRun(db: Queryable, companyId: string, runId: string): P
   return r.rows[0];
 }
 
-export async function payrollPolicy(db: Queryable, companyId: string): Promise<PayrollPolicy & { payDay: number; separateApprover: boolean; encashmentDivisor: string }> {
+export async function payrollPolicy(db: Queryable, companyId: string): Promise<PayrollPolicy & { payDay: number; separateApprover: boolean; encashmentDivisor: string; publishOnLock: boolean }> {
   const r = await db.query<{ value: Record<string, unknown> }>(`SELECT value FROM company_setting WHERE company_id = $1 AND key = 'payroll.policy'`, [companyId]);
   const v = r.rows[0]?.value ?? {};
   return {
@@ -51,6 +52,7 @@ export async function payrollPolicy(db: Queryable, companyId: string): Promise<P
     payDay: typeof v.payDay === 'number' ? v.payDay : 25,
     separateApprover: v.separateApprover === true,
     encashmentDivisor: String(v.encashmentDivisor ?? 'bs_days'),
+    publishOnLock: v.publishOnLock === true,
   };
 }
 
@@ -103,6 +105,8 @@ export async function preflight(db: Queryable, companyId: string, run: RunRow): 
       if (due.length) warnings.push({ code: 'late_penalties_pending', message: 'Late-arrival penalties for this month have not been applied yet', count: due.length, employees: due.map((l) => `${l.empCode}: ${l.lateDays} late days`) });
     }
   }
+  warnings.push(...await holdPreflight(db, companyId, run, emps.filter((e) => e.assignment).map((e) => e.id)));
+
   const joiners = emps.filter((e) => e.join_date && e.join_date >= p.start_ad && e.join_date <= p.end_ad).map((e) => e.emp_code);
   const leavers = emps.filter((e) => e.exit_date && e.exit_date >= p.start_ad && e.exit_date <= p.end_ad).map((e) => e.emp_code);
   return { ok: blockers.length === 0, blockers, warnings, info: { employees: emps.length, joiners, leavers, period: { bsYear: p.bs_year, bsMonth: p.bs_month, startAd: p.start_ad, endAd: p.end_ad, days: p.days } } };
@@ -195,6 +199,7 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
     await client.query('DELETE FROM payslip_line WHERE payslip_id IN (SELECT id FROM payslip WHERE run_id = $1)', [runId]);
     await client.query('DELETE FROM payslip WHERE run_id = $1', [runId]);
     await releaseRunPayouts(client, runId);
+    await releaseRunClaims(client, runId);
     for (const emp of emps) {
       if (!emp.assignment) continue;
       let components = componentCache.get(emp.assignment.structure_version_id);
@@ -232,6 +237,12 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
            FROM payslip ps JOIN payroll_run r ON r.id = ps.run_id JOIN payroll_period pp ON pp.id = r.period_id
           WHERE ps.employee_id = $1 AND r.locked_at IS NOT NULL AND r.id <> $4 AND pp.start_ad >= $2 AND pp.start_ad <= $3`, [emp.id, fy.startAd, p.start_ad, runId]);
       const y = ytd.rows[0]!;
+      // Income and tax from before Hajiri ran this employee's payroll this fiscal year (previous employer, go-live).
+      const ob = await openingBalance(client, emp.id, fy.startYear);
+      if (ob) {
+        y.taxable = D(y.taxable).plus(ob.taxable).toFixed(2); y.tds = D(y.tds).plus(ob.tds_paid).toFixed(2); y.gross = D(y.gross).plus(ob.gross).toFixed(2);
+        y.ee = D(y.ee).plus(ob.retirement_employee).toFixed(2); y.er = D(y.er).plus(ob.retirement_employer).toFixed(2); y.festival = y.festival || ob.festival_paid;
+      }
       // One-off runs have no salary lines, so the annual projection borrows the recurring figures of the latest locked
       // regular payslip of this fiscal year (plan §11.4 keeps projecting the year).
       let recurringOverride: { taxable: string; retirement: string } | undefined;
@@ -243,8 +254,8 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
         const t = ref.rows[0]?.tax;
         if (t?.recurringTaxable) recurringOverride = { taxable: t.recurringTaxable, retirement: t.recurringRetirement ?? '0' };
       }
-      const decl = await client.query<{ life_premium: string; health_premium: string; cit_monthly: string; medical_cost: string; other_retirement_annual: string }>(
-        `SELECT life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual FROM tax_declaration WHERE employee_id = $1 AND fiscal_year_start = $2 AND status = 'verified'`, [emp.id, fy.startYear]);
+      const decl = await client.query<{ life_premium: string; health_premium: string; cit_monthly: string; medical_cost: string; other_retirement_annual: string; donation: string; cit_from_month: number | null; cit_prev_monthly: string }>(
+        `SELECT life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, donation, cit_from_month, cit_prev_monthly FROM tax_declaration WHERE employee_id = $1 AND fiscal_year_start = $2 AND status = 'verified'`, [emp.id, fy.startYear]);
       const dcl = decl.rows[0];
       const loans = await client.query<{ id: string; emi: string; principal: string; paid: string; kind: 'loan' | 'advance' }>(
         `SELECT l.id, l.emi, l.principal, l.kind, coalesce((SELECT sum(i.amount) FROM loan_installment i WHERE i.loan_id = l.id), 0)::text AS paid
@@ -255,6 +266,9 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
       // Approved expense claims and travel settlements: paid (or recovered) once, as non-taxable one-time lines.
       const payouts = await claimPayouts(client, companyId, runId, run.run_type, emp.id);
       if (payouts.length) { inputs.push(...payouts); components = await withPayoutComponents(client, companyId, components, payouts); }
+      // Pay held in an earlier run and released through this one: paid once, not taxed again.
+      const releases = await claimReleases(client, companyId, runId, run.run_type, emp.id);
+      if (releases.length) { inputs.push(...releases); components = await withReleaseComponent(client, companyId, components); }
 
       // Festival allowance proration (Sec 37(3)): months of service inside the fiscal year, bounded by join and exit dates.
       const serviceFrom = emp.join_date && emp.join_date > fy.startAd ? emp.join_date : fy.startAd;
@@ -292,7 +306,7 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
         attendance: carriesSalary ? { paidDays: paidDays.toFixed(2), lopDays: lop.toFixed(2), otHours: run.run_type === 'regular' ? otHours.toFixed(2) : '0' }
           : { paidDays: String(p.days), lopDays: '0', otHours: '0' },
         ytd: { taxable: y.taxable, tdsPaid: y.tds, retirementEmployee: y.ee, retirementEmployer: y.er, festivalPaid: Boolean(y.festival) },
-        declaration: { lifePremium: dcl?.life_premium ?? '0', healthPremium: dcl?.health_premium ?? '0', citMonthly: dcl?.cit_monthly ?? '0', medicalCost: dcl?.medical_cost ?? '0', otherRetirementAnnual: dcl?.other_retirement_annual ?? '0' },
+        declaration: { lifePremium: dcl?.life_premium ?? '0', healthPremium: dcl?.health_premium ?? '0', citMonthly: effectiveCit(dcl, monthIndexInFy), medicalCost: dcl?.medical_cost ?? '0', otherRetirementAnnual: dcl?.other_retirement_annual ?? '0', donation: dcl?.donation ?? '0' },
         loans: run.run_type === 'regular' || isFinal ? loanInputs : [], rules, policy, extras,
       };
       if (!carriesSalary && run.run_type !== 'arrears' && run.run_type !== 'bonus' && inputs.length === 0) continue; // nothing to pay in a one-off run
@@ -356,6 +370,7 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
     };
     await client.query(`UPDATE payroll_run SET status = 'computed', computed_at = now(), preflight = $2, totals = $3, variance = $4, maker_id = coalesce(maker_id, $5) WHERE id = $1`,
       [runId, JSON.stringify(pf), JSON.stringify(totals), JSON.stringify(variance), actorId]);
+    await syncRunHolds(client, runId);
     await audit(client, { actorId, action: 'compute', table: 'payroll_run', rowId: runId, after: totals });
     await client.query('COMMIT');
     return { payslips: results.length, totals, variance };
@@ -408,16 +423,16 @@ export async function approveRun(db: Db, companyId: string, runId: string, appro
   return { signature, approved: true };
 }
 
-export async function lockRun(db: Db, companyId: string, runId: string, actorId: string): Promise<{ attendanceLocked: number }> {
+export async function lockRun(db: Db, companyId: string, runId: string, actorId: string): Promise<{ attendanceLocked: number; published: number }> {
   const run = await getRun(db, companyId, runId);
   if (run.status !== 'approved') throw new ConflictError(`run is ${run.status}; approve it first`);
   const p = await getPeriod(db, companyId, run.period_id);
   const client = await db.connect();
+  let n: number;
   try {
     await client.query('BEGIN');
     // A run scoped to specific employees (final settlement, supplementary) locks only their attendance; a regular run locks the period.
     const only = Array.isArray(run.params.employeeIds) ? (run.params.employeeIds as string[]) : null;
-    let n: number;
     if (only) {
       const r = await client.query(
         `UPDATE attendance_day a SET locked_at = now() FROM v_attendance_latest v JOIN employee e ON e.id = v.employee_id
@@ -440,10 +455,13 @@ export async function lockRun(db: Db, companyId: string, runId: string, actorId:
       }
     }
     await settleRunPayouts(client, runId);
+    await settleRunReleases(client, runId, actorId);
     await audit(client, { actorId, action: 'lock', table: 'payroll_run', rowId: runId, after: { attendanceLocked: n } });
     await client.query('COMMIT');
-    return { attendanceLocked: n };
   } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+  // Company setting: payslips go to employees as soon as the run is locked (otherwise HR publishes them).
+  const published = (await payrollPolicy(db, companyId)).publishOnLock ? await publishRun(db, companyId, runId, actorId) : 0;
+  return { attendanceLocked: n, published };
 }
 
 export async function publishRun(db: Db, companyId: string, runId: string, actorId: string): Promise<number> {

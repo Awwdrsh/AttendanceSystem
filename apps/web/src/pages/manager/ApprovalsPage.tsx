@@ -90,7 +90,7 @@ function Summary({ item }: { item: InboxItem }) {
       break;
     case 'tax_declaration': {
       const fy = Number(s.fiscalYearStart);
-      const parts: Array<[string, unknown]> = [['Life insurance', s.lifePremium], ['Health insurance', s.healthPremium], ['CIT a month', s.citMonthly], ['Other retirement', s.otherRetirementAnnual], ['Medical', s.medicalCost]];
+      const parts: Array<[string, unknown]> = [['Life insurance', s.lifePremium], ['Health insurance', s.healthPremium], ['CIT a month', s.citMonthly], ['Other retirement', s.otherRetirementAnnual], ['Medical', s.medicalCost], ['Donations', s.donation]];
       main = <>Tax savings for FY {fy}/{String(fy + 1).slice(-2)}: {parts.filter(([, v]) => Number(v) > 0).map(([k, v]) => `${k} ${fmtMoney(String(v))}`).join(', ') || 'nothing declared'}</>;
       extra.push(<Text key="p" size="xs" c="dimmed">{Number(s.proofs ?? 0)} proof file(s)</Text>);
       if (s.note) extra.push(<Text key="n" size="xs" c="dimmed">“{String(s.note)}”</Text>);

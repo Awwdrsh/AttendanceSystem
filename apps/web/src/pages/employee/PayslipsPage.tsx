@@ -10,6 +10,7 @@ import { StatStrip } from '../../components/Kpi';
 import { PageHeader } from '../../components/PageHeader';
 import { bsMonthLabel, fmtMoney, safeAdToBs, todayNpt } from '../../lib/format';
 import { useQuery } from '../../lib/useQuery';
+import { MyCertificates } from '../payroll/compliance/MyCertificates';
 
 const runTypeLabel = (s: string) => s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, ' ') + ' run';
 
@@ -56,6 +57,7 @@ export default function PayslipsPage() {
             { key: 'ded', header: 'Deductions', align: 'right', render: (r) => <span className="num">{fmtMoney(r.total_deductions)}</span> },
           ] satisfies Column<PayslipSummary>[])),
         ]} />
+      {employeeId === user?.employeeId ? <MyCertificates fiscalYearStart={Number(fy)} /> : null}
     </Stack>
   );
 }

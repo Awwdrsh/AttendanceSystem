@@ -14,6 +14,8 @@ import { notify, userIdForEmployee } from '../notifications/service.js';
 import { act, cancelWorkflow, nptToday, registerHandler, registerSummary, startWorkflow, type DecisionContext } from '../workflow/service.js';
 import { resolveRules } from './rules.js';
 import { activeEmployees, componentsFor, payrollPolicy, type PeriodRow, type RunRow } from './service.js';
+import { effectiveCit, openingBalance } from './compliance-service.js';
+import type { PayrollInput } from '@hajiri/payroll-engine';
 
 /**
  * Tax savings self-service: an employee declares insurance premiums, retirement contributions and medical costs with
@@ -24,18 +26,20 @@ const amount = money.refine((v) => !v.startsWith('-'), 'must not be negative');
 
 export const declarationBody = z.object({
   lifePremium: amount.default('0'), healthPremium: amount.default('0'), citMonthly: amount.default('0'),
-  medicalCost: amount.default('0'), otherRetirementAnnual: amount.default('0'),
+  medicalCost: amount.default('0'), otherRetirementAnnual: amount.default('0'), donation: amount.default('0'),
 });
 export type DeclarationValues = z.infer<typeof declarationBody>;
 
 interface RequestRow {
   id: string; company_id: string; employee_id: string; fiscal_year_start: number; life_premium: string; health_premium: string; cit_monthly: string;
-  medical_cost: string; other_retirement_annual: string; note: string | null; proof_file_ids: string[]; status: string; workflow_instance_id: string | null;
+  medical_cost: string; other_retirement_annual: string; donation: string; note: string | null; proof_file_ids: string[]; status: string; workflow_instance_id: string | null;
   created_at: Date; decided_at: Date | null; decision_note: string | null;
 }
 
-const toInput = (v: { life_premium: string; health_premium: string; cit_monthly: string; medical_cost: string; other_retirement_annual: string } | undefined): DeclarationInput => ({
-  lifePremium: v?.life_premium ?? '0', healthPremium: v?.health_premium ?? '0', citMonthly: v?.cit_monthly ?? '0', medicalCost: v?.medical_cost ?? '0', otherRetirementAnnual: v?.other_retirement_annual ?? '0',
+type DeclRow = { life_premium: string; health_premium: string; cit_monthly: string; medical_cost: string; other_retirement_annual: string; donation?: string; cit_from_month?: number | null; cit_prev_monthly?: string };
+const toInput = (v: DeclRow | undefined, monthIndexInFy?: number): DeclarationInput => ({
+  lifePremium: v?.life_premium ?? '0', healthPremium: v?.health_premium ?? '0', citMonthly: monthIndexInFy ? effectiveCit(v, monthIndexInFy) : v?.cit_monthly ?? '0',
+  medicalCost: v?.medical_cost ?? '0', otherRetirementAnnual: v?.other_retirement_annual ?? '0', donation: v?.donation ?? '0',
 });
 const fromValues = (v: DeclarationValues): DeclarationInput => ({ ...v });
 
@@ -52,11 +56,12 @@ export async function applyTaxDeclarationDecision(db: Queryable, requestId: stri
   await db.query('UPDATE tax_declaration_request SET status = $2, decided_by = $3, decided_at = now(), decision_note = $4 WHERE id = $1', [requestId, state, ctx.actorId, ctx.reason]);
   if (state === 'approved') {
     await db.query(
-      `INSERT INTO tax_declaration (employee_id, fiscal_year_start, life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, status, verified_by, verified_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'verified', $8, now())
+      `INSERT INTO tax_declaration (employee_id, fiscal_year_start, life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, donation, status, verified_by, verified_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $9, 'verified', $8, now())
        ON CONFLICT (employee_id, fiscal_year_start) DO UPDATE SET life_premium = EXCLUDED.life_premium, health_premium = EXCLUDED.health_premium, cit_monthly = EXCLUDED.cit_monthly,
-         medical_cost = EXCLUDED.medical_cost, other_retirement_annual = EXCLUDED.other_retirement_annual, status = 'verified', verified_by = EXCLUDED.verified_by, verified_at = now(), updated_at = now()`,
-      [req.employee_id, req.fiscal_year_start, req.life_premium, req.health_premium, req.cit_monthly, req.medical_cost, req.other_retirement_annual, ctx.actorId]);
+         medical_cost = EXCLUDED.medical_cost, other_retirement_annual = EXCLUDED.other_retirement_annual, donation = EXCLUDED.donation, cit_from_month = NULL, cit_prev_monthly = 0,
+         status = 'verified', verified_by = EXCLUDED.verified_by, verified_at = now(), updated_at = now()`,
+      [req.employee_id, req.fiscal_year_start, req.life_premium, req.health_premium, req.cit_monthly, req.medical_cost, req.other_retirement_annual, ctx.actorId, req.donation]);
   }
   await audit(db, { actorId: ctx.actorId, action: state, table: 'tax_declaration_request', rowId: requestId, after: { fiscalYearStart: req.fiscal_year_start, reason: ctx.reason } });
   const userId = await userIdForEmployee(db, req.employee_id);
@@ -75,12 +80,12 @@ registerSummary('tax_declaration', async (db, inst) => {
   const r = await db.query<RequestRow>('SELECT * FROM tax_declaration_request WHERE id = $1', [inst.object_id]);
   const x = r.rows[0];
   if (!x) return {};
-  const cur = await db.query<{ life_premium: string; health_premium: string; cit_monthly: string; medical_cost: string; other_retirement_annual: string }>(
-    `SELECT life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual FROM tax_declaration WHERE employee_id = $1 AND fiscal_year_start = $2 AND status = 'verified'`,
+  const cur = await db.query<DeclRow>(
+    `SELECT life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, donation FROM tax_declaration WHERE employee_id = $1 AND fiscal_year_start = $2 AND status = 'verified'`,
     [x.employee_id, x.fiscal_year_start]);
   return {
     fiscalYearStart: x.fiscal_year_start, lifePremium: x.life_premium, healthPremium: x.health_premium, citMonthly: x.cit_monthly, medicalCost: x.medical_cost,
-    otherRetirementAnnual: x.other_retirement_annual, note: x.note, proofs: x.proof_file_ids.length, current: cur.rows[0] ? toInput(cur.rows[0]) : null,
+    otherRetirementAnnual: x.other_retirement_annual, donation: x.donation, note: x.note, proofs: x.proof_file_ids.length, current: cur.rows[0] ? toInput(cur.rows[0]) : null,
   };
 });
 
@@ -98,9 +103,9 @@ export async function submitTaxSavings(db: Queryable, user: AuthUser, companyId:
   const proofs = [...new Set(opts.proofFileIds ?? [])];
   for (const f of proofs) await attachFile(db, { companyId, fileId: f, userId: user.id, purpose: ['employee_document', 'tax_proof'], attachedTo: `tax_declaration_request:${id}` });
   const ins = await db.query<RequestRow>(
-    `INSERT INTO tax_declaration_request (id, company_id, employee_id, fiscal_year_start, life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, note, proof_file_ids, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
-    [id, companyId, employeeId, fiscalYearStart, values.lifePremium, values.healthPremium, values.citMonthly, values.medicalCost, values.otherRetirementAnnual, opts.note ?? null, proofs, user.id]);
+    `INSERT INTO tax_declaration_request (id, company_id, employee_id, fiscal_year_start, life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, donation, note, proof_file_ids, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $13, $10, $11, $12) RETURNING *`,
+    [id, companyId, employeeId, fiscalYearStart, values.lifePremium, values.healthPremium, values.citMonthly, values.medicalCost, values.otherRetirementAnnual, opts.note ?? null, proofs, user.id, values.donation ?? '0']);
   const inst = await startWorkflow(db, {
     companyId, objectType: 'tax_declaration', objectId: id, employeeId,
     title: 'Tax savings to verify', body: `Tax savings declaration for FY ${fiscalYearStart}/${String(fiscalYearStart + 1).slice(-2)}${proofs.length ? ` with ${proofs.length} proof file(s)` : ''}.`,
@@ -135,29 +140,30 @@ export interface TaxEstimate {
   current?: TaxSummary; proposed?: TaxSummary; annualSaving?: string; monthlySaving?: string;
 }
 export interface TaxSummary {
-  projectedAnnualTaxable: string; retirementDeduction: string; insuranceDeduction: string; taxableAfterDeductions: string; medicalCredit: string;
+  projectedAnnualTaxable: string; retirementDeduction: string; insuranceDeduction: string; donationDeduction: string; taxableAfterDeductions: string; medicalCredit: string;
   annualTax: string; tdsThisMonth: string; remainingMonths: number; declaration: DeclarationInput;
 }
 
 const summary = (t: TaxDetail, declaration: DeclarationInput): TaxSummary => ({
-  projectedAnnualTaxable: t.projectedAnnualTaxable, retirementDeduction: t.retirementDeduction, insuranceDeduction: t.insuranceDeduction,
+  projectedAnnualTaxable: t.projectedAnnualTaxable, retirementDeduction: t.retirementDeduction, insuranceDeduction: t.insuranceDeduction, donationDeduction: t.donationDeduction ?? '0.00',
   taxableAfterDeductions: t.taxableAfterDeductions, medicalCredit: t.medicalCredit, annualTax: t.annualTax, tdsThisMonth: t.tdsThisMonth,
   remainingMonths: t.remainingMonths, declaration,
 });
 
 /**
- * What the payroll engine would project for this month's payslip with the verified declaration and with a proposed
- * one: same salary structure, rules, year-to-date locked payslips and policy as a real run, full attendance, no one-offs.
+ * The payroll engine input for this month's payslip of one employee, as a real run would build it: same salary
+ * structure, rules, year-to-date locked payslips (plus opening balances) and policy, full attendance, no one-offs,
+ * with the verified declaration. Used by the tax estimate and the optimum CIT suggestion.
  */
-export async function estimateTax(db: Queryable, companyId: string, employeeId: string, fiscalYearStart: number, proposed: DeclarationInput | null): Promise<TaxEstimate> {
+export async function estimateInput(db: Queryable, companyId: string, employeeId: string, fiscalYearStart: number): Promise<{ input: PayrollInput; bsYear: number; bsMonth: number } | { reason: string }> {
   const today = nptToday();
   const bs = adToBs(today);
   const fy = fiscalYearOf(bs);
-  if (fy.startYear !== fiscalYearStart) return { available: false, reason: 'Estimates are available for the current fiscal year only.', fiscalYearStart };
+  if (fy.startYear !== fiscalYearStart) return { reason: 'Estimates are available for the current fiscal year only.' };
   const b = bsMonthBounds(bs.year, bs.month);
   const p: PeriodRow = { id: 'estimate', company_id: companyId, bs_year: bs.year, bs_month: bs.month, start_ad: b.startAd, end_ad: b.endAd, days: b.days, attendance_locked_at: null };
   const [emp] = await activeEmployees(db, companyId, p, { params: { employeeIds: [employeeId] } } as unknown as RunRow);
-  if (!emp?.assignment) return { available: false, reason: 'Your salary is not set up in Hajiri yet, so tax cannot be estimated.', fiscalYearStart };
+  if (!emp?.assignment) return { reason: 'The salary is not set up in Hajiri yet, so tax cannot be estimated.' };
   const components = await componentsFor(db, companyId, emp.assignment.structure_version_id);
   const policy = await payrollPolicy(db, companyId);
   const { rules } = await resolveRules(db, p.end_ad);
@@ -169,23 +175,35 @@ export async function estimateTax(db: Queryable, companyId: string, employeeId: 
        FROM payslip ps JOIN payroll_run r ON r.id = ps.run_id JOIN payroll_period pp ON pp.id = r.period_id
       WHERE ps.employee_id = $1 AND r.locked_at IS NOT NULL AND pp.start_ad >= $2 AND pp.start_ad < $3`, [employeeId, fy.startAd, p.start_ad]);
   const y = ytd.rows[0]!;
-  const verified = await db.query<{ life_premium: string; health_premium: string; cit_monthly: string; medical_cost: string; other_retirement_annual: string }>(
-    `SELECT life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual FROM tax_declaration WHERE employee_id = $1 AND fiscal_year_start = $2 AND status = 'verified'`,
-    [employeeId, fiscalYearStart]);
-  const currentDecl = toInput(verified.rows[0]);
+  const ob = await openingBalance(db, employeeId, fy.startYear);
+  const verified = await db.query<DeclRow>(
+    `SELECT life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, donation, cit_from_month, cit_prev_monthly
+       FROM tax_declaration WHERE employee_id = $1 AND fiscal_year_start = $2 AND status = 'verified'`, [employeeId, fiscalYearStart]);
+  const monthIndexInFy = ((p.bs_month - 4 + 12) % 12) + 1;
   const serviceFrom = emp.join_date && emp.join_date > fy.startAd ? emp.join_date : fy.startAd;
   const months = serviceFrom === fy.startAd ? 12 : Math.min(12, Math.max(1, Math.round((new Date(fy.endAd).getTime() - new Date(serviceFrom).getTime()) / (30.44 * 86_400_000))));
-  const run = (declaration: DeclarationInput) => computePayslip({
+  const plus = (a: string, b2: string | undefined) => D(a).plus(b2 ?? 0).toFixed(2);
+  const input: PayrollInput = {
     employee: { id: emp.id, code: emp.emp_code, nameEn: emp.name_en, nameNe: emp.name_ne, gender: emp.gender, maritalStatus: emp.marital_status, isResident: emp.is_resident, regime: emp.regime,
       remoteAreaClass: emp.remote_area_class, disability: emp.disability, otEligible: emp.ot_eligible, festivalMonth: emp.festival_month },
-    period: { bsYear: p.bs_year, bsMonth: p.bs_month, daysInMonth: p.days, fiscalYearStart: fy.startYear, monthIndexInFy: ((p.bs_month - 4 + 12) % 12) + 1 },
-    components, baseAmounts: emp.assignment!.base_amounts, inputs: [],
+    period: { bsYear: p.bs_year, bsMonth: p.bs_month, daysInMonth: p.days, fiscalYearStart: fy.startYear, monthIndexInFy },
+    components, baseAmounts: emp.assignment.base_amounts, inputs: [],
     attendance: { paidDays: String(p.days), lopDays: '0', otHours: '0' },
-    ytd: { taxable: y.taxable, tdsPaid: y.tds, retirementEmployee: y.ee, retirementEmployer: y.er, festivalPaid: Boolean(y.festival) },
-    declaration, loans: [], rules, policy, extras: { monthsOfServiceInFy: months },
-  });
+    ytd: { taxable: plus(y.taxable, ob?.taxable), tdsPaid: plus(y.tds, ob?.tds_paid), retirementEmployee: plus(y.ee, ob?.retirement_employee),
+      retirementEmployer: plus(y.er, ob?.retirement_employer), festivalPaid: Boolean(y.festival) || Boolean(ob?.festival_paid) },
+    declaration: toInput(verified.rows[0], monthIndexInFy), loans: [], rules, policy, extras: { monthsOfServiceInFy: months },
+  };
+  return { input, bsYear: bs.year, bsMonth: bs.month };
+}
+
+/** What the payroll engine would project for this month's payslip with the verified declaration and with a proposed one (nothing is saved). */
+export async function estimateTax(db: Queryable, companyId: string, employeeId: string, fiscalYearStart: number, proposed: DeclarationInput | null): Promise<TaxEstimate> {
+  const built = await estimateInput(db, companyId, employeeId, fiscalYearStart);
+  if ('reason' in built) return { available: false, reason: built.reason, fiscalYearStart };
+  const run = (declaration: DeclarationInput) => computePayslip({ ...built.input, declaration });
+  const currentDecl = built.input.declaration;
   const cur = summary(run(currentDecl).tax, currentDecl);
-  const out: TaxEstimate = { available: true, fiscalYearStart, bsYear: bs.year, bsMonth: bs.month, current: cur };
+  const out: TaxEstimate = { available: true, fiscalYearStart, bsYear: built.bsYear, bsMonth: built.bsMonth, current: cur };
   if (proposed) {
     const prop = summary(run(proposed).tax, proposed);
     out.proposed = prop;

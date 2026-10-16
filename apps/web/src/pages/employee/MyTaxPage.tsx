@@ -12,16 +12,17 @@ import { StatusBadge } from '../../components/StatusBadge';
 import { bsMonthLabel, fmtAd, fmtMoney, NPT_OFFSET_MIN, safeAdToBs, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
+import { OptimumCitCard } from '../payroll/compliance/OptimumCitCard';
 
 type Form = Record<keyof DeclarationValues, number>;
-const EMPTY: Form = { lifePremium: 0, healthPremium: 0, citMonthly: 0, medicalCost: 0, otherRetirementAnnual: 0 };
+const EMPTY: Form = { lifePremium: 0, healthPremium: 0, citMonthly: 0, medicalCost: 0, otherRetirementAnnual: 0, donation: 0 };
 const toValues = (f: Form): DeclarationValues => ({
   lifePremium: f.lifePremium.toFixed(2), healthPremium: f.healthPremium.toFixed(2), citMonthly: f.citMonthly.toFixed(2),
-  medicalCost: f.medicalCost.toFixed(2), otherRetirementAnnual: f.otherRetirementAnnual.toFixed(2),
+  medicalCost: f.medicalCost.toFixed(2), otherRetirementAnnual: f.otherRetirementAnnual.toFixed(2), donation: f.donation.toFixed(2),
 });
-const fromRow = (d: { life_premium: string; health_premium: string; cit_monthly: string; medical_cost: string; other_retirement_annual: string }): Form => ({
+const fromRow = (d: { life_premium: string; health_premium: string; cit_monthly: string; medical_cost: string; other_retirement_annual: string; donation?: string }): Form => ({
   lifePremium: Number(d.life_premium), healthPremium: Number(d.health_premium), citMonthly: Number(d.cit_monthly),
-  medicalCost: Number(d.medical_cost), otherRetirementAnnual: Number(d.other_retirement_annual),
+  medicalCost: Number(d.medical_cost), otherRetirementAnnual: Number(d.other_retirement_annual), donation: Number(d.donation ?? 0),
 });
 const day = (iso: string) => fmtAd(new Date(Date.parse(iso) + NPT_OFFSET_MIN * 60_000).toISOString().slice(0, 10));
 const money = (v: string | undefined) => fmtMoney(v, { decimals: 0 });
@@ -94,6 +95,7 @@ export default function MyTaxPage() {
           ]} />
         ) : null
       ) : <Text size="sm" c="dimmed">Tax estimates are shown for the current fiscal year.</Text>}
+      {fy === currentFy ? <OptimumCitCard onUse={(monthly) => setF((x) => ({ ...x, citMonthly: monthly }))} /> : null}
 
       <Paper withBorder p="lg">
         <SectionTitle hint="Annual amounts unless marked monthly." actions={pending ? <Badge variant="light" color="orange">Waiting for HR</Badge> : verified ? <Badge variant="light" color="teal">Verified</Badge> : <Text size="sm" c="dimmed">Nothing declared</Text>}>
@@ -105,6 +107,7 @@ export default function MyTaxPage() {
           {n('citMonthly', 'Extra CIT contribution (monthly)', 'Counts toward the retirement limit with SSF/PF')}
           {n('otherRetirementAnnual', 'Other approved retirement fund (yearly)', 'Shares the retirement limit')}
           {n('medicalCost', 'Medical costs (yearly)', '15% tax credit, up to NPR 1,500')}
+          {n('donation', 'Donations (yearly)', 'To organisations approved by the tax office; up to NPR 1,00,000 or 5% of taxable income')}
         </SimpleGrid>
         {prop && changed ? (
           <Text size="sm" mt="md">

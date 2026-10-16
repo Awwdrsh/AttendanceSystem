@@ -28,6 +28,8 @@ export interface TaxInput {
   lifePremium: Decimal;
   healthPremium: Decimal;
   medicalCost: Decimal;
+  /** Donations to approved organisations this fiscal year (Sec 12). */
+  donation?: Decimal;
   monthIndexInFy: number;
   deductFullTaxNow: boolean;
   isFinalSettlement: boolean;
@@ -54,7 +56,11 @@ export function computeTds(t: TaxInput): TaxDetail {
   const firstCeiling = bands?.[0]?.upTo ? D(bands[0]!.upTo!) : ZERO;
   const disability = t.disability ? firstCeiling.times(D(d.disabilityExtraFraction)) : ZERO;
 
-  const taxableAfter = max0(projected.minus(retirementDeduction).minus(insurance).minus(remote).minus(disability));
+  const adjusted = max0(projected.minus(retirementDeduction).minus(insurance).minus(remote).minus(disability));
+  // Sec 12: approved donations up to the lower of the cap (Rs 1,00,000) and 5% of the adjusted taxable income.
+  const donation = t.donation && t.donation.gt(0) && t.isResident
+    ? Decimal.min(t.donation, D(d.donationCap ?? '100000'), adjusted.times(D(d.donationFraction ?? '0.05'))) : ZERO;
+  const taxableAfter = max0(adjusted.minus(donation));
 
   const applied: TaxDetail['bands'] = [];
   let gross = ZERO;
@@ -92,7 +98,7 @@ export function computeTds(t: TaxInput): TaxDetail {
     fiscalYearStart: t.schedule.fiscalYearStart, status,
     monthTaxable: paisa(t.monthTaxable).toFixed(2), recurringTaxable: paisa(t.recurringTaxable).toFixed(2), recurringRetirement: paisa(t.recurringRetirement).toFixed(2),
     projectedAnnualTaxable: paisa(projected).toFixed(2), retirementDeduction: paisa(retirementDeduction).toFixed(2),
-    insuranceDeduction: paisa(insurance).toFixed(2), remoteAreaDeduction: remote.toFixed(2), disabilityDeduction: paisa(disability).toFixed(2),
+    insuranceDeduction: paisa(insurance).toFixed(2), remoteAreaDeduction: remote.toFixed(2), disabilityDeduction: paisa(disability).toFixed(2), donationDeduction: paisa(donation).toFixed(2),
     taxableAfterDeductions: paisa(taxableAfter).toFixed(2), bands: applied, grossTax: paisa(gross).toFixed(2),
     femaleRebate: paisa(femaleRebate).toFixed(2), medicalCredit: paisa(medicalCredit).toFixed(2), annualTax: paisa(annualTax).toFixed(2),
     ytdTdsPaid: paisa(t.ytdTdsPaid).toFixed(2), remainingMonths, tdsThisMonth: tdsThisMonth.toFixed(2),

@@ -78,7 +78,7 @@ export function SalarySheet({ runId, version }: { runId: string; version: string
                     {deductions.map((c) => <Table.Td key={c.code} ta="right" className="num">{r.deductions[c.code] ? m(r.deductions[c.code]) : <Text span c="dimmed">–</Text>}</Table.Td>)}
                     <Table.Td ta="right" className="num" fw={600}>{m(r.totalDeductions)}</Table.Td>
                     {rounding ? <Table.Td ta="right" className="num" c="dimmed">{signed(r.rounding)}</Table.Td> : null}
-                    <Table.Td ta="right" className="num" fw={700} c="brand">{m(r.net)}</Table.Td>
+                    <Table.Td ta="right" className="num" fw={700} c="brand">{m(r.net)}{r.flags?.includes('PayHeld') ? <Text size="xs" c="orange" fw={500}>On hold</Text> : null}</Table.Td>
                     {employer.map((c) => <Table.Td key={c.code} ta="right" className="num">{r.employer[c.code] ? m(r.employer[c.code]) : <Text span c="dimmed">–</Text>}</Table.Td>)}
                     <Table.Td ta="right" className="num">{m(r.employerTotal)}</Table.Td>
                     <Table.Td ta="right" className="num">{m(r.costToCompany)}</Table.Td>
