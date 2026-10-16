@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { AppDeps } from '../../deps.js';
 import type { Queryable } from '../../db/pool.js';
 import { HttpError, NotFoundError } from '../../errors.js';
+import { featureOn } from '../features/service.js';
 import { parseUpload, saveFile } from '../files/store.js';
 import { notify } from '../notifications/service.js';
 import { nptToday } from '../workflow/service.js';
@@ -66,7 +67,7 @@ export function careersRoutes({ db, cipher }: AppDeps): Router {
       : await db.query<PublicCompany>('SELECT id, code, name_en FROM company ORDER BY created_at LIMIT 2');
     if (rows.rows.length !== 1) throw new NotFoundError('careers page not found');
     const c = rows.rows[0]!;
-    if (!(await hiringPolicy(db, c.id)).careersEnabled) throw new NotFoundError('careers page not found');
+    if (!(await hiringPolicy(db, c.id)).careersEnabled || !(await featureOn(db, c.id, 'hiring'))) throw new NotFoundError('careers page not found');
     return c;
   };
 
@@ -74,7 +75,7 @@ export function careersRoutes({ db, cipher }: AppDeps): Router {
     const j = await q.query<{ id: string; company_id: string; title: string; questions: JobQuestion[]; stages: string[]; experience_min: string | null; experience_max: string | null; hiring_manager_id: string | null }>(
       `SELECT j.id, j.company_id, j.title, j.questions, j.stages, j.experience_min, j.experience_max, j.hiring_manager_id FROM hiring_job j WHERE j.id = $1 AND ${OPEN}`, [jobId, nptToday()]);
     const job = j.rows[0];
-    if (!job || !(await hiringPolicy(q, job.company_id)).careersEnabled) throw new NotFoundError('This job is no longer accepting applications.');
+    if (!job || !(await hiringPolicy(q, job.company_id)).careersEnabled || !(await featureOn(q, job.company_id, 'hiring'))) throw new NotFoundError('This job is no longer accepting applications.');
     return job;
   };
 

@@ -6,6 +6,7 @@ import { audit } from '../../audit.js';
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors.js';
 import { hasRole } from '../auth/middleware.js';
 import type { AuthUser } from '../auth/service.js';
+import { featureOn } from '../features/service.js';
 import { notify, notifyRole, userIdForEmployee, userIdsWithRole } from '../notifications/service.js';
 import { nptToday, type DecisionContext } from '../workflow/service.js';
 
@@ -376,7 +377,7 @@ export async function settlementStatus(db: Queryable, companyId: string, employe
  */
 export async function autoStartOnboarding(db: Queryable, companyId: string, employeeId: string, joinDate: string, actorId: string | null): Promise<string | null> {
   const policy = await lifecyclePolicy(db, companyId);
-  if (!policy.autoStartOnboarding) return null;
+  if (!policy.autoStartOnboarding || !(await featureOn(db, companyId, 'lifecycle'))) return null;
   await db.query('SAVEPOINT auto_onboarding');
   try {
     const id = await startCase(db, { companyId, employeeId, kind: 'onboarding', anchorDate: joinDate, startedBy: actorId });
