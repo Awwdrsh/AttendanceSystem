@@ -28,7 +28,15 @@ export const DEMO = {
 
 export async function freshDb(): Promise<Db> {
   const db = createPool(TEST_DATABASE_URL);
-  await db.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+  // Dropping a schema of a few hundred tables takes a lock per object from the server-wide lock table; when several
+  // test databases on the same server are rebuilt at once it can run out ("out of shared memory"). Wait and retry.
+  for (let attempt = 1; ; attempt++) {
+    try { await db.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'); break; }
+    catch (e) {
+      if ((e as { code?: string }).code !== '53200' || attempt >= 6) throw e;
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
+  }
   await migrate(db, MIGRATIONS_DIR, () => undefined);
   await seedBsCalendar(db);
   await seedDemo(db);

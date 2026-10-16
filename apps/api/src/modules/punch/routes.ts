@@ -15,6 +15,7 @@ import { isAttendanceLocked, listDays, recomputeForPunch } from '../attendance/s
 import { ensurePseudoDevice, nptLocalTime } from './devices.js';
 import { geofence, type GeoLocation } from './geo.js';
 import { fieldPolicy } from '../field/policy.js';
+import { assertRegisteredDevice } from '../relations/service.js';
 
 const CLOCK_TOLERANCE_MS = 10 * 60_000;
 
@@ -56,6 +57,8 @@ export function punchRoutes({ db, cipher }: AppDeps): Router {
         WHERE e.id = $1 AND e.status = 'active'`, [employeeId]);
     const e = emp.rows[0];
     if (!e) throw new NotFoundError('employee not found');
+    // Optional company rule: browser clock-in only from a device HR approved for this employee.
+    await assertRegisteredDevice(db, e.company_id, employeeId, req.get('x-device-token'));
 
     let geo: ReturnType<typeof geofence> = { inside: null, locationId: null, distanceM: null, locationName: null };
     // Geofence policy (Settings, Locations): off ignores locations; flag asks for a reason; block refuses punches outside.

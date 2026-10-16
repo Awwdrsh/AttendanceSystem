@@ -12,14 +12,18 @@ import { recordFieldChanges, type FieldChange } from './history.js';
  * updates the employee row and splits the effective-dated assignment at the event date, and writes field history.
  */
 export const CAREER_KINDS = ['hire', 'confirmation', 'promotion', 'transfer', 'designation_change', 'grade_change', 'manager_change',
-  'employment_type_change', 'salary_revision', 'separation', 'rehire', 'note'] as const;
+  'employment_type_change', 'salary_revision', 'separation', 'rehire', 'note', 'suspension', 'leave_of_absence', 'acting', 'deputation'] as const;
 export type CareerKind = typeof CAREER_KINDS[number];
 
 export const CAREER_LABEL: Record<CareerKind, string> = {
   hire: 'Joined', confirmation: 'Confirmed', promotion: 'Promoted', transfer: 'Transferred', designation_change: 'Designation changed',
   grade_change: 'Grade changed', manager_change: 'Manager changed', employment_type_change: 'Employment type changed', salary_revision: 'Salary revised',
   separation: 'Left the company', rehire: 'Rejoined', note: 'Note',
+  suspension: 'Suspended', leave_of_absence: 'Leave of absence', acting: 'Acting assignment', deputation: 'Deputation',
 };
+
+/** Temporary or record-only events: logged on the timeline, never applied to the permanent record. */
+export const TEMPORARY_KINDS: ReadonlySet<CareerKind> = new Set(['suspension', 'leave_of_absence', 'acting', 'deputation']);
 
 export const careerDetails = z.object({
   designationId: z.uuid().optional(),
@@ -32,6 +36,7 @@ export const careerDetails = z.object({
   separationType: z.enum(['resignation', 'termination', 'retirement', 'contract_end', 'death', 'other']).optional(),
   revisionPercent: z.number().min(-100).max(1000).optional(),
   reason: z.string().trim().max(500).optional(),
+  endDate: isoDate.optional(),
 }).strict();
 export type CareerDetails = z.infer<typeof careerDetails>;
 
@@ -181,17 +186,20 @@ export async function applyCareerEvent(db: Queryable, ev: CareerEventRow, actorI
   const before = await snapshot(db, e.employee_id, e.effective_date);
   const empSets: Record<string, unknown> = {};
   const assignment: Partial<Record<'branch_id' | 'org_unit_id' | 'manager_id' | 'employment_type', string | null>> = {};
-  if (d.designationId) {
+  if (TEMPORARY_KINDS.has(e.kind)) { /* acting, deputation, suspension and leave of absence change nothing permanent */ }
+  else if (d.designationId) {
     const des = await db.query<{ name_en: string; grade: string | null }>('SELECT name_en, grade FROM designation WHERE id = $1', [d.designationId]);
     empSets.designation_id = d.designationId;
     empSets.designation = des.rows[0]?.name_en ?? d.designation ?? null;
     if (!d.grade && des.rows[0]?.grade) empSets.grade = des.rows[0].grade;
   } else if (d.designation) { empSets.designation = d.designation; empSets.designation_id = null; }
-  if (d.grade) empSets.grade = d.grade;
-  if (d.branchId !== undefined) assignment.branch_id = d.branchId;
-  if (d.orgUnitId !== undefined) assignment.org_unit_id = d.orgUnitId;
-  if (d.managerId !== undefined) assignment.manager_id = d.managerId;
-  if (d.employmentType) assignment.employment_type = d.employmentType;
+  if (!TEMPORARY_KINDS.has(e.kind)) {
+    if (d.grade) empSets.grade = d.grade;
+    if (d.branchId !== undefined) assignment.branch_id = d.branchId;
+    if (d.orgUnitId !== undefined) assignment.org_unit_id = d.orgUnitId;
+    if (d.managerId !== undefined) assignment.manager_id = d.managerId;
+    if (d.employmentType) assignment.employment_type = d.employmentType;
+  }
   if (e.kind === 'confirmation') empSets.confirmed_on = e.effective_date;
   if (e.kind === 'separation') { empSets.status = 'exited'; empSets.exit_date = e.effective_date; }
   if (e.kind === 'rehire') { empSets.status = 'active'; empSets.exit_date = null; }

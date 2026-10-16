@@ -30,7 +30,6 @@ const CATEGORIES: Array<[string, string, boolean]> = [
   ['Leave & attendance', 'Balances, missed punches, shifts and holidays', false],
   ['Documents & letters', 'Experience letters, salary certificates and other paperwork', false],
   ['IT & equipment', 'Laptop, email, access and other equipment', false],
-  ['Grievance', 'Confidential: only HR can see these tickets, never your manager', true],
   ['Other', 'Anything else for HR', false],
 ];
 

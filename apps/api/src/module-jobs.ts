@@ -12,6 +12,7 @@ import { applyDueCareerEvents } from './modules/people/career.js';
 import { performanceReminders } from './modules/performance/jobs.js';
 import { localDateOf } from '@hajiri/attendance-engine';
 import { runSurveyJobs } from './modules/engage/surveys.js';
+import { relationsDaily } from './modules/relations/service.js';
 
 export interface ModuleJobDeps { db: Db; cipher: FieldCipher }
 export type ModuleJob = (deps: ModuleJobDeps, now: Date) => Promise<unknown>;
@@ -32,4 +33,5 @@ export const DAILY_MODULE_JOBS: Record<string, ModuleJob> = {
   careerEventsApplied: (d, now) => applyDueCareerEvents(d.db, now),
   performanceReminders: (d, now) => performanceReminders(d.db, now),
   surveys: (d, now) => runSurveyJobs(d.db, d.cipher, localDateOf(now.getTime())),
+  relations: (d, now) => relationsDaily(d.db, now),
 };
