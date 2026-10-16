@@ -45,7 +45,7 @@ export interface QuestionResult {
   enps?: { score: number; promoters: number; passives: number; detractors: number } | null;
   texts?: Array<{ text: string; name?: string }>; breakdown?: Array<{ group: string; responses: number; average: number | null }>;
 }
-export interface SurveyResults { responses: number; audience: number; hidden: boolean; minGroup: number; questions: QuestionResult[] }
+export interface SurveyResults { responses: number; audience: number; hidden: boolean; hiddenUntilClose?: boolean; minGroup: number; questions: QuestionResult[] }
 export interface Answer { questionId: string; value?: number; choices?: string[]; text?: string }
 export interface SurveyInput {
   kind: 'survey' | 'poll'; title: string; description?: string | null; anonymous: boolean; minGroup: number; audienceKind: 'all' | 'branch' | 'department';

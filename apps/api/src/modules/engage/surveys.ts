@@ -96,7 +96,8 @@ export interface QuestionResult {
 export interface SurveyResults {
   responses: number;
   audience: number;
-  hidden: boolean;          // anonymous and below the minimum group size
+  hidden: boolean;          // anonymous and below the minimum group size, or an anonymous survey still open
+  hiddenUntilClose?: boolean;
   minGroup: number;
   questions: QuestionResult[];
 }
@@ -131,6 +132,8 @@ export async function surveyResults(db: Queryable, s: SurveyRow, audienceSize: n
   const n = resp.rows.length;
   const hidden = s.anonymous && n < s.min_group;
   if (hidden) return { responses: n, audience: audienceSize, hidden, minGroup: s.min_group, questions: [] };
+  // Live results of an open anonymous survey would let HR see how one person answered by comparing before and after.
+  if (s.anonymous && s.kind === 'survey' && s.status !== 'closed') return { responses: n, audience: audienceSize, hidden: true, hiddenUntilClose: true, minGroup: s.min_group, questions: [] };
   const ans = await db.query<{ response_id: string; question_id: string; value_num: number | null; choices: string[] | null; text_value: string | null }>(
     `SELECT a.response_id, a.question_id, a.value_num, a.choices, a.text_value
        FROM survey_answer a JOIN survey_response r ON r.id = a.response_id WHERE r.survey_id = $1`, [s.id]);

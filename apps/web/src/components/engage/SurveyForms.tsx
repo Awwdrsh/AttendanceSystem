@@ -106,7 +106,9 @@ export function SurveyResultsView({ results, anonymous }: { results: SurveyResul
   if (results.hidden) {
     return (
       <Alert variant="light" color="gray" icon={<IconLock size={16} />}>
-        {results.responses} of {results.audience} answered. Results appear once at least {results.minGroup} people have answered, so nobody can be singled out.
+        {results.responses} of {results.audience} answered. {results.hiddenUntilClose
+          ? 'Results of an anonymous survey appear when it closes, so nobody can be singled out.'
+          : `Results appear once at least ${results.minGroup} people have answered, so nobody can be singled out.`}
       </Alert>
     );
   }

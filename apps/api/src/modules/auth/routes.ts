@@ -96,6 +96,8 @@ export function authRoutes(db: Db, opts: AuthOptions): Router {
     const recoveryCodes = await confirmSetup(db, cipherOf(), req.user!, b.code);
     // The current session has just proved the second factor.
     if (req.sessionToken) await db.query('UPDATE session SET two_factor = true WHERE token_hash = $1', [sha256Hex(req.sessionToken)]);
+    // Sessions opened before the second factor existed may be someone else's; end them.
+    await revokeOtherSessions(db, req.user!.id, req.sessionToken);
     res.json({ recoveryCodes });
   });
 

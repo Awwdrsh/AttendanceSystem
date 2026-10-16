@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { Db, Queryable } from '../../db/pool.js';
-import { BadRequestError } from '../../errors.js';
+import { BadRequestError, ForbiddenError } from '../../errors.js';
 import { deleteFile } from '../files/store.js';
 import { notify, userIdForEmployee, userIdsWithRole } from '../notifications/service.js';
 import { registerHandler, registerSummariser, type DecisionContext } from '../workflow/service.js';
@@ -165,6 +165,7 @@ async function decideRequisition(db: Queryable, id: string, state: 'approved' | 
     'SELECT company_id, raised_by, title, status FROM hiring_requisition WHERE id = $1 FOR UPDATE', [id]);
   const q = r.rows[0];
   if (!q || q.status !== 'pending') return;
+  if (state === 'approved' && ctx.actorId === q.raised_by) throw new ForbiddenError('you raised this hiring request; someone else must approve it');
   await db.query('UPDATE hiring_requisition SET status = $2, decided_at = now(), decision_reason = $3 WHERE id = $1', [id, state, ctx.reason]);
   await notify(db, {
     companyId: q.company_id, userId: q.raised_by, template: `job_requisition.${state}`,
@@ -179,6 +180,7 @@ async function decideOffer(db: Queryable, id: string, state: 'approved' | 'rejec
        JOIN hiring_application a ON a.id = o.application_id JOIN hiring_candidate c ON c.id = a.candidate_id WHERE o.id = $1 FOR UPDATE OF o`, [id]);
   const o = r.rows[0];
   if (!o || o.status !== 'pending_approval') return;
+  if (state === 'approved' && ctx.actorId === o.created_by) throw new ForbiddenError('you drafted this offer; someone else must approve it');
   await db.query('UPDATE hiring_offer SET status = $2, decided_at = now() WHERE id = $1', [id, state]);
   await addEvent(db, { companyId: o.company_id, applicationId: o.application_id, actorId: ctx.actorId, kind: 'offer', body: `Offer ${state}${ctx.reason ? `: ${ctx.reason}` : ''}` });
   if (o.created_by) {

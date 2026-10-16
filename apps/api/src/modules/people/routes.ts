@@ -55,7 +55,7 @@ export function peopleRoutes({ db, cipher }: AppDeps): Router {
 
   // ---------------------------------------------------------------- directory, summary, org chart (everyone)
 
-  const DIRECTORY_COLS = `e.id, e.emp_code, e.name_en, e.designation, e.grade, e.email AS work_email, e.work_phone, e.join_date, e.avatar_file_id IS NOT NULL AS has_avatar,
+  const DIRECTORY_COLS = `e.id, e.emp_code, e.name_en, e.designation, e.email AS work_email, e.work_phone, e.join_date, e.avatar_file_id IS NOT NULL AS has_avatar,
     a.branch_id, b.name_en AS branch_name, a.org_unit_id, o.name_en AS unit_name, a.manager_id, m.name_en AS manager_name`;
   const DIRECTORY_FROM = `employee e
     LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date

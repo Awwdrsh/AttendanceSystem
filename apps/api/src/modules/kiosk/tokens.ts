@@ -32,19 +32,20 @@ export function verifyQr(cipher: FieldCipher, p: { employeeId: string; window: n
 // ---------------------------------------------------------------- identify → punch ticket (2 minutes, one kiosk)
 export const TICKET_TTL_MS = 2 * 60_000;
 
-export function issueTicket(cipher: FieldCipher, kioskId: string, employeeId: string, now = Date.now()): string {
+export function issueTicket(cipher: FieldCipher, kioskId: string, employeeId: string, now = Date.now(), viaQr = false): string {
   const exp = now + TICKET_TTL_MS;
-  const nonce = randomBytes(9).toString('base64url');
+  // The first nonce character records how the person identified (signed with the rest): Q = QR badge, P = PIN.
+  const nonce = (viaQr ? 'Q' : 'P') + randomBytes(9).toString('base64url').slice(1);
   return `${kioskId}.${employeeId}.${exp}.${nonce}.${sign(cipher, `kt|${kioskId}|${employeeId}|${exp}|${nonce}`)}`;
 }
 
-export function verifyTicket(cipher: FieldCipher, ticket: string, kioskId: string, now = Date.now()): { employeeId: string; nonce: string } | null {
+export function verifyTicket(cipher: FieldCipher, ticket: string, kioskId: string, now = Date.now()): { employeeId: string; nonce: string; viaQr: boolean } | null {
   const m = /^([0-9a-f-]{36})\.([0-9a-f-]{36})\.(\d{13})\.([A-Za-z0-9_-]{12})\.([0-9a-f]{32})$/.exec(ticket);
   if (!m || m[1] !== kioskId) return null;
   const exp = Number(m[3]);
   if (exp < now) return null;
   if (!same(m[5]!, sign(cipher, `kt|${m[1]}|${m[2]}|${exp}|${m[4]}`))) return null;
-  return { employeeId: m[2]!, nonce: m[4]! };
+  return { employeeId: m[2]!, nonce: m[4]!, viaQr: m[4]!.startsWith('Q') };
 }
 
 // ---------------------------------------------------------------- pairing codes and PINs

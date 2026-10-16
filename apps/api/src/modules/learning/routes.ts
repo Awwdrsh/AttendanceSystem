@@ -370,6 +370,7 @@ export function learningRoutes({ db, cipher }: AppDeps): Router {
     const role = await enrollmentRole(db, u, e);
     if (!role) throw new NotFoundError('enrolment not found');
     if (e.status !== 'completed') throw new ConflictError('add a certificate after the course is completed');
+    if ((b.issuedOn !== undefined || b.expiresOn !== undefined) && !hasRole(u, 'hr')) throw new ForbiddenError('only HR can set the issue and expiry dates of a certificate');
     if (b.issuedOn && b.expiresOn && b.expiresOn < b.issuedOn) throw new BadRequestError('the certificate expires before it was issued');
     await tx(db, async (cx) => {
       await attachFile(cx, { companyId, fileId: b.fileId, userId: u.id, purpose: 'training_certificate', attachedTo: `lrn_enrollment:${e.id}` });

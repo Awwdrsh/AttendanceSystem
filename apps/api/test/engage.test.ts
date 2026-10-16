@@ -229,6 +229,9 @@ describe('surveys and polls', () => {
     expect((await request(app).get(`/api/v1/engage/surveys/${surveyId}/results`).set(auth(sita))).status).toBe(404);
     expect((await request(app).post(`/api/v1/engage/surveys/${surveyId}/respond`).set(auth(extra[0]!.token)).send(answer(8, 4))).status).toBe(201);
     res = await request(app).get(`/api/v1/engage/surveys/${surveyId}/results`).set(auth(hr));
+    expect(res.body.results).toMatchObject({ responses: 3, hidden: true, hiddenUntilClose: true, questions: [] });
+    await db.query(`UPDATE survey SET status = 'closed' WHERE id = $1`, [surveyId]);   // results of an anonymous survey show once it has closed
+    res = await request(app).get(`/api/v1/engage/surveys/${surveyId}/results`).set(auth(hr));
     expect(res.body.results.hidden).toBe(false);
     const enps = res.body.results.questions[0];
     expect(enps.enps).toEqual({ score: 0, promoters: 1, passives: 1, detractors: 1 });
@@ -246,6 +249,7 @@ describe('surveys and polls', () => {
     expect(csv.status).toBe(200);
     expect(csv.text).toContain('More tools please');
     expect(csv.text).not.toContain('Sita');
+    await db.query(`UPDATE survey SET status = 'published' WHERE id = $1`, [surveyId]);
     const list = await request(app).get('/api/v1/engage/surveys').set(auth(sita));
     expect(list.body.surveys.find((x: { id: string }) => x.id === surveyId).answered).toBe(true);
     expect((await request(app).get(`/api/v1/engage/surveys/${surveyId}/results`).set(auth(foreignHr))).status).toBe(404);

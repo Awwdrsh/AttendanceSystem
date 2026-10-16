@@ -89,6 +89,7 @@ export function kioskRoutes({ db, cipher, pepper }: AppDeps): Router {
     ]).parse(req.body);
 
     let employeeId: string;
+    let viaQr = false;
     if ('qr' in b) {
       const p = parseQr(b.qr);
       const cred = p ? await db.query<{ qr_version: number; company_id: string }>('SELECT qr_version, company_id FROM kiosk_credential WHERE employee_id = $1', [p.employeeId]) : null;
@@ -97,6 +98,7 @@ export function kioskRoutes({ db, cipher, pepper }: AppDeps): Router {
       const used = await db.query('INSERT INTO kiosk_qr_use (employee_id, time_window, kiosk_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [p.employeeId, p.window, k.id]);
       if (!used.rowCount) throw new BadRequestError('This QR code was already used. Wait for the next code in the app.');
       employeeId = p.employeeId;
+      viaQr = true;
     } else {
       const e = await db.query<{ id: string; pin_hash: string | null; locked_until: Date | null }>(
         `SELECT e.id, c.pin_hash, c.locked_until FROM employee e LEFT JOIN kiosk_credential c ON c.employee_id = e.id
@@ -134,9 +136,9 @@ export function kioskRoutes({ db, cipher, pepper }: AppDeps): Router {
     const direction = await nextDirection(db, employeeId);
     const openBreak = await db.query<{ kind: string; started_at: Date }>('SELECT kind, started_at FROM work_break WHERE employee_id = $1 AND ended_at IS NULL', [employeeId]);
     res.json({
-      ticket: issueTicket(cipher, k.id, employeeId),
+      ticket: issueTicket(cipher, k.id, employeeId, Date.now(), viaQr),
       employee: { name: emp.rows[0].name_en, empCode: emp.rows[0].emp_code, designation: emp.rows[0].designation },
-      nextDirection: direction, selfieRequired: k.selfie_required, openBreak: openBreak.rows[0] ?? null,
+      nextDirection: direction, selfieRequired: k.selfie_required || viaQr, openBreak: openBreak.rows[0] ?? null,
     });
   });
 
@@ -147,7 +149,7 @@ export function kioskRoutes({ db, cipher, pepper }: AppDeps): Router {
     const t = verifyTicket(cipher, b.ticket, k.id);
     if (!t) throw new BadRequestError('This sign-in has expired. Enter your code and PIN again.');
     const photo = b.selfie ? parsePhoto(b.selfie) : null;
-    if (k.selfie_required && !photo) throw new BadRequestError('Take a quick photo to punch at this kiosk.', { code: 'photo_required' });
+    if ((k.selfie_required || t?.viaQr) && !photo) throw new BadRequestError('Take a quick photo to punch at this kiosk.', { code: 'photo_required' });
     const emp = await db.query<{ emp_code: string; name_en: string }>(`SELECT emp_code, name_en FROM employee WHERE id = $1 AND company_id = $2 AND status = 'active'`, [t.employeeId, k.company_id]);
     if (!emp.rows[0]) throw new ConflictError('This employee can no longer punch here.');
     const direction = await nextDirection(db, t.employeeId);
