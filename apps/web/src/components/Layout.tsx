@@ -18,8 +18,11 @@ import { PopupNotices } from './relations/PopupNotices';
 import { OfflineBanner } from './OfflineBanner';
 import type { Role } from '../api/types';
 import { AREA, STAFF_ROLES } from '../lib/access';
+import type { FeatureKey } from '../api/catalog';
+import { useFeatures } from '../lib/features';
 
-interface NavItem { to: string; label: string; icon: Icon; roles?: Role[]; employeeOnly?: boolean; keywords?: string[]; match?: string[]; badge?: 'approvals' }
+/** `features`: shown while any of these modules is on (Settings → Features). */
+interface NavItem { to: string; label: string; icon: Icon; roles?: Role[]; employeeOnly?: boolean; keywords?: string[]; match?: string[]; badge?: 'approvals'; features?: FeatureKey[] }
 interface NavGroup { id: string; title: string; items: NavItem[]; roles?: Role[] }
 
 const NAV: NavGroup[] = [
@@ -27,12 +30,12 @@ const NAV: NavGroup[] = [
     { to: '/', label: 'Home', icon: IconHome, employeeOnly: true, keywords: ['today', 'clock in', 'clock out', 'punch'] },
     { to: '/me/attendance', label: 'My attendance', icon: IconCalendarStats, employeeOnly: true, keywords: ['field visit', 'roster', 'shift swap'] },
     { to: '/me/leave', label: 'Time off', icon: IconBeach, employeeOnly: true, keywords: ['leave', 'holiday', 'vacation', 'apply'] },
-    { to: '/me/timesheet', label: 'Timesheet', icon: IconHourglass, employeeOnly: true, keywords: ['timer', 'project', 'hours', 'log time'] },
+    { to: '/me/timesheet', label: 'Timesheet', icon: IconHourglass, employeeOnly: true, keywords: ['timer', 'project', 'hours', 'log time'], features: ['time'] },
     { to: '/me/payslips', label: 'Payslips', icon: IconReceipt2, employeeOnly: true, keywords: ['salary', 'pay', 'tax'] },
-    { to: '/me/claims', label: 'Claims & travel', icon: IconReceiptRefund, employeeOnly: true, keywords: ['expense', 'reimbursement', 'travel', 'tada', 'advance'] },
-    { to: '/me/growth', label: 'Growth', icon: IconTargetArrow, employeeOnly: true, keywords: ['goals', 'kpi', 'review', 'appraisal', 'training', 'learning', '1-on-1'] },
-    { to: '/tasks', label: 'Tasks', icon: IconLayoutKanban, keywords: ['to-do', 'todo', 'board', 'kanban', 'checklist'] },
-    { to: '/me/help', label: 'Help desk', icon: IconLifebuoy, employeeOnly: true, keywords: ['ticket', 'question', 'hr help', 'resign', 'grievance', 'complaint'] },
+    { to: '/me/claims', label: 'Claims & travel', icon: IconReceiptRefund, employeeOnly: true, keywords: ['expense', 'reimbursement', 'travel', 'tada', 'advance'], features: ['expenses'] },
+    { to: '/me/growth', label: 'Growth', icon: IconTargetArrow, employeeOnly: true, keywords: ['goals', 'kpi', 'review', 'appraisal', 'training', 'learning', '1-on-1'], features: ['performance', 'learning'] },
+    { to: '/tasks', label: 'Tasks', icon: IconLayoutKanban, keywords: ['to-do', 'todo', 'board', 'kanban', 'checklist'], features: ['tasks'] },
+    { to: '/me/help', label: 'Help desk', icon: IconLifebuoy, employeeOnly: true, keywords: ['ticket', 'question', 'hr help', 'resign', 'grievance', 'complaint'], features: ['helpdesk'] },
   ] },
   { id: 'company', title: 'Company', items: [
     { to: '/people', label: 'People', icon: IconAddressBook, keywords: ['directory', 'org chart', 'colleagues'] },
@@ -45,20 +48,22 @@ const NAV: NavGroup[] = [
     { to: '/attendance', label: 'Attendance', icon: IconClockHour4, roles: ['manager', ...AREA.attendance], keywords: ["who's in", 'today', 'exceptions', 'overtime', 'fix punch', 'timesheets', 'roster', 'kiosk'] },
     { to: '/leave', label: 'Leave', icon: IconCalendarEvent, roles: ['manager', ...AREA.attendance], keywords: ['calendar', 'balances', 'policies', 'time off'] },
     { to: '/payroll', label: 'Payroll', icon: IconCash, roles: AREA.payroll, keywords: ['pay run', 'salary', 'tax', 'loans', 'ssf'] },
-    { to: '/expenses', label: 'Expenses & travel', icon: IconReceiptRefund, roles: ['manager', 'hr'], keywords: ['claims', 'reimbursement', 'travel', 'tada'] },
-    { to: '/performance', label: 'Performance', icon: IconTargetArrow, roles: ['manager', 'hr'], keywords: ['goals', 'kpi', 'appraisal', 'review cycle', 'training', 'learning'] },
-    { to: '/hiring', label: 'Hiring', icon: IconUserPlus, roles: ['manager', ...AREA.hiring], keywords: ['jobs', 'vacancy', 'candidates', 'interview', 'offer', 'recruitment'] },
-    { to: '/helpdesk', label: 'Help desk', icon: IconLifebuoy, roles: ['hr'], keywords: ['tickets', 'queries'] },
+    { to: '/expenses', label: 'Expenses & travel', icon: IconReceiptRefund, roles: ['manager', 'hr'], keywords: ['claims', 'reimbursement', 'travel', 'tada'], features: ['expenses'] },
+    { to: '/performance', label: 'Performance', icon: IconTargetArrow, roles: ['manager', 'hr'], keywords: ['goals', 'kpi', 'appraisal', 'review cycle', 'training', 'learning'], features: ['performance', 'learning'] },
+    { to: '/hiring', label: 'Hiring', icon: IconUserPlus, roles: ['manager', ...AREA.hiring], keywords: ['jobs', 'vacancy', 'candidates', 'interview', 'offer', 'recruitment'], features: ['hiring'] },
+    { to: '/helpdesk', label: 'Help desk', icon: IconLifebuoy, roles: ['hr'], keywords: ['tickets', 'queries'], features: ['helpdesk'] },
     { to: '/relations', label: 'Employee relations', icon: IconScale, roles: ['hr'], keywords: ['grievance', 'disciplinary', 'warning', 'milestones', 'retirement', 'contract end', 'acting', 'deputation', 'kye', 'devices'] },
     { to: '/insights', label: 'Insights', icon: IconChartHistogram, roles: AREA.insights, keywords: ['analytics', 'headcount', 'attrition', 'people cost', 'trends'] },
-    { to: '/reports', label: 'Reports', icon: IconReportAnalytics, roles: ['hr'], keywords: ['export', 'csv', 'register'] },
+    { to: '/reports', label: 'Reports', icon: IconReportAnalytics, roles: ['hr'], keywords: ['export', 'csv', 'register', 'report builder', 'birthdays', 'nominees', 'headcount'] },
   ] },
 ];
 
 const SETTINGS: NavItem = { to: '/settings', label: 'Settings', icon: IconSettings, roles: ['hr'], keywords: ['shifts', 'holidays', 'devices', 'users', 'rules', 'setup'] };
 
 /** Extra jump targets for the command palette: tabs inside pages. */
-const JUMPS: Array<{ to: string; label: string; group: string; roles?: Role[]; icon: Icon }> = [
+const JUMPS: Array<{ to: string; label: string; group: string; roles?: Role[]; icon: Icon; features?: FeatureKey[] }> = [
+  { to: '/reports/builder', label: 'Build a report', group: 'Reports', roles: ['hr'], icon: IconReportAnalytics },
+  { to: '/settings/features', label: 'Features (switch modules on or off)', group: 'Settings', roles: ['hr'], icon: IconSettings },
   { to: '/relations/disciplinary', label: 'Disciplinary cases', group: 'Employee relations', roles: ['hr'], icon: IconScale },
   { to: '/relations/milestones', label: 'Milestones (retirements, contract ends)', group: 'Employee relations', roles: ['hr'], icon: IconCalendarEvent },
   { to: '/relations/kye', label: 'Know your employee', group: 'Employee relations', roles: ['hr'], icon: IconChecklist },
@@ -76,14 +81,14 @@ const JUMPS: Array<{ to: string; label: string; group: string; roles?: Role[]; i
   { to: '/payroll/loans', label: 'Loans & advances', group: 'Payroll', roles: AREA.payroll, icon: IconBuildingBank },
   { to: '/payroll/rules', label: 'Tax & SSF rules', group: 'Payroll', roles: AREA.payroll, icon: IconGavel },
   { to: '/employees/structure', label: 'Org structure', group: 'Employees', roles: ['hr'], icon: IconBriefcase },
-  { to: '/employees/onboarding', label: 'Onboarding', group: 'Employees', roles: ['hr'], icon: IconUserPlus },
-  { to: '/employees/exits', label: 'Exits', group: 'Employees', roles: ['hr'], icon: IconLogout },
-  { to: '/employees/documents', label: 'Documents & letters', group: 'Employees', roles: ['hr'], icon: IconFileCertificate },
+  { to: '/employees/onboarding', label: 'Onboarding', group: 'Employees', roles: ['hr'], icon: IconUserPlus, features: ['lifecycle'] },
+  { to: '/employees/exits', label: 'Exits', group: 'Employees', roles: ['hr'], icon: IconLogout, features: ['lifecycle'] },
+  { to: '/employees/documents', label: 'Documents & letters', group: 'Employees', roles: ['hr'], icon: IconFileCertificate, features: ['documents'] },
   { to: '/employees/requests', label: 'Profile change requests', group: 'Employees', roles: ['hr'], icon: IconListCheck },
   { to: '/people/org-chart', label: 'Org chart', group: 'People', icon: IconAddressBook },
-  { to: '/attendance/timesheets', label: 'Timesheets', group: 'Attendance', roles: ['manager', ...AREA.attendance], icon: IconHourglass },
+  { to: '/attendance/timesheets', label: 'Timesheets', group: 'Attendance', roles: ['manager', ...AREA.attendance], icon: IconHourglass, features: ['time'] },
   { to: '/attendance/rosters', label: 'Rosters & shift swaps', group: 'Attendance', roles: ['manager', ...AREA.attendance], icon: IconCalendarEvent },
-  { to: '/attendance/visits', label: 'Field visits', group: 'Attendance', roles: ['manager', ...AREA.attendance], icon: IconClockHour4 },
+  { to: '/attendance/visits', label: 'Field visits', group: 'Attendance', roles: ['manager', ...AREA.attendance], icon: IconClockHour4, features: ['field'] },
   { to: '/attendance/issues', label: 'Attendance issues and reminders', group: 'Attendance', roles: ['manager', ...AREA.attendance], icon: IconAlertTriangle },
   { to: '/attendance/penalties', label: 'Late penalties and attendance rules', group: 'Attendance', roles: AREA.attendance, icon: IconClockHour4 },
   { to: '/attendance/upload', label: 'Upload attendance (CSV)', group: 'Attendance', roles: AREA.attendance, icon: IconClockEdit },
@@ -98,7 +103,7 @@ const JUMPS: Array<{ to: string; label: string; group: string; roles?: Role[]; i
 const ACCOUNT: NavItem[] = [
   { to: '/me/notifications', label: 'Notifications', icon: IconBell },
   { to: '/me/profile', label: 'Profile & privacy', icon: IconUserCircle },
-  { to: '/me/profile/documents', label: 'My documents', icon: IconFileCertificate },
+  { to: '/me/profile/documents', label: 'My documents', icon: IconFileCertificate, features: ['documents'] },
   { to: '/me/profile/security', label: 'Sign-in security', icon: IconUserShield },
 ];
 
@@ -128,11 +133,13 @@ export function Layout() {
     return () => { alive = false; clearInterval(id); };
   }, [loc.pathname]);
 
-  const visible = (i: NavItem) => ((!i.roles || hasRole(...i.roles)) || (i.badge === 'approvals' && pendingApprovals > 0)) && (!i.employeeOnly || !!user?.employeeId);
+  const { on } = useFeatures();
+  const featureOn = (f?: FeatureKey[]) => !f || f.some((k) => on(k));
+  const visible = (i: NavItem) => ((!i.roles || hasRole(...i.roles)) || (i.badge === 'approvals' && pendingApprovals > 0)) && (!i.employeeOnly || !!user?.employeeId) && featureOn(i.features);
   const groups = NAV.filter((g) => !g.roles || hasRole(...g.roles) || (g.id === 'manage' && pendingApprovals > 0)).map((g) => ({ ...g, items: g.items.filter(visible) })).filter((g) => g.items.length > 0);
   const account = ACCOUNT.filter(visible);
   const settings = visible(SETTINGS) ? SETTINGS : null;
-  const jumps = JUMPS.filter((j) => !j.roles || hasRole(...j.roles));
+  const jumps = JUMPS.filter((j) => (!j.roles || hasRole(...j.roles)) && featureOn(j.features));
 
   const actions: SpotlightActionData[] = useMemo(() => [
     ...groups.flatMap((g) => g.items.map((i) => ({ ...i, group: g.title }))),
@@ -142,7 +149,7 @@ export function Layout() {
   ].map((i) => {
     const Ico = i.icon;
     return { id: i.to, label: i.label, description: i.group, keywords: i.keywords ?? [], onClick: () => nav(i.to), leftSection: <Ico size={18} stroke={1.6} /> };
-  }), [groups.length, account.length, jumps.length, user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }), [groups.length, account.length, jumps.length, user?.id, on]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useHotkeys([['mod+K', () => spotlight.open()]]);
 

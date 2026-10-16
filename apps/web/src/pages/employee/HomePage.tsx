@@ -24,6 +24,7 @@ import { MyChecklistCard } from '../lifecycle/MyChecklistCard';
 import { HomeCompanyCard } from '../../components/engage/HomeCompanyCard';
 import { LateClockInModal, WhosOutCard } from '../attendance-tools/HomeAttendanceExtras';
 import { MyTodoCard } from '../tasks/MyTodoCard';
+import { IfFeature } from '../../lib/features';
 
 export function describeFlag(f: Flag): string {
   switch (f.kind) {
@@ -189,7 +190,7 @@ export default function HomePage() {
       ) : null}
 
       <RelationsHomeCard />
-      <MyChecklistCard />
+      <IfFeature feature="lifecycle"><MyChecklistCard /></IfFeature>
 
       <Grid gap="md">
         <Grid.Col span={{ base: 12, md: 7 }}>
@@ -277,8 +278,8 @@ export default function HomePage() {
         </Grid.Col>
       </Grid>
 
-      <HomeTimer />
-      <HomeFieldCard key={punches.length} onChange={() => void today.reload()} />
+      <IfFeature feature="time"><HomeTimer /></IfFeature>
+      <IfFeature feature="field"><HomeFieldCard key={punches.length} onChange={() => void today.reload()} /></IfFeature>
 
       {m ? (
         <div>
@@ -292,7 +293,7 @@ export default function HomePage() {
         </div>
       ) : null}
 
-      <MyTodoCard />
+      <IfFeature feature="tasks"><MyTodoCard /></IfFeature>
       <WhosOutCard />
       <HomeCompanyCard />
       <LateClockInModal message={lateBlocked} onClose={() => setLateBlocked(null)} />

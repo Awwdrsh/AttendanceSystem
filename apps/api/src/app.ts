@@ -40,6 +40,9 @@ import { insightsRoutes } from './modules/insights/routes.js';
 import { attendanceToolsRoutes } from './modules/attendance-tools/routes.js';
 import { tasksRoutes } from './modules/tasks/routes.js';
 import { wireModules } from './modules/integrations.js';
+import { featuresRoutes } from './modules/features/routes.js';
+import { featureGate } from './modules/features/service.js';
+import { reportCatalogRoutes } from './modules/reports/catalog.js';
 import { filesRoutes } from './modules/files/routes.js';
 
 export const LOG_REDACT = ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-api-key"]', 'req.headers["x-kiosk-key"]', 'res.headers["set-cookie"]'];
@@ -119,24 +122,29 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
   api.use('/regularisation', regularisationRoutes(deps));
   api.use('/ot', otRoutes(deps));
   api.use('/notifications', notificationsRoutes(deps));
+  api.use('/reports', reportCatalogRoutes(deps));
   api.use('/reports', reportsRoutes(deps));
   api.use('/punch', punchRoutes(deps));
+  api.use('/settings/features', featuresRoutes(deps));  // before /settings: every signed-in user reads it
   api.use('/settings', settingsRoutes(deps));
   api.use('/payroll', payrollRoutes(deps));
   api.use('/biometrics', biometricsRoutes(deps));
   api.use('/dashboard', dashboardRoutes(deps));
   api.use('/files', filesRoutes(deps));
   api.use('/people', peopleRoutes(deps));
-  api.use('/documents', documentsRoutes(deps));
-  api.use('/lifecycle', lifecycleRoutes(deps));
-  api.use('/helpdesk', helpdeskRoutes(deps));
-  api.use('/time', timesheetsRoutes(deps));
-  api.use('/field', fieldRoutes(deps));
-  api.use('/expenses', expensesRoutes(deps));
-  api.use('/performance', performanceRoutes(deps));
-  api.use('/learning', learningRoutes(deps));
-  api.use('/hiring', hiringRoutes(deps));
-  api.use('/engage', engageRoutes(deps));
+  // Modules a company can switch off (Settings → Features) answer 404 "feature off" while off.
+  api.use('/documents', featureGate(db, 'documents'), documentsRoutes(deps));
+  api.use('/lifecycle', featureGate(db, 'lifecycle'), lifecycleRoutes(deps));
+  api.use('/helpdesk', featureGate(db, 'helpdesk'), helpdeskRoutes(deps));
+  api.use('/time', featureGate(db, 'time'), timesheetsRoutes(deps));
+  api.use('/field', featureGate(db, 'field', ['/breaks', '/visits', '/kiosks', '/kiosk-pin', '/kiosk-qr']), fieldRoutes(deps));
+  api.use('/expenses', featureGate(db, 'expenses'), expensesRoutes(deps));
+  api.use('/performance', featureGate(db, 'performance'), performanceRoutes(deps));
+  api.use('/learning', featureGate(db, 'learning'), learningRoutes(deps));
+  api.use('/hiring', featureGate(db, 'hiring'), hiringRoutes(deps));
+  api.use('/engage', featureGate(db, 'kudos', ['/kudos', '/leaderboard']), featureGate(db, 'surveys', ['/surveys']),
+    featureGate(db, 'suggestions', ['/suggestions']), engageRoutes(deps));
+  api.use('/tasks', featureGate(db, 'tasks'));          // gate for the Tasks module, whose router is mounted after it
   api.use('/insights', insightsRoutes(deps));
   api.use('/relations', relationsRoutes(deps));
   api.use('/attendance-tools', attendanceToolsRoutes(deps));

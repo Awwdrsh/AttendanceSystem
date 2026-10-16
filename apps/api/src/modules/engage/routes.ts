@@ -6,6 +6,7 @@ import type { AppDeps } from '../../deps.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors.js';
 import { isoDate, uuid } from '../../validation.js';
 import { companyIdOf, hasRole, requireRole } from '../auth/middleware.js';
+import { featureOn } from '../features/service.js';
 import { notify } from '../notifications/service.js';
 import { csvCell } from '../reports/csv.js';
 import { nptToday } from '../workflow/service.js';
@@ -495,8 +496,9 @@ export function engageRoutes({ db, cipher }: AppDeps): Router {
     const q = z.object({ before: z.iso.datetime().optional(), limit: z.coerce.number().int().min(1).max(50).default(20) }).parse(req.query);
     const { user, companyId } = me(req);
     const before = q.before ? new Date(q.before) : new Date(Date.now() + 60_000);
+    const kudosOn = await featureOn(db, companyId, 'kudos');
     const [kudos, anns] = await Promise.all([
-      kudosItems(companyId, user.id, isHr(user), 'AND k.created_at < $2', [before], q.limit),
+      kudosOn ? kudosItems(companyId, user.id, isHr(user), 'AND k.created_at < $2', [before], q.limit) : Promise.resolve([]),
       announcementsFor(req, { before, limit: q.limit }),
     ]);
     const items = [...kudos, ...anns].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, q.limit);
@@ -531,10 +533,11 @@ export function engageRoutes({ db, cipher }: AppDeps): Router {
   /** The Company card on Home: the latest pinned announcement, today's celebrations and the first survey waiting for an answer. */
   r.get('/home', async (req, res) => {
     const { companyId } = me(req);
+    const surveysOn = await featureOn(db, companyId, 'surveys');
     const [pinned, todays, surveys] = await Promise.all([
       announcementsFor(req, { limit: 1, pinnedOnly: true }),
       celebrations(db, companyId, nptToday(), 1),
-      openSurveysFor(req),
+      surveysOn ? openSurveysFor(req) : Promise.resolve([]),
     ]);
     const waiting = surveys.filter((s) => !s.answered);
     res.json({

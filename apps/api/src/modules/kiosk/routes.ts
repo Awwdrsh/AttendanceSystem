@@ -3,7 +3,8 @@ import { z } from 'zod';
 import type { AppDeps } from '../../deps.js';
 import { audit } from '../../audit.js';
 import { randomToken, sha256Hex, verifyPassword } from '../../crypto.js';
-import { BadRequestError, ConflictError, HttpError, UnauthorizedError } from '../../errors.js';
+import { BadRequestError, ConflictError, HttpError, NotFoundError, UnauthorizedError } from '../../errors.js';
+import { featureOn } from '../features/service.js';
 import { parsePhoto, PHOTO_MAX_BYTES } from '../punch/photo.js';
 import { nptLocalTime } from '../punch/devices.js';
 import { closeOpenBreak, insertAppPunch, nextDirection } from '../field/punches.js';
@@ -54,6 +55,7 @@ export function kioskRoutes({ db, cipher, pepper }: AppDeps): Router {
       [sha256Hex(`kiosk-key|${key}`)]);
     if (!k.rows[0]) return next(new UnauthorizedError('This tablet is no longer paired. Ask HR for a new pairing code.'));
     req.kiosk = k.rows[0];
+    if (!(await featureOn(db, k.rows[0].company_id, 'field'))) return next(new NotFoundError('feature off'));
     if (!k.rows[0].last_seen_at || Date.now() - k.rows[0].last_seen_at.getTime() > 60_000) await db.query('UPDATE kiosk SET last_seen_at = now() WHERE id = $1', [k.rows[0].id]);
     return next();
   });
