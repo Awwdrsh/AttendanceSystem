@@ -7,6 +7,7 @@ import { BadRequestError, ConflictError, HttpError, UnauthorizedError } from '..
 import { parsePhoto, PHOTO_MAX_BYTES } from '../punch/photo.js';
 import { nptLocalTime } from '../punch/devices.js';
 import { closeOpenBreak, insertAppPunch, nextDirection } from '../field/punches.js';
+import { assertClockInAllowed } from '../attendance-tools/block.js';
 import { allow, issueTicket, normalisePairingCode, parseQr, verifyQr, verifyTicket } from './tokens.js';
 
 export const KIOSK_HEADER = 'x-kiosk-key';
@@ -153,6 +154,7 @@ export function kioskRoutes({ db, cipher, pepper }: AppDeps): Router {
     const emp = await db.query<{ emp_code: string; name_en: string }>(`SELECT emp_code, name_en FROM employee WHERE id = $1 AND company_id = $2 AND status = 'active'`, [t.employeeId, k.company_id]);
     if (!emp.rows[0]) throw new ConflictError('This employee can no longer punch here.');
     const direction = await nextDirection(db, t.employeeId);
+    await assertClockInAllowed(db, { companyId: k.company_id, employeeId: t.employeeId, atMs: Date.now(), direction });
     const p = await insertAppPunch(db, cipher, {
       companyId: k.company_id, employeeId: t.employeeId, empCode: emp.rows[0].emp_code, direction, kind: 'kiosk', idempotency: t.nonce, photo,
       raw: { kioskId: k.id, kioskName: k.name, locationId: k.location_id, remote: false, flags: ['Kiosk'], ip: req.ip ?? null },

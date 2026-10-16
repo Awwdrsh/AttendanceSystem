@@ -11,6 +11,7 @@ import { purgeRejectedCandidates } from './modules/hiring/service.js';
 import { applyDueCareerEvents } from './modules/people/career.js';
 import { performanceReminders } from './modules/performance/jobs.js';
 import { localDateOf } from '@hajiri/attendance-engine';
+import { taskReminders } from './modules/tasks/service.js';
 import { runSurveyJobs } from './modules/engage/surveys.js';
 import { relationsDaily } from './modules/relations/service.js';
 
@@ -32,6 +33,7 @@ export const DAILY_MODULE_JOBS: Record<string, ModuleJob> = {
   candidatesPurged: (d, now) => purgeRejectedCandidates(d.db, now),
   careerEventsApplied: (d, now) => applyDueCareerEvents(d.db, now),
   performanceReminders: (d, now) => performanceReminders(d.db, now),
+  taskReminders: (d, now) => taskReminders(d.db, now),
   surveys: (d, now) => runSurveyJobs(d.db, d.cipher, localDateOf(now.getTime())),
   relations: (d, now) => relationsDaily(d.db, now),
 };

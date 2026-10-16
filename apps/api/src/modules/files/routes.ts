@@ -10,7 +10,7 @@ import { DOCUMENT_MIMES, fileMeta, parseUpload, readFile, saveFile, sendStoredFi
 
 /** Purposes a signed-in user may upload for; each module attaches the upload to its own record. */
 export const UPLOAD_PURPOSES = ['employee_document', 'company_document', 'expense_receipt', 'travel_bill', 'helpdesk_attachment',
-  'training_certificate', 'profile_change', 'hiring_cv', 'avatar', 'tax_proof', 'grievance_attachment'] as const;
+  'training_certificate', 'profile_change', 'hiring_cv', 'avatar', 'tax_proof', 'grievance_attachment', 'task_attachment'] as const;
 
 export const UPLOADS_PER_HOUR = 60;
 export const UNATTACHED_BYTES_MAX = 40 * 1024 * 1024;

@@ -6,7 +6,7 @@ import {
   IconClockEdit, IconClockHour4, IconCoin, IconFileInvoice, IconFingerprint, IconGavel, IconHome,
   IconLayoutDashboard, IconLogout, IconMoon, IconReceipt2, IconReportAnalytics, IconSearch, IconSelector, IconSun,
   IconUserCircle, IconUserShield, IconUsers, IconAlertTriangle, IconListCheck, IconBeach, IconCash, IconFileCertificate,
-  IconAdjustments, IconSettings, IconScale, IconHourglass, IconReceiptRefund, IconTargetArrow, IconLifebuoy, IconAddressBook, IconConfetti,
+  IconAdjustments, IconSettings, IconScale, IconLayoutKanban, IconHourglass, IconReceiptRefund, IconTargetArrow, IconLifebuoy, IconAddressBook, IconConfetti,
   IconUserPlus, IconChartHistogram, IconBriefcase, type Icon,
 } from '@tabler/icons-react';
 import { Suspense, useEffect, useMemo, useState } from 'react';
@@ -31,6 +31,7 @@ const NAV: NavGroup[] = [
     { to: '/me/payslips', label: 'Payslips', icon: IconReceipt2, employeeOnly: true, keywords: ['salary', 'pay', 'tax'] },
     { to: '/me/claims', label: 'Claims & travel', icon: IconReceiptRefund, employeeOnly: true, keywords: ['expense', 'reimbursement', 'travel', 'tada', 'advance'] },
     { to: '/me/growth', label: 'Growth', icon: IconTargetArrow, employeeOnly: true, keywords: ['goals', 'kpi', 'review', 'appraisal', 'training', 'learning', '1-on-1'] },
+    { to: '/tasks', label: 'Tasks', icon: IconLayoutKanban, keywords: ['to-do', 'todo', 'board', 'kanban', 'checklist'] },
     { to: '/me/help', label: 'Help desk', icon: IconLifebuoy, employeeOnly: true, keywords: ['ticket', 'question', 'hr help', 'resign', 'grievance', 'complaint'] },
   ] },
   { id: 'company', title: 'Company', items: [
@@ -83,6 +84,9 @@ const JUMPS: Array<{ to: string; label: string; group: string; roles?: Role[]; i
   { to: '/attendance/timesheets', label: 'Timesheets', group: 'Attendance', roles: ['manager', ...AREA.attendance], icon: IconHourglass },
   { to: '/attendance/rosters', label: 'Rosters & shift swaps', group: 'Attendance', roles: ['manager', ...AREA.attendance], icon: IconCalendarEvent },
   { to: '/attendance/visits', label: 'Field visits', group: 'Attendance', roles: ['manager', ...AREA.attendance], icon: IconClockHour4 },
+  { to: '/attendance/issues', label: 'Attendance issues and reminders', group: 'Attendance', roles: ['manager', ...AREA.attendance], icon: IconAlertTriangle },
+  { to: '/attendance/penalties', label: 'Late penalties and attendance rules', group: 'Attendance', roles: AREA.attendance, icon: IconClockHour4 },
+  { to: '/attendance/upload', label: 'Upload attendance (CSV)', group: 'Attendance', roles: AREA.attendance, icon: IconClockEdit },
   { to: '/settings/shifts', label: 'Shifts', group: 'Settings', roles: ['hr'], icon: IconClockHour4 },
   { to: '/settings/holidays', label: 'Holidays', group: 'Settings', roles: ['hr'], icon: IconCalendarEvent },
   { to: '/settings/devices', label: 'Devices', group: 'Settings', roles: ['hr'], icon: IconFingerprint },

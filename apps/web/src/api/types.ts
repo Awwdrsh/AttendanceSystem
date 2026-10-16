@@ -42,13 +42,14 @@ export interface CalendarDay { date: string; bsDate: string | null; weekday: num
 export interface LeaveType {
   id: string; code: string; name_en: string; name_ne: string | null; paid: boolean; statutory: boolean; accrual_basis: string; accrual_days: string; accrual_per_worked_days: number | null;
   max_balance: string | null; carry_forward: boolean; encashable: boolean; certificate_after_days: number | null; allow_half_day: boolean; max_consecutive_days: number | null;
-  min_service_days: number; negative_balance_limit: string; gender_scope: string; sandwich_rule: boolean; expiry_days: number | null; sort_order: number; allow_hourly?: boolean;
+  min_service_days: number; negative_balance_limit: string; gender_scope: string; sandwich_rule: boolean; expiry_days: number | null; sort_order: number; allow_hourly?: boolean; club_with_id?: string | null;
 }
 export interface LeaveBalance {
   leaveTypeId: string; code: string; nameEn: string; nameNe: string | null; paid: boolean; encashable: boolean; opening: number; accrued: number; taken: number; cancelled: number;
   lapsed: number; carried: number; adjustments: number; compOff: number; encashed: number; pending: number; balance: number; available: number; fiscalYear: string; explanation: string;
 }
-export interface LeavePreview { days: number; explanation: string; sandwichApplied: boolean; balance: number; available: number; balanceAfter: number; hours?: number }
+export interface LeavePreview { days: number; explanation: string; sandwichApplied: boolean; balance: number; available: number; balanceAfter: number; hours?: number;
+  bridge?: { days: number; typeId: string; typeName: string; from: string; to: string; explanation: string } | null }
 export interface LeaveRequest {
   id: string; employee_id: string; emp_code: string; name_en: string; name_ne: string | null; leave_type_id: string; type_code: string; type_name: string; paid: boolean;
   from_date: string; to_date: string; half_day: string | null; days_requested: string; reason: string | null; attachment_key: string | null;

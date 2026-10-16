@@ -16,6 +16,8 @@ export interface LeaveTypeRow {
   event_days: string | null;
   /** Can be taken by the hour (short leave). */
   allow_hourly: boolean;
+  /** Clubbed with another type: follows that type's place in the leave order and its sandwich rule. */
+  club_with_id: string | null;
 }
 
 export interface EmployeeLite {
@@ -71,7 +73,7 @@ export async function computeLeaveDays(db: Queryable, emp: EmployeeLite, type: L
     return { days: all.length, workingDays: all, excludedDays: [], sandwichApplied: false, explanation: `${all.length} calendar day(s) of ${type.name_en}` };
   }
   const { working, nonWorking } = await workingDaysBetween(db, emp, from, to);
-  const sandwich = (type.sandwich_rule || sandwichPolicy) && working.length >= 2 && nonWorking.length > 0 && working[0] === from && working[working.length - 1] === to;
+  const sandwich = ((await groupHead(db, type)).sandwich_rule || sandwichPolicy) && working.length >= 2 && nonWorking.length > 0 && working[0] === from && working[working.length - 1] === to;
   if (sandwich) {
     const all = dateRange(from, to);
     return { days: all.length, workingDays: all, excludedDays: [], sandwichApplied: true,
@@ -133,8 +135,69 @@ export async function ledgerBalance(db: Queryable, employeeId: string, leaveType
 }
 
 export async function pendingDays(db: Queryable, employeeId: string, leaveTypeId: string): Promise<number> {
-  const r = await db.query<{ d: string }>(`SELECT coalesce(sum(days_requested), 0)::text AS d FROM leave_request WHERE employee_id = $1 AND leave_type_id = $2 AND status = 'pending'`, [employeeId, leaveTypeId]);
+  // A pending request also holds the non-working days it bridges, on the type that pays for them.
+  const r = await db.query<{ d: string }>(
+    `SELECT coalesce(sum(CASE WHEN leave_type_id = $2 THEN days_requested ELSE 0 END + CASE WHEN bridge_type_id = $2 THEN bridge_days ELSE 0 END), 0)::text AS d
+       FROM leave_request WHERE employee_id = $1 AND status = 'pending' AND (leave_type_id = $2 OR bridge_type_id = $2)`, [employeeId, leaveTypeId]);
   return Number(r.rows[0]!.d);
+}
+
+/** The type whose order and sandwich rule a type follows: the type it is clubbed with, or itself. */
+export async function groupHead(db: Queryable, type: LeaveTypeRow): Promise<LeaveTypeRow> {
+  if (!type.club_with_id) return type;
+  return (await getLeaveType(db, type.club_with_id)) ?? type;
+}
+
+export interface Bridge {
+  days: number; typeId: string; typeName: string; from: string; to: string; adjacentRequestId: string; explanation: string;
+}
+
+/**
+ * Sandwich across requests (study: "the order decides how holidays and week-offs between two leaves are treated"). When
+ * this request and another pending or approved full-day leave are separated only by weekly offs or holidays, those days
+ * are charged to whichever of the two types comes first in the leave order (a clubbed type takes the order of the type it
+ * is clubbed with; on a tie, this request's type), if that type or the company applies the sandwich rule. Unpaid and
+ * event-based types never absorb bridge days, and a gap is charged once.
+ */
+export async function bridgeAcross(db: Queryable, emp: EmployeeLite, type: LeaveTypeRow, from: string, to: string, sandwichPolicy: boolean, excludeId?: string): Promise<Bridge | null> {
+  if (type.event_days !== null) return null;
+  const adj = await db.query<{ id: string; leave_type_id: string; from_date: string; to_date: string }>(
+    `SELECT id, leave_type_id, from_date::text, to_date::text FROM leave_request
+      WHERE employee_id = $1 AND status IN ('pending', 'approved') AND half_day IS NULL AND from_time IS NULL AND ($4::uuid IS NULL OR id <> $4)
+        AND (to_date BETWEEN $2::date - 15 AND $2::date - 2 OR from_date BETWEEN $3::date + 2 AND $3::date + 15)
+      ORDER BY (to_date < $2::date) DESC, abs(from_date - $2::date)`, [emp.id, from, to, excludeId ?? null]);
+  const myHead = await groupHead(db, type);
+  for (const a of adj.rows) {
+    const before = a.to_date < from;
+    const gapFrom = before ? addIso(a.to_date, 1) : addIso(to, 1);
+    const gapTo = before ? addIso(from, -1) : addIso(a.from_date, -1);
+    if (gapFrom > gapTo) continue;
+    const gap = await workingDaysBetween(db, emp, gapFrom, gapTo);
+    if (gap.working.length || !gap.nonWorking.length) continue;
+    const taken = await db.query(
+      `SELECT 1 FROM leave_request WHERE employee_id = $1 AND status IN ('pending', 'approved') AND ($4::uuid IS NULL OR id <> $4)
+          AND ((bridge_days > 0 AND bridge_from <= $3::date AND bridge_to >= $2::date) OR (from_date <= $3::date AND to_date >= $2::date)) LIMIT 1`,
+      [emp.id, gapFrom, gapTo, excludeId ?? null]);
+    if (taken.rows.length) continue;
+    const other = await getLeaveType(db, a.leave_type_id);
+    if (!other) continue;
+    const otherHead = await groupHead(db, other);
+    const mineFirst = myHead.id === otherHead.id || myHead.sort_order <= otherHead.sort_order;
+    const owner = mineFirst ? type : other;
+    const ownerHead = mineFirst ? myHead : otherHead;
+    if (!(sandwichPolicy || ownerHead.sandwich_rule)) continue;
+    if (!owner.paid || owner.event_days !== null) continue;
+    const days = gap.nonWorking.length;
+    return {
+      days, typeId: owner.id, typeName: owner.name_en, from: gapFrom, to: gapTo, adjacentRequestId: a.id,
+      explanation: `${days} weekly-off/holiday day(s) between this and your ${other.id === type.id ? 'other' : other.name_en} leave will be charged to ${owner.name_en} (sandwich rule)`,
+    };
+  }
+  return null;
+}
+
+function addIso(iso: string, n: number): string {
+  return new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 }
 
 export interface BalanceLine {

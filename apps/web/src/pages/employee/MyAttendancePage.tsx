@@ -17,6 +17,7 @@ import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
 import { describeFlag, sourceLabel } from './HomePage';
 import { ApprovalChainPreview } from '../../components/ApprovalChainPreview';
+import { LatePenaltyNote } from '../attendance-tools/HomeAttendanceExtras';
 
 export function CorrectionForm({ employeeId, date, onDone }: { employeeId: string; date: string; onDone: () => void }) {
   const { t } = useI18n();
@@ -105,6 +106,7 @@ export default function MyAttendancePage() {
         { key: 'missing', label: 'Missing clock-out', value: missing, ...(missing > 0 ? { tone: 'warn' as const } : {}) },
         { key: 'ot', label: 'Overtime', value: minutesToHm(otMin) },
       ]} />
+      <LatePenaltyNote bsYear={ym.year} bsMonth={ym.month} />
 
       <Paper withBorder p="sm" style={{ overflowX: 'auto' }}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, minmax(44px, 1fr))', gap: 4, minWidth: 320 }}>

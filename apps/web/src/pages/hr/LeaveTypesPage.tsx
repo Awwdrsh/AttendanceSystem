@@ -1,7 +1,8 @@
-import { Alert, Badge, Button, Drawer, Group, NumberInput, Select, SimpleGrid, Stack, Switch, Text, TextInput } from '@mantine/core';
-import { IconLock, IconPlus } from '@tabler/icons-react';
+import { ActionIcon, Alert, Badge, Button, Drawer, Group, NumberInput, Select, SimpleGrid, Stack, Switch, Text, TextInput, Tooltip } from '@mantine/core';
+import { IconArrowDown, IconArrowUp, IconLink, IconLock, IconPlus } from '@tabler/icons-react';
 import { useState } from 'react';
 import { leave as leaveApi } from '../../api';
+import { leaveOrder } from '../../api/attendanceTools';
 import type { LeaveType } from '../../api/types';
 import { DataTable } from '../../components/DataTable';
 import { PageHeader, SectionTitle } from '../../components/PageHeader';
@@ -34,17 +35,34 @@ export default function LeaveTypesPage() {
       toast.ok('Leave policy saved.'); setEdit(null); await q.reload();
     } catch (e) { toast.err(e); } finally { setBusy(false); }
   };
-  const open = (lt?: LeaveType) => setEdit(lt ? { id: lt.id, statutory: lt.statutory, code: lt.code, nameEn: lt.name_en, nameNe: lt.name_ne ?? '', paid: lt.paid, accrualBasis: lt.accrual_basis, accrualDays: Number(lt.accrual_days), accrualPerWorkedDays: lt.accrual_per_worked_days ?? undefined, maxBalance: lt.max_balance === null ? undefined : Number(lt.max_balance), carryForward: lt.carry_forward, encashable: lt.encashable, certificateAfterDays: lt.certificate_after_days ?? undefined, allowHalfDay: lt.allow_half_day, allowHourly: !!lt.allow_hourly, maxConsecutiveDays: lt.max_consecutive_days ?? undefined, minServiceDays: lt.min_service_days, negativeBalanceLimit: Number(lt.negative_balance_limit), genderScope: lt.gender_scope, sandwichRule: lt.sandwich_rule, expiryDays: lt.expiry_days ?? undefined } : { code: '', nameEn: '', nameNe: '', paid: true, accrualBasis: 'annual', accrualDays: 0, carryForward: false, encashable: false, allowHalfDay: true, minServiceDays: 0, negativeBalanceLimit: 0, genderScope: 'all', sandwichRule: false, statutory: false });
+  const open = (lt?: LeaveType) => setEdit(lt ? { id: lt.id, statutory: lt.statutory, code: lt.code, nameEn: lt.name_en, nameNe: lt.name_ne ?? '', paid: lt.paid, accrualBasis: lt.accrual_basis, accrualDays: Number(lt.accrual_days), accrualPerWorkedDays: lt.accrual_per_worked_days ?? undefined, maxBalance: lt.max_balance === null ? undefined : Number(lt.max_balance), carryForward: lt.carry_forward, encashable: lt.encashable, certificateAfterDays: lt.certificate_after_days ?? undefined, allowHalfDay: lt.allow_half_day, allowHourly: !!lt.allow_hourly, maxConsecutiveDays: lt.max_consecutive_days ?? undefined, minServiceDays: lt.min_service_days, negativeBalanceLimit: Number(lt.negative_balance_limit), genderScope: lt.gender_scope, sandwichRule: lt.sandwich_rule, expiryDays: lt.expiry_days ?? undefined, clubWithId: lt.club_with_id ?? null } : { code: '', nameEn: '', nameNe: '', paid: true, accrualBasis: 'annual', accrualDays: 0, carryForward: false, encashable: false, allowHalfDay: true, minServiceDays: 0, negativeBalanceLimit: 0, genderScope: 'all', sandwichRule: false, statutory: false });
   const set = (k: string, v: unknown) => setEdit((e) => e && ({ ...e, [k]: v }));
+  const types = q.data?.types ?? [];
+  const nameOf = (id: string | null | undefined) => types.find((x) => x.id === id)?.name_en ?? null;
+  const move = async (l: LeaveType, dir: -1 | 1) => {
+    const ids = types.map((x) => x.id);
+    const i = ids.indexOf(l.id); const j = i + dir;
+    if (j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j]!, ids[i]!];
+    try { await leaveOrder(ids); await q.reload(); } catch (e) { toast.err(e); }
+  };
   const num = (k: string, label: string, extra: Record<string, unknown> = {}) => <NumberInput label={label} value={(edit?.[k] as number | undefined) ?? ''} onChange={(v) => set(k, v === '' ? undefined : Number(v))} min={0} {...extra} />;
   const sw = (k: string, label: string, description?: string) => <Switch label={label} {...(description ? { description } : {})} checked={!!edit?.[k]} onChange={(e) => set(k, e.currentTarget.checked)} />;
   return (
     <Stack gap="lg">
-      <PageHeader title="Leave policies" subtitle="Statutory leave follows the Labour Act and is locked with its citation. Company leave types are fully editable."
+      <PageHeader title="Leave policies" subtitle="Statutory leave follows the Labour Act and is locked with its citation. Company leave types are fully editable. The order of the list is the leave order: when two leaves are separated only by weekly offs or holidays, those days are charged to the type higher in the list if it uses the sandwich rule."
         actions={<Button leftSection={<IconPlus {...ICON} />} onClick={() => open()}>New leave type</Button>} />
       <DataTable<LeaveType> rows={q.data?.types ?? []} rowKey={(l) => l.id} loading={q.loading} error={q.error}
         emptyTitle="No leave types yet" emptyHint="Create a leave type to start tracking balances." onRowClick={(l) => open(l)}
         columns={[
+          {
+            key: 'order', header: 'Order', width: 76, render: (l) => (
+              <Group gap={2} wrap="nowrap" onClick={(e) => e.stopPropagation()}>
+                <ActionIcon variant="subtle" color="gray" size="sm" aria-label={`Move ${l.name_en} up`} disabled={types[0]?.id === l.id} onClick={() => void move(l, -1)}><IconArrowUp size={14} stroke={1.6} /></ActionIcon>
+                <ActionIcon variant="subtle" color="gray" size="sm" aria-label={`Move ${l.name_en} down`} disabled={types[types.length - 1]?.id === l.id} onClick={() => void move(l, 1)}><IconArrowDown size={14} stroke={1.6} /></ActionIcon>
+              </Group>
+            ),
+          },
           {
             key: 'name', header: 'Leave type', render: (l) => (
               <Group gap={8} wrap="nowrap">
@@ -53,6 +71,8 @@ export default function LeaveTypesPage() {
                   <Text size="xs" c="dimmed" ff="monospace">{l.code}</Text>
                 </div>
                 {l.statutory ? <Badge size="sm" variant="light" color="gray" leftSection={<IconLock size={12} stroke={1.6} />}>Statutory</Badge> : null}
+                {l.club_with_id ? <Tooltip label="Follows this type's place in the order and its sandwich rule"><Badge size="sm" variant="light" color="grape" leftSection={<IconLink size={12} stroke={1.6} />}>With {nameOf(l.club_with_id)}</Badge></Tooltip> : null}
+                {l.sandwich_rule ? <Badge size="sm" variant="light" color="blue">Sandwich</Badge> : null}
               </Group>
             ),
           },
@@ -95,7 +115,11 @@ export default function LeaveTypesPage() {
               <Stack gap="sm" mt="md">
                 {sw('allowHalfDay', 'Allow half days')}
                 {edit?.paid !== false ? sw('allowHourly', 'Allow by the hour', 'Short leave for part of a day, deducted as hours of the working day') : null}
-                {sw('sandwichRule', 'Sandwich rule', 'Count weekly offs and holidays that fall between leave days')}
+                {sw('sandwichRule', 'Sandwich rule', 'Count weekly offs and holidays that fall between leave days, including between this and another leave just before or after it')}
+                <Select label="Club with" clearable placeholder="Not clubbed"
+                  description="A clubbed type takes the other type's place in the leave order and follows its sandwich rule"
+                  value={(edit.clubWithId as string | null | undefined) ?? null} onChange={(v) => set('clubWithId', v ?? null)}
+                  data={types.filter((x) => x.id !== edit.id && !x.club_with_id && !types.some((y) => y.club_with_id === edit.id && edit.id)).map((x) => ({ value: x.id, label: x.name_en }))} />
                 {sw('carryForward', 'Carry forward', 'Unused balance moves to the next leave year')}
                 {sw('encashable', 'Encash at separation', 'Unused balance is paid out when the employee leaves')}
               </Stack>

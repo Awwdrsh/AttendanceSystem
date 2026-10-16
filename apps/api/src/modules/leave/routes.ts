@@ -12,7 +12,7 @@ import { dateRange, enqueueRecompute } from '../attendance/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
 import { assertManages, cancelWorkflow, nptToday, registerHandler, startWorkflow, type DecisionContext } from '../workflow/service.js';
 import {
-  assertNoOverlap, balances, computeHourlyLeave, computeLeaveDays, eventDaysUsed, getEmployeeLite, getLeaveType, hasLockedDay, leaveTypeByCode, ledgerBalance, pendingDays, type LeaveTypeRow,
+  assertNoOverlap, balances, bridgeAcross, computeHourlyLeave, computeLeaveDays, eventDaysUsed, getEmployeeLite, getLeaveType, hasLockedDay, leaveTypeByCode, ledgerBalance, pendingDays, type LeaveTypeRow,
 } from './service.js';
 import { allocateAnnualLeave, runLeaveCatchUp } from './accrual.js';
 
@@ -35,6 +35,7 @@ export async function applyLeaveDecision(db: Queryable, requestId: string, state
       `INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, ref_id, posted_by)
        VALUES ($1, $2, $3, $4, 'usage', 'leave_request', $5, $6)`,
       [lr.employee_id, lr.leave_type_id, lr.from_date, -Number(lr.days_requested), requestId, ctx.actorId]);
+    await postBridge(db, requestId, lr.employee_id, ctx.actorId);
     await enqueueRecompute(db, dateRange(lr.from_date, lr.to_date).map((d) => ({ employeeId: lr.employee_id, localDate: d })), 'leave_approved');
   }
   const userId = await userIdForEmployee(db, lr.employee_id);
@@ -47,6 +48,28 @@ export async function applyLeaveDecision(db: Queryable, requestId: string, state
 }
 registerHandler('leave_request', applyLeaveDecision);
 
+/**
+ * On approval, charge the non-working days this request bridges (sandwich across requests) to the type that pays for
+ * them, if the leave on the other side is still pending or approved; otherwise the bridge is dropped.
+ */
+async function postBridge(db: Queryable, requestId: string, employeeId: string, actorId: string): Promise<void> {
+  const b = await db.query<{ bridge_days: string; bridge_type_id: string | null; bridge_from: string | null; bridge_to: string | null }>(
+    'SELECT bridge_days, bridge_type_id, bridge_from::text, bridge_to::text FROM leave_request WHERE id = $1', [requestId]);
+  const x = b.rows[0];
+  if (!x || !x.bridge_type_id || Number(x.bridge_days) <= 0 || !x.bridge_from || !x.bridge_to) return;
+  const other = await db.query(
+    `SELECT 1 FROM leave_request WHERE employee_id = $1 AND id <> $2 AND status IN ('pending', 'approved')
+        AND (to_date = $3::date - 1 OR from_date = $4::date + 1) LIMIT 1`, [employeeId, requestId, x.bridge_from, x.bridge_to]);
+  if (!other.rows.length) {
+    await db.query('UPDATE leave_request SET bridge_days = 0, bridge_type_id = NULL, bridge_from = NULL, bridge_to = NULL WHERE id = $1', [requestId]);
+    return;
+  }
+  await db.query(
+    `INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, ref_id, posted_by, note)
+     VALUES ($1, $2, $3, $4, 'usage', 'leave_bridge', $5, $6, $7)`,
+    [employeeId, x.bridge_type_id, x.bridge_from, -Number(x.bridge_days), requestId, actorId, 'Weekly-off/holiday days between two leaves (sandwich rule)']);
+}
+
 const typeBody = z.object({
   code: z.string().min(1).max(20), nameEn: z.string().min(1).max(80), nameNe: z.string().max(80).optional(), paid: z.boolean().default(true),
   accrualBasis: z.enum(['none', 'worked_days', 'monthly', 'annual']).default('none'), accrualDays: z.number().min(0).default(0),
@@ -55,6 +78,8 @@ const typeBody = z.object({
   maxConsecutiveDays: z.number().int().min(1).nullable().optional(), minServiceDays: z.number().int().min(0).default(0), negativeBalanceLimit: z.number().min(0).default(0),
   genderScope: z.enum(['all', 'female', 'male']).default('all'), sandwichRule: z.boolean().default(false), expiryDays: z.number().int().min(1).nullable().optional(),
   eventDays: z.number().min(0.5).max(365).nullable().optional(), allowHourly: z.boolean().default(false),
+  /** Follow another type's place in the leave order and its sandwich rule. */
+  clubWithId: z.uuid().nullable().optional(), sortOrder: z.number().int().min(0).max(9999).optional(),
 });
 
 /** Columns that define a statutory entitlement (Labour Act Ch. 9) — not editable through the API once statutory. */
@@ -104,6 +129,11 @@ export function leaveRoutes({ db }: AppDeps): Router {
       [companyOf(req), b.code, b.nameEn, b.nameNe ?? null, b.paid, b.accrualBasis, b.accrualDays, b.accrualPerWorkedDays ?? null, b.maxBalance ?? null, b.carryForward, b.encashable,
         b.certificateAfterDays ?? null, b.allowHalfDay, b.maxConsecutiveDays ?? null, b.minServiceDays, b.negativeBalanceLimit, b.genderScope, b.sandwichRule, b.expiryDays ?? null, b.eventDays ?? null,
         b.allowHourly && b.paid && (b.eventDays ?? null) === null]);
+    if (b.clubWithId) {
+      await assertClubTarget(db, companyOf(req), ins.rows[0]!.id, b.clubWithId);
+      await db.query('UPDATE leave_type SET club_with_id = $2 WHERE id = $1', [ins.rows[0]!.id, b.clubWithId]);
+    }
+    if (b.sortOrder !== undefined) await db.query('UPDATE leave_type SET sort_order = $2 WHERE id = $1', [ins.rows[0]!.id, b.sortOrder]);
     await audit(db, { actorId: req.user!.id, action: 'create', table: 'leave_type', rowId: ins.rows[0]!.id, after: b });
     res.status(201).json({ id: ins.rows[0]!.id });
   });
@@ -121,8 +151,9 @@ export function leaveRoutes({ db }: AppDeps): Router {
       ['accrualPerWorkedDays', 'accrual_per_worked_days'], ['maxBalance', 'max_balance'], ['carryForward', 'carry_forward'], ['encashable', 'encashable'],
       ['certificateAfterDays', 'certificate_after_days'], ['allowHalfDay', 'allow_half_day'], ['maxConsecutiveDays', 'max_consecutive_days'], ['minServiceDays', 'min_service_days'],
       ['negativeBalanceLimit', 'negative_balance_limit'], ['genderScope', 'gender_scope'], ['sandwichRule', 'sandwich_rule'], ['expiryDays', 'expiry_days'], ['eventDays', 'event_days'],
-      ['allowHourly', 'allow_hourly'],
+      ['allowHourly', 'allow_hourly'], ['clubWithId', 'club_with_id'], ['sortOrder', 'sort_order'],
     ];
+    if (b.clubWithId) await assertClubTarget(db, cur.rows[0].company_id, id, b.clubWithId);
     if (b.allowHourly && (!(b.paid ?? cur.rows[0].paid) || (b.eventDays !== undefined ? b.eventDays : cur.rows[0].event_days) !== null)) {
       throw new BadRequestError('only paid leave with a balance can be taken by the hour');
     }
@@ -130,6 +161,16 @@ export function leaveRoutes({ db }: AppDeps): Router {
     for (const [k, col] of map) if (b[k] !== undefined) { vals.push(b[k]); sets.push(`${col} = $${vals.length}`); }
     if (sets.length) await db.query(`UPDATE leave_type SET ${sets.join(', ')} WHERE id = $1`, vals);
     await audit(db, { actorId: req.user!.id, action: 'update', table: 'leave_type', rowId: id, before: cur.rows[0], after: b });
+    res.json({ ok: true });
+  });
+
+  /** Set the leave order in one go: the listed types get sort orders 10, 20, 30... */
+  r.post('/types/order', requireRole('hr'), async (req, res) => {
+    const b = z.object({ ids: z.array(z.uuid()).min(1).max(100) }).parse(req.body);
+    const own = await db.query<{ id: string }>('SELECT id FROM leave_type WHERE company_id = $1 AND id = ANY($2::uuid[])', [companyOf(req), b.ids]);
+    if (own.rows.length !== new Set(b.ids).size) throw new BadRequestError('a leave type in the list does not exist');
+    for (const [i, id] of b.ids.entries()) await db.query('UPDATE leave_type SET sort_order = $2 WHERE id = $1', [id, (i + 1) * 10]);
+    await audit(db, { actorId: req.user!.id, action: 'reorder', table: 'leave_type', after: { ids: b.ids } });
     res.json({ ok: true });
   });
 
@@ -159,6 +200,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const hourly = hourlyWindow(q);
     const calc = hourly ? await computeHourlyLeave(db, emp, type, q.from, hourly.fromTime, hourly.toTime)
       : await computeLeaveDays(db, emp, type, q.from, q.to, q.halfDay ?? null, policy.sandwichRule);
+    const bridge = !hourly && !q.halfDay ? await bridgeAcross(db, emp, type, q.from, q.to, policy.sandwichRule) : null;
     if (type.event_days !== null) {
       const left = Number(type.event_days) - (await eventDaysUsed(db, employeeId, type.id, q.from, q.to));
       return res.json({ ...calc, balance: Number(type.event_days), available: left, balanceAfter: left - calc.days });
@@ -166,7 +208,8 @@ export function leaveRoutes({ db }: AppDeps): Router {
     await allocateAnnualLeave(db, emp.company_id, nptToday(), employeeId);
     const bal = await ledgerBalance(db, employeeId, type.id);
     const pend = await pendingDays(db, employeeId, type.id);
-    return res.json({ ...calc, balance: bal, available: bal - pend, balanceAfter: bal - pend - calc.days });
+    const ownBridge = bridge && bridge.typeId === type.id ? bridge.days : 0;
+    return res.json({ ...calc, bridge, balance: bal, available: bal - pend, balanceAfter: bal - pend - calc.days - ownBridge });
   });
 
   // ---------------------------------------------------------------- requests
@@ -203,6 +246,12 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const hourly = hourlyWindow(b);
     const calc = hourly ? await computeHourlyLeave(db, emp, type, b.from, hourly.fromTime, hourly.toTime)
       : await computeLeaveDays(db, emp, type, b.from, b.to, b.halfDay ?? null, policy.sandwichRule);
+    const bridge = !hourly && !b.halfDay ? await bridgeAcross(db, emp, type, b.from, b.to, policy.sandwichRule) : null;
+    const ownBridge = bridge && bridge.typeId === type.id ? bridge.days : 0;
+    if (bridge && bridge.typeId !== type.id) {
+      const avail = (await ledgerBalance(db, employeeId, bridge.typeId)) - (await pendingDays(db, employeeId, bridge.typeId));
+      if (bridge.days > avail) throw new BadRequestError(`${bridge.explanation}, but only ${Math.max(0, avail).toFixed(1)} day(s) of ${bridge.typeName} are left. Change the dates or ask HR.`);
+    }
     // The company's maxContinuousDays policy limits discretionary leave only; a statutory entitlement cannot be capped by policy.
     const maxRun = type.max_consecutive_days ?? (type.statutory ? null : policy.maxContinuousDays);
     if (maxRun !== null && calc.days > maxRun) throw new BadRequestError(`${type.name_en} cannot exceed ${maxRun} consecutive days`);
@@ -235,7 +284,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
     if (type.paid && type.event_days === null) {
       await allocateAnnualLeave(db, emp.company_id, nptToday(), employeeId);
       const available = (await ledgerBalance(db, employeeId, type.id)) - (await pendingDays(db, employeeId, type.id));
-      if (calc.days > available + Number(type.negative_balance_limit)) {
+      if (calc.days + ownBridge > available + Number(type.negative_balance_limit)) {
         const paidDays = Math.max(0, Math.floor(available * 2) / 2);
         return res.status(400).json({
           error: `You have ${available.toFixed(1)} days of ${type.name_en} left but this request needs ${calc.days}. Change the dates, or apply ${(calc.days - paidDays).toFixed(1)} day(s) as unpaid leave.`,
@@ -255,10 +304,12 @@ export function leaveRoutes({ db }: AppDeps): Router {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`leave:${employeeId}`]);
       await assertNoOverlap(client, employeeId, b.from, b.to);
       const ins = await client.query<{ id: string }>(
-        `INSERT INTO leave_request (employee_id, leave_type_id, from_date, to_date, half_day, days_requested, reason, attachment_key, created_by, from_time, to_time, hours)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
+        `INSERT INTO leave_request (employee_id, leave_type_id, from_date, to_date, half_day, days_requested, reason, attachment_key, created_by, from_time, to_time, hours,
+           bridge_days, bridge_type_id, bridge_from, bridge_to)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id`,
         [employeeId, type.id, b.from, b.to, b.halfDay ?? null, calc.days, b.reason ?? null, b.attachmentKey ?? null, req.user!.id,
-          hourly?.fromTime ?? null, hourly?.toTime ?? null, hourly ? hoursOf(calc) : null]);
+          hourly?.fromTime ?? null, hourly?.toTime ?? null, hourly ? hoursOf(calc) : null,
+          bridge?.days ?? 0, bridge?.typeId ?? null, bridge?.from ?? null, bridge?.to ?? null]);
       requestId = ins.rows[0]!.id;
       const when = hourly ? `${bsRange(b.from, b.to)} ${hourly.fromTime}–${hourly.toTime}` : bsRange(b.from, b.to);
       const inst = await startWorkflow(client, {
@@ -269,7 +320,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
       await audit(client, { actorId: req.user!.id, action: 'create', table: 'leave_request', rowId: requestId, after: { ...b, days: calc.days } });
       await client.query('COMMIT');
     } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
-    return res.status(201).json({ id: requestId, days: calc.days, explanation: calc.explanation, sandwichApplied: calc.sandwichApplied, teamOverlap: overlap.rows.map((x) => x.name_en) });
+    return res.status(201).json({ id: requestId, days: calc.days, explanation: calc.explanation, sandwichApplied: calc.sandwichApplied, bridge, teamOverlap: overlap.rows.map((x) => x.name_en) });
   });
 
   r.get('/requests', async (req, res) => {
@@ -281,7 +332,7 @@ export function leaveRoutes({ db }: AppDeps): Router {
     const rows = await db.query(
       `SELECT lr.id, lr.employee_id, e.emp_code, e.name_en, e.name_ne, lr.leave_type_id, lt.code AS type_code, lt.name_en AS type_name, lt.paid,
               lr.from_date, lr.to_date, lr.half_day, lr.days_requested, lr.reason, lr.attachment_key, lr.status, lr.workflow_instance_id, lr.created_at, lr.decided_at,
-              to_char(lr.from_time, 'HH24:MI') AS from_time, to_char(lr.to_time, 'HH24:MI') AS to_time, lr.hours
+              to_char(lr.from_time, 'HH24:MI') AS from_time, to_char(lr.to_time, 'HH24:MI') AS to_time, lr.hours, lr.bridge_days, lr.bridge_type_id
          FROM leave_request lr JOIN employee e ON e.id = lr.employee_id JOIN leave_type lt ON lt.id = lr.leave_type_id
          LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
         WHERE e.company_id = $1
@@ -312,6 +363,11 @@ export function leaveRoutes({ db }: AppDeps): Router {
         await client.query(
           `INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, ref_id, posted_by, note) VALUES ($1, $2, $3, $4, 'cancellation', 'leave_request', $5, $6, $7)`,
           [lr.employee_id, lr.leave_type_id, lr.from_date, Number(lr.days_requested), id, req.user!.id, b.reason ?? null]);
+        // Give back the bridged weekly-off/holiday days, if any were charged.
+        await client.query(
+          `INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, ref_id, posted_by, note)
+           SELECT employee_id, leave_type_id, effective_date, -delta_days, 'cancellation', 'leave_bridge', ref_id, $2, $3 FROM leave_ledger
+            WHERE ref_type = 'leave_bridge' AND ref_id = $1 AND reason = 'usage'`, [id, req.user!.id, b.reason ?? null]);
         await enqueueRecompute(client, dateRange(lr.from_date, lr.to_date).map((d) => ({ employeeId: lr.employee_id, localDate: d })), 'leave_cancelled');
       }
       await client.query(`UPDATE leave_request SET status = 'cancelled', decided_at = now() WHERE id = $1`, [id]);
@@ -403,4 +459,14 @@ export function leaveRoutes({ db }: AppDeps): Router {
   });
 
   return r;
+}
+
+/** A type can be clubbed with another type of the same company that is not itself clubbed (no chains or loops). */
+async function assertClubTarget(db: Queryable, companyId: string, typeId: string, targetId: string): Promise<void> {
+  if (typeId === targetId) throw new BadRequestError('a leave type cannot be clubbed with itself');
+  const t = await db.query<{ club_with_id: string | null }>('SELECT club_with_id FROM leave_type WHERE id = $1 AND company_id = $2', [targetId, companyId]);
+  if (!t.rows[0]) throw new BadRequestError('the leave type to club with does not exist');
+  if (t.rows[0].club_with_id) throw new BadRequestError('that leave type is itself clubbed with another; club with the main type instead');
+  const followers = await db.query('SELECT 1 FROM leave_type WHERE club_with_id = $1 LIMIT 1', [typeId]);
+  if (followers.rows.length) throw new BadRequestError('other leave types are clubbed with this one, so it cannot follow another type');
 }

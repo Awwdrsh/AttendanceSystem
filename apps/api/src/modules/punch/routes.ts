@@ -15,6 +15,7 @@ import { ensurePseudoDevice, nptLocalTime } from './devices.js';
 import { geofence, type GeoLocation } from './geo.js';
 import { fieldPolicy } from '../field/policy.js';
 import { assertRegisteredDevice } from '../relations/service.js';
+import { assertClockInAllowed } from '../attendance-tools/block.js';
 
 const CLOCK_TOLERANCE_MS = 10 * 60_000;
 
@@ -110,6 +111,8 @@ export function punchRoutes({ db, cipher }: AppDeps): Router {
       const day = await listDays(db, employeeId, existing.rows[0].local_date, existing.rows[0].local_date);
       return res.json({ duplicate: true, punch: existing.rows[0], day: day[0] ?? null });
     }
+    // Optional company rule: a first clock-in after shift start + grace is refused and a time request is asked for instead.
+    await assertClockInAllowed(db, { companyId: e.company_id, employeeId, atMs: at, direction: b.direction });
     const localDate = localDateOf(at);
     // Photos are kept only for clock-ins and outs from home; at the office they are not needed and are discarded.
     const photoId = remote && photo ? randomUUID() : null;

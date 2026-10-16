@@ -68,6 +68,7 @@ export async function seedDefaults(db: Db, companyId: string): Promise<Record<st
     ['time.policy', { enabled: true, requireProject: false, roundingStep: 0, roundingMode: 'nearest', fridayReminder: true, autoStopHours: 12 }],
     ['hiring.policy', { retentionDays: 180, careersEnabled: true }],
     ['people.policy', { makerChecker: false }],
+    ['attendance.extras', { blockLateClockIn: false, blockAfterMin: 0, whosOutScope: 'team', latePenalty: { enabled: false, lateCount: 3, minLateMinutes: 1, penaltyDays: 0.5, leaveTypeIds: [] } }],
     ['notifications.policy', { quietHoursStart: '21:00', quietHoursEnd: '07:00', slaHours: 24, escalationHours: 48 }],
   ];
   let s = 0;
