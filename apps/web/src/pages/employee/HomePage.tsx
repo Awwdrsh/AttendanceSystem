@@ -19,6 +19,7 @@ import { isOfflineError, queueOfflinePunch } from '../../lib/offlinePunch';
 import type { Flag, Punch } from '../../api/types';
 import { HomeTimer } from '../time/HomeTimer';
 import { HomeFieldCard } from '../field/HomeFieldCard';
+import { RelationsHomeCard } from '../../components/relations/RelationsHomeCard';
 import { MyChecklistCard } from '../lifecycle/MyChecklistCard';
 import { HomeCompanyCard } from '../../components/engage/HomeCompanyCard';
 
@@ -183,6 +184,7 @@ export default function HomePage() {
         </Group>
       ) : null}
 
+      <RelationsHomeCard />
       <MyChecklistCard />
 
       <Grid gap="md">

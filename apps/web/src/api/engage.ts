@@ -57,6 +57,7 @@ export interface Suggestion {
 }
 export interface AnnouncementInput {
   title: string; body: string; audienceKind: AudienceKind; audienceId?: string | null; pinned: boolean; requiresAck: boolean; expiresOn?: string | null;
+  popup?: boolean; popupUntil?: string | null;
 }
 
 export const engage = {

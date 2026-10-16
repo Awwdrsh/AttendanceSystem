@@ -5,7 +5,7 @@ import { RequireRole } from './auth/RequireRole';
 import { useAuth } from './auth/AuthProvider';
 import {
   AttendanceHub, EMPLOYEES_HUB_PATHS, EmployeesHub, EngageHub, ExpensesHub, GrowthHub, HiringHub, LeaveHub, MyAttendanceHub, MyClaimsHub, MyPayHub,
-  PayrollHub, PeopleHub, PerformanceHub, ProfileHub, SettingsHub, TimesheetHub,
+  PayrollHub, PeopleHub, HelpHub, RelationsHub, PerformanceHub, ProfileHub, SettingsHub, TimesheetHub,
 } from './pages/hubs';
 
 const LoginPage = lazy(() => import('./pages/LoginPage'));
@@ -20,7 +20,6 @@ const DashboardPage = lazy(() => import('./pages/hr/DashboardPage'));
 const EmployeeDetailPage = lazy(() => import('./pages/hr/EmployeeDetailPage'));
 const ReportsPage = lazy(() => import('./pages/hr/ReportsPage'));
 const RunWizardPage = lazy(() => import('./pages/payroll/RunWizardPage'));
-const MyTicketsPage = lazy(() => import('./pages/helpdesk/MyTicketsPage'));
 const HelpdeskPage = lazy(() => import('./pages/helpdesk/HelpdeskPage'));
 const InsightsPage = lazy(() => import('./pages/insights/InsightsPage'));
 const CareersPage = lazy(() => import('./pages/hiring/CareersPage'));
@@ -64,7 +63,7 @@ export function App() {
           <Route path="/me/timesheet" element={<TimesheetHub />} />
           <Route path="/me/claims/*" element={<MyClaimsHub />} />
           <Route path="/me/growth/*" element={<GrowthHub />} />
-          <Route path="/me/help" element={<MyTicketsPage />} />
+          <Route path="/me/help/*" element={<HelpHub />} />
           <Route path="/people/*" element={<PeopleHub />} />
           <Route path="/engage/*" element={<EngageHub />} />
           <Route path="/me/leave" element={<LeavePage />} />
@@ -85,6 +84,7 @@ export function App() {
             <Route path="/overview" element={<DashboardPage />} />
             {EMPLOYEES_HUB_PATHS.map((p) => <Route key={p} path={p} element={<EmployeesHub />} />)}
             <Route path="/helpdesk" element={<HelpdeskPage />} />
+            <Route path="/relations/*" element={<RelationsHub />} />
             <Route path="/insights" element={<InsightsPage />} />
             <Route path="/employees/:id" element={<EmployeeDetailPage />} />
             <Route path="/reports" element={<ReportsPage />} />

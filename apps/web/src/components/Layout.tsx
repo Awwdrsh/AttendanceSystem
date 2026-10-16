@@ -6,7 +6,7 @@ import {
   IconClockEdit, IconClockHour4, IconCoin, IconFileInvoice, IconFingerprint, IconGavel, IconHome,
   IconLayoutDashboard, IconLogout, IconMoon, IconReceipt2, IconReportAnalytics, IconSearch, IconSelector, IconSun,
   IconUserCircle, IconUserShield, IconUsers, IconAlertTriangle, IconListCheck, IconBeach, IconCash, IconFileCertificate,
-  IconAdjustments, IconSettings, IconHourglass, IconReceiptRefund, IconTargetArrow, IconLifebuoy, IconAddressBook, IconConfetti,
+  IconAdjustments, IconSettings, IconScale, IconHourglass, IconReceiptRefund, IconTargetArrow, IconLifebuoy, IconAddressBook, IconConfetti,
   IconUserPlus, IconChartHistogram, IconBriefcase, type Icon,
 } from '@tabler/icons-react';
 import { Suspense, useEffect, useMemo, useState } from 'react';
@@ -14,6 +14,7 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthProvider';
 import { notifications as notifApi, workflow as workflowApi } from '../api';
 import { Brand } from './Brand';
+import { PopupNotices } from './relations/PopupNotices';
 import { OfflineBanner } from './OfflineBanner';
 import type { Role } from '../api/types';
 
@@ -29,7 +30,7 @@ const NAV: NavGroup[] = [
     { to: '/me/payslips', label: 'Payslips', icon: IconReceipt2, employeeOnly: true, keywords: ['salary', 'pay', 'tax'] },
     { to: '/me/claims', label: 'Claims & travel', icon: IconReceiptRefund, employeeOnly: true, keywords: ['expense', 'reimbursement', 'travel', 'tada', 'advance'] },
     { to: '/me/growth', label: 'Growth', icon: IconTargetArrow, employeeOnly: true, keywords: ['goals', 'kpi', 'review', 'appraisal', 'training', 'learning', '1-on-1'] },
-    { to: '/me/help', label: 'Help desk', icon: IconLifebuoy, employeeOnly: true, keywords: ['ticket', 'question', 'hr help', 'resign'] },
+    { to: '/me/help', label: 'Help desk', icon: IconLifebuoy, employeeOnly: true, keywords: ['ticket', 'question', 'hr help', 'resign', 'grievance', 'complaint'] },
   ] },
   { id: 'company', title: 'Company', items: [
     { to: '/people', label: 'People', icon: IconAddressBook, keywords: ['directory', 'org chart', 'colleagues'] },
@@ -46,6 +47,7 @@ const NAV: NavGroup[] = [
     { to: '/performance', label: 'Performance', icon: IconTargetArrow, roles: ['manager', 'hr'], keywords: ['goals', 'kpi', 'appraisal', 'review cycle', 'training', 'learning'] },
     { to: '/hiring', label: 'Hiring', icon: IconUserPlus, roles: ['manager', 'hr'], keywords: ['jobs', 'vacancy', 'candidates', 'interview', 'offer', 'recruitment'] },
     { to: '/helpdesk', label: 'Help desk', icon: IconLifebuoy, roles: ['hr'], keywords: ['tickets', 'queries'] },
+    { to: '/relations', label: 'Employee relations', icon: IconScale, roles: ['hr'], keywords: ['grievance', 'disciplinary', 'warning', 'milestones', 'retirement', 'contract end', 'acting', 'deputation', 'kye', 'devices'] },
     { to: '/insights', label: 'Insights', icon: IconChartHistogram, roles: ['hr'], keywords: ['analytics', 'headcount', 'attrition', 'people cost', 'trends'] },
     { to: '/reports', label: 'Reports', icon: IconReportAnalytics, roles: ['hr'], keywords: ['export', 'csv', 'register'] },
   ] },
@@ -55,6 +57,10 @@ const SETTINGS: NavItem = { to: '/settings', label: 'Settings', icon: IconSettin
 
 /** Extra jump targets for the command palette: tabs inside pages. */
 const JUMPS: Array<{ to: string; label: string; group: string; roles?: Role[]; icon: Icon }> = [
+  { to: '/relations/disciplinary', label: 'Disciplinary cases', group: 'Employee relations', roles: ['hr'], icon: IconScale },
+  { to: '/relations/milestones', label: 'Milestones (retirements, contract ends)', group: 'Employee relations', roles: ['hr'], icon: IconCalendarEvent },
+  { to: '/relations/kye', label: 'Know your employee', group: 'Employee relations', roles: ['hr'], icon: IconChecklist },
+  { to: '/me/help/grievances', label: 'Raise a grievance', group: 'Help desk', icon: IconLifebuoy },
   { to: '/attendance/exceptions', label: 'Attendance exceptions', group: 'Attendance', roles: ['hr'], icon: IconAlertTriangle },
   { to: '/attendance/overtime', label: 'Overtime review', group: 'Attendance', roles: ['hr'], icon: IconClockHour4 },
   { to: '/attendance/from-home', label: 'Work from home check-ins', group: 'Attendance', roles: ['manager', 'hr'], icon: IconHome },
@@ -212,6 +218,7 @@ export function Layout() {
         <OfflineBanner />
         <Suspense fallback={<Center h="60vh"><Loader size="sm" /></Center>}>
           <div className="hj-page"><Outlet /></div>
+          <PopupNotices />
         </Suspense>
       </AppShell.Main>
 

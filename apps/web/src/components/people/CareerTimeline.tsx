@@ -12,7 +12,7 @@ import { EmptyState } from '../EmptyState';
 const ICON = { size: 14, stroke: 1.8 } as const;
 const KIND_ICON: Partial<Record<CareerKind, ReactNode>> = {
   hire: <IconUserPlus {...ICON} />, rehire: <IconUserPlus {...ICON} />, promotion: <IconTrendingUp {...ICON} />, confirmation: <IconCircleCheck {...ICON} />,
-  transfer: <IconArrowsExchange {...ICON} />, separation: <IconDoorExit {...ICON} />, note: <IconNote {...ICON} />,
+  transfer: <IconArrowsExchange {...ICON} />, deputation: <IconArrowsExchange {...ICON} />, acting: <IconBriefcase {...ICON} />, separation: <IconDoorExit {...ICON} />, note: <IconNote {...ICON} />,
 };
 const KINDS: Array<{ value: CareerKind; label: string; hint: string }> = [
   { value: 'promotion', label: 'Promotion', hint: 'New designation and/or grade.' },

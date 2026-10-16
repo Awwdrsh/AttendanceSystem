@@ -17,6 +17,7 @@ import { useQuery } from '../../lib/useQuery';
 import { LeaveApplyForm } from '../employee/LeavePage';
 import { EmployeeDocumentsTab } from '../documents/EmployeeDocumentsTab';
 import { LifecycleSection } from '../lifecycle/LifecycleSection';
+import { EmployeeRelationsSection } from '../../components/relations/EmployeeRelationsSection';
 import { CareerTimeline } from '../../components/people/CareerTimeline';
 import { EmployeeProfilePanel } from '../../components/people/EmployeeProfilePanel';
 import { FieldHistory } from '../../components/people/FieldHistory';
@@ -82,6 +83,7 @@ export default function EmployeeDetailPage() {
           <Tabs.Tab value="leave">Leave</Tabs.Tab>
           <Tabs.Tab value="history">Employment history</Tabs.Tab>
           <Tabs.Tab value="lifecycle">Lifecycle</Tabs.Tab>
+          <Tabs.Tab value="relations">Relations</Tabs.Tab>
           <Tabs.Tab value="pay">Pay</Tabs.Tab>
           <Tabs.Tab value="documents">Documents</Tabs.Tab>
           <Tabs.Tab value="biometrics">Biometrics</Tabs.Tab>
@@ -158,6 +160,7 @@ export default function EmployeeDetailPage() {
         </Tabs.Panel>
 
         <Tabs.Panel value="lifecycle" pt="lg"><LifecycleSection employeeId={id} /></Tabs.Panel>
+        <Tabs.Panel value="relations" pt="lg"><EmployeeRelationsSection employeeId={id} /></Tabs.Panel>
 
         <Tabs.Panel value="pay" pt="lg">
           <Stack gap="md">
