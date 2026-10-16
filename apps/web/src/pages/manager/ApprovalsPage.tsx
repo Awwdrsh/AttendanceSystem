@@ -5,6 +5,7 @@ import { workflow as wfApi } from '../../api';
 import type { InboxItem, WorkflowDetail } from '../../api/types';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { EmptyState } from '../../components/EmptyState';
+import { DelegateApprovals } from '../../components/DelegateApprovals';
 import { PageHeader } from '../../components/PageHeader';
 import { bsMonthLabel, fmtDateShort, fmtMoney, fmtTime, minutesToHm, relativeTime } from '../../lib/format';
 import { toast } from '../../lib/toast';
@@ -102,6 +103,7 @@ function Summary({ item }: { item: InboxItem }) {
       main = <Text span c="dimmed">{JSON.stringify(s)}</Text>;
     }
   }
+  if (item.routing?.length) extra.push(<Text key="route" size="xs" c="orange">{item.routing.join('. ')}</Text>);
   return (
     <>
       <Text size="sm">{main}</Text>
@@ -129,7 +131,10 @@ export default function ApprovalsPage() {
     <Stack gap="md">
       <PageHeader title="Approvals"
         subtitle={items.length ? `${items.length} ${items.length === 1 ? 'request is' : 'requests are'} waiting for your decision.` : 'Leave, attendance correction and overtime requests that need your decision.'}
-        actions={items.length > 1 ? <Button variant="default" leftSection={<IconChecks size={16} stroke={1.6} />} loading={busy === 'bulk'} onClick={() => setConfirmBulk(true)}>Approve all ({items.length})</Button> : null} />
+        actions={<>
+          <DelegateApprovals />
+          {items.length > 1 ? <Button variant="default" leftSection={<IconChecks size={16} stroke={1.6} />} loading={busy === 'bulk'} onClick={() => setConfirmBulk(true)}>Approve all ({items.length})</Button> : null}
+        </>} />
 
       {kinds.length > 1 ? (
         <SegmentedControl value={kind} onChange={setKind} style={{ alignSelf: 'flex-start' }}

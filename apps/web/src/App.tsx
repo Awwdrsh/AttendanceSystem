@@ -2,6 +2,7 @@ import { lazy } from 'react';
 import { Navigate, Route, Routes, useParams } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { RequireRole } from './auth/RequireRole';
+import { AREA } from './lib/access';
 import { useAuth } from './auth/AuthProvider';
 import {
   AttendanceHub, EMPLOYEES_HUB_PATHS, EmployeesHub, EngageHub, ExpensesHub, GrowthHub, HiringHub, LeaveHub, MyAttendanceHub, MyClaimsHub, MyPayHub,
@@ -73,24 +74,31 @@ export function App() {
           <Route path="/me/payslips/:id" element={<PayslipDetailPage />} />
           <Route path="/me/notifications" element={<NotificationsPage />} />
           <Route path="/me/profile/*" element={<ProfileHub />} />
-          <Route element={<RequireRole roles={['manager', 'hr']} />}>
-            <Route path="/approvals" element={<ApprovalsPage />} />
+          {/* Anyone can be asked to approve (a named person or a group member in a flow); the inbox shows only their items. */}
+          <Route path="/approvals" element={<ApprovalsPage />} />
+          <Route element={<RequireRole roles={['manager', ...AREA.attendance]} />}>
             <Route path="/attendance/*" element={<AttendanceHub />} />
             <Route path="/leave/*" element={<LeaveHub />} />
+          </Route>
+          <Route element={<RequireRole roles={['manager', 'hr']} />}>
             <Route path="/expenses/*" element={<ExpensesHub />} />
             <Route path="/performance/*" element={<PerformanceHub />} />
+          </Route>
+          <Route element={<RequireRole roles={['manager', ...AREA.hiring]} />}>
             <Route path="/hiring/*" element={<HiringHub />} />
           </Route>
-          <Route element={<RequireRole roles={['hr']} />}>
+          <Route element={<RequireRole roles={AREA.insights} />}>
             <Route path="/overview" element={<DashboardPage />} />
+            <Route path="/insights" element={<InsightsPage />} />
+          </Route>
+          <Route element={<RequireRole roles={['hr']} />}>
             {EMPLOYEES_HUB_PATHS.map((p) => <Route key={p} path={p} element={<EmployeesHub />} />)}
             <Route path="/helpdesk" element={<HelpdeskPage />} />
-            <Route path="/insights" element={<InsightsPage />} />
             <Route path="/employees/:id" element={<EmployeeDetailPage />} />
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/settings/*" element={<SettingsHub />} />
           </Route>
-          <Route element={<RequireRole roles={['hr']} />}>
+          <Route element={<RequireRole roles={AREA.payroll} />}>
             <Route path="/payroll/runs/:id" element={<RunWizardPage />} />
             <Route path="/payroll/*" element={<PayrollHub />} />
           </Route>

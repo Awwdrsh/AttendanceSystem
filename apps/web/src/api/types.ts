@@ -1,4 +1,4 @@
-export type Role = 'admin' | 'hr' | 'manager' | 'employee';
+export type Role = 'admin' | 'hr' | 'manager' | 'employee' | 'payroll_admin' | 'attendance_admin' | 'recruiter' | 'executive';
 
 export interface AuthUser { id: string; companyId: string | null; employeeId: string | null; email: string; name: string; roles: Role[]; mustChangePassword: boolean; twoFactorEnabled?: boolean; mustSetUpTwoFactor?: boolean }
 
@@ -61,6 +61,8 @@ export interface TeamCalendarDay { date: string; off: Array<{ employeeId: string
 export interface InboxItem {
   instanceId: string; objectType: string; objectId: string; step: number; totalSteps: number; createdAt: string;
   employee: { id: string; empCode: string; nameEn: string; nameNe: string | null } | null; summary: Record<string, unknown>;
+  /** Why the request reached you (approver away, delegated, nobody set). */
+  routing?: string[];
 }
 export interface WorkflowDetail { instance: { id: string; object_type: string; object_id: string; state: string; steps: Array<{ role: string }>; current_step: number; created_at: string }; summary: Record<string, unknown>; actions: Array<{ step: number; decision: string; reason: string | null; acted_at: string; actor_name: string; signature: string }> }
 

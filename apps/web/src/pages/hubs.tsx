@@ -1,6 +1,7 @@
 import { lazy } from 'react';
 import { useAuth } from '../auth/AuthProvider';
 import { Hub } from '../components/Hub';
+import { AREA } from '../lib/access';
 
 const TeamTodayPage = lazy(() => import('./manager/TeamTodayPage'));
 const ExceptionsPage = lazy(() => import('./hr/ExceptionsPage'));
@@ -23,6 +24,7 @@ const HolidaysPage = lazy(() => import('./hr/HolidaysPage'));
 const DevicesPage = lazy(() => import('./hr/DevicesPage'));
 const UsersPage = lazy(() => import('./hr/UsersPage'));
 const SetupPage = lazy(() => import('./hr/SetupPage'));
+const ApprovalFlowsPage = lazy(() => import('./hr/ApprovalFlowsPage'));
 const ProfilePage = lazy(() => import('./employee/ProfilePage'));
 const MyDataPage = lazy(() => import('./employee/MyDataPage'));
 const MyAttendancePage = lazy(() => import('./employee/MyAttendancePage'));
@@ -73,13 +75,13 @@ export function AttendanceHub() {
   return <Hub title="Attendance" tabs={[
     { path: '/attendance', label: 'Today', element: <TeamTodayPage /> },
     { path: '/attendance/from-home', label: 'Work from home', element: <RemoteCheckinsPage /> },
-    { path: '/attendance/exceptions', label: 'Exceptions', element: <ExceptionsPage />, roles: ['hr'] },
-    { path: '/attendance/overtime', label: 'Overtime', element: <OtSlipsPage />, roles: ['hr'] },
+    { path: '/attendance/exceptions', label: 'Exceptions', element: <ExceptionsPage />, roles: AREA.attendance },
+    { path: '/attendance/overtime', label: 'Overtime', element: <OtSlipsPage />, roles: AREA.attendance },
     { path: '/attendance/timesheets', label: 'Timesheets', element: <TimesheetsReviewPage /> },
     { path: '/attendance/rosters', label: 'Rosters', element: <RostersPage /> },
     { path: '/attendance/visits', label: 'Field visits', element: <FieldVisitsPage /> },
-    { path: '/attendance/projects', label: 'Projects', element: <ProjectsPage />, roles: ['hr'] },
-    { path: '/attendance/kiosks', label: 'Kiosks', element: <KiosksPage />, roles: ['hr'] },
+    { path: '/attendance/projects', label: 'Projects', element: <ProjectsPage />, roles: AREA.attendance },
+    { path: '/attendance/kiosks', label: 'Kiosks', element: <KiosksPage />, roles: AREA.attendance },
     { path: '/attendance/fix', label: 'Fix a punch', element: <FixPunchPage /> },
   ]} />;
 }
@@ -87,9 +89,9 @@ export function AttendanceHub() {
 export function LeaveHub() {
   return <Hub title="Leave" tabs={[
     { path: '/leave', label: 'Calendar', element: <TeamCalendarPage /> },
-    { path: '/leave/balances', label: 'Balances', element: <LeaveAdjustPage />, roles: ['hr'] },
-    { path: '/leave/policies', label: 'Policies', element: <LeaveTypesPage />, roles: ['hr'] },
-    { path: '/leave/history', label: 'Request history', element: <RequestsPage />, roles: ['hr'] },
+    { path: '/leave/balances', label: 'Balances', element: <LeaveAdjustPage />, roles: AREA.attendance },
+    { path: '/leave/policies', label: 'Policies', element: <LeaveTypesPage />, roles: AREA.attendance },
+    { path: '/leave/history', label: 'Request history', element: <RequestsPage />, roles: AREA.attendance },
   ]} />;
 }
 
@@ -112,6 +114,7 @@ export function SettingsHub() {
     { path: '/settings/devices', label: 'Devices', element: <DevicesPage /> },
     { path: '/settings/locations', label: 'Locations', element: <LocationsPage /> },
     { path: '/settings/users', label: 'Users & roles', element: <UsersPage /> },
+    { path: '/settings/approvals', label: 'Approval flows', element: <ApprovalFlowsPage /> },
     { path: '/settings/setup', label: 'Setup checklist', element: <SetupPage /> },
   ]} />;
 }
