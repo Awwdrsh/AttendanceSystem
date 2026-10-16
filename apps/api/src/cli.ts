@@ -5,11 +5,12 @@
  *      the new admin must change it at first sign-in)
  *   seed-defaults [--company DEMO]        leave types, workflows, settings, rule versions, salary components
  *   reset-password --email <email> --password <pw>
+ *   seed-demo-suite --yes [--company DEMO] [--only a,b]   sample data for every HR module (DATABASE_URL must be set)
  */
 import { loadConfig, loadDatabaseUrl } from './config.js';
 import { createPool } from './db/pool.js';
 import { createUser } from './modules/auth/service.js';
-import { hashPassword, passwordPolicyError } from './crypto.js';
+import { FieldCipher, hashPassword, passwordPolicyError } from './crypto.js';
 import { seedDefaults } from './db/seed-defaults.js';
 
 const args = process.argv.slice(2);
@@ -54,8 +55,21 @@ try {
       console.log('defaults seeded:', summary);
       break;
     }
+    case 'seed-demo-suite': {
+      // Sample data for every HR module, through the real API. DATABASE_URL must name the target database explicitly.
+      if (!process.env.DATABASE_URL || !args.includes('--yes')) {
+        throw new Error('seed-demo-suite adds sample people data. Set DATABASE_URL to the demo database and add --yes to confirm.');
+      }
+      const cfg = loadConfig();
+      const { seedDemoSuite } = await import('./db/demo-suite/index.js');
+      const only = opt('only')?.split(',').map((s) => s.trim()).filter(Boolean);
+      const out = await seedDemoSuite(db, FieldCipher.fromBase64(cfg.DATA_ENCRYPTION_KEY), cfg.PASSWORD_PEPPER, { company: opt('company', 'DEMO')!, ...(only ? { only } : {}) });
+      console.log(`done: ${out.done.join(', ') || 'nothing new'}; already there: ${out.skipped.join(', ') || 'none'}`);
+      if (out.failed.length) { console.log(`failed: ${out.failed.map((f) => f.section).join(', ')}`); process.exitCode = 1; }
+      break;
+    }
     default:
-      console.log('usage: cli create-admin|reset-password|seed-defaults ...');
+      console.log('usage: cli create-admin|reset-password|seed-defaults|seed-demo-suite ...');
       process.exitCode = 1;
   }
 } catch (e) {
