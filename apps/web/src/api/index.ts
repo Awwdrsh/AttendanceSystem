@@ -1,4 +1,5 @@
-import { del, download, get, patch, post, put, type Query } from './client';
+import { api, del, download, get, patch, post, put, type Query } from './client';
+import { deviceHeaders } from '../lib/deviceToken';
 import type * as T from './types';
 
 export const auth = {
@@ -32,7 +33,7 @@ export const attendance = {
 };
 
 export const punch = {
-  create: (b: Record<string, unknown>) => post<T.PunchResult>('/punch', b),
+  create: (b: Record<string, unknown>) => api<T.PunchResult>('POST', '/punch', b, { headers: deviceHeaders() }),
   today: () => get<T.TodayCard>('/punch/today'),
   remote: (q: { from: string; to: string; employeeId?: string }) => get<{ punches: T.RemotePunch[] }>('/punch/remote', q),
   photoUrl: (id: string) => `/api/v1/punch/photos/${id}`,

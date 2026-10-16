@@ -22,6 +22,8 @@ beforeAll(async () => {
   const c = await db.query<{ id: string }>(`INSERT INTO company (code, name_en) VALUES ('OTHERHD', 'Other Co') RETURNING id`);
   await createUser(db, { companyId: c.rows[0]!.id, email: 'hr@other-hd.local', name: 'Other HR', password: 'correct-horse-battery-staple', roles: ['hr'], pepper: TEST_PEPPER });
   otherHr = (await request(app).post('/api/v1/auth/login').send({ email: 'hr@other-hd.local', password: 'correct-horse-battery-staple' })).body.token;
+  // Grievances have their own committee flow (Employee relations); a confidential help desk topic is still possible.
+  await request(app).post('/api/v1/helpdesk/categories').set(auth(hr)).send({ name: 'Confidential HR matter', confidential: true, sort: 9 });
   cats = (await request(app).get('/api/v1/helpdesk/categories').set(auth(sita))).body.categories;
 });
 afterAll(async () => { await db.end(); });
@@ -29,9 +31,10 @@ afterAll(async () => { await db.end(); });
 describe('help desk', () => {
   let ticket: { id: string; number: number }; let grievance: string;
 
-  it('seeds categories, with grievances marked confidential and owners hidden from employees', () => {
+  it('seeds categories without a grievance topic (grievances go to the committee), owners hidden from employees', () => {
     expect(cats.length).toBe(6);
-    expect(cats.find((c) => c.name === 'Grievance')!.confidential).toBe(true);
+    expect(cats.find((c) => c.name === 'Grievance')).toBeUndefined();
+    expect(cats.find((c) => c.name.startsWith('Confidential'))!.confidential).toBe(true);
     expect((cats[0] as unknown as { owner_user_id: unknown }).owner_user_id).toBeNull();
   });
 
@@ -105,11 +108,11 @@ describe('help desk', () => {
   });
 
   it('grievances are never visible to managers or non-HR owners, and only HR can be assigned', async () => {
-    const r = await request(app).post('/api/v1/helpdesk/tickets').set(auth(sita)).send({ categoryId: cat('Grievance'), subject: 'Concern about my manager', body: 'Confidential matter' });
+    const r = await request(app).post('/api/v1/helpdesk/tickets').set(auth(sita)).send({ categoryId: cat('Confidential'), subject: 'Concern about my manager', body: 'Confidential matter' });
     expect(r.status).toBe(201);
     grievance = r.body.id;
     expect((await request(app).patch(`/api/v1/helpdesk/tickets/${grievance}`).set(auth(hr)).send({ assigneeUserId: ramUser })).status).toBe(400);
-    expect((await request(app).put(`/api/v1/helpdesk/categories/${cat('Grievance')}`).set(auth(hr)).send({ name: 'Grievance', confidential: true, ownerUserId: ramUser })).status).toBe(400);
+    expect((await request(app).put(`/api/v1/helpdesk/categories/${cat('Confidential')}`).set(auth(hr)).send({ name: 'Confidential HR matter', confidential: true, ownerUserId: ramUser })).status).toBe(400);
     expect((await request(app).get(`/api/v1/helpdesk/tickets/${grievance}`).set(auth(ram))).status).toBe(404);
     const n = await db.query(`SELECT body FROM notification_outbox WHERE template = 'helpdesk.ticket.new' AND payload->>'ticketId' = $1`, [grievance]);
     expect(n.rows.every((x: { body: string }) => !x.body.includes('manager'))).toBe(true);

@@ -23,6 +23,7 @@ const targetType = z.enum(['kudos', 'announcement', 'celebration']);
 interface AnnouncementRow {
   id: string; company_id: string; author_id: string; author_employee_id: string | null; title: string; body: string; audience_kind: AudienceKind;
   audience_id: string | null; pinned: boolean; requires_ack: boolean; expires_on: string | null; created_at: Date; updated_at: Date; deleted_at: Date | null;
+  popup: boolean; popup_until: string | null;
 }
 
 const announcementBody = z.object({
@@ -33,6 +34,9 @@ const announcementBody = z.object({
   pinned: z.boolean().default(false),
   requiresAck: z.boolean().default(false),
   expiresOn: isoDate.nullish(),
+  /** HR only: also show it as a pop-up after sign-in, until acknowledged or until this date. */
+  popup: z.boolean().default(false),
+  popupUntil: isoDate.nullish(),
 });
 const announcementPatch = z.object({
   title: z.string().trim().min(1).max(160).optional(),
@@ -40,6 +44,8 @@ const announcementPatch = z.object({
   pinned: z.boolean().optional(),
   requiresAck: z.boolean().optional(),
   expiresOn: isoDate.nullish(),
+  popup: z.boolean().optional(),
+  popupUntil: isoDate.nullish(),
 }).strict();
 
 const surveyBody = z.object({
@@ -221,7 +227,7 @@ export function engageRoutes({ db, cipher }: AppDeps): Router {
       type: 'announcement' as const, id: a.id, createdAt: a.created_at, title: a.title, body: a.body, authorName: a.author_name,
       audienceKind: a.audience_kind, audienceId: a.audience_id,
       audienceLabel: a.audience_kind === 'all' ? 'Everyone' : a.audience_kind === 'reports' ? `${a.author_name}'s team` : a.audience_name ?? '—',
-      pinned: a.pinned, requiresAck: a.requires_ack, acked: a.acked, expiresOn: a.expires_on,
+      pinned: a.pinned, requiresAck: a.requires_ack, acked: a.acked, expiresOn: a.expires_on, popup: a.popup, popupUntil: a.popup_until,
       reactions: s.counts.get(a.id) ?? {}, mine: s.mine.get(a.id) ?? [], comments: s.comments.get(a.id) ?? 0,
       canEdit: a.author_id === user.id || isHr(user),
     }));
@@ -245,9 +251,10 @@ export function engageRoutes({ db, cipher }: AppDeps): Router {
     const audienceId = b.audienceKind === 'all' || b.audienceKind === 'reports' ? null : b.audienceId ?? null;
     const out = await inTx(db, async (c) => {
       const a = await c.query<{ id: string }>(
-        `INSERT INTO announcement (company_id, author_id, author_employee_id, title, body, audience_kind, audience_id, pinned, requires_ack, expires_on)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
-        [companyId, user.id, user.employeeId, b.title, b.body, b.audienceKind, audienceId, b.pinned && isHr(user), b.requiresAck, b.expiresOn ?? null]);
+        `INSERT INTO announcement (company_id, author_id, author_employee_id, title, body, audience_kind, audience_id, pinned, requires_ack, expires_on, popup, popup_until)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
+        [companyId, user.id, user.employeeId, b.title, b.body, b.audienceKind, audienceId, b.pinned && isHr(user), b.requiresAck, b.expiresOn ?? null,
+          b.popup && isHr(user), b.popup && isHr(user) ? b.popupUntil ?? null : null]);
       const id = a.rows[0]!.id;
       const members = await audienceMembers(c, companyId, b.audienceKind, audienceId, user.employeeId);
       let notified = 0;
@@ -272,9 +279,11 @@ export function engageRoutes({ db, cipher }: AppDeps): Router {
     if (a.author_id !== user.id && !isHr(user)) throw new ForbiddenError('only the author or HR can edit this');
     await db.query(
       `UPDATE announcement SET title = coalesce($2, title), body = coalesce($3, body), pinned = coalesce($4, pinned),
-              requires_ack = coalesce($5, requires_ack), expires_on = CASE WHEN $6::boolean THEN $7::date ELSE expires_on END, updated_at = now()
+              requires_ack = coalesce($5, requires_ack), expires_on = CASE WHEN $6::boolean THEN $7::date ELSE expires_on END,
+              popup = coalesce($8, popup), popup_until = CASE WHEN $9::boolean THEN $10::date ELSE popup_until END, updated_at = now()
         WHERE id = $1`,
-      [id, b.title ?? null, b.body ?? null, b.pinned === undefined ? null : b.pinned && isHr(user), b.requiresAck ?? null, b.expiresOn !== undefined, b.expiresOn ?? null]);
+      [id, b.title ?? null, b.body ?? null, b.pinned === undefined ? null : b.pinned && isHr(user), b.requiresAck ?? null, b.expiresOn !== undefined, b.expiresOn ?? null,
+        b.popup === undefined ? null : b.popup && isHr(user), b.popupUntil !== undefined && isHr(user), b.popupUntil ?? null]);
     await audit(db, { actorId: user.id, action: 'update', table: 'announcement', rowId: id, before: { title: a.title }, after: b });
     res.json({ ok: true });
   });

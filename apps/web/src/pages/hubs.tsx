@@ -27,6 +27,16 @@ const SetupPage = lazy(() => import('./hr/SetupPage'));
 const ApprovalFlowsPage = lazy(() => import('./hr/ApprovalFlowsPage'));
 const ProfilePage = lazy(() => import('./employee/ProfilePage'));
 const MyDataPage = lazy(() => import('./employee/MyDataPage'));
+const MyTicketsPage = lazy(() => import('./helpdesk/MyTicketsPage'));
+const MyGrievancesPage = lazy(() => import('./relations/MyGrievancesPage'));
+const MyConductPage = lazy(() => import('./relations/MyConductPage'));
+const MyDevicesPage = lazy(() => import('./relations/MyDevicesPage'));
+const GrievancesAdminPage = lazy(() => import('./relations/GrievancesAdminPage'));
+const DisciplinaryPage = lazy(() => import('./relations/DisciplinaryPage'));
+const MilestonesPage = lazy(() => import('./relations/MilestonesPage'));
+const TempAssignmentsPage = lazy(() => import('./relations/TempAssignmentsPage'));
+const KyePage = lazy(() => import('./relations/KyePage'));
+const RegisteredDevicesPage = lazy(() => import('./relations/RegisteredDevicesPage'));
 const MyAttendancePage = lazy(() => import('./employee/MyAttendancePage'));
 const PayslipsPage = lazy(() => import('./employee/PayslipsPage'));
 const EmployeesPage = lazy(() => import('./hr/EmployeesPage'));
@@ -125,6 +135,7 @@ export function ProfileHub() {
     { path: '/me/profile', label: 'Profile', element: <ProfilePage /> },
     { path: '/me/profile/documents', label: 'Documents & letters', element: <MyDocumentsPage />, show: !!user?.employeeId },
     { path: '/me/profile/security', label: 'Sign-in security', element: <SecurityPage /> },
+    { path: '/me/profile/conduct', label: 'Conduct', element: <MyConductPage />, show: !!user?.employeeId },
     { path: '/me/profile/privacy', label: 'Privacy & my data', element: <MyDataPage />, show: !!user?.employeeId },
   ]} />;
 }
@@ -135,6 +146,7 @@ export function MyAttendanceHub() {
     { path: '/me/attendance/roster', label: 'My roster', element: <MyRosterPage /> },
     { path: '/me/attendance/visits', label: 'Visits & breaks', element: <MyFieldVisitsPage /> },
     { path: '/me/attendance/kiosk', label: 'Kiosk badge', element: <MyKioskPage /> },
+    { path: '/me/attendance/devices', label: 'Clock-in devices', element: <MyDevicesPage /> },
   ]} />;
 }
 
@@ -217,5 +229,23 @@ export function HiringHub() {
     { path: '/hiring/pipeline', label: 'Candidates', element: <PipelinePage /> },
     { path: '/hiring/interviews', label: 'Interviews', element: <InterviewsPage /> },
     { path: '/hiring/requisitions', label: 'Requisitions', element: <RequisitionsPage /> },
+  ]} />;
+}
+
+export function HelpHub() {
+  return <Hub title="Help desk" tabs={[
+    { path: '/me/help', label: 'Questions', element: <MyTicketsPage /> },
+    { path: '/me/help/grievances', label: 'Grievances', element: <MyGrievancesPage /> },
+  ]} />;
+}
+
+export function RelationsHub() {
+  return <Hub title="Employee relations" tabs={[
+    { path: '/relations', label: 'Grievances', element: <GrievancesAdminPage /> },
+    { path: '/relations/disciplinary', label: 'Disciplinary', element: <DisciplinaryPage /> },
+    { path: '/relations/milestones', label: 'Milestones', element: <MilestonesPage /> },
+    { path: '/relations/assignments', label: 'Acting & deputation', element: <TempAssignmentsPage /> },
+    { path: '/relations/kye', label: 'Know your employee', element: <KyePage /> },
+    { path: '/relations/devices', label: 'Clock-in devices', element: <RegisteredDevicesPage /> },
   ]} />;
 }

@@ -6,6 +6,7 @@ export interface DirectoryPerson {
   id: string; emp_code: string; name_en: string; designation: string | null; grade: string | null; work_email: string | null; work_phone: string | null;
   join_date: string | null; has_avatar: boolean; branch_id: string | null; branch_name: string | null; org_unit_id: string | null; unit_name: string | null;
   manager_id: string | null; manager_name: string | null;
+  temp_assignment?: { kind: 'acting' | 'deputation'; label: string | null; until: string } | null;
 }
 export interface PersonCard extends DirectoryPerson { skills: string[]; languages: string[]; status: string }
 export interface OrgNode { id: string; name_en: string; designation: string | null; has_avatar: boolean; unit_name: string | null; manager_id: string | null }
@@ -58,14 +59,14 @@ export interface ChangeRequest {
 }
 
 export type CareerKind = 'hire' | 'confirmation' | 'promotion' | 'transfer' | 'designation_change' | 'grade_change' | 'manager_change'
-  | 'employment_type_change' | 'salary_revision' | 'separation' | 'rehire' | 'note';
+  | 'employment_type_change' | 'salary_revision' | 'separation' | 'rehire' | 'note' | 'suspension' | 'leave_of_absence' | 'acting' | 'deputation';
 export interface CareerEvent {
   id: string; kind: CareerKind; label: string; effectiveDate: string; status: 'scheduled' | 'applied'; summary: string;
   note: string | null; reason: string | null; createdBy: string | null; createdAt: string;
 }
 export interface CareerDetails {
   designationId?: string; designation?: string; grade?: string; branchId?: string; orgUnitId?: string | null; managerId?: string | null;
-  employmentType?: string; separationType?: string; revisionPercent?: number; reason?: string;
+  employmentType?: string; separationType?: string; revisionPercent?: number; reason?: string; endDate?: string;
 }
 export interface HistoryRow { id: string; field: string; old_value: string | null; new_value: string | null; source: string; changed_at: string; changed_by_name: string | null }
 

@@ -64,11 +64,12 @@ export function AnnouncementComposer({ opened, onClose, onDone }: { opened: bool
   const [pinned, setPinned] = useState(false);
   const [requiresAck, setRequiresAck] = useState(false);
   const [expiresOn, setExpiresOn] = useState<string | null>(null);
+  const [popup, setPopup] = useState(false);
   const [opts, setOpts] = useState<{ branches: Array<{ id: string; name: string }>; orgUnits: Array<{ id: string; name: string }> }>({ branches: [], orgUnits: [] });
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (!opened) return;
-    setTitle(''); setBody(''); setAudienceKind(isHr ? 'all' : 'reports'); setAudienceId(null); setPinned(false); setRequiresAck(false); setExpiresOn(null);
+    setTitle(''); setBody(''); setAudienceKind(isHr ? 'all' : 'reports'); setAudienceId(null); setPinned(false); setRequiresAck(false); setExpiresOn(null); setPopup(false);
     if (isHr) insights.filters().then(setOpts).catch(() => undefined);
   }, [opened]); // eslint-disable-line react-hooks/exhaustive-deps
   const needsTarget = audienceKind === 'branch' || audienceKind === 'department';
@@ -89,6 +90,7 @@ export function AnnouncementComposer({ opened, onClose, onDone }: { opened: bool
                 data={(audienceKind === 'branch' ? opts.branches : opts.orgUnits).map((o) => ({ value: o.id, label: o.name }))} />
             ) : null}
             <Switch label="Pin to the top of the feed and Home" checked={pinned} onChange={(e) => setPinned(e.currentTarget.checked)} />
+            <Switch label="Show as a pop-up after sign-in" description="Once per person, or until they confirm if you ask for confirmation." checked={popup} onChange={(e) => setPopup(e.currentTarget.checked)} />
           </>
         ) : <Text size="sm" c="dimmed">This goes to the people who report to you.</Text>}
         <Switch label="Ask people to confirm they have read it" description="You can see who has and hasn't confirmed." checked={requiresAck} onChange={(e) => setRequiresAck(e.currentTarget.checked)} />
@@ -98,7 +100,7 @@ export function AnnouncementComposer({ opened, onClose, onDone }: { opened: bool
           <Button loading={busy} disabled={!title.trim() || !body.trim() || (needsTarget && !audienceId)} onClick={async () => {
             setBusy(true);
             try {
-              const r = await engage.postAnnouncement({ title: title.trim(), body: body.trim(), audienceKind, audienceId, pinned, requiresAck, expiresOn });
+              const r = await engage.postAnnouncement({ title: title.trim(), body: body.trim(), audienceKind, audienceId, pinned, requiresAck, expiresOn, ...(isHr ? { popup } : {}) });
               toast.ok(`Posted. ${r.notified} ${r.notified === 1 ? 'person was' : 'people were'} notified.`); onDone(); onClose();
             } catch (e) { toast.err(e, 'Not posted'); } finally { setBusy(false); }
           }}>Post</Button>

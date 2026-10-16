@@ -1,6 +1,7 @@
-import { Alert, Badge, Button, Divider, Drawer, Group, Modal, Paper, SegmentedControl, Select, Stack, Text, Textarea, TextInput, UnstyledButton } from '@mantine/core';
+import { Alert, Anchor, Badge, Button, Divider, Drawer, Group, Modal, Paper, SegmentedControl, Select, Stack, Text, Textarea, TextInput, UnstyledButton } from '@mantine/core';
 import { IconDoorExit, IconLock, IconPlus } from '@tabler/icons-react';
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import type { UploadedFile } from '../../api/files';
 import { helpdesk, type Priority, type Ticket } from '../../api/helpdesk';
 import { lifecycle, RESIGN_REASONS } from '../../api/lifecycle';
@@ -138,6 +139,9 @@ export default function MyTicketsPage() {
     <Stack gap="lg">
       <PageHeader title="Help desk" subtitle="Ask HR about pay, leave, documents or anything else, and follow the answer here."
         actions={<Button leftSection={<IconPlus {...ICON} />} onClick={() => setCreating(true)}>Ask HR</Button>} />
+      <Alert variant="light" color="grape" icon={<IconLock {...ICON} />}>
+        A formal complaint about how you are treated at work? <Anchor component={Link} to="/me/help/grievances" size="sm">Raise a grievance</Anchor>: a committee hears it, never your manager.
+      </Alert>
       {q.error ? <EmptyState title="Could not load your tickets" hint={q.error} /> : null}
       {!q.loading && !q.error && !tickets.length ? <EmptyState title="No questions yet" hint="Raise a ticket and HR will answer here. You get a notification when they reply." action={{ label: 'Ask HR', onClick: () => setCreating(true) }} /> : null}
       {tickets.length ? <Paper withBorder p={4}><Stack gap={0}>{tickets.map(row)}</Stack></Paper> : null}

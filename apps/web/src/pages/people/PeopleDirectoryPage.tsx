@@ -1,4 +1,4 @@
-import { Group, Paper, Select, SimpleGrid, Skeleton, Stack, Text, TextInput, UnstyledButton } from '@mantine/core';
+import { Badge, Group, Paper, Select, SimpleGrid, Skeleton, Stack, Text, TextInput, UnstyledButton } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
 import { IconSearch, IconUsers } from '@tabler/icons-react';
 import { useState } from 'react';
@@ -20,6 +20,7 @@ function PersonTile({ p, onOpen }: { p: DirectoryPerson; onOpen: () => void }) {
             <Text fw={600} size="sm" truncate>{p.name_en}</Text>
             <Text size="xs" c="dimmed" truncate>{p.designation ?? '—'}</Text>
             <Text size="xs" c="dimmed" truncate>{[p.unit_name, p.branch_name].filter(Boolean).join(' · ') || ' '}</Text>
+            {p.temp_assignment ? <Badge size="xs" variant="light" color={p.temp_assignment.kind === 'acting' ? 'violet' : 'cyan'} mt={4}>{p.temp_assignment.kind === 'acting' ? 'Acting' : 'Deputed to'} {p.temp_assignment.label ?? ''}</Badge> : null}
             {p.work_email ? <Text size="xs" truncate mt={4}>{p.work_email}</Text> : null}
           </div>
         </Group>

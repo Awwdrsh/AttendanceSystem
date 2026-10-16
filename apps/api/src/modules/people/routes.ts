@@ -1,3 +1,4 @@
+import { bsLabel } from '../../bsdate.js';
 import { Router, type Request } from 'express';
 import { z } from 'zod';
 import type { AppDeps } from '../../deps.js';
@@ -56,7 +57,10 @@ export function peopleRoutes({ db, cipher }: AppDeps): Router {
   // ---------------------------------------------------------------- directory, summary, org chart (everyone)
 
   const DIRECTORY_COLS = `e.id, e.emp_code, e.name_en, e.designation, e.email AS work_email, e.work_phone, e.join_date, e.avatar_file_id IS NOT NULL AS has_avatar,
-    a.branch_id, b.name_en AS branch_name, a.org_unit_id, o.name_en AS unit_name, a.manager_id, m.name_en AS manager_name`;
+    a.branch_id, b.name_en AS branch_name, a.org_unit_id, o.name_en AS unit_name, a.manager_id, m.name_en AS manager_name,
+    (SELECT json_build_object('kind', t.kind, 'label', coalesce(t.designation, tb.name_en, tu.name_en), 'until', t.end_date)
+       FROM employee_temp_assignment t LEFT JOIN branch tb ON tb.id = t.branch_id LEFT JOIN org_unit tu ON tu.id = t.org_unit_id
+      WHERE t.employee_id = e.id AND t.status = 'active' AND current_date BETWEEN t.start_date AND t.end_date ORDER BY t.start_date DESC LIMIT 1) AS temp_assignment`;
   const DIRECTORY_FROM = `employee e
     LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> current_date
     LEFT JOIN branch b ON b.id = a.branch_id LEFT JOIN org_unit o ON o.id = a.org_unit_id LEFT JOIN employee m ON m.id = a.manager_id`;
@@ -505,12 +509,13 @@ export function peopleRoutes({ db, cipher }: AppDeps): Router {
       // Managers see the event but not separation types, salary revisions or reasons.
       if (full && d.separationType) parts.push(d.separationType.replace(/_/g, ' '));
       if (full && d.revisionPercent !== undefined) parts.push(`${d.revisionPercent > 0 ? '+' : ''}${d.revisionPercent}%`);
+      if (d.endDate) parts.push(`until ${bsLabel(d.endDate)}`);
       events.push({
         id: ev.id, kind: ev.kind, label: CAREER_LABEL[ev.kind], effectiveDate: ev.effective_date, status: ev.status, summary: parts.join(', '),
         note: full ? ev.note : null, reason: full ? d.reason ?? null : null, createdBy: ev.created_by_name, createdAt: ev.created_at,
       });
     }
-    res.json({ events: full ? events : events.filter((e) => e.kind !== 'salary_revision') });
+    res.json({ events: full ? events : events.filter((e) => e.kind !== 'salary_revision' && e.kind !== 'suspension') });
   });
 
   r.post('/:id/career', hr, async (req, res) => {
