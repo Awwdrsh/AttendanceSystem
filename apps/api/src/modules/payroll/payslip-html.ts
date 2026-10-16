@@ -13,6 +13,8 @@ export interface PayslipView {
   explain: Array<{ code: string; text: string }>;
   numerals: 'latin' | 'devanagari';
   payslipId: string;
+  /** HR has held this net pay; it is paid later. */
+  held?: boolean;
 }
 
 const esc = (s: string | null | undefined) => (s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
@@ -38,6 +40,7 @@ table.blk td{padding:6px 0;border-bottom:1px solid #f0f0f2}.amt{text-align:right
 .totals{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:8px;font-weight:600}
 .net{margin-top:24px;padding:18px 20px;border:1px solid #e6e7ea;border-radius:12px;display:flex;justify-content:space-between;align-items:center}
 .net .label{color:#6b707b}.net b{font-size:24px;font-weight:600;letter-spacing:-.02em;color:#12773a;font-variant-numeric:tabular-nums}.words{font-size:12px;color:#6b707b;margin-top:2px}
+.held{margin-top:20px;padding:10px 14px;border-radius:10px;background:#fff4e5;color:#8a4b00;font-weight:500}
 .foot{margin-top:24px;font-size:11px;color:#6b707b;border-top:1px solid #e6e7ea;padding-top:10px}.explain{margin-top:16px;font-size:12px}
 @media print{body{margin:10mm auto}.net{border-color:#bbb}}
 </style></head><body>
@@ -51,6 +54,7 @@ table.blk td{padding:6px 0;border-bottom:1px solid #f0f0f2}.amt{text-align:right
 </div>
 <div class="cols">${block('Earnings', 'earning')}${block('Deductions', 'deduction')}${block('Employer contributions', 'employer_contribution')}</div>
 <div class="totals"><div class="amt">Gross ${n(v.gross)}</div><div class="amt">Total deductions ${n(v.totalDeductions)}</div><div class="amt">${n(v.employerStatutory)}</div></div>
+${v.held ? '<div class="held">Payment on hold: this net pay has not been paid yet. HR will release it in a later month.</div>' : ''}
 <div class="net"><div><div class="label">Net pay</div><div class="words">${esc(amountInWordsEn(v.net))}</div></div><b>NPR ${n(v.net)}</b></div>
 <div class="meta"><div><span>Year-to-date gross</span>${n(v.ytd.gross)}</div><div><span>Year-to-date tax (TDS)</span>${n(v.ytd.tds)}</div><div><span>Year-to-date SSF/PF</span>${n(v.ytd.statutory)}</div></div>
 <details class="explain"><summary>How was this amount calculated?</summary><ul>${v.explain.map((e) => `<li><b>${esc(e.code)}</b>: ${esc(e.text)}</li>`).join('')}</ul></details>

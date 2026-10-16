@@ -11,6 +11,7 @@ import { ssfSheetCsv } from './exports.js';
 import { renderPayslipHtml } from './payslip-html.js';
 import { salarySheet, salarySheetCsv, salarySheetHtml } from './salary-sheet.js';
 import { decideTaxSavings, pendingTaxSavings, submitTaxSavings, taxSavingsRoutes } from './tax-savings.js';
+import { complianceRoutes } from './compliance.js';
 import { approveRun, bonusAllocation, computeRun, ensurePeriod, getPeriod, getRun, lockRun, preflight, publishRun, reviewRun } from './service.js';
 
 const STATUTORY_KEYS = new Set(['tax.schedule', 'tax.deductions', 'ssf.rates', 'pf.rates', 'ot.multiplier', 'festival.allowance', 'min_wage', 'bonus.caps', 'ssf.deposit_days', 'tds.deposit_days']);
@@ -25,6 +26,8 @@ export function payrollRoutes(deps: AppDeps): Router {
 
   // Employees' tax savings self-service (any signed-in user; rules inside).
   r.use('/tax-savings', taxSavingsRoutes(deps));
+  // Optimum CIT, opening balances, held pay, certificates and statutory reports.
+  r.use(complianceRoutes(deps));
 
   // ---------------------------------------------------------------- rule versions (plan §6.13)
   r.get('/rules', payrollRole, async (req, res) => {
@@ -201,7 +204,7 @@ export function payrollRoutes(deps: AppDeps): Router {
    */
   r.put('/declarations', async (req, res) => {
     const b = z.object({ employeeId: z.uuid().optional(), fiscalYearStart: z.number().int(), lifePremium: amount.default('0'), healthPremium: amount.default('0'), citMonthly: amount.default('0'),
-      medicalCost: amount.default('0'), otherRetirementAnnual: amount.default('0'), submit: z.boolean().default(true) }).parse(req.body);
+      medicalCost: amount.default('0'), otherRetirementAnnual: amount.default('0'), donation: amount.default('0'), submit: z.boolean().default(true) }).parse(req.body);
     const employeeId = b.employeeId ?? req.user!.employeeId;
     if (!employeeId) throw new BadRequestError('employeeId required');
     await assertManages(db, req.user!, employeeId);
@@ -221,12 +224,12 @@ export function payrollRoutes(deps: AppDeps): Router {
       } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
     }
     await db.query(
-      `INSERT INTO tax_declaration (employee_id, fiscal_year_start, life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, status, verified_by, verified_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CASE WHEN $8 = 'verified' THEN now() END)
+      `INSERT INTO tax_declaration (employee_id, fiscal_year_start, life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, donation, status, verified_by, verified_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $10, $8, $9, CASE WHEN $8 = 'verified' THEN now() END)
        ON CONFLICT (employee_id, fiscal_year_start) DO UPDATE SET life_premium = EXCLUDED.life_premium, health_premium = EXCLUDED.health_premium, cit_monthly = EXCLUDED.cit_monthly,
-         medical_cost = EXCLUDED.medical_cost, other_retirement_annual = EXCLUDED.other_retirement_annual, status = EXCLUDED.status, verified_by = EXCLUDED.verified_by,
-         verified_at = EXCLUDED.verified_at, updated_at = now()`,
-      [employeeId, fiscalYearStart, b.lifePremium, b.healthPremium, b.citMonthly, b.medicalCost, b.otherRetirementAnnual, submit ? 'verified' : 'draft', submit ? req.user!.id : null]);
+         medical_cost = EXCLUDED.medical_cost, other_retirement_annual = EXCLUDED.other_retirement_annual, donation = EXCLUDED.donation, cit_from_month = NULL, cit_prev_monthly = 0,
+         status = EXCLUDED.status, verified_by = EXCLUDED.verified_by, verified_at = EXCLUDED.verified_at, updated_at = now()`,
+      [employeeId, fiscalYearStart, b.lifePremium, b.healthPremium, b.citMonthly, b.medicalCost, b.otherRetirementAnnual, submit ? 'verified' : 'draft', submit ? req.user!.id : null, b.donation]);
     await audit(db, { actorId: req.user!.id, action: 'upsert', table: 'tax_declaration', rowId: employeeId, after: b });
     return res.json({ ok: true, status: submit ? 'verified' : 'draft' });
   });
@@ -458,6 +461,8 @@ export function payrollRoutes(deps: AppDeps): Router {
     if (!canSeePayslip(req.user!, row.employee_id)) throw new ForbiddenError();
     if (!hasRole(req.user!, 'hr') && !row.published_at) throw new NotFoundError('payslip not found');
     const lines = await db.query('SELECT component_code AS code, type, name_en, name_ne, amount, basis, sort_order FROM payslip_line WHERE payslip_id = $1 ORDER BY sort_order', [id]);
+    const hold = await db.query<{ status: string; reason: string }>(`SELECT status, reason FROM payroll_hold WHERE run_id = $1 AND employee_id = $2 AND status IN ('held', 'releasing')`, [row.run_id, row.employee_id]);
+    row.held = hold.rows[0] ? { status: hold.rows[0].status, reason: hasRole(req.user!, 'hr') ? hold.rows[0].reason : null } : null;
     return { row, lines: lines.rows as Array<{ code: string; type: string; name_en: string; name_ne: string | null; amount: string; basis: unknown; sort_order: number }> };
   }
   r.get('/payslips/:id', async (req, res) => {
@@ -478,6 +483,7 @@ export function payrollRoutes(deps: AppDeps): Router {
       lines: lines.map((l) => ({ code: l.code, type: l.type, nameEn: l.name_en, nameNe: l.name_ne, amount: String(l.amount) })),
       gross: String(row.gross), totalDeductions: String(row.total_deductions), employerStatutory: String(row.employer_statutory), net: String(row.net),
       ytd: { gross: row.ytd?.gross ?? '0', tds: row.ytd?.tds ?? '0', statutory: row.ytd?.statutory ?? '0' }, explain: row.explain ?? [],
+      held: Boolean(row.held),
     });
     res.type('text/html').send(html);
   });

@@ -39,6 +39,9 @@ export interface TaxDeductionRules {
   medicalCreditRate: string;      // 0.15
   medicalCreditCap: string;       // 1500
   femaleRebate: string;           // 0.10
+  /** Income Tax Act Sec 12: donations to approved organisations, up to the lower of this cap and a fraction of adjusted taxable income. */
+  donationCap?: string;           // 100000
+  donationFraction?: string;      // 0.05
 }
 
 /** Rules resolved by the caller as of the pay period (plan §6.13). Keys mirror rule_version.rule_key. */
@@ -111,6 +114,8 @@ export interface DeclarationInput {
   citMonthly: string;
   medicalCost: string;
   otherRetirementAnnual: string;
+  /** Donations to approved organisations in the fiscal year (Sec 12); optional, 0 when absent. */
+  donation?: string;
 }
 
 export interface LoanInput { id: string; emi: string; remaining: string; kind?: 'loan' | 'advance' }
@@ -174,6 +179,7 @@ export interface TaxDetail {
   insuranceDeduction: string;
   remoteAreaDeduction: string;
   disabilityDeduction: string;
+  donationDeduction?: string;
   taxableAfterDeductions: string;
   bands: Array<{ upTo: string | null; rate: string; slice: string; tax: string; waived: boolean }>;
   grossTax: string;

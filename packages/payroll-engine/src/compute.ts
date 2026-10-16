@@ -173,7 +173,7 @@ export function computePayslip(input: PayrollInput): PayrollResult {
           monthTaxable, recurringTaxable: recurring, futureOneOffs: festivalLater, ytdTaxable: D(ytd.taxable), ytdTdsPaid: D(ytd.tdsPaid),
           monthRetirement: retirement, recurringRetirement, ytdRetirement: D(ytd.retirementEmployee).plus(D(ytd.retirementEmployer)),
           otherRetirementAnnual: D(declaration.otherRetirementAnnual), lifePremium: D(declaration.lifePremium), healthPremium: D(declaration.healthPremium),
-          medicalCost: D(declaration.medicalCost), monthIndexInFy: period.monthIndexInFy, deductFullTaxNow: Boolean(extras.deductFullTaxNow), isFinalSettlement: Boolean(extras.isFinalSettlement),
+          medicalCost: D(declaration.medicalCost), donation: D(declaration.donation ?? 0), monthIndexInFy: period.monthIndexInFy, deductFullTaxNow: Boolean(extras.deductFullTaxNow), isFinalSettlement: Boolean(extras.isFinalSettlement),
         });
         const amt = D(tax.tdsThisMonth);
         return { amount: amt, basis: { annualTax: tax.annualTax, projectedTaxable: tax.projectedAnnualTaxable, remainingMonths: tax.remainingMonths, status: tax.status },

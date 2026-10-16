@@ -26,9 +26,30 @@ export const DEMO = {
   deviceId: '00000000-0000-7000-8000-000000000021',
 };
 
+/**
+ * Empty the test database. One `DROP SCHEMA public CASCADE` takes a lock on every object in a single transaction; with
+ * the full schema that can exhaust the server's shared lock table (max_locks_per_transaction x connections), more so
+ * when several suites share one server. Dropping foreign keys, views, then tables one statement at a time keeps each
+ * transaction to a handful of locks.
+ */
+async function dropEverything(db: Db): Promise<void> {
+  const fks = await db.query<{ tbl: string; name: string }>(
+    `SELECT c.relname AS tbl, k.conname AS name FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND k.contype = 'f' AND k.conparentid = 0`);
+  for (const f of fks.rows) await db.query(`ALTER TABLE IF EXISTS public."${f.tbl}" DROP CONSTRAINT IF EXISTS "${f.name}"`);
+  const views = await db.query<{ name: string; kind: string }>(
+    `SELECT c.relname AS name, c.relkind AS kind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind IN ('v', 'm')`);
+  for (const v of views.rows) await db.query(`DROP ${v.kind === 'm' ? 'MATERIALIZED VIEW' : 'VIEW'} IF EXISTS public."${v.name}" CASCADE`);
+  const tables = await db.query<{ name: string }>(
+    `SELECT c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') ORDER BY c.relispartition DESC, c.relkind, c.relname`);
+  for (const t of tables.rows) await db.query(`DROP TABLE IF EXISTS public."${t.name}" CASCADE`);
+  await db.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+}
+
 export async function freshDb(): Promise<Db> {
   const db = createPool(TEST_DATABASE_URL);
-  await db.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+  await dropEverything(db);
   await migrate(db, MIGRATIONS_DIR, () => undefined);
   await seedBsCalendar(db);
   await seedDemo(db);
