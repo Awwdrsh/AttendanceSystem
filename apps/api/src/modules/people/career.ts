@@ -106,6 +106,18 @@ export async function recordCareerEvent(db: Queryable, input: CareerEventInput, 
   return ev;
 }
 
+/**
+ * Record an event that another module has already put into effect (a probation confirmation, a completed exit), so it
+ * appears on the career timeline without being applied a second time.
+ */
+export async function logCareerEvent(db: Queryable, input: CareerEventInput): Promise<void> {
+  const d = careerDetails.parse(input.details ?? {});
+  await db.query(
+    `INSERT INTO career_event (company_id, employee_id, kind, effective_date, details, note, status, applied_at, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, 'applied', now(), $7)`,
+    [input.companyId, input.employeeId, input.kind, input.effectiveDate, JSON.stringify(d), input.note ?? null, input.actorId ?? null]);
+}
+
 interface Snapshot {
   designation: string | null; designation_id: string | null; grade: string | null; status: string; exit_date: string | null; confirmed_on: string | null;
   branch_id: string | null; org_unit_id: string | null; manager_id: string | null; employment_type: string | null;

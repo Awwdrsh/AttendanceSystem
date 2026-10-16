@@ -1,3 +1,4 @@
+import { logCareerEvent } from '../people/career.js';
 import { z } from 'zod';
 import { bsLabel } from '../../bsdate.js';
 import type { Db, Queryable } from '../../db/pool.js';
@@ -223,6 +224,7 @@ export async function applyConfirmation(db: Queryable, input: { companyId: strin
     'INSERT INTO employee_confirmation (company_id, employee_id, confirmed_on, review_id, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id',
     [input.companyId, input.employeeId, input.confirmedOn, input.reviewId, input.actorId]);
   await audit(db, { actorId: input.actorId, action: 'confirm', table: 'employee', rowId: input.employeeId, after: { confirmedOn: input.confirmedOn, reviewId: input.reviewId } });
+  await logCareerEvent(db, { companyId: input.companyId, employeeId: input.employeeId, kind: 'confirmation', effectiveDate: input.confirmedOn, note: input.reviewId ? 'Confirmed after the probation review' : null, actorId: input.actorId });
   return r.rows[0]!.id;
 }
 
@@ -323,8 +325,8 @@ export async function clearanceBlockers(db: Queryable, exitId: string, employeeI
 
 /** Finish an exit: the employee becomes exited (sign-in already stops after the last working day). */
 export async function completeExit(db: Queryable, exitId: string, actorId: string | null, opts: { skipOpenTasks?: boolean } = {}): Promise<void> {
-  const r = await db.query<{ status: string; employee_id: string; company_id: string; accepted_lwd: string }>(
-    'SELECT status, employee_id, company_id, accepted_lwd FROM employee_exit WHERE id = $1 FOR UPDATE', [exitId]);
+  const r = await db.query<{ status: string; employee_id: string; company_id: string; accepted_lwd: string; kind: string; reason: string | null }>(
+    'SELECT status, employee_id, company_id, accepted_lwd, kind, reason FROM employee_exit WHERE id = $1 FOR UPDATE', [exitId]);
   const ex = r.rows[0];
   if (!ex) throw new NotFoundError('exit not found');
   if (ex.status !== 'accepted') throw new ConflictError(`exit is ${ex.status}`);
@@ -340,6 +342,8 @@ export async function completeExit(db: Queryable, exitId: string, actorId: strin
   await db.query(`UPDATE employee_exit SET status = 'completed', completed_at = now() WHERE id = $1`, [exitId]);
   await db.query(`UPDATE employee SET status = 'exited', exit_date = $2, updated_at = now() WHERE id = $1`, [ex.employee_id, ex.accepted_lwd]);
   await audit(db, { actorId, action: 'complete_exit', table: 'employee_exit', rowId: exitId, after: { skippedTasks: b.openTasks } });
+  await logCareerEvent(db, { companyId: ex.company_id, employeeId: ex.employee_id, kind: 'separation', effectiveDate: ex.accepted_lwd,
+    details: { separationType: ex.kind as 'resignation' }, note: ex.reason, actorId });
 }
 
 /** What HR still needs to do in payroll for a leaver (final settlement run, loans, leave encashment). */
