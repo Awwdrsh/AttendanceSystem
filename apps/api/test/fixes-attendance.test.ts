@@ -127,7 +127,8 @@ describe('worker queue', () => {
     const items = [];
     for (let i = 0; i < 300; i++) items.push({ employeeId: i % 2 ? DEMO.sita : DEMO.ram, localDate: new Date(Date.UTC(2025, 0, 1) + i * 86_400_000).toISOString().slice(0, 10) });
     await enqueueRecompute(db, items, 'test');
-    const r = await drainRecomputeQueue({ db, logger: pino({ level: 'silent' }), cipher: testCipher });
+    // The point is batching past the old 50-row cap, not speed: give a loaded test machine room to finish.
+    const r = await drainRecomputeQueue({ db, logger: pino({ level: 'silent' }), cipher: testCipher }, { budgetMs: 60_000 });
     expect(r.processed).toBe(300);
     expect((await db.query('SELECT count(*)::int AS n FROM recompute_queue')).rows[0].n).toBe(0);
   });
