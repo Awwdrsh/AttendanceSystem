@@ -9,6 +9,8 @@ import { lockAttendance } from '../attendance/service.js';
 import { notify, userIdForEmployee } from '../notifications/service.js';
 import { resolveRules } from './rules.js';
 import { claimPayouts, payoutPreview, previewMessage, releaseRunPayouts, settleRunPayouts, withPayoutComponents } from '../expenses/payroll.js';
+import { penaltyPreview, penaltyUnpaidDays } from '../attendance-tools/penalties.js';
+import { extrasPolicy } from '../attendance-tools/policy.js';
 
 export interface PeriodRow { id: string; company_id: string; bs_year: number; bs_month: number; start_ad: string; end_ad: string; days: number; attendance_locked_at: Date | null }
 export interface RunRow {
@@ -93,6 +95,14 @@ export async function preflight(db: Queryable, companyId: string, run: RunRow): 
   const payouts = await payoutPreview(db, companyId, run.id, run.run_type, emps.filter((e) => e.assignment).map((e) => e.id));
   if (payouts.count > 0) warnings.push({ code: 'expense_payouts', message: previewMessage(payouts), count: payouts.count, employees: payouts.employees });
 
+  if (run.run_type === 'regular') {
+    // Late-arrival penalties of this month that HR has not applied yet (Attendance, Late penalties).
+    const rule = (await extrasPolicy(db, companyId)).latePenalty;
+    if (rule.enabled) {
+      const due = (await penaltyPreview(db, companyId, p.bs_year, p.bs_month, rule)).filter((l) => l.penaltyDays > 0 && !l.applied);
+      if (due.length) warnings.push({ code: 'late_penalties_pending', message: 'Late-arrival penalties for this month have not been applied yet', count: due.length, employees: due.map((l) => `${l.empCode}: ${l.lateDays} late days`) });
+    }
+  }
   const joiners = emps.filter((e) => e.join_date && e.join_date >= p.start_ad && e.join_date <= p.end_ad).map((e) => e.emp_code);
   const leavers = emps.filter((e) => e.exit_date && e.exit_date >= p.start_ad && e.exit_date <= p.end_ad).map((e) => e.emp_code);
   return { ok: blockers.length === 0, blockers, warnings, info: { employees: emps.length, joiners, leavers, period: { bsYear: p.bs_year, bsMonth: p.bs_month, startAd: p.start_ad, endAd: p.end_ad, days: p.days } } };
@@ -207,7 +217,8 @@ export async function computeRun(db: Db, companyId: string, runId: string, actor
                 count(*)::text AS rows,
                 (SELECT coalesce(sum(approved_min), 0) FROM ot_slip s WHERE s.employee_id = $1 AND s.local_date BETWEEN $2 AND $3 AND s.status IN ('approved', 'posted'))::text AS ot_min
            FROM v_attendance_latest WHERE employee_id = $1 AND local_date BETWEEN $2 AND $3`, [emp.id, from, to]);
-      const lop = D(att.rows[0]?.lop ?? 0);
+      // Unpaid days from an applied late-arrival penalty for this BS month count as loss of pay on the salary run.
+      const lop = D(att.rows[0]?.lop ?? 0).plus(carriesSalary ? await penaltyUnpaidDays(client, emp.id, p.bs_year, p.bs_month) : 0);
       const paidDays = D(employedDays).minus(lop);
       const otHours = D(att.rows[0]?.ot_min ?? 0).div(60).toDecimalPlaces(2);
 

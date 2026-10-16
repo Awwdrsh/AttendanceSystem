@@ -36,6 +36,8 @@ import { hiringRoutes } from './modules/hiring/routes.js';
 import { careersRoutes } from './modules/careers/routes.js';
 import { engageRoutes } from './modules/engage/routes.js';
 import { insightsRoutes } from './modules/insights/routes.js';
+import { attendanceToolsRoutes } from './modules/attendance-tools/routes.js';
+import { tasksRoutes } from './modules/tasks/routes.js';
 import { wireModules } from './modules/integrations.js';
 import { filesRoutes } from './modules/files/routes.js';
 
@@ -135,6 +137,8 @@ export function createApp(deps: AppDeps, opts: AppOptions = {}): Express {
   api.use('/hiring', hiringRoutes(deps));
   api.use('/engage', engageRoutes(deps));
   api.use('/insights', insightsRoutes(deps));
+  api.use('/attendance-tools', attendanceToolsRoutes(deps));
+  api.use('/tasks', tasksRoutes(deps));
   app.use('/api/v1', api);
 
   if (opts.webDist) {
