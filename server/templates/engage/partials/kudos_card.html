@@ -1,0 +1,24 @@
+<article class="hj-card p-md" id="{{ k.dom }}">
+  <div class="hj-row nowrap hj-between" style="align-items:flex-start">
+    <div class="hj-row nowrap" style="align-items:flex-start;min-width:0">
+      <span class="hj-avatar lg" aria-hidden="true">{{ k.giver.name|initials }}</span>
+      <div style="min-width:0">
+        <div class="hj-sm"><span class="hj-strong">{{ k.giver.name }}</span> gave kudos to <span class="hj-strong">{% for r in k.recipients %}{{ r.name }}{% if not forloop.last %}, {% endif %}{% endfor %}</span></div>
+        <div class="hj-small hj-muted">{{ k.createdAt|relative_time }}</div>
+      </div>
+    </div>
+    {% if k.canDelete %}
+    <div style="position:relative" x-data="{ open: false }" @click.outside="open = false">
+      <button type="button" class="hj-iconbtn" aria-label="Kudos options" @click="open = !open"><i class="ti ti-dots" aria-hidden="true"></i></button>
+      <div class="hj-menu down" x-show="open" x-cloak>
+        <button type="button" class="hj-menu-item danger" hx-post="{% url 'engage:kudos_delete' k.id %}" hx-swap="none" {% confirm_attrs "Remove these kudos? They disappear from the feed for everyone." label="Remove" %}><i class="ti ti-trash" aria-hidden="true"></i>Remove</button>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  <div class="hj-stack hj-mt-sm" style="--gap:10px;padding-left:56px">
+    {% if k.value %}<span class="hj-badge hj-tone-accent" style="width:fit-content"><span aria-hidden="true">{{ k.value.emoji }}</span> {{ k.value.name }}</span>{% endif %}
+    <div class="hj-sm" style="white-space:pre-wrap;overflow-wrap:anywhere">{{ k.message }}</div>
+    {% include "engage/partials/social.html" with s=k.social %}
+  </div>
+</article>

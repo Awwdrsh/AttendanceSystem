@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Travel · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Travel" subtitle="Trips are approved by the manager and then HR. After the trip, the traveller settles it with bills; any unspent advance is recovered from salary." %}{% endpage_header %}
+<div id="exp-trips" hx-get="{% url 'expenses:trips_list' %}?status={{ status }}" hx-trigger="hj:refresh-exp-trips from:body" hx-swap="innerHTML">
+  {% include "expenses/partials/trips_block.html" %}
+</div>
+{% if open %}<div hx-get="{% url 'expenses:trip_detail' open %}" hx-target="#hj-drawer-body" hx-trigger="load"></div>{% endif %}
+{% endblock %}

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Statutory rules · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack" style="--gap:24px">
+{% page_header "Statutory rules" subtitle="Tax slabs, SSF rates and other legal values, each valid for a date range. Every pay run uses the version in force for its period; new fiscal-year values are added as new rows, never overwritten." %}{% endpage_header %}
+{% if rules %}
+<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+  <thead><tr><th>Rule</th><th>Effective</th><th>Approval</th><th>Source</th><th></th></tr></thead>
+  <tbody>{% for r in rules %}
+  <tr style="cursor:pointer" hx-get="{% url 'payroll:rule_view' r.id %}" hx-target="#hj-modal-body">
+    <td><div class="hj-row nowrap hj-gap-xs"><span class="mono hj-strong hj-sm">{{ r.rule_key }}</span>{% if r.locked %}<span class="hj-badge hj-tone-idle"><i class="ti ti-lock" aria-hidden="true"></i>Statutory</span>{% endif %}</div></td>
+    <td class="hj-sm hj-muted">{{ r.effective }}</td>
+    <td>{% if r.approved_at %}<span class="hj-sm hj-muted">{{ r.approved_at|bs_date }}</span>{% else %}{% status_badge "pending" %}{% endif %}</td>
+    <td>{% if r.source_url %}<a class="hj-sm" href="{{ r.source_url }}" target="_blank" rel="noreferrer" x-data @click.stop>Open<i class="ti ti-external-link" aria-hidden="true"></i></a>{% else %}<span class="hj-sm hj-muted">—</span>{% endif %}</td>
+    <td class="right">{% if not r.approved_at and is_hr %}<button type="button" class="hj-btn default xs" hx-post="{% url 'payroll:rule_approve' r.id %}" hx-swap="none" hx-trigger="click consume"><i class="ti ti-check" aria-hidden="true"></i>Approve</button>{% endif %}</td>
+  </tr>{% endfor %}</tbody>
+</table></div></div>
+{% else %}{% empty_state title="No rules loaded" hint="Load the default statutory rules from Setup, then approve them here." %}{% endif %}
+</div>
+{% endblock %}

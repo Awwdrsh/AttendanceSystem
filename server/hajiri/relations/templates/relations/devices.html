@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Clock-in devices · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack hj-gap-lg">
+  {% page_header "Clock-in devices" subtitle="Stop clock-ins from someone else's phone: when this is on, the website and app accept clock-ins only from devices you approved for that person. Device terminals and kiosks are not affected." %}{% endpage_header %}
+  <div class="hj-card p-md">
+    <form class="hj-row nowrap hj-between" hx-post="{% url 'relations:devices_policy' %}" hx-trigger="change" hx-swap="none">
+      <div><div class="hj-strong">Clock in only from registered devices</div><div class="hj-sm hj-muted">Employees register their phone under My attendance, Clock-in devices. Up to three each.</div></div>
+      <input type="hidden" name="registeredDevicesOnly" value="0">
+      <input type="checkbox" class="hj-switch" name="registeredDevicesOnly" value="1"{% if on %} checked{% endif %} aria-label="Clock in only from registered devices">
+    </form>
+    {% if on %}<div class="hj-mt-sm">{% alert "warn" %}People without an approved device cannot clock in from the website until you approve one.{% endalert %}</div>{% endif %}
+  </div>
+  <div class="hj-row hj-end"><nav class="hj-pills" aria-label="Show"><a class="hj-pill" href="?status=pending"{% if status == 'pending' %} aria-current="page"{% endif %}>Waiting</a><a class="hj-pill" href="?status=all"{% if status == 'all' %} aria-current="page"{% endif %}>All</a></nav></div>
+  {% include "relations/partials/device_list.html" %}
+</div>
+{% endblock %}

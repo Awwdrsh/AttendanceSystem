@@ -1,0 +1,73 @@
+{# EmployeeForm.tsx. PAN and bank account are write-only here; HR reveals them from the profile when needed. #}
+<form class="hj-form" data-modal-title="{{ title }}" data-modal-size="lg" hx-post="{{ action }}" hx-swap="none"
+      x-data="{ code: {{ e.emp_code|default:''|json_attr }}, name: {{ e.name_en|default:''|json_attr }} }">
+  <div class="hj-stack hj-gap-sm"><div class="hj-sm hj-strong">Personal details</div>
+    <div class="hj-form-row">
+      <div class="hj-fieldset"><label class="hj-label" for="e-name">Full name<span class="req">*</span></label><input id="e-name" name="nameEn" class="hj-input" required maxlength="120" x-model="name"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-code">Employee code<span class="req">*</span></label><div class="hj-help">Must match the code on the attendance terminal.</div><input id="e-code" name="empCode" class="hj-input mono" required maxlength="32" x-model="code"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-email">Email</label><input id="e-email" type="email" name="email" class="hj-input" value="{{ e.email|default:'' }}"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-phone">Phone</label><input id="e-phone" name="phone" class="hj-input" maxlength="30" value="{{ e.phone|default:'' }}"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-gender">Gender</label><select id="e-gender" name="gender" class="hj-select"><option value=""></option>
+        <option value="male"{% if e.gender == 'male' %} selected{% endif %}>Male</option><option value="female"{% if e.gender == 'female' %} selected{% endif %}>Female</option><option value="other"{% if e.gender == 'other' %} selected{% endif %}>Other</option></select></div>
+      {% bs_date_input "dob" value=e.dob label="Date of birth" id="e-dob" %}
+      <div class="hj-fieldset"><label class="hj-label" for="e-ms">Marital status</label><div class="hj-help">Sets the income tax slab.</div><select id="e-ms" name="maritalStatus" class="hj-select"><option value=""></option>
+        <option value="single"{% if e.marital_status == 'single' %} selected{% endif %}>Single</option><option value="couple"{% if e.marital_status == 'couple' %} selected{% endif %}>Couple</option></select></div>
+    </div></div>
+  <hr class="hj-divider">
+  <div class="hj-stack hj-gap-sm"><div class="hj-sm hj-strong">Job</div>
+    <div class="hj-form-row">
+      <div class="hj-fieldset"><label class="hj-label" for="e-des">Designation</label><input id="e-des" name="designation" class="hj-input" maxlength="120" value="{{ e.designation|default:'' }}"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-grade">Grade</label><input id="e-grade" name="grade" class="hj-input" maxlength="40" value="{{ e.grade|default:'' }}"></div>
+      {% bs_date_input "joinDate" value=e.join_date label="Join date" id="e-join" %}
+      {% bs_date_input "probationEnd" value=e.probation_end label="Probation ends" id="e-prob" %}
+      <div class="hj-fieldset"><label class="hj-label" for="e-et">Employment type</label><select id="e-et" name="employmentType" class="hj-select">
+        {% for v, l in employment %}<option value="{{ v }}"{% if e.employment_type == v or not e.employment_type and v == 'regular' %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-br">Branch</label><select id="e-br" name="branchId" class="hj-select"><option value=""></option>
+        {% for v, l in branches %}<option value="{{ v }}"{% if e.branch_id == v %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+      {% if not new %}{% bs_date_input "exitDate" value=e.exit_date label="Exit date" id="e-exit" description="Setting this marks the employee as exited." %}{% endif %}
+    </div></div>
+  <hr class="hj-divider">
+  <div class="hj-stack hj-gap-sm"><div class="hj-sm hj-strong">Schedule</div>
+    <div class="hj-form-row">
+      <div class="hj-fieldset"><label class="hj-label" for="e-shift">Shift</label><select id="e-shift" name="shiftId" class="hj-select"><option value=""></option>
+        {% for v, l in shifts %}<option value="{{ v }}"{% if e.shift_id == v %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+      <fieldset class="hj-fieldset" style="border:0;padding:0;margin:0"><legend class="hj-label">Weekly off days</legend>
+        <div class="hj-row hj-gap-sm">{% for i, d in dow %}<label class="hj-row nowrap hj-gap-xs hj-sm"><input type="checkbox" class="hj-check" name="weeklyOffDays" value="{{ i }}"{% if i in e.weekly_off_days %} checked{% endif %}>{{ d }}</label>{% endfor %}</div></fieldset>
+      <label class="hj-row nowrap hj-gap-sm" style="align-items:flex-start"><input type="checkbox" class="hj-switch" name="workFromHome"{% if e.work_from_home %} checked{% endif %}>
+        <span><span class="hj-sm">Can work from home</span><br><span class="hj-small hj-muted">Lets them clock in from anywhere without giving a reason. Their home clock-ins are tagged Remote.</span></span></label>
+      <label class="hj-row nowrap hj-gap-sm" style="align-items:flex-start"><input type="checkbox" class="hj-switch" name="otEligible"{% if e.ot_eligible %} checked{% endif %}>
+        <span><span class="hj-sm">Eligible for overtime</span><br><span class="hj-small hj-muted">Labour Act Sec 31. Excluding someone needs a documented Sec 31(2) basis.</span></span></label>
+    </div></div>
+  <hr class="hj-divider">
+  <div class="hj-stack hj-gap-sm"><div class="hj-sm hj-strong">Tax and social security</div>
+    <div class="hj-form-row">
+      <div class="hj-fieldset"><label class="hj-label" for="e-reg">Retirement scheme</label><div class="hj-help">SSF: 11% employee, 20% employer.</div><select id="e-reg" name="regime" class="hj-select">
+        <option value="ssf"{% if e.regime == 'ssf' %} selected{% endif %}>SSF</option><option value="pf"{% if e.regime == 'pf' %} selected{% endif %}>PF and gratuity</option><option value="none"{% if e.regime == 'none' %} selected{% endif %}>None</option></select></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-ssf">SSF ID</label><input id="e-ssf" name="ssfId" class="hj-input" maxlength="20" value="{{ e.ssf_id|default:'' }}"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-pf">PF ID</label><input id="e-pf" name="pfId" class="hj-input" maxlength="40" value="{{ e.pf_id|default:'' }}"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-cit">CIT ID</label><input id="e-cit" name="citId" class="hj-input" maxlength="40" value="{{ e.cit_id|default:'' }}"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-pan">PAN</label><div class="hj-help">{% if e.has_pan %}A PAN is on file. Enter a new one to replace it.{% else %}9 digits.{% endif %}</div>
+        <input id="e-pan" name="pan" class="hj-input mono" placeholder="•••••••••" inputmode="numeric" autocomplete="off"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-rac">Remote area class</label><select id="e-rac" name="remoteAreaClass" class="hj-select"><option value=""></option>
+        {% for c in "ABCD" %}<option value="{{ c }}"{% if e.remote_area_class == c %} selected{% endif %}>Class {{ c }}</option>{% endfor %}</select></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-fm">Festival allowance month</label><div class="hj-help">Defaults to Ashwin (Dashain). The employee may choose another month.</div>
+        <select id="e-fm" name="festivalMonth" class="hj-select"><option value=""></option>{% for i, m in months %}<option value="{{ i }}"{% if e.festival_month == i %} selected{% endif %}>{{ m }}</option>{% endfor %}</select></div>
+      <div class="hj-stack hj-gap-sm">
+        <label class="hj-row nowrap hj-gap-sm"><input type="checkbox" class="hj-switch" name="isResident"{% if e.is_resident is not False %} checked{% endif %}><span class="hj-sm">Resident for tax</span></label>
+        <label class="hj-row nowrap hj-gap-sm" style="align-items:flex-start"><input type="checkbox" class="hj-switch" name="disability"{% if e.disability %} checked{% endif %}><span><span class="hj-sm">Has a disability</span><br><span class="hj-small hj-muted">Adds the extra tax deduction.</span></span></label>
+      </div>
+    </div></div>
+  <hr class="hj-divider">
+  <div class="hj-stack hj-gap-sm"><div class="hj-sm hj-strong">Bank</div>
+    <div class="hj-form-row">
+      <div class="hj-fieldset"><label class="hj-label" for="e-bank">Bank</label><select id="e-bank" name="bankCode" class="hj-select"><option value=""></option>
+        {% for v, l in banks %}<option value="{{ v }}"{% if e.bank_code == v %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-bb">Bank branch</label><input id="e-bb" name="bankBranch" class="hj-input" maxlength="80" value="{{ e.bank_branch|default:'' }}"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="e-ba">Account number</label>{% if e.bank_account_last4 %}<div class="hj-help">Account ending {{ e.bank_account_last4 }} is on file. Enter a new one to replace it.</div>{% endif %}
+        <input id="e-ba" name="bankAccount" class="hj-input mono" placeholder="••••••••••" autocomplete="off" maxlength="40"></div>
+    </div></div>
+  <div class="hj-modal-foot hj-between">
+    <span class="hj-row nowrap hj-gap-xs hj-small hj-muted"><i class="ti ti-lock" aria-hidden="true"></i>PAN and bank account are encrypted. Every reveal is logged.</span>
+    <button type="submit" class="hj-btn" :disabled="!code.trim() || !name.trim()">{{ submit }}</button>
+  </div>
+</form>

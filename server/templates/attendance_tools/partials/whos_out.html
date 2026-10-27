@@ -1,0 +1,18 @@
+<div class="hj-stack" style="--gap:8px">
+{% section "Who's out" hint="People in "|add:scope|add:" who are away" %}
+<div class="hj-card p-md hj-stack" style="--gap:12px">
+  <div>
+    <div class="hj-eyebrow" style="margin-bottom:6px">Today</div>
+    {% if today_people %}<div class="hj-row hj-gap-xs">{% for p in today_people %}
+      <span class="hj-badge hj-tone-{{ p.tone }}" data-tip="{{ p.tip }}"><span aria-hidden="true" style="display:inline-grid;place-items:center;width:18px;height:18px;border-radius:50%;background:currentColor;color:var(--hj-surface);font-size:9px;font-weight:700;margin-right:4px">{{ p.name|initials }}</span>{{ p.name }}</span>
+    {% endfor %}</div>{% else %}<p class="hj-sm hj-muted" style="margin:0">Everyone is in today.</p>{% endif %}
+  </div>
+  {% if later %}<div>
+    <div class="hj-eyebrow" style="margin-bottom:6px">Next days</div>
+    <div class="hj-stack" style="--gap:4px">{% for d in later %}
+      <div class="hj-row nowrap hj-gap-xs" style="align-items:flex-start"><span class="hj-sm hj-muted" style="width:110px;flex-shrink:0">{{ d.date }}</span><span class="hj-sm">{{ d.text }}</span></div>
+    {% endfor %}</div>
+  </div>{% endif %}
+</div>
+{% endsection %}
+</div>

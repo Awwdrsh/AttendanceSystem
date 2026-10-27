@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Held pay · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack" style="--gap:24px">
+{% page_header "Held pay" subtitle="Net pay held back in a run is paid later: with the next pay run as a separate line (not taxed again), or recorded as paid outside payroll. Hold someone's pay from the pay run's review step." %}
+  <div class="hj-pills" role="tablist">{% for k, l in tabs %}<a class="hj-pill" href="?status={{ k }}"{% if k == tab %} aria-current="page"{% endif %}>{{ l }}</a>{% endfor %}</div>
+{% endpage_header %}
+{% if holds %}
+<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+  <thead><tr><th>Employee</th><th>Held in</th><th class="right">Net held</th><th>Reason</th><th>Status</th><th></th></tr></thead>
+  <tbody>{% for h in holds %}
+  <tr><td><div class="hj-strong hj-sm">{{ h.name_en }}</div><div class="hj-small hj-muted">{{ h.emp_code }}</div></td>
+    <td><a href="{% url 'payroll:run' h.run_id %}">{{ h.held_in }}</a></td>
+    <td class="right num hj-strong">{{ h.amount|npr }}</td>
+    <td><div class="hj-sm">{{ h.reason }}</div><div class="hj-small hj-muted">{{ h.held_by_name|default:'' }} · {{ h.held_at|bs_date }}</div></td>
+    <td>{% badge h.status_label h.status_tone %}{% if h.release_in %}<div class="hj-small hj-muted">in {{ h.release_in }}</div>{% endif %}</td>
+    <td class="right">{% if h.status == 'held' %}{% if h.run_status == 'locked' %}<button type="button" class="hj-btn light xs" hx-get="{% url 'payroll:hold_release' h.id %}" hx-target="#hj-modal-body">Release</button>
+      {% else %}<button type="button" class="hj-btn subtle gray xs" hx-post="{% url 'payroll:hold_cancel' h.id %}" hx-swap="none" {% confirm_attrs h.name_en|add:" will be paid normally in this run." title="Undo this hold?" label="Undo hold" tone="primary" %}>Undo hold</button>{% endif %}{% endif %}</td>
+  </tr>{% endfor %}</tbody>
+</table></div></div>
+{% elif tab == 'open' %}{% empty_state title="No pay on hold" hint="Everyone is being paid. To hold someone's pay, open a pay run and use Hold pay on the review step." %}
+{% else %}{% empty_state title="Nothing here" %}{% endif %}
+</div>
+{% endblock %}

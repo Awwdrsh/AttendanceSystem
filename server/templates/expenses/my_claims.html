@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Expense claims · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Expense claims" subtitle="Claim money you spent for work. Approved claims are paid with your next salary and are not taxed." %}
+  <button class="hj-btn" hx-get="{% url 'expenses:claim_new' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>New claim</button>
+{% endpage_header %}
+<div id="exp-claims" hx-get="{% url 'expenses:claims_list' %}?own=1" hx-trigger="hj:refresh-exp-claims from:body" hx-swap="innerHTML">
+  {% include "expenses/partials/claims_block.html" %}
+</div>
+{% if open %}<div hx-get="{% url 'expenses:claim_detail' open %}" hx-target="#hj-drawer-body" hx-trigger="load"></div>{% endif %}
+{% endblock %}

@@ -1,0 +1,7 @@
+{# 1-5 rating with the cycle's labels as tooltips (parts.tsx RatingPicker). #}
+<div class="hj-row" style="gap:4px" role="radiogroup" x-data="{ v: '{{ value|default_if_none:'' }}' }">
+  {% for n, lbl in levels %}
+  <label class="hj-btn {% if value != n %}default {% endif %}xs" :class="v == '{{ n }}' ? 'hj-btn xs' : 'hj-btn default xs'" style="min-width:34px;position:relative" title="{{ lbl }}">
+    <input type="radio" name="{{ name }}" value="{{ n }}" x-model="v"{% if value == n %} checked{% endif %}{% if disabled %} disabled{% endif %} style="position:absolute;opacity:0;width:0;height:0" aria-label="{{ n }}: {{ lbl }}">{{ n }}</label>
+  {% endfor %}
+</div>

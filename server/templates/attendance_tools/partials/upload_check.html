@@ -1,0 +1,32 @@
+<div id="upload-check" class="hj-stack" style="--gap:12px">
+  <p class="hj-small hj-muted" style="margin:0">{{ filename }}</p>
+  {% if errors %}{% alert "bad" title="The file cannot be read" %}{{ errors|join:" " }}{% endalert %}{% endif %}
+  {% if rows %}
+  {% stat_strip stats %}
+  {% if invalid %}
+  {% alert "warn" %}Fix the rows marked in red in your file and choose it again. Nothing has been saved yet.{% endalert %}
+  {% else %}
+  <form class="hj-card p-md hj-row hj-gap-sm" style="align-items:flex-end" hx-post="{% url 'attendance_tools:upload_import' %}" hx-target="#upload-check" hx-swap="outerHTML" x-data="{ reason: '' }">
+    <textarea name="csv" hidden>{{ csv }}</textarea>
+    <input type="hidden" name="filename" value="{{ filename }}">
+    <label class="hj-fieldset hj-grow" style="min-width:240px"><span class="hj-label">Reason</span>
+      <span class="hj-help">Saved with every punch for the audit trail</span>
+      <input class="hj-input" name="reason" maxlength="300" placeholder="For example: front door device offline" x-model="reason"></label>
+    <button type="submit" class="hj-btn" :disabled="reason.trim().length < 5"><i class="ti ti-upload" aria-hidden="true"></i>Add {{ valid }} row(s)</button>
+  </form>
+  {% endif %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll" style="max-height:480px"><table class="hj-table">
+    <thead><tr><th style="width:60px">Row</th><th>Employee</th><th>Date</th><th>In</th><th>Out</th><th>Note</th><th>Check</th></tr></thead>
+    <tbody>{% for r in rows %}
+    <tr{% if r.errors %} class="highlight"{% endif %}>
+      <td class="num hj-muted">{{ r.line }}</td>
+      <td>{% if r.name %}<div class="hj-strong">{{ r.name }}</div><div class="hj-small hj-muted">{{ r.empCode }}</div>{% else %}<span class="hj-strong">{{ r.empCode }}</span>{% endif %}</td>
+      <td>{% if r.date_label %}{{ r.date_label }}{% else %}<span class="hj-muted">{{ r.dateBs|default:"—" }}</span>{% endif %}</td>
+      <td class="num">{{ r.inTime|default:"—" }}</td>
+      <td><span class="num">{{ r.outTime|default:"—" }}</span>{% if r.overnight %} {% badge "next day" "info" %}{% endif %}</td>
+      <td class="hj-muted hj-truncate" style="max-width:220px">{{ r.note|default:"" }}</td>
+      <td>{% if r.errors %}<span class="hj-bad-text hj-small">{{ r.errors|join:" " }}</span>{% else %}{% badge "OK" "ok" %}{% endif %}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div></div>
+  {% endif %}
+</div>

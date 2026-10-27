@@ -1,0 +1,19 @@
+{# Panels.tsx LeaderboardPanel: most appreciated people this BS month. #}
+<div class="hj-card p-md">
+  <div class="hj-row hj-between" style="margin-bottom:12px">
+    <div class="hj-row" style="gap:8px"><i class="ti ti-trophy" aria-hidden="true"></i><span class="hj-strong hj-sm">Most appreciated</span></div>
+    <span class="hj-small hj-muted">{{ d.label }}</span>
+  </div>
+  {% if not d.received %}
+  <p class="hj-sm hj-muted" style="margin:0">No kudos yet this month. Be the first to thank someone.</p>
+  {% else %}
+  <div class="hj-stack" style="--gap:8px">
+    {% for r in d.received|slice:":5" %}
+    <div class="hj-row nowrap" style="gap:10px"><span class="hj-sm hj-muted num" style="width:16px">{{ forloop.counter }}</span><span class="hj-sm hj-truncate" style="flex:1">{{ r.name }}</span><span class="hj-badge hj-tone-accent sm">{{ r.count }}</span></div>
+    {% endfor %}
+    {% if d.top_values %}
+    <div class="hj-row" style="gap:6px;margin-top:4px">{% for v in d.top_values %}<span class="hj-badge hj-tone-idle sm">{{ v.emoji }} {{ v.name }} · {{ v.count }}</span>{% endfor %}</div>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>

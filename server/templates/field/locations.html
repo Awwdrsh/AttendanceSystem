@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Locations · Hajiri{% endblock %}
+{% block scripts %}<script src="{% static 'field/geo.js' %}" defer></script>{% endblock %}
+{% block content %}
+<div class="hj-stack" style="--gap:28px">
+<div class="hj-stack" style="--gap:8px">
+  <div class="hj-section-title">
+    <div><h3>Work locations</h3>
+      <p class="hj-small hj-muted" style="margin:0">Places people clock in from the browser or phone. A punch within the radius counts as at work.</p></div>
+    <button type="button" class="hj-btn sm" hx-get="{% url 'field:location_new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>Add location</button>
+  </div>
+  {% include "field/partials/locations_table.html" %}
+</div>
+<div class="hj-stack" style="--gap:8px">
+  {% section "Rules" hint="How strictly locations are checked, which breaks people can take, and how field visits work." %}
+  <form class="hj-card p-lg hj-stack" style="--gap:16px" hx-post="{% url 'field:rules' %}" hx-swap="none" x-data="{ mode: '{{ policy.geofenceMode }}' }">
+    <div>
+      <div class="hj-strong" style="margin-bottom:6px">Clocking in away from a location</div>
+      <div class="hj-pills" role="radiogroup">
+        <label class="hj-pill"><input type="radio" name="geofenceMode" value="off" x-model="mode" hidden{% if policy.geofenceMode == 'off' %} checked{% endif %}><span>Don't check</span></label>
+        <label class="hj-pill"><input type="radio" name="geofenceMode" value="flag" x-model="mode" hidden{% if policy.geofenceMode == 'flag' %} checked{% endif %}><span>Ask for a reason</span></label>
+        <label class="hj-pill"><input type="radio" name="geofenceMode" value="block" x-model="mode" hidden{% if policy.geofenceMode == 'block' %} checked{% endif %}><span>Refuse</span></label>
+      </div>
+      <p class="hj-small hj-muted" style="margin:6px 0 0">
+        <span x-show="mode === 'off'"{% if policy.geofenceMode != 'off' %} x-cloak{% endif %}>{{ mode_hint.off }}</span>
+        <span x-show="mode === 'flag'"{% if policy.geofenceMode != 'flag' %} x-cloak{% endif %}>{{ mode_hint.flag }}</span>
+        <span x-show="mode === 'block'"{% if policy.geofenceMode != 'block' %} x-cloak{% endif %}>{{ mode_hint.block }}</span>
+      </p>
+    </div>
+    <div>
+      <div class="hj-strong" style="margin-bottom:6px">Breaks</div>
+      <div class="hj-stack" style="--gap:6px">{% for k, label, rule in kinds %}
+        <div class="hj-row hj-gap-md" x-data="{ on: {{ rule.enabled|yesno:'true,false' }} }">
+          <label class="hj-switch" style="width:130px"><input type="checkbox" name="{{ k }}_enabled" x-model="on"{% if rule.enabled %} checked{% endif %}><span>{{ label }}</span></label>
+          <label class="hj-switch"><input type="checkbox" name="{{ k }}_paid"{% if rule.paid %} checked{% endif %} :disabled="!on"><span>Paid</span></label>
+          <label class="hj-row nowrap hj-gap-xs"><input class="hj-input" type="number" name="{{ k }}_maxMin" min="5" max="180" value="{{ rule.maxMin }}" style="width:90px" :disabled="!on" aria-label="{{ label }} limit"><span class="hj-small hj-muted">min</span></label>
+        </div>{% endfor %}
+      </div>
+      <p class="hj-small hj-muted" style="margin:6px 0 0">A break that runs past its limit is flagged and the line manager is told.</p>
+    </div>
+    <div>
+      <div class="hj-strong" style="margin-bottom:6px">Field visits</div>
+      <label class="hj-switch"><input type="checkbox" name="fieldVisitClockIn"{% if policy.fieldVisitClockIn %} checked{% endif %}><span>The first visit of the day clocks the person in</span></label>
+      <label class="hj-switch"><input type="checkbox" name="fieldPhotoRequired"{% if policy.fieldPhotoRequired %} checked{% endif %}><span>Require a photo at the start of each visit</span></label>
+    </div>
+    <div class="hj-row hj-end"><button type="submit" class="hj-btn">Save rules</button></div>
+  </form>
+  {% endsection %}
+</div>
+<div class="hj-stack" style="--gap:8px">
+  {% include "field/partials/staff.html" %}
+</div>
+</div>
+{% endblock %}

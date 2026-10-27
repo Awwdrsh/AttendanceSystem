@@ -1,0 +1,3 @@
+{% extends hj_user|yesno:"base.html,bare.html" %}
+{% block title %}{{ title }} · Hajiri{% endblock %}
+{% block content %}{% include "web/_error_body.html" %}{% endblock %}

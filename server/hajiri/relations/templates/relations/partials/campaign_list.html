@@ -1,0 +1,18 @@
+<div id="kye-campaigns" hx-get="{% url 'relations:kye' %}" hx-trigger="hj:refresh-kye-campaigns from:body" hx-target="this" hx-swap="outerHTML">
+  {% if campaigns %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Request</th><th>Confirmed</th><th>Asked for changes</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for r in campaigns %}
+      <tr class="clickable" style="cursor:pointer" hx-get="{% url 'relations:kye_campaign' r.id %}" hx-target="#hj-drawer-body">
+        <td><div class="hj-sm">{{ r.title }}</div><div class="hj-small hj-muted">by {{ r.due_date|bs_date }}</div></td>
+        <td><div class="hj-row nowrap hj-gap-xs"><div class="hj-progress" style="width:90px"><span style="width:{{ r.pct }}%"></span></div><span class="hj-small">{{ r.confirmed }} of {{ r.total }}</span></div></td>
+        <td>{% if r.changes_requested %}{{ r.changes_requested }}{% endif %}</td>
+        <td>{% if r.status == 'open' %}{% badge "Open" "info" %}{% else %}{% badge "Closed" "idle" %}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody></table></div></div>
+  {% else %}
+    {% empty_state title="None yet" hint="Send one a year, or before payroll go-live, so bank, ID and family details are current." compact=True %}
+  {% endif %}
+</div>

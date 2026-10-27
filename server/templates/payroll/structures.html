@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Salary structures · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack" style="--gap:24px">
+{% page_header "Salary structures" subtitle="Components are the building blocks of a payslip, each with an optional formula. Structures bundle components; a structure version freezes once it is assigned to someone." %}{% endpage_header %}
+<div class="hj-tabs" role="tablist">
+  <a class="hj-tab" href="?tab=components"{% if tab == 'components' %} aria-current="page"{% endif %}>Components</a>
+  <a class="hj-tab" href="?tab=structures"{% if tab == 'structures' %} aria-current="page"{% endif %}>Structures</a>
+</div>
+{% if tab == 'components' %}
+<div class="hj-stack" style="--gap:16px">
+  <div class="hj-section-title"><div><h3>Components</h3><p class="hj-small hj-muted" style="margin:0">Statutory components (SSF, TDS and similar) are locked.</p></div>
+    <button type="button" class="hj-btn" hx-get="{% url 'payroll:component_new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>New component</button></div>
+  {% if components %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Component</th><th>Type</th><th>Formula</th><th></th></tr></thead>
+    <tbody>{% for c in components %}
+    <tr style="cursor:pointer" hx-get="{% url 'payroll:component_edit' c.code %}" hx-target="#hj-modal-body">
+      <td><div class="hj-row nowrap hj-gap-xs"><span class="mono hj-strong hj-sm">{{ c.code }}</span>{% if c.statutory %}<i class="ti ti-lock hj-muted" role="img" aria-label="Statutory"></i>{% endif %}{% if not c.active %}{% badge "Inactive" "idle" %}{% endif %}</div>
+        <div class="hj-small hj-muted">{{ c.name_en }}</div></td>
+      <td>{{ c.type_label }}</td>
+      <td>{% if c.formula %}<span class="mono hj-small">{{ c.formula }}</span>{% else %}<span class="hj-small hj-muted">Amount from assignment or input</span>{% endif %}</td>
+      <td><div class="hj-row nowrap hj-gap-xs">{% if c.taxable %}{% badge "Taxable" "idle" %}{% endif %}{% if c.depends_on_payment_days %}{% badge "Prorated" "idle" %}{% endif %}</div></td>
+    </tr>{% endfor %}</tbody>
+  </table></div></div>
+  {% else %}{% empty_state title="No components yet" hint="Load the defaults from Setup, or add your first component." %}{% endif %}
+</div>
+{% else %}
+<div class="hj-stack" style="--gap:16px">
+  <div class="hj-section-title"><div><h3>Structures</h3><p class="hj-small hj-muted" style="margin:0">Editing a structure adds a new version; existing assignments keep theirs.</p></div>
+    <button type="button" class="hj-btn" hx-get="{% url 'payroll:structure_new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>New structure</button></div>
+  {% if structures %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Structure</th><th>Versions</th><th></th></tr></thead>
+    <tbody>{% for s in structures %}
+    <tr><td><div class="hj-strong hj-sm">{{ s.name_en }}</div><div class="hj-small hj-muted mono">{{ s.code }}</div></td>
+      <td><div class="hj-stack" style="--gap:4px">{% for v in s.versions %}<div class="hj-row nowrap hj-gap-xs" style="align-items:flex-start"><span class="hj-small hj-strong" style="width:24px">v{{ v.version }}</span><span class="hj-small hj-muted">{{ v.codes }}</span>{% if v.frozenAt %}<i class="ti ti-lock hj-muted" role="img" aria-label="Frozen"></i>{% endif %}</div>{% endfor %}</div></td>
+      <td class="right"><button type="button" class="hj-btn default xs" hx-get="{% url 'payroll:structure_new' %}?code={{ s.code|urlencode }}" hx-target="#hj-modal-body">New version</button></td></tr>
+    {% endfor %}</tbody>
+  </table></div></div>
+  {% else %}{% empty_state title="No structures yet" hint="Create a structure from your components, then assign it to employees." %}{% endif %}
+</div>
+{% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,75 @@
+{% load expenses_tags %}
+{# ClaimDrawer: the claim with its lines and receipts; approvers can lower a line (with a reason), approve or reject; HR can record payment outside payroll. #}
+<div class="hj-stack" data-modal-title="{{ c.title }}" data-modal-size="lg" style="--gap:16px">
+  <div class="hj-between">
+    {% badge status_label status_tone %}
+    {% if not mine %}<span class="hj-sm hj-muted">{{ c.employee.name }} · {{ c.employee.empCode }}{% if c.employee.grade %} · Grade {{ c.employee.grade }}{% endif %}</span>{% endif %}
+  </div>
+  <div class="hj-fields hj-grid" style="--cols:3">
+    {% field "Claimed" c.totalClaimed|exmoney %}
+    {% if c.totalApproved %}{% field "Approved" c.totalApproved|exmoney %}{% else %}{% field "Approved" "—" %}{% endif %}
+    {% if c.submittedAt %}{% field "Submitted" c.submittedAt|bs_date %}{% else %}{% field "Submitted" "Not yet" %}{% endif %}
+  </div>
+  {% if payouts_text %}{% if payouts_pending %}{% alert "info" %}{{ payouts_text }}{% endalert %}{% else %}{% alert "ok" %}{{ payouts_text }}{% endalert %}{% endif %}{% endif %}
+  {% if c.decisionNote %}<p class="hj-sm hj-muted">“{{ c.decisionNote }}”</p>{% endif %}
+  {% if issues %}{% alert issues_tone title=issues_title %}{% for i in issues %}<div>{{ i.message }}</div>{% endfor %}{% endalert %}{% endif %}
+  <form class="hj-stack" style="--gap:12px" hx-post="{% url 'expenses:claim_review' c.id %}" hx-swap="none"
+        x-data="{ reason: '', adj: {}, claimed: {{ claimed_total }}, items: { {% for i in items %}'{{ i.id }}': {{ i.amount }}{% if not forloop.last %}, {% endif %}{% endfor %} },
+                  total() { let t = 0; for (const k in this.items) { const v = this.adj[k]; t += (v !== undefined && v !== '') ? Number(v) || 0 : this.items[k]; } return t; },
+                  fmt(v) { const dec = Number(v) % 1 === 0 ? 0 : 2; const n = Number(v).toFixed(dec); const neg = n.startsWith('-'); const [i, f] = n.replace('-', '').split('.'); const last = i.slice(-3), rest = i.slice(0, -3); const g = rest ? rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last : last; return (neg ? '−' : '') + 'NPR ' + g + (dec ? '.' + f : ''); } }">
+    <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+      <thead><tr><th>Date</th><th>Expense</th><th class="right">Amount</th>{% if d.canDecide %}<th>Approve</th>{% endif %}</tr></thead>
+      <tbody>
+      {% for i in items %}
+        <tr>
+          <td style="white-space:nowrap">{{ i.date_text }}</td>
+          <td><div class="hj-sm">{{ i.description }}</div>
+            <div class="hj-small hj-muted">{{ i.categoryName }}{% if i.km %}, {{ i.km }} km{% endif %}
+              {% if i.receiptFileId %} · <a href="{% url 'expenses:claim_receipt' c.id i.id %}" target="_blank" rel="noopener"><i class="ti ti-paperclip" aria-hidden="true"></i>Receipt</a>{% endif %}</div>
+            {% if i.adjustReason %}<div class="hj-small hj-warn-text">Approved {{ i.approved_text }}: {{ i.adjustReason }}</div>{% endif %}</td>
+          <td class="right" style="white-space:nowrap">{{ i.amount_text }}</td>
+          {% if d.canDecide %}
+          <td style="min-width:150px">
+            <input class="hj-input" name="adj-{{ i.id }}" inputmode="decimal" placeholder="{{ i.amount }}" aria-label="Approved amount" x-model="adj['{{ i.id }}']">
+            <input class="hj-input hj-mt-sm" name="adjreason-{{ i.id }}" placeholder="Reason for less" x-show="adj['{{ i.id }}'] && Number(adj['{{ i.id }}']) < {{ i.amount }}" x-cloak>
+          </td>
+          {% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div></div>
+    {% if d.canDecide %}
+    <div class="hj-card p-sm hj-stack" style="--gap:8px">
+      <div class="hj-strong hj-sm">Your decision</div>
+      <div class="hj-small hj-muted">Leave the amounts empty to approve what was claimed. Approving less needs a reason on that line.</div>
+      <textarea class="hj-input" name="reason" rows="2" maxlength="1000" placeholder="Comment (required to reject)" x-model="reason"></textarea>
+      <div class="hj-between">
+        <span class="hj-sm">Approve <span class="hj-strong" x-text="fmt(total())">{{ c.totalClaimed|exmoney }}</span></span>
+        <span class="hj-row hj-gap-xs">
+          <button type="submit" class="hj-btn default" name="decision" value="reject" :disabled="!reason.trim()">Reject</button>
+          <button type="submit" class="hj-btn" name="decision" value="approve">Approve</button>
+        </span>
+      </div>
+    </div>
+    {% endif %}
+  </form>
+  {% if mine and c.status == 'draft' or mine and c.status == 'pending' %}
+  <div class="hj-row hj-gap-xs">
+    {% if c.status == 'draft' %}
+      <button type="button" class="hj-btn default" hx-get="{% url 'expenses:claim_edit' c.id %}" hx-target="#hj-drawer-body">Edit</button>
+      <button type="button" class="hj-btn" hx-post="{% url 'expenses:claim_submit' c.id %}" hx-swap="none"{% if blocked %} disabled{% endif %}>Submit for approval</button>
+    {% endif %}
+    <button type="button" class="hj-btn subtle danger" hx-post="{% url 'expenses:claim_cancel' c.id %}" hx-swap="none">Cancel claim</button>
+  </div>
+  {% endif %}
+  {% if can_pay_outside %}
+  <form class="hj-stack" style="--gap:8px" hx-post="{% url 'expenses:claim_pay_outside' c.id %}" hx-swap="none" x-data="{ note: '' }">
+    <div class="hj-eyebrow">Paid another way?</div>
+    <div class="hj-row" style="align-items:flex-end">
+      <div class="hj-fieldset hj-grow"><label class="hj-label">How it was paid</label>
+        <input class="hj-input" name="note" maxlength="300" placeholder="e.g. Cash from petty cash, voucher 112" x-model="note"></div>
+      <button type="submit" class="hj-btn default" :disabled="note.trim().length < 3">Mark as paid</button>
+    </div>
+  </form>
+  {% endif %}
+</div>

@@ -1,0 +1,58 @@
+{% load perf_tags %}
+<div class="hj-stack" data-modal-title="{{ g.title }}" data-modal-size="lg" style="--gap:16px">
+  <div class="hj-row" style="gap:6px">
+    {% if g.scope == 'individual' %}{% badge g.employee_name "info" %}{% elif g.scope == 'company' %}{% badge "Company" "info" %}{% else %}{% badge g.org_unit_name "info" %}{% endif %}
+    {% if g.due_date %}<span class="hj-badge hj-tone-idle">Due {{ g.due_date|bs_date_short }}</span>{% endif %}
+    {% if g.weight|numstr != '0' %}<span class="hj-badge hj-tone-idle">Weight {{ g.weight|numstr }}%</span>{% endif %}
+    {% if g.status != 'active' %}{% include "performance/partials/status_badge.html" with status=g.status %}{% endif %}
+  </div>
+  {% if g.description %}<p class="hj-sm" style="margin:0">{{ g.description }}</p>{% endif %}
+  {% if g.parent_title %}<p class="hj-sm hj-muted" style="margin:0">Supports: {{ g.parent_title }}</p>{% endif %}
+  {% include "performance/partials/progress.html" with value=g.progress %}
+  {% if g.key_results %}<div class="hj-stack" style="--gap:6px">{% for k in g.key_results %}
+    <div class="hj-card p-sm hj-between"><span class="hj-sm">{{ k.title }}</span><span class="hj-small hj-muted" style="flex:none">{{ k|kr_value }}</span></div>{% endfor %}</div>{% endif %}
+  {% if d.children %}<div class="hj-stack" style="--gap:4px"><div class="hj-strong hj-sm">Goals supporting this</div>
+    {% for c in d.children %}<div class="hj-between"><span class="hj-sm">{{ c.title }}</span><span class="hj-small hj-muted">{{ c.progress|pct_round }}%</span></div>{% endfor %}</div>{% endif %}
+  {% if d.canEdit and g.status != 'cancelled' %}
+  <form class="hj-card p-sm hj-stack" style="--gap:8px" hx-post="{% url 'performance:goal_checkin' g.id %}" hx-target="#hj-drawer-body" x-data="{ kr: '', touched: false }">
+    <input type="hidden" name="done_touched" :value="touched ? '1' : ''">
+    <div class="hj-strong hj-sm">Check in</div>
+    {% if g.key_results %}
+    <div class="hj-form-row">
+      <div class="hj-fieldset"><label class="hj-label" for="ci-kr">Key result</label>
+        <select class="hj-select" id="ci-kr" name="key_result_id" x-model="kr" @change="touched = false"><option value=""></option>{% for k in g.key_results %}<option value="{{ k.id }}" data-measure="{{ k.measure }}">{{ k.title }}</option>{% endfor %}</select></div>
+      <div class="hj-fieldset">
+        {% for k in g.key_results %}{% if k.measure == 'boolean' %}<label class="hj-check-row" style="margin-top:28px" x-show="kr === '{{ k.id }}'" x-cloak><input type="checkbox" class="hj-switch" name="done" :disabled="kr !== '{{ k.id }}'" @change="touched = true"> Done</label>{% endif %}{% endfor %}
+        <div x-show="![{% for k in g.key_results %}{% if k.measure == 'boolean' %}'{{ k.id }}',{% endif %}{% endfor %}].includes(kr)"><label class="hj-label" for="ci-v">New value</label><input class="hj-input" id="ci-v" name="value" type="number" step="any" :disabled="!kr"></div>
+      </div>
+    </div>
+    {% else %}
+    <div class="hj-fieldset"><label class="hj-label" for="ci-p">Progress (%)</label><input class="hj-input" id="ci-p" name="progress" type="number" min="0" max="100" step="any"></div>
+    {% endif %}
+    <div class="hj-pills" x-data="{ c: '3' }"><input type="hidden" name="confidence" :value="c" value="3">
+      <button type="button" class="hj-pill" :aria-selected="c === '3'" @click="c = '3'">On track</button>
+      <button type="button" class="hj-pill" :aria-selected="c === '2'" @click="c = '2'">At risk</button>
+      <button type="button" class="hj-pill" :aria-selected="c === '1'" @click="c = '1'">Off track</button></div>
+    <textarea class="hj-input" name="comment" rows="2" maxlength="2000" placeholder="What changed? Any blockers?" aria-label="Comment"></textarea>
+    <div class="hj-between">
+      <div class="hj-row" style="gap:4px">
+        {% if g.status == 'active' %}<button type="button" class="hj-btn subtle xs" hx-post="{% url 'performance:goal_status' g.id %}" hx-vals='{"status": "completed"}' hx-target="#hj-drawer-body">Mark complete</button>
+        {% else %}<button type="button" class="hj-btn subtle xs" hx-post="{% url 'performance:goal_status' g.id %}" hx-vals='{"status": "active"}' hx-target="#hj-drawer-body">Reopen</button>{% endif %}
+        <button type="button" class="hj-btn subtle danger xs" hx-post="{% url 'performance:goal_cancel' g.id %}" hx-swap="none" {% confirm_attrs "Cancel this goal? It stays in the history but drops out of reviews." label="Cancel goal" %}>Cancel goal</button>
+      </div>
+      <button class="hj-btn sm" type="submit">Save check-in</button>
+    </div>
+  </form>
+  {% endif %}
+  <div class="hj-stack" style="--gap:6px">
+    <div class="hj-strong hj-sm">History</div>
+    {% for c in d.checkins %}
+    <div class="hj-card p-sm">
+      <div class="hj-between"><span class="hj-small hj-muted">{{ c.author_name|default:"Someone" }} · {{ c.created_at|short_dt }}</span>
+        <span class="hj-row nowrap" style="gap:4px">{% if c.confidence %}{% badge c.confidence|confidence_label c.confidence|confidence_tone %}{% endif %}{% if c.progress is not None %}<span class="hj-badge hj-tone-idle sm">{{ c.progress|pct_round }}%</span>{% endif %}</span></div>
+      {% if c.key_result_title %}<div class="hj-small">{{ c.key_result_title }}{% if c.value is not None %}: {{ c.value|numstr }}{% endif %}</div>{% endif %}
+      {% if c.comment %}<div class="hj-sm" style="margin-top:2px">{{ c.comment }}</div>{% endif %}
+    </div>
+    {% empty %}<div class="hj-sm hj-muted">No check-ins yet.</div>{% endfor %}
+  </div>
+</div>

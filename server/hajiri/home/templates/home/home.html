@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Home · Hajiri{% endblock %}
+{% block content %}
+{% if not linked %}
+{% page_header title subtitle=subtitle %}{% endpage_header %}
+{% empty_state title="No employee record linked" hint="Your account is not linked to an employee record, so there is nothing to clock in to. Use the menu to reach the tools for your role." %}
+{% else %}
+<script src="{% static 'field/geo.js' %}" defer></script>
+<script src="{% static 'home/home.js' %}" defer></script>
+{% page_header title subtitle=subtitle %}
+  {% if not card.wfh_allowed and wfh_url %}<button type="button" class="hj-btn default" hx-get="{{ wfh_url }}" hx-target="#hj-modal-body"><i class="ti ti-home" aria-hidden="true"></i>Work from home</button>{% endif %}
+  <a class="hj-btn default" href="/me/attendance?correct=1"><i class="ti ti-clock-edit" aria-hidden="true"></i>Request correction</a>
+{% endpage_header %}
+<div class="hj-stack" style="--gap:28px">
+  {% if card.wfh_allowed or card.wfh_today %}
+  <div class="hj-row nowrap hj-gap-sm" style="margin-top:-12px;padding:0 2px">
+    <i class="ti ti-home" aria-hidden="true" style="color:var(--hj-info)"></i>
+    <span class="hj-sm hj-muted">{% if card.wfh_allowed %}You can clock in from home. Your clock-ins away from the office are marked Remote.{% else %}Your work-from-home day is approved. Clock in from wherever you are.{% endif %}</span>
+  </div>
+  {% endif %}
+
+  {% if cards.relations %}<div hx-get="{{ cards.relations }}" hx-trigger="load" hx-swap="outerHTML"></div>{% endif %}
+  {% if cards.checklist %}<div hx-get="{{ cards.checklist }}" hx-trigger="load" hx-swap="outerHTML"></div>{% endif %}
+
+  {% include "home/partials/today.html" %}
+
+  {% if cards.timer %}<div hx-get="{{ cards.timer }}" hx-trigger="load" hx-swap="outerHTML"></div>{% endif %}
+  {% if cards.field %}<div id="home-field-slot" hx-get="{{ cards.field }}" hx-trigger="load, hj:home-punched from:body" hx-swap="innerHTML"></div>{% endif %}
+
+  {% include "home/partials/month.html" %}
+
+  {% if cards.todo %}<div hx-get="{{ cards.todo }}" hx-trigger="load" hx-swap="outerHTML"></div>{% endif %}
+  {% if cards.whos_out %}<div hx-get="{{ cards.whos_out }}" hx-trigger="load" hx-swap="outerHTML"></div>{% endif %}
+  {% if cards.company %}<div hx-get="{{ cards.company }}" hx-trigger="load" hx-swap="outerHTML"></div>{% endif %}
+
+  {% include "home/partials/requests.html" %}
+</div>
+{% endif %}
+{% endblock %}

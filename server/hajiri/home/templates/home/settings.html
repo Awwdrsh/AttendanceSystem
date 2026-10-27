@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Settings · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Attendance rules" subtitle="How attendance, leave and pay are calculated. Values fixed by law are locked with their citation, and closed payroll periods are never recalculated." %}{% endpage_header %}
+<nav class="hj-pills" aria-label="Settings sections">
+  {% for key, label in tabs %}<a class="hj-pill" href="?tab={{ key }}"{% if key == tab %} aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
+</nav>
+<div class="hj-mt-lg">{% include "home/partials/settings_panel.html" %}</div>
+{% endblock %}

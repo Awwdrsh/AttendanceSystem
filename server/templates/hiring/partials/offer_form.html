@@ -1,0 +1,13 @@
+<form class="hj-form" data-modal-title="Make an offer" data-modal-size="lg" hx-post="{% url 'hiring:offer_new' app.id %}" hx-swap="none"
+      x-data="{ designation: '{{ designation|escapejs }}', salary: '' }" @hj:hiring-done.window="$el.closest('dialog') && $el.closest('dialog').close()">
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="of-des">Designation<span class="req" aria-hidden="true">*</span></label><input id="of-des" class="hj-input" name="designation" maxlength="120" required x-model="designation"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="of-sal">Monthly gross salary (NPR)<span class="req" aria-hidden="true">*</span></label><input id="of-sal" class="hj-input" type="number" min="1" name="salary" required x-model="salary"></div>
+    {% bs_date_input "joinDate" value=join label="Joining date" required=True min=today %}
+    {% bs_date_input "expiresOn" value=expires label="Offer valid until" min=today %}
+  </div>
+  <div class="hj-fieldset"><label class="hj-label" for="of-notes">Extra terms for the letter</label><div class="hj-help">Optional. Blank lines start a new paragraph.</div>
+    <textarea id="of-notes" class="hj-input" name="notes" rows="3" maxlength="4000"></textarea></div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="designation.trim().length < 2 || !salary">Send for approval</button></div>
+</form>

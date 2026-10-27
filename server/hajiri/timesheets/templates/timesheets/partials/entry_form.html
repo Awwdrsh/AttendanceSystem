@@ -1,0 +1,58 @@
+{% load timesheet_tags %}{# EntryModal: start and end times, or just a duration. #}
+<form class="hj-form" data-modal-title="{% if entry %}Edit time{% else %}Add time{% endif %}"
+      hx-post="{% if entry %}{% url 'timesheets:entry_edit' entry.id %}{% else %}{% url 'timesheets:entry_new' %}{% endif %}" hx-swap="none"
+      x-data="{ mode: '{{ mode }}', duration: {{ duration }}, billable: {% if billable == 'true' %}true{% elif billable == 'false' %}false{% else %}null{% endif %},
+               projectBillable: {% if project_billable %}true{% else %}false{% endif %},
+               hm(m) { m = parseInt(m) || 0; const h = Math.floor(m / 60), r = m % 60; return h > 0 ? (r > 0 ? h + ' h ' + r + ' m' : h + ' h') : r + ' m' } }">
+  {% if not running %}
+  {% bs_date_input "date" value=date label="Day" required=True max=today %}
+  <input type="hidden" name="mode" :value="mode" value="{{ mode }}">
+  <div class="hj-pills" role="tablist" style="margin:0">
+    <button type="button" class="hj-pill" role="tab" :aria-selected="mode === 'range'" aria-selected="{% if mode == 'range' %}true{% else %}false{% endif %}" @click="mode = 'range'">Start and end</button>
+    <button type="button" class="hj-pill" role="tab" :aria-selected="mode === 'duration'" aria-selected="{% if mode == 'duration' %}true{% else %}false{% endif %}" @click="mode = 'duration'">Duration</button>
+  </div>
+  <div class="hj-form-row" x-show="mode === 'range'"{% if mode != 'range' %} x-cloak{% endif %}>
+    <div class="hj-fieldset"><label class="hj-label" for="ts-e-start">Start<span class="req" aria-hidden="true">*</span></label>
+      <input id="ts-e-start" type="time" name="start" class="hj-input" value="{{ start }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="ts-e-end">End<span class="req" aria-hidden="true">*</span></label>
+      <input id="ts-e-end" type="time" name="end" class="hj-input" value="{{ end }}"></div>
+  </div>
+  <div class="hj-fieldset" x-show="mode === 'duration'"{% if mode != 'duration' %} x-cloak{% endif %}>
+    <label class="hj-label" for="ts-e-duration">Duration</label>
+    <div class="hj-help" x-text="hm(duration)">{{ duration|minutes_hm }}</div>
+    <div class="hj-input-wrap"><input id="ts-e-duration" type="number" name="duration_min" class="hj-input" min="1" max="1440" x-model="duration" value="{{ duration }}" aria-describedby="ts-e-duration-unit"><span id="ts-e-duration-unit" class="hj-small hj-muted">min</span></div>
+  </div>
+  {% else %}
+  <p class="hj-sm hj-muted" style="margin:0">The timer is still running. You can change what it is for; stop it to change its times.</p>
+  {% endif %}
+  <div class="hj-fieldset">
+    <label class="hj-label" for="ts-e-project">Project</label>
+    <select id="ts-e-project" name="project_id" class="hj-select"
+            @change="billable = null; projectBillable = $event.target.selectedOptions[0]?.dataset.billable === '1'"
+            hx-get="{% url 'timesheets:activity_options' %}" hx-trigger="change" hx-target="#ts-e-activity" hx-include="this" hx-swap="innerHTML">
+      <option value="" data-billable="0">No project</option>
+      {% for p in projects %}<option value="{{ p.id }}" data-billable="{% if p.billable %}1{% else %}0{% endif %}"{% if p.id == project_id %} selected{% endif %}>{{ p.label }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="ts-e-activity">Activity</label>
+    <select id="ts-e-activity" name="activity_id" class="hj-select">
+      {% include "timesheets/partials/activity_options.html" with activities=activities_for selected=activity_id %}
+    </select>
+  </div>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="ts-e-note">Note</label>
+    <input id="ts-e-note" name="note" class="hj-input" maxlength="500" value="{{ note }}">
+  </div>
+  {% if not running %}
+  <input type="hidden" name="billable" :value="billable === null ? '' : (billable ? 'true' : 'false')" value="{{ billable }}">
+  <label class="hj-check-row hj-row hj-gap-xs" style="align-items:center">
+    <input type="checkbox" class="hj-check" :checked="billable ?? projectBillable" @change="billable = $event.target.checked"{% if entry and entry.billable %} checked{% endif %}>
+    <span class="hj-sm">Billable</span>
+  </label>
+  {% endif %}
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn">{% if entry %}Save{% else %}Add time{% endif %}</button>
+  </div>
+</form>

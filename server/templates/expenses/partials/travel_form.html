@@ -1,0 +1,33 @@
+{% load workflow_tags %}
+{# TravelForm: the trip, its allowance quote (live), costs and advance. #}
+<form class="hj-form" data-modal-title="Request travel" data-modal-size="lg" hx-post="{% url 'expenses:travel_new' %}" hx-swap="none"
+      x-data="{ cat: 'city', dest: '', purpose: '', est: '', adv: '', fx: '', quoted: false,
+                amountOk(v) { return !v || /^\d{1,10}(\.\d{1,2})?$/.test(v.trim()); },
+                ok() { return this.dest.trim() && this.purpose.trim().length >= 3 && this.amountOk(this.est) && this.amountOk(this.adv) && (this.cat !== 'international' || this.quoted); } }">
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label">Destination<span class="req" aria-hidden="true">*</span></label>
+      <input class="hj-input" name="destination" maxlength="120" required placeholder="e.g. Pokhara" x-model="dest"></div>
+    <div class="hj-fieldset"><label class="hj-label">Destination type</label>
+      <select class="hj-select" name="destination_category" x-model="cat">
+        {% for d in policy.destinations %}<option value="{{ d.value }}"{% if d.value == 'city' %} selected{% endif %}>{{ d.label }}</option>{% endfor %}
+      </select></div>
+    {% bs_date_input "from_date" value=from_date label="From" required=True min=today %}
+    {% bs_date_input "to_date" value=to_date label="To" required=True min=today %}
+    <div class="hj-fieldset"><label class="hj-label">Travel by</label>
+      <select class="hj-select" name="mode">{% for v, label in modes %}<option value="{{ v }}">{{ label }}</option>{% endfor %}</select></div>
+    <div class="hj-fieldset" x-show="cat === 'international'" x-cloak><label class="hj-label">US dollar rate (NPR)<span class="req" aria-hidden="true">*</span></label>
+      <input class="hj-input" name="fx_rate" inputmode="decimal" placeholder="e.g. 136.50" x-model="fx" @input="fx = fx.replace(/[^\d.]/g, '')"></div>
+  </div>
+  <div class="hj-fieldset"><label class="hj-label">Purpose<span class="req" aria-hidden="true">*</span></label>
+    <textarea class="hj-input" name="purpose" rows="2" maxlength="1000" required placeholder="Why the trip is needed" x-model="purpose"></textarea></div>
+  <div id="travel-quote" hx-get="{% url 'expenses:travel_quote' %}" hx-include="closest form" hx-swap="innerHTML"
+       hx-trigger="load, change from:closest form delay:300ms, input from:closest form delay:300ms"></div>
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label">Fares and other costs (NPR)</label><div class="hj-help">Tickets, taxis; not meals or lodging</div>
+      <input class="hj-input" name="estimated_cost" inputmode="decimal" placeholder="0" x-model="est" @input="est = est.replace(/[^\d.]/g, '')"></div>
+    <div class="hj-fieldset"><label class="hj-label">Advance needed (NPR)</label><div class="hj-help">Paid with your salary, or in cash by HR</div>
+      <input class="hj-input" name="advance_requested" inputmode="decimal" placeholder="0" x-model="adv" @input="adv = adv.replace(/[^\d.]/g, '')"></div>
+  </div>
+  {% approval_chain_live "travel_request" employee_id=user.employee_id amount_field="chain_amount" employee_field="no_employee_field" %}
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn" :disabled="!ok()">Request approval</button></div>
+</form>

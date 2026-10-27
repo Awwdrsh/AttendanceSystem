@@ -1,0 +1,47 @@
+{% load timesheet_tags %}{# WeekDays: a week of entries, day by day, with the attendance comparison. #}
+<div class="hj-card p-0" style="overflow:hidden">
+  {% for d in days %}
+  <div style="padding:10px 16px;{% if not forloop.first %}border-top:1px solid var(--hj-line-soft);{% endif %}{% if d.date > today %}opacity:.55{% endif %}">
+    <div class="hj-between hj-row nowrap" style="--gap:12px;align-items:center">
+      <div class="hj-row nowrap hj-gap-xs" style="min-width:0;align-items:center">
+        <span class="hj-sm hj-strong hj-truncate">{{ d.date|bs_date_long }}</span>
+        {% if d.flag %}<i class="ti ti-alert-triangle" style="color:var(--hj-warn)" aria-label="{{ d.flag|flag_label }}"
+           data-tip="{{ d.flag|flag_label }}{% if d.attendanceMin is not None %} (attended {{ d.attendanceMin|minutes_hm }}){% endif %}"></i>{% endif %}
+      </div>
+      <div class="hj-row nowrap" style="--gap:16px;align-items:center">
+        <span class="hj-small hj-muted hide-sm">Attended {% if d.attendanceMin is None %}—{% else %}{{ d.attendanceMin|hhmm }}{% endif %}</span>
+        <span class="hj-sm mono hj-strong">{{ d.roundedMin|hhmm }}</span>
+        {% if editable and d.date <= today %}<button type="button" class="hj-btn subtle xs" hx-get="{% url 'timesheets:entry_new' %}?date={{ d.date }}" hx-target="#hj-modal-body" hx-swap="innerHTML">Add</button>{% endif %}
+      </div>
+    </div>
+    {% if d.entries %}
+    <div class="hj-stack" style="--gap:4px;margin-top:6px">
+      {% for e in d.entries %}
+      <div class="hj-between hj-row nowrap" style="--gap:8px;align-items:center">
+        <div class="hj-row nowrap" style="--gap:8px;min-width:0;align-items:center">
+          {% project_dot e.project_color %}
+          <span class="hj-sm hj-truncate">{{ e.project_name|default:"No project" }}{% if e.activity_name %}<span class="hj-muted"> · {{ e.activity_name }}</span>{% endif %}{% if e.note %}<span class="hj-muted"> · {{ e.note }}</span>{% endif %}</span>
+          {% if e.billable %}{% badge "Billable" "accent" %}{% endif %}
+          {% if e.auto_stopped %}{% badge "Auto-stopped" "warn" %}{% endif %}
+        </div>
+        <div class="hj-row nowrap" style="--gap:6px;align-items:center;position:relative">
+          <span class="hj-small hj-muted hide-sm">{% if e.started_at %}{{ e.started_at|npt_time }}–{% if e.ended_at %}{{ e.ended_at|npt_time }}{% else %}now{% endif %}{% else %}Duration{% endif %}</span>
+          <span class="hj-sm mono">{% if e.duration_min is None %}running{% else %}{{ e.duration_min|hhmm }}{% endif %}</span>
+          {% if editable %}
+          <button type="button" class="hj-iconbtn" data-menu-toggle="ts-m-{{ e.id }}" aria-haspopup="menu" aria-expanded="false" aria-label="Entry actions"><i class="ti ti-dots" aria-hidden="true"></i></button>
+          <div class="hj-menu down" id="ts-m-{{ e.id }}" role="menu" hidden>
+            <button type="button" class="hj-menu-item" role="menuitem" hx-get="{% url 'timesheets:entry_edit' e.id %}" hx-target="#hj-modal-body" hx-swap="innerHTML"><i class="ti ti-pencil" aria-hidden="true"></i>Edit</button>
+            {% if e.duration_min is not None %}
+            <button type="button" class="hj-menu-item" role="menuitem" style="color:var(--hj-bad)" hx-post="{% url 'timesheets:entry_delete' e.id %}" hx-swap="none"
+              {% confirm_attrs e.delete_message title="Delete this time?" label="Delete" %}><i class="ti ti-trash" aria-hidden="true"></i>Delete</button>
+            {% endif %}
+          </div>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>

@@ -1,0 +1,9 @@
+{# A {columns, rows} report rendered on screen (ReportTable.tsx). #}
+{% if not rows %}{% empty_state title=empty_title %}{% else %}
+<div class="hj-table-wrap"><div class="hj-table-scroll" style="max-height:{{ max_height }}">
+  <table class="hj-table">
+    <thead><tr>{% for c in columns %}<th class="{{ c.align }}" scope="col">{{ c.header }}</th>{% endfor %}</tr></thead>
+    <tbody>{% for r in rows %}<tr>{% for cell in r %}<td class="{{ cell.align }}">{{ cell.text }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+  </table>
+</div></div>
+{% endif %}

@@ -1,0 +1,9 @@
+<form class="hj-form" data-modal-title="Not moving forward with {{ app.name }}" hx-post="{% url 'hiring:reject' app.id %}" hx-swap="none"
+      x-data="{ reason: '' }" @hj:hiring-done.window="$el.closest('dialog') && $el.closest('dialog').close()">
+  <div class="hj-fieldset"><label class="hj-label" for="hr-reason">Reason<span class="req" aria-hidden="true">*</span></label>
+    <div class="hj-help">Kept for your records; it is not sent to the candidate.</div>
+    <textarea id="hr-reason" class="hj-input" name="reason" rows="2" maxlength="500" required x-model="reason" autofocus></textarea></div>
+  <label class="hj-row nowrap hj-gap-sm"><input type="checkbox" class="hj-switch" name="notifyCandidate" value="1" checked><span class="hj-sm">Send a polite e-mail to the candidate</span></label>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn danger" :disabled="reason.trim().length < 3">Close application</button></div>
+</form>

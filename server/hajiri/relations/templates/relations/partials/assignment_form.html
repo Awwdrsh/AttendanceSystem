@@ -1,0 +1,27 @@
+<form class="hj-form" data-modal-title="Acting or deputation" data-modal-size="lg" hx-post="{% url 'relations:assignment_new' %}" hx-swap="none"
+      x-data="{ kind: 'acting', designation: '', branch: '', unit: '', emp: '{{ employee_id|default:''|escapejs }}', start: '{{ today }}', end: '' }"
+      @change="const n = $event.target.name; if (n === 'employeeId') emp = $event.target.value; if (n === 'startDate') start = $event.target.value; if (n === 'endDate') end = $event.target.value">
+  {% if employee_id %}<input type="hidden" name="employeeId" value="{{ employee_id }}">{% else %}{% employee_picker "employeeId" required=True id="ta-employee" %}{% endif %}
+  <div class="hj-pills" role="tablist">
+    <button type="button" class="hj-pill" :aria-selected="kind === 'acting'" @click="kind = 'acting'">Acting in a position</button>
+    <button type="button" class="hj-pill" :aria-selected="kind === 'deputation'" @click="kind = 'deputation'">Deputed elsewhere</button>
+  </div>
+  <input type="hidden" name="kind" :value="kind" value="acting">
+  <div class="hj-fieldset" x-show="kind === 'acting'"><label class="hj-label" for="ta-designation">Acting as<span class="req" aria-hidden="true">*</span></label>
+    <select id="ta-designation" name="designationId" class="hj-select" x-model="designation"><option value="">Choose</option>
+      {% for d in designations %}<option value="{{ d.id }}">{{ d.name_en }}</option>{% endfor %}</select></div>
+  <div class="hj-form-row" x-show="kind === 'deputation'" x-cloak>
+    <div class="hj-fieldset"><label class="hj-label" for="ta-branch">Branch</label><select id="ta-branch" name="branchId" class="hj-select" x-model="branch"><option value="">None</option>
+      {% for b in branches %}<option value="{{ b.id }}">{{ b.name_en }}</option>{% endfor %}</select></div>
+    <div class="hj-fieldset"><label class="hj-label" for="ta-unit">Department</label><select id="ta-unit" name="orgUnitId" class="hj-select" x-model="unit"><option value="">None</option>
+      {% for u in units %}<option value="{{ u.id }}">{{ u.name_en }}</option>{% endfor %}</select></div>
+  </div>
+  <div class="hj-form-row">
+    {% bs_date_input "startDate" value=today label="From" required=True id="ta-start" %}
+    {% bs_date_input "endDate" label="Until" required=True id="ta-end" %}
+  </div>
+  <div class="hj-fieldset"><label class="hj-label" for="ta-note">Note (optional)</label><textarea id="ta-note" name="note" class="hj-input" rows="2" maxlength="500"></textarea></div>
+  <div class="hj-small hj-muted">The permanent designation and placement do not change. The assignment shows in the directory and ends by itself.</div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="!emp || !start || !end || (kind === 'acting' ? !designation : !(branch || unit))">Save</button></div>
+</form>

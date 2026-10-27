@@ -1,0 +1,3 @@
+{% if row.is_admin_view %}
+<button type="button" class="hj-btn subtle xs{% if row.status == 'active' %} danger{% else %} gray{% endif %}" hx-post="{% url 'home:user_update' row.id %}" hx-vals='{"status": "{% if row.status == 'active' %}disabled{% else %}active{% endif %}"}' hx-swap="none">{% if row.status == 'active' %}Disable{% else %}Activate{% endif %}</button>
+{% endif %}

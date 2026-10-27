@@ -1,0 +1,8 @@
+<form class="hj-form" data-modal-title="Assign {{ shift.name_en }}" hx-post="{% url 'shifts:assign' shift.id %}" hx-target="this" hx-swap="outerHTML">
+  {% employee_picker "employee_id" value=employee_id required=True error=form.employee_id.errors.0 %}
+  {% bs_date_input "from_date" value=from_date label="Starting from" required=True error=form.from_date.errors.0 %}
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn">Assign shift</button>
+  </div>
+</form>

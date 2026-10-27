@@ -1,0 +1,15 @@
+{# ReviewCyclesPage.tsx TagsField: type a value and press Enter (or leave the box); each value shows as a removable chip
+   and posts as one `name` value. #}
+<div class="hj-fieldset" x-data="{ t: '', tags: {{ tags|json_attr }},
+       add() { const v = this.t.trim(); if (v && !this.tags.includes(v)) this.tags.push(v); this.t = '' } }">
+  <label class="hj-label" for="{{ id }}">{{ label }}</label>
+  {% if help %}<div class="hj-help">{{ help }}</div>{% endif %}
+  <input class="hj-input" id="{{ id }}" placeholder="Type and press Enter" maxlength="{{ maxlength|default:120 }}" x-model="t"
+         @keydown.enter.prevent="add()" @blur="add()" autocomplete="off">
+  <template x-for="v in tags" :key="v"><input type="hidden" name="{{ name }}" :value="v"></template>
+  <div class="hj-row" style="gap:4px;flex-wrap:wrap;margin-top:4px" x-show="tags.length" x-cloak>
+    <template x-for="v in tags" :key="v">
+      <span class="hj-badge hj-tone-info"><span x-text="v"></span><button type="button" class="hj-iconbtn" style="width:16px;height:16px;margin-left:2px" :aria-label="'Remove ' + v" @click="tags = tags.filter((x) => x !== v)"><i class="ti ti-trash" aria-hidden="true" style="font-size:11px"></i></button></span>
+    </template>
+  </div>
+</div>

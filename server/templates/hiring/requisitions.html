@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Requisitions · Hiring · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Requisitions" subtitle="Ask for a new or replacement hire. HR approves it, then opens a job for it." %}
+  <button type="button" class="hj-btn" hx-get="{% url 'hiring:requisition_new' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>Request to hire</button>
+{% endpage_header %}
+{% data_table table %}
+{% endblock %}

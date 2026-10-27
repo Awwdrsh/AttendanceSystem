@@ -1,0 +1,13 @@
+<form class="hj-form" data-modal-title="{% if from_review %}Send back {{ d.title }}{% else %}Not accepted{% endif %}" data-modal-size="sm" hx-post="{% url 'documents:reject' d.id %}" hx-swap="none" x-data="{ reason: '' }">
+  {% if from_review %}<input type="hidden" name="from" value="review">{% endif %}
+  <p class="hj-sm" style="margin:0">{% if from_review %}{{ name }} will be asked to upload it again with your reason.{% else %}Say what needs fixing. The employee will be asked to upload {{ d.title }} again.{% endif %}</p>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="rj-reason">Reason <span class="req">*</span></label>
+    <textarea id="rj-reason" class="hj-input" name="reason" rows="2" maxlength="300" required x-model="reason"
+              placeholder="{% if from_review %}e.g. The scan is cut off; please upload both sides.{% else %}e.g. The scan is blurry; please upload a clearer copy.{% endif %}"></textarea>
+  </div>
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn danger" :disabled="!reason.trim()">Send back</button>
+  </div>
+</form>

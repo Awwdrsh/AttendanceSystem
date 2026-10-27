@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Jobs · Hiring · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Jobs" subtitle="Open a role, publish it to the careers page, and follow every candidate through to hire." %}
+  {% if hr %}
+  <a class="hj-btn default" href="{{ careers_url }}" target="_blank" rel="noopener"><i class="ti ti-external-link" aria-hidden="true"></i>Careers page</a>
+  <button type="button" class="hj-btn default icon" aria-label="Hiring settings" data-tip="Hiring settings" hx-get="{% url 'hiring:policy' %}" hx-target="#hj-modal-body"><i class="ti ti-settings" aria-hidden="true"></i></button>
+  <button type="button" class="hj-btn" hx-get="{% url 'hiring:job_new' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>New job</button>
+  {% endif %}
+{% endpage_header %}
+{% if reports %}
+<div class="hj-stack hj-gap-lg hj-mb">
+  {% stat_strip reports.stats %}
+  {% if reports.has_funnel %}
+  <div class="hj-grid" style="--cols:2">
+    {% card "Funnel by job" hint="How many applicants reached each stage" %}
+      <div class="hj-stack hj-gap-md">
+      {% for f in reports.funnel %}
+        <div>
+          <div class="hj-sm hj-strong" style="margin-bottom:4px">{{ f.title }}</div>
+          {% for s in f.stages %}
+          <div class="hj-row nowrap hj-gap-xs" style="margin-bottom:3px">
+            <span class="hj-small hj-muted hj-truncate" style="width:80px">{{ s.stage }}</span>
+            <div class="hj-progress hj-grow"><div style="width:{{ s.pct }}%"></div></div>
+            <span class="hj-small num" style="width:70px;text-align:right">{{ s.label }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      {% endfor %}
+      </div>
+    {% endcard %}
+    {% card "Sources" hint="Where applicants came from and who was hired" %}
+      <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+        <thead><tr><th>Source</th><th class="right">Applications</th><th class="right">Hired</th></tr></thead>
+        <tbody>{% for s in reports.sources %}<tr><td>{{ s.label }}</td><td class="right num">{{ s.applications }}</td><td class="right num">{{ s.hired }}</td></tr>{% endfor %}</tbody>
+      </table></div></div>
+    {% endcard %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+<nav class="hj-pills" aria-label="Job status">
+  {% for v, l in pills %}<a class="hj-pill" href="?{% if v != 'all' %}status={{ v }}{% endif %}"{% if v == status %} aria-current="page"{% endif %}>{{ l }}</a>{% endfor %}
+</nav>
+{% data_table table %}
+{% endblock %}

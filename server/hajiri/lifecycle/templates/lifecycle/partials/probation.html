@@ -1,0 +1,20 @@
+<div id="probation" class="hj-stack hj-gap-md" hx-get="{% url 'lifecycle:onboarding' %}?tab=probation&within={{ within }}" hx-trigger="hj:refresh-probation from:body" hx-swap="outerHTML">
+  <div class="hj-section-title"><div><h3>Probation ending</h3><p>People whose probation ends soon. Managers are reminded before the end; their review comes to HR for approval.</p></div>
+    <nav class="hj-pills" style="margin:0">
+      <a class="hj-pill" href="?tab=probation&within=30"{% if within == '30' %} aria-current="page"{% endif %}>30 days</a>
+      <a class="hj-pill" href="?tab=probation&within=60"{% if within == '60' %} aria-current="page"{% endif %}>60 days</a>
+      <a class="hj-pill" href="?tab=probation&within=180"{% if within == '180' %} aria-current="page"{% endif %}>6 months</a></nav></div>
+  {% if not employees %}{% empty_state title="No probation periods ending soon" hint="Set a probation end date on an employee's profile to track it here." %}{% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Employee</th><th>Manager</th><th>Probation ends</th><th>Review</th><th></th></tr></thead>
+    <tbody>{% for r in employees %}<tr>
+      <td><div class="hj-sm hj-strong">{{ r.name_en }}</div><div class="hj-small hj-muted">{{ r.emp_code }}{% if r.designation %}, {{ r.designation }}{% endif %}</div></td>
+      <td>{{ r.manager_name|default:"—" }}</td>
+      <td><div class="hj-sm num">{{ r.probation_end|bs_date }}</div><div class="hj-small {% if r.left_tone == 'bad' %}hj-bad-text{% elif r.left_tone == 'warn' %}hj-warn-text{% else %}hj-muted{% endif %}">{{ r.left }}</div></td>
+      <td>{% if r.review %}{% badge r.review.0 r.review.1 %}{% else %}<span class="hj-sm hj-muted">Not reviewed</span>{% endif %}</td>
+      <td class="right"><div class="hj-row nowrap hj-gap-xs hj-end">
+        <button type="button" class="hj-btn default xs" hx-get="{% url 'lifecycle:review' r.id %}" hx-target="#hj-modal-body"{% if r.last_review.status == 'pending' %} disabled{% endif %}>Review</button>
+        <button type="button" class="hj-btn subtle xs" hx-get="{% url 'lifecycle:confirm' r.id %}" hx-target="#hj-modal-body">Confirm now</button></div></td>
+    </tr>{% endfor %}</tbody></table></div></div>
+  {% endif %}
+</div>

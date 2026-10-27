@@ -1,0 +1,55 @@
+{# ProjectModal: new or edit a project. #}
+<form class="hj-form" data-modal-title="{% if project %}Edit {{ project.name }}{% else %}New project{% endif %}" data-modal-size="lg"
+      hx-post="{% if project %}{% url 'timesheets:project_edit' project.id %}{% else %}{% url 'timesheets:project_new' %}{% endif %}" hx-swap="none"
+      x-data="{ name: '{{ p.name|escapejs }}', code: '{{ p.code|escapejs }}', all: {% if p.all_members %}true{% else %}false{% endif %} }">
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="ts-p-name">Name<span class="req" aria-hidden="true">*</span></label>
+      <input id="ts-p-name" name="name" class="hj-input" maxlength="120" required x-model="name" value="{{ p.name }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="ts-p-code">Code<span class="req" aria-hidden="true">*</span></label>
+      <div class="hj-help">Short reference, e.g. HYDRO-1</div>
+      <input id="ts-p-code" name="code" class="hj-input mono" maxlength="20" required x-model="code" @input="code = code.toUpperCase()" value="{{ p.code }}"></div>
+  </div>
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="ts-p-client">Client</label>
+      <select id="ts-p-client" name="client_id" class="hj-select"><option value="">Internal (no client)</option>
+        {% for c in clients %}<option value="{{ c.id }}"{% if c.id == p.client_id %} selected{% endif %}>{{ c.name }}</option>{% endfor %}</select></div>
+    {# ColorInput with swatches and no picker: a hex field and the brand swatches. #}
+    <div class="hj-fieldset" x-data="{ color: '{{ p.color|escapejs }}' }"><label class="hj-label" for="ts-p-color">Colour</label>
+      <div class="hj-row nowrap hj-gap-xs" style="align-items:center">
+        <span aria-hidden="true" style="width:18px;height:18px;border-radius:99px;flex:none;border:1px solid var(--hj-line)" :style="{ background: color }"></span>
+        <input id="ts-p-color" name="color" class="hj-input mono" maxlength="7" pattern="#[0-9a-fA-F]{6}" x-model="color" value="{{ p.color }}">
+      </div>
+      <div class="hj-row hj-gap-xs" style="margin-top:6px" role="group" aria-label="Swatches">
+        {% for s in swatches %}<button type="button" class="hj-iconbtn" style="width:22px;height:22px;min-width:22px;border-radius:99px;background:{{ s }}" aria-label="{{ s }}" @click="color = '{{ s }}'"></button>{% endfor %}
+      </div></div>
+  </div>
+  <label class="hj-row hj-gap-xs" style="align-items:flex-start"><input type="checkbox" class="hj-switch" name="billable" value="true"{% if p.billable %} checked{% endif %}>
+    <span><span class="hj-sm">Billable by default</span><br><span class="hj-help">New time on this project is marked billable unless the person changes it.</span></span></label>
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="ts-p-rate">Bill rate</label><div class="hj-help">Per hour</div>
+      <input id="ts-p-rate" name="bill_rate" type="number" min="0" step="any" class="hj-input" placeholder="Rs" value="{{ bill_rate }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="ts-p-budget">Budget</label><div class="hj-help">Total hours</div>
+      <input id="ts-p-budget" name="budget_hours" type="number" min="1" step="any" class="hj-input" placeholder="h" value="{{ budget_hours }}"></div>
+  </div>
+  <label class="hj-row hj-gap-xs" style="align-items:center"><input type="checkbox" class="hj-switch" name="all_members" value="true" x-model="all"{% if p.all_members %} checked{% endif %}>
+    <span class="hj-sm">Everyone can log time to this project</span></label>
+  {# MultiSelect "Members" (searchable): a filter over a checklist of active employees. #}
+  <div class="hj-fieldset" x-show="!all"{% if p.all_members %} x-cloak{% endif %} x-data="{ q: '' }">
+    <label class="hj-label" for="ts-p-members-q">Members</label>
+    <input id="ts-p-members-q" type="search" class="hj-input" placeholder="Pick people" x-model="q" autocomplete="off">
+    <div id="ts-p-members" class="hj-stack" role="group" aria-label="Members" style="--gap:2px;max-height:220px;overflow:auto;margin-top:6px">
+      {% for e in people %}<label class="hj-row nowrap hj-gap-xs" style="align-items:center" data-label="{{ e.name_en|lower }} ({{ e.emp_code|lower }})"
+        x-show="!q || $el.dataset.label.includes(q.toLowerCase()) || $el.querySelector('input').checked">
+        <input type="checkbox" class="hj-check" name="member_ids" value="{{ e.id }}"{% if e.id in member_ids %} checked{% endif %}>
+        <span class="hj-sm">{{ e.name_en }} ({{ e.emp_code }})</span></label>{% empty %}<span class="hj-sm hj-muted">No one matches</span>{% endfor %}
+    </div>
+  </div>
+  {% if project %}
+  <label class="hj-row hj-gap-xs" style="align-items:flex-start"><input type="checkbox" class="hj-switch" name="archived" value="true"{% if p.status == 'archived' %} checked{% endif %}>
+    <span><span class="hj-sm">Archived</span><br><span class="hj-help">Archived projects stay in reports but no one can log new time to them.</span></span></label>
+  {% endif %}
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="!name.trim() || !code.trim()">{% if project %}Save{% else %}Create project{% endif %}</button>
+  </div>
+</form>

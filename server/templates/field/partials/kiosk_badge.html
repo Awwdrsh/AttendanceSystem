@@ -1,0 +1,10 @@
+{% if error %}
+<div id="kiosk-badge" hx-get="{% url 'field:kiosk_badge' %}" hx-trigger="load delay:5s" hx-swap="outerHTML">{% alert "warn" %}{{ error }}{% endalert %}</div>
+{% else %}
+<div id="kiosk-badge" class="hj-stack" style="--gap:6px;align-items:center" hx-get="{% url 'field:kiosk_badge' %}" hx-trigger="load delay:{{ refresh_s }}s" hx-swap="outerHTML"
+     x-data="{ left: {{ left }} }" x-init="setInterval(() => { if (left > 0) left-- }, 1000)">
+  {% qr_code token 220 "Kiosk clock-in badge" %}
+  <span class="hj-sm hj-strong">{{ emp_code }}</span>
+  <span class="hj-small hj-muted">New code in <span x-text="left">{{ left }}</span> s. Each code works once.</span>
+</div>
+{% endif %}

@@ -1,0 +1,7 @@
+{% load perf_tags %}
+<form class="hj-form" data-modal-title="Ask for feedback" hx-post="{% url 'performance:feedback_ask' %}" hx-swap="none">
+  {% multi_pick "from_employee_ids" colleagues label="Ask" max=10 required=True id="fa-from" %}
+  <div class="hj-fieldset"><label class="hj-label" for="fa-q">Question (optional)</label>
+    <textarea class="hj-input" id="fa-q" name="prompt" rows="2" maxlength="1000" placeholder="e.g. How did I handle the client handover?"></textarea></div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit">Send request</button></div>
+</form>

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Expense claims · Hajiri{% endblock %}
+{% block content %}
+{% if hr %}{% page_header "Expense claims" subtitle="Every claim in the company. After the manager approves, HR gives the final approval; approved amounts are paid in the next pay run." %}{% endpage_header %}
+{% else %}{% page_header "Expense claims" subtitle="Claims from your team waiting for you, and what happened to earlier ones." %}{% endpage_header %}{% endif %}
+<div id="exp-claims" hx-get="{% url 'expenses:claims_list' %}?status={{ status }}" hx-trigger="hj:refresh-exp-claims from:body" hx-swap="innerHTML">
+  {% include "expenses/partials/claims_block.html" %}
+</div>
+{% if open %}<div hx-get="{% url 'expenses:claim_detail' open %}" hx-target="#hj-drawer-body" hx-trigger="load"></div>{% endif %}
+{% endblock %}

@@ -1,0 +1,2 @@
+<form hx-get="" hx-target="#perf-main" hx-select="#perf-main" hx-swap="outerHTML" hx-push-url="true" hx-trigger="change"><input type="hidden" name="view" value="{{ view }}">
+  <select class="hj-select" name="person" aria-label="Person" style="width:240px"><option value="">Choose a person</option>{% for t in team %}<option value="{{ t.id }}"{% if t.id == person %} selected{% endif %}>{{ t.name_en }}</option>{% endfor %}</select></form>

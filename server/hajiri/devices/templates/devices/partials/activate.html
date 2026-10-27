@@ -1,0 +1,15 @@
+<form class="hj-form" data-modal-title="Activate {{ d.serial_no }}" hx-post="{% url 'devices:activate' d.id %}" hx-target="this" hx-swap="outerHTML">
+  <p class="hj-sm hj-muted">Only activate terminals you installed. Once active, this device can submit punches for your company.</p>
+  {% form_errors form %}
+  {% form_field form.name %}
+  {% if branches %}
+  <div class="hj-fieldset">
+    <label class="hj-label" for="f-branch_id">Branch</label>
+    <select class="hj-select" name="branch_id" id="f-branch_id">
+      <option value="">Keep current</option>
+      {% for b in branches %}<option value="{{ b.id }}"{% if d.branch_id|stringformat:"s" == b.id|stringformat:"s" %} selected{% endif %}>{{ b.name_en }} ({{ b.code }})</option>{% endfor %}
+    </select>
+  </div>
+  {% endif %}
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit"><i class="ti ti-check" aria-hidden="true"></i>Activate device</button></div>
+</form>

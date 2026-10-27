@@ -1,0 +1,6 @@
+{% if not items %}
+  {% if status == 'pending' %}{% empty_state title="Nothing waiting" hint="When employees ask to change their details, the requests appear here and in Approvals." icon="user-edit" %}
+  {% else %}{% empty_state title="No requests here" hint="When employees ask to change their details, the requests appear here and in Approvals." icon="user-edit" %}{% endif %}
+{% else %}
+<div class="hj-stack hj-gap-md">{% for it in items %}{% include "people/partials/request_card.html" %}{% endfor %}</div>
+{% endif %}

@@ -1,0 +1,127 @@
+{# GrievanceThread.tsx: the account, the conversation and, for the committee and HR, the hearing, decision and appeal steps. #}
+<div class="hj-stack hj-gap-md" data-modal-title="Grievance" data-modal-size="lg"
+     x-data="{ hearing: false, decision: false, appeal: false, appealDecision: false, note: '' }">
+  <div class="hj-row nowrap hj-between" style="align-items:flex-start">
+    <div style="min-width:0">
+      <div class="hj-small hj-muted mono">G-{{ g.number }}</div>
+      <div class="hj-strong">{{ g.subject }}</div>
+      <div class="hj-small hj-muted">{{ g.category_label }}, filed {{ g.createdAt|bs_date_long }}{% if handler and g.employeeName %} by {{ g.employeeName }} ({{ g.empCode }}){% endif %}</div>
+    </div>
+    {% badge g.status_label g.status_tone %}
+  </div>
+  {% if handler %}
+    {% alert "accent" %}Confidential. Only HR and the grievance committee can see this, and each time you open it is recorded.{% endalert %}
+  {% else %}
+    {% alert "accent" %}Confidential. Only HR and the grievance committee can see this. Your manager is never shown it.{% endalert %}
+  {% endif %}
+  <div class="hj-card p-sm">
+    <div class="hj-sm" style="white-space:pre-wrap">{{ g.description }}</div>
+    {% if g.concerns %}<div class="hj-small hj-muted hj-mt-sm">Concerns: {{ g.concerns }}</div>{% endif %}
+    {% if files %}<div class="hj-row hj-gap-xs hj-mt-sm">{% for f in files %}<a class="hj-small" href="{% url 'relations:grievance_file' g.id f.id %}" target="_blank" rel="noopener"><i class="ti ti-paperclip" aria-hidden="true"></i> {{ f.filename }}</a>{% endfor %}</div>{% endif %}
+  </div>
+
+  {% if g.hearingAt %}<div class="hj-sm">Hearing: <b>{{ g.hearingAt|bs_date }}</b> at {{ g.hearingAt|npt_time }}{% if g.hearingPlace %}, {{ g.hearingPlace }}{% endif %}</div>{% endif %}
+  {% if g.outcome %}
+  <div class="hj-card p-sm" style="background:var(--hj-hover, transparent)">
+    <div class="hj-row hj-gap-xs hj-mb"><span class="hj-sm hj-strong">Decision</span>{% badge g.outcome_label "info" %}{% if g.decidedAt %}<span class="hj-small hj-muted">{{ g.decidedAt|relative_time }}</span>{% endif %}</div>
+    <div class="hj-sm" style="white-space:pre-wrap">{{ g.findings }}</div>
+  </div>
+  {% endif %}
+  {% if g.appealReason %}<div class="hj-card p-sm"><div class="hj-sm hj-strong">Appeal</div><div class="hj-sm" style="white-space:pre-wrap">{{ g.appealReason }}</div></div>{% endif %}
+  {% if g.appealNote %}<div class="hj-card p-sm"><div class="hj-sm hj-strong">Appeal decision: {% if g.appealOutcome == 'decision_upheld' %}original decision stands{% else %}decision changed{% endif %}</div>
+    <div class="hj-sm" style="white-space:pre-wrap">{{ g.appealNote }}</div></div>{% endif %}
+
+  <div class="hj-eyebrow">Messages</div>
+  {% if notes %}
+  <div class="hj-stack hj-gap-xs">
+    {% for n in notes %}
+    <div class="hj-card p-sm" {% if not n.shared %}style="border-style:dashed"{% endif %}>
+      <div class="hj-row hj-between"><span class="hj-small hj-strong">{% if n.mine %}You{% elif n.fromComplainant %}Employee{% else %}{{ n.authorName }}{% endif %}</span>
+        <span class="hj-row hj-gap-xs">{% if not n.shared %}<span class="hj-badge sm hj-tone-idle">Committee only</span>{% endif %}<span class="hj-small hj-muted">{{ n.createdAt|relative_time }}</span></span></div>
+      <div class="hj-sm" style="white-space:pre-wrap">{{ n.body }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}<div class="hj-sm hj-muted">No messages yet.</div>{% endif %}
+  {% if g.status != 'closed' and g.status != 'withdrawn' %}
+  <form class="hj-stack hj-gap-xs" hx-post="{% url 'relations:grievance_note' g.id %}" hx-target="#hj-drawer-body">
+    <textarea name="body" class="hj-input" rows="2" maxlength="4000" x-model="note" placeholder="{% if handler %}Add a note{% else %}Send a message to the committee{% endif %}" aria-label="Message"></textarea>
+    <div class="hj-row hj-between">
+      {% if handler %}<label class="hj-check"><input type="checkbox" name="shared" value="1"> Share with the employee</label>{% else %}<span></span>{% endif %}
+      <button type="submit" class="hj-btn xs" :disabled="!note.trim()">Send</button>
+    </div>
+  </form>
+  {% endif %}
+
+  {% if handler and open %}
+  <div class="hj-eyebrow">Committee actions</div>
+  <div class="hj-row hj-gap-xs">
+    {% if g.status == 'submitted' %}<button type="button" class="hj-btn default xs" hx-post="{% url 'relations:grievance_update' g.id %}" hx-vals='{"action": "review"}' hx-target="#hj-drawer-body">Start review</button>{% endif %}
+    <button type="button" class="hj-btn default xs" @click="hearing = !hearing">{% if g.hearingAt %}Change hearing{% else %}Schedule hearing{% endif %}</button>
+    <button type="button" class="hj-btn xs" @click="decision = !decision">Record decision</button>
+  </div>
+  <form class="hj-card p-sm hj-stack hj-gap-xs" x-show="hearing" x-cloak hx-post="{% url 'relations:grievance_update' g.id %}" hx-target="#hj-drawer-body"
+        x-data="{ time: '10:00', date: {% if g.hearingAt %}true{% else %}false{% endif %} }" @change="if ($event.target.name === 'date') date = !!$event.target.value">
+    <input type="hidden" name="action" value="hearing">
+    <div class="hj-form-row">
+      {% bs_date_input "date" value=g.hearingAt label="Date" required=True min=today id="g-hearing-date" %}
+      <div class="hj-fieldset"><label class="hj-label" for="g-hearing-time">Time</label><input id="g-hearing-time" type="time" name="time" class="hj-input" x-model="time" required></div>
+    </div>
+    <div class="hj-fieldset"><label class="hj-label" for="g-hearing-place">Place or link</label><input id="g-hearing-place" name="place" class="hj-input" maxlength="200" value="{{ g.hearingPlace|default:'' }}"></div>
+    <div class="hj-row hj-end hj-gap-xs"><button type="button" class="hj-btn default xs" @click="hearing = false">Cancel</button><button type="submit" class="hj-btn xs" :disabled="!date || !time">Save</button></div>
+  </form>
+  <form class="hj-card p-sm hj-stack hj-gap-xs" x-show="decision" x-cloak hx-post="{% url 'relations:grievance_decide' g.id %}" hx-target="#hj-drawer-body"
+        x-data="{ outcome: '', findings: '' }">
+    <div class="hj-fieldset"><label class="hj-label" for="g-outcome">Outcome</label><select id="g-outcome" name="outcome" class="hj-select" x-model="outcome">
+      <option value="" disabled selected>Choose</option>{% for k, l in outcomes %}<option value="{{ k }}">{{ l }}</option>{% endfor %}</select></div>
+    <div class="hj-fieldset"><label class="hj-label" for="g-findings">Findings and what will happen</label><div class="hj-help">The employee reads this.</div>
+      <textarea id="g-findings" name="findings" class="hj-input" rows="3" maxlength="8000" x-model="findings"></textarea></div>
+    <div class="hj-row hj-end hj-gap-xs"><button type="button" class="hj-btn default xs" @click="decision = false">Cancel</button>
+      <button type="submit" class="hj-btn xs" :disabled="!outcome || !findings.trim()">Record decision</button></div>
+  </form>
+  {% if is_hr %}
+  <form class="hj-fieldset" hx-post="{% url 'relations:grievance_update' g.id %}" hx-target="#hj-drawer-body" hx-trigger="change" x-data="{ q: '' }">
+    <input type="hidden" name="action" value="exclude">
+    <label class="hj-label">Exclude from this case</label><div class="hj-help">People with a conflict of interest lose access to it.</div>
+    <input type="search" class="hj-input sm" placeholder="Find people" x-model="q" aria-label="Find people" @change.stop>
+    <div class="hj-stack hj-gap-xs" style="max-height:180px;overflow:auto;margin-top:6px">
+      {% for u in users %}
+      <label class="hj-check" x-show="!q || '{{ u.name|lower|escapejs }}'.includes(q.toLowerCase())"><input type="checkbox" name="excludeUserIds" value="{{ u.id }}"{% if u.id in g.excludedUserIds %} checked{% endif %}> {{ u.name }}</label>
+      {% endfor %}
+    </div>
+  </form>
+  {% endif %}
+  {% endif %}
+
+  {% if g.role == 'hr' and g.status == 'appealed' %}
+  <button type="button" class="hj-btn xs" x-show="!appealDecision" @click="appealDecision = true" style="align-self:flex-start">Hear the appeal</button>
+  <form class="hj-card p-sm hj-stack hj-gap-xs" x-show="appealDecision" x-cloak hx-post="{% url 'relations:grievance_appeal_decide' g.id %}" hx-target="#hj-drawer-body"
+        x-data="{ outcome: 'decision_upheld', newOutcome: '', note: '' }">
+    <div class="hj-fieldset"><label class="hj-label" for="g-appeal-outcome">Appeal outcome</label><select id="g-appeal-outcome" name="outcome" class="hj-select" x-model="outcome">
+      <option value="decision_upheld">The original decision stands</option><option value="decision_changed">Change the decision</option></select></div>
+    <div class="hj-fieldset" x-show="outcome === 'decision_changed'"><label class="hj-label" for="g-new-outcome">New outcome</label><select id="g-new-outcome" name="newOutcome" class="hj-select" x-model="newOutcome">
+      <option value="" disabled selected>Choose</option>{% for k, l in outcomes %}<option value="{{ k }}">{{ l }}</option>{% endfor %}</select></div>
+    <div class="hj-fieldset"><label class="hj-label" for="g-appeal-note">Reasons</label><textarea id="g-appeal-note" name="note" class="hj-input" rows="3" maxlength="4000" x-model="note"></textarea></div>
+    <div class="hj-row hj-end hj-gap-xs"><button type="button" class="hj-btn default xs" @click="appealDecision = false">Cancel</button>
+      <button type="submit" class="hj-btn xs" :disabled="!note.trim() || (outcome === 'decision_changed' && !newOutcome)">Decide appeal</button></div>
+  </form>
+  {% endif %}
+
+  {% if g.role == 'complainant' %}
+  <div class="hj-row hj-gap-xs">
+    {% if open %}<button type="button" class="hj-btn subtle gray xs" hx-post="{% url 'relations:grievance_withdraw' g.id %}" hx-target="#hj-drawer-body">Withdraw</button>{% endif %}
+    {% if canAppeal %}<button type="button" class="hj-btn default xs" x-show="!appeal" @click="appeal = true">Appeal{% if appealUntil %} (until {{ appealUntil|bs_date }}){% endif %}</button>{% endif %}
+    {% if g.status == 'decided' %}<button type="button" class="hj-btn subtle xs" hx-post="{% url 'relations:grievance_close' g.id %}" hx-target="#hj-drawer-body">Accept and close</button>{% endif %}
+  </div>
+  {% endif %}
+  {% if g.role == 'hr' and g.status == 'decided' %}<div class="hj-row"><button type="button" class="hj-btn subtle gray xs" hx-post="{% url 'relations:grievance_close' g.id %}" hx-target="#hj-drawer-body">Close</button></div>{% endif %}
+  {% if canAppeal %}
+  <form class="hj-card p-sm hj-stack hj-gap-xs" x-show="appeal" x-cloak hx-post="{% url 'relations:grievance_appeal' g.id %}" hx-target="#hj-drawer-body" x-data="{ reason: '' }">
+    <div class="hj-fieldset"><label class="hj-label" for="g-appeal-reason">Why do you disagree with the decision?</label>
+      <textarea id="g-appeal-reason" name="reason" class="hj-input" rows="3" maxlength="4000" x-model="reason"></textarea></div>
+    <div class="hj-small hj-muted">HR hears appeals. You can appeal only once.</div>
+    <div class="hj-row hj-end hj-gap-xs"><button type="button" class="hj-btn default xs" @click="appeal = false">Cancel</button>
+      <button type="submit" class="hj-btn xs" :disabled="!reason.trim()">Send appeal</button></div>
+  </form>
+  {% endif %}
+</div>

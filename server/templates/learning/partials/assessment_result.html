@@ -1,0 +1,5 @@
+<div class="hj-stack" data-modal-title="{{ title }}">
+  {% if r.passed %}{% alert "ok" title="Passed" %}{{ r.correct }} of {{ r.total }} correct ({{ r.score }}%). Well done.{% endalert %}
+  {% else %}{% alert "warn" title="Not passed yet" %}{{ r.correct }} of {{ r.total }} correct ({{ r.score }}%). {{ r.attemptsLeft }} attempt{{ r.attemptsLeft|pluralize }} left.{% endalert %}{% endif %}
+  <div class="hj-modal-foot">{% if not r.passed and r.attemptsLeft > 0 %}<button type="button" class="hj-btn default" hx-get="{% url 'learning:assessment' id %}" hx-target="#hj-modal-body">Try again</button>{% endif %}<button type="button" class="hj-btn" data-modal-close>Close</button></div>
+</div>

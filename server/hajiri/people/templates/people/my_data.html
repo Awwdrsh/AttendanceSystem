@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}My data and privacy · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack hj-gap-lg">
+  {% page_header "My data and privacy" subtitle="What Hajiri stores about you, who can see it, and how to take it with you." %}
+    {% if request.hajiri_user.employee_id and dsar_url %}<a class="hj-btn default" href="{{ dsar_url }}?employeeId={{ request.hajiri_user.employee_id }}" download><i class="ti ti-download" aria-hidden="true"></i>Download my data</a>{% endif %}
+  {% endpage_header %}
+  <nav class="hj-pills" aria-label="My data">
+    <a class="hj-pill" href="?tab=privacy"{% if tab == 'privacy' %} aria-current="page"{% endif %}>What we store</a>
+    <a class="hj-pill" href="?tab=consent"{% if tab == 'consent' %} aria-current="page"{% endif %}>Biometric consent</a>
+    <a class="hj-pill" href="?tab=log"{% if tab == 'log' %} aria-current="page"{% endif %}>Clock-in log</a>
+  </nav>
+  {% if tab == 'privacy' %}
+    {% if transparency_url %}<div hx-get="{{ transparency_url }}" hx-trigger="load" hx-swap="outerHTML"><div class="hj-skeleton" style="height:160px"></div></div>
+    {% else %}{% empty_state title="Could not load the privacy notice" %}{% endif %}
+  {% elif tab == 'consent' %}
+    <div class="hj-stack hj-gap-md">
+      {% if consents_url %}<div hx-get="{{ consents_url }}?employeeId={{ request.hajiri_user.employee_id }}" hx-trigger="load" hx-swap="outerHTML"></div>{% endif %}
+      <p class="hj-sm hj-muted" style="margin:0">Biometric templates stored for you: <span class="hj-strong num">{{ active_templates }}</span></p>
+    </div>
+  {% else %}
+    <p class="hj-sm hj-muted" style="margin:0">Every clock-in and clock-out recorded for you in the last 14 days, including replaced entries.</p>
+    {% if not punches %}{% empty_state title="Nothing recorded in the last 14 days" %}{% else %}
+    <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table" style="min-width:560px">
+      <thead><tr><th>Date</th><th class="right">Time</th><th>Entry</th><th>Method</th><th>Source</th><th>Device</th></tr></thead>
+      <tbody>{% for p in punches %}
+        <tr{% if p.superseded %} class="hj-muted"{% endif %}><td>{{ p.local_date|bs_date_short }}</td><td class="right num">{{ p.punched_at|npt_time }}</td>
+          <td>{{ p.entry }}{% if p.superseded %} <span class="hj-badge sm hj-tone-idle">Replaced</span>{% endif %}</td><td>{{ p.method }}</td><td>{{ p.source_label }}</td><td class="muted">{{ p.device_sn|default:"—" }}</td></tr>
+      {% endfor %}</tbody>
+    </table></div></div>
+    {% endif %}
+  {% endif %}
+</div>
+{% endblock %}

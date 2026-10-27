@@ -1,0 +1,16 @@
+{# FieldHistory.tsx: every recorded change to the employee's record. #}
+<div id="field-history" hx-get="{% url 'people:history' employee_id %}" hx-trigger="hj:refresh-field-history from:body" hx-swap="outerHTML">
+{% if not history %}
+  {% empty_state title="No changes recorded yet" hint="Edits to the record, approved change requests and career changes are listed here." %}
+{% else %}
+<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+  <thead><tr><th>When</th><th>Field</th><th>From</th><th>To</th><th>How</th><th>By</th></tr></thead>
+  <tbody>
+  {% for r in history %}
+    <tr><td class="num">{{ r.changed_at|bs_datetime }}</td><td class="hj-strong">{{ r.field }}</td><td class="muted">{{ r.old_value|default:"—" }}</td>
+        <td>{{ r.new_value|default:"—" }}</td><td>{{ r.how }}</td><td>{{ r.changed_by_name|default:"System" }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div></div>
+{% endif %}
+</div>

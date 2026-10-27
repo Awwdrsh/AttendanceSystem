@@ -1,0 +1,30 @@
+<div id="preflight" class="hj-stack" style="--gap:16px">
+{% if pf %}
+<div class="hj-grid" style="--cols:2">
+  <div class="hj-card p-md">
+    <div class="hj-row hj-gap-xs hj-mb"><span class="hj-strong hj-sm">Blockers</span><span class="hj-sm hj-muted num">{{ pf.blocker_items|length }}</span></div>
+    {% if not pf.blocker_items %}<div class="hj-row nowrap hj-gap-xs"><i class="ti ti-circle-check" style="color:var(--hj-ok)" aria-hidden="true"></i><span class="hj-sm hj-muted">None. You can calculate.</span></div>
+    {% else %}<div class="hj-stack" style="--gap:10px">{% for b in pf.blocker_items %}
+      <div class="hj-row nowrap hj-gap-xs" style="align-items:flex-start"><i class="ti ti-alert-circle" style="color:var(--hj-bad);margin-top:2px" aria-hidden="true"></i>
+        <div><div class="hj-sm hj-strong">{{ b.message }}</div>{% if b.line %}<div class="hj-small hj-muted">{{ b.line }}</div>{% endif %}</div></div>
+    {% endfor %}</div>{% endif %}
+  </div>
+  <div class="hj-card p-md">
+    <div class="hj-row hj-gap-xs hj-mb"><span class="hj-strong hj-sm">Warnings</span><span class="hj-sm hj-muted num">{{ pf.warning_items|length }}</span></div>
+    {% if not pf.warning_items %}<div class="hj-row nowrap hj-gap-xs"><i class="ti ti-circle-check" style="color:var(--hj-ok)" aria-hidden="true"></i><span class="hj-sm hj-muted">None.</span></div>
+    {% else %}<div class="hj-stack" style="--gap:10px">{% for b in pf.warning_items %}
+      <div class="hj-row nowrap hj-gap-xs" style="align-items:flex-start"><i class="ti ti-alert-triangle" style="color:var(--hj-warn);margin-top:2px" aria-hidden="true"></i>
+        <div><div class="hj-sm hj-strong">{{ b.message }}</div>{% if b.line %}<div class="hj-small hj-muted">{{ b.line }}</div>{% endif %}</div></div>
+    {% endfor %}</div>{% endif %}
+  </div>
+</div>
+{% else %}
+{% empty_state title="Checks not run yet" hint="Run the checks to see anything that would stop this run from calculating correctly." icon="shield-check" compact=True %}
+{% endif %}
+<div class="hj-row hj-between hj-mt-sm"><span></span>
+  <div class="hj-row hj-gap-xs">
+    {% if pf and not pf.ok and is_hr and can_compute %}<button type="button" class="hj-btn default" hx-get="{% url 'payroll:run_override' run.id %}" hx-target="#hj-modal-body"><i class="ti ti-alert-triangle" aria-hidden="true"></i>Calculate anyway</button>{% endif %}
+    {% if pf.ok %}<a class="hj-btn" href="?step=1">Continue to inputs</a>{% else %}<button type="button" class="hj-btn default" disabled>Continue to inputs</button>{% endif %}
+  </div>
+</div>
+</div>

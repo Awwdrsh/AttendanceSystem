@@ -1,0 +1,6 @@
+<form class="hj-form" data-modal-title="Decline this change?" hx-post="{% url 'people:request_reject' id %}" hx-swap="none" x-data="{ reason: '' }">
+  <div class="hj-fieldset"><label class="hj-label" for="f-dr">Reason<span class="req" aria-hidden="true">*</span></label><div class="hj-help">The employee sees this.</div>
+    <textarea id="f-dr" name="reason" class="hj-input" rows="2" required x-model="reason" autofocus></textarea></div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn danger" :disabled="!reason.trim()">Decline</button></div>
+</form>

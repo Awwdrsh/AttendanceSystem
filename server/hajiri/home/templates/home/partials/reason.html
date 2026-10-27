@@ -1,0 +1,16 @@
+{# "You're outside your work location": the punch again with a reason for the manager. #}
+<form class="hj-form" data-modal-title="You're outside your work location" data-geo data-device-token
+      hx-post="{% url 'home:punch' %}" hx-target="#home-today" hx-swap="outerHTML" hx-disabled-elt="find button[type='submit']"
+      hx-vals='js:{clientTime: new Date().toISOString()}' x-data="{ reason: '' }">
+  <input type="hidden" name="direction" value="{{ direction }}">
+  <input type="hidden" name="idempotency_key" value="{{ key }}">
+  <input type="hidden" name="lat"><input type="hidden" name="lng"><input type="hidden" name="accuracy">
+  <p class="hj-sm" style="margin:0">{{ message }}</p>
+  <label class="hj-fieldset"><span class="hj-label">Reason <span class="req">*</span></span>
+    <span class="hj-help">Your manager sees this with the record.</span>
+    <textarea class="hj-input" name="reason" rows="2" required x-model="reason"></textarea></label>
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="!reason.trim()">{% if direction == 'out' %}Clock out{% else %}Clock in{% endif %}</button>
+  </div>
+</form>

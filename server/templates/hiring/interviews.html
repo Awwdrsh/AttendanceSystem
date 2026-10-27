@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Interviews · Hiring · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Interviews" subtitle="Fill in your scorecard soon after each interview, while it is fresh." %}
+  <div class="hj-pills" role="group" aria-label="Whose interviews" style="margin:0">
+    <a class="hj-pill" href="?scope=mine&when={{ when }}"{% if scope == 'mine' %} aria-current="page"{% endif %}>My interviews</a>
+    <a class="hj-pill" href="?scope=all&when={{ when }}"{% if scope == 'all' %} aria-current="page"{% endif %}>All</a>
+  </div>
+  <div class="hj-pills" role="group" aria-label="When" style="margin:0">
+    <a class="hj-pill" href="?scope={{ scope }}&when=upcoming"{% if when == 'upcoming' %} aria-current="page"{% endif %}>Upcoming</a>
+    <a class="hj-pill" href="?scope={{ scope }}&when=past"{% if when == 'past' %} aria-current="page"{% endif %}>Last 90 days</a>
+  </div>
+{% endpage_header %}
+<div id="interviews" hx-get="?scope={{ scope }}&when={{ when }}" hx-trigger="hj:refresh-interviews from:body" hx-swap="innerHTML">
+  {% include "hiring/partials/interviews.html" %}
+</div>
+{% endblock %}

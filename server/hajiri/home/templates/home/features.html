@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Features · Hajiri{% endblock %}
+{% block content %}
+<form hx-post="{% url 'home:features_save' %}" hx-swap="none" x-data="{ saved: {{ saved_json }}, draft: {{ saved_json }}, get changed() { return Object.keys(this.saved).filter(k => this.draft[k] !== this.saved[k]).length } }">
+{% page_header "Features" subtitle="Switch off the parts of Hajiri your company does not use. They disappear from everyone's menu; nothing is deleted, and switching one back on brings its data back." %}
+  <button type="button" class="hj-btn subtle gray" x-show="changed" x-cloak @click="draft = Object.assign({}, saved)">Undo changes</button>
+  <button type="submit" class="hj-btn" :disabled="!changed" disabled>Save<span x-show="changed" x-text="' (' + changed + ')'"></span></button>
+{% endpage_header %}
+<div class="hj-stack" style="--gap:16px">
+  {% for group, items in groups %}
+  <div class="hj-card p-0">
+    <div style="padding:10px 24px;border-bottom:1px solid var(--hj-line-soft)"><span class="hj-sm hj-strong">{{ group }}</span></div>
+    {% for f in items %}
+    <div class="hj-row nowrap hj-between hj-gap-md" style="padding:16px 24px{% if not forloop.first %};border-top:1px solid var(--hj-line-soft){% endif %}">
+      <div style="min-width:0">
+        <div class="hj-row hj-gap-xs"><span class="hj-sm" style="font-weight:500">{{ f.label }}</span>
+          <span class="hj-badge sm hj-tone-warn" x-show="draft.{{ f.key }} !== saved.{{ f.key }}" x-cloak>Not saved</span></div>
+        <div class="hj-sm hj-muted">{{ f.description }}</div>
+      </div>
+      <input type="checkbox" class="hj-switch" name="on" value="{{ f.key }}" aria-label="{{ f.label }}" x-model="draft.{{ f.key }}"{% if f.enabled %} checked{% endif %}>
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+  <p class="hj-small hj-muted" style="margin:0">Attendance, leave, payroll, people, approvals and reports are the core of Hajiri and are always on.</p>
+</div>
+</form>
+{% endblock %}

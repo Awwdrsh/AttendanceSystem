@@ -1,0 +1,7 @@
+{# TicketBadges: status, priority, and in the thread also confidential and overdue. #}
+<span class="hj-badges" style="flex-wrap:wrap">
+  <span class="hj-badge hj-tone-{{ t.status_tone }}">{{ t.status_label }}</span>
+  <span class="hj-badge hj-tone-{{ t.priority_tone }}"><span class="hj-dot" aria-hidden="true"></span>{{ t.priority_label }}</span>
+  {% if show_flags and t.confidential %}<span class="hj-badge hj-tone-accent"><i class="ti ti-lock" aria-hidden="true"></i>Confidential</span>{% endif %}
+  {% if show_flags and t.is_overdue %}<span class="hj-badge hj-tone-bad">Overdue</span>{% endif %}
+</span>

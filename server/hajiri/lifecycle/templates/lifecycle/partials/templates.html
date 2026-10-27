@@ -1,0 +1,12 @@
+{# TemplatesPanel.tsx #}
+<div id="templates" class="hj-stack hj-gap-md" hx-get="{% if kind == 'onboarding' %}{% url 'lifecycle:onboarding' %}{% else %}{% url 'lifecycle:exits' %}{% endif %}?tab=templates" hx-trigger="hj:refresh-templates from:body" hx-swap="outerHTML">
+  <div class="hj-section-title"><div><h3>{% if kind == 'onboarding' %}Onboarding checklists{% else %}Exit clearance checklists{% endif %}</h3>
+    <p>{% if kind == 'onboarding' %}Every new joiner gets these tasks. The most specific checklist (department, then branch, then default) is used.{% else %}Tasks each department signs off before someone leaves.{% endif %}</p></div>
+    <div class="hj-actions"><button type="button" class="hj-btn sm" hx-get="{% url 'lifecycle:template_new' kind %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>New checklist</button></div></div>
+  {% if not templates %}{% empty_state title="No checklists yet" hint="Create a checklist so every person gets the same steps." %}{% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table"><thead><tr><th>Checklist</th><th>Used for</th><th class="right">Tasks</th></tr></thead>
+    <tbody>{% for t in templates %}<tr style="cursor:pointer" hx-get="{% url 'lifecycle:template_edit' kind t.id %}" hx-target="#hj-drawer-body">
+      <td><span class="hj-sm hj-strong">{{ t.name }}</span>{% if t.is_default %} <span class="hj-badge sm hj-tone-accent">Default</span>{% endif %}{% if not t.active %} <span class="hj-badge sm hj-tone-idle">Off</span>{% endif %}</td>
+      <td class="muted">{{ t.scope }}</td><td class="right num">{{ t.tasks|length }}</td></tr>{% endfor %}</tbody></table></div></div>
+  {% endif %}
+</div>

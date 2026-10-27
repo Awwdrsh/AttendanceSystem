@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Payslips · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack" style="--gap:24px">
+{% page_header "Payslips" subtitle="Payslips appear here once payroll is published for the month." %}
+  <form method="get" x-data @change="$el.submit()">{% if other_employee %}<input type="hidden" name="employeeId" value="{{ other_employee }}">{% endif %}
+    <select class="hj-select" name="fy" aria-label="Fiscal year" style="width:150px">{% for y, l in fy_options %}<option value="{{ y }}"{% if y == fy %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></form>
+{% endpage_header %}
+{% if stats %}{% stat_strip stats %}{% endif %}
+{% if error %}{% alert "bad" %}{{ error }}{% endalert %}
+{% elif rows %}
+<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+  <thead><tr><th>Month</th><th class="right">Net pay</th><th class="right hide-sm">Paid days</th><th class="right hide-sm">Gross</th><th class="right hide-sm">Deductions</th></tr></thead>
+  <tbody>{% for r in rows %}
+  <tr data-href="{% url 'payroll:payslip' r.id %}">
+    <td><a class="hj-strong hj-sm" href="{% url 'payroll:payslip' r.id %}">{{ r.month_label }}</a>{% if r.run_word %}<div class="hj-small hj-muted">{{ r.run_word }}</div>{% endif %}</td>
+    <td class="right num hj-strong">{{ r.net|npr }}</td>
+    <td class="right hide-sm"><span class="num">{{ r.paid }}</span>{% if r.lop %}<span class="hj-small hj-muted num"> ({{ r.lop }} unpaid)</span>{% endif %}</td>
+    <td class="right num hide-sm">{{ r.gross|npr }}</td><td class="right num hide-sm">{{ r.total_deductions|npr }}</td>
+  </tr>{% endfor %}</tbody>
+</table></div></div>
+{% else %}{% empty_state title="No payslips for this fiscal year yet" hint="They appear here once payroll is published. Try an earlier fiscal year if you're looking for older ones." icon="receipt-2" %}{% endif %}
+{% if own %}
+<div class="hj-card p-md"><div class="hj-row hj-between hj-gap-sm">
+  <div><div class="hj-strong hj-sm">Certificates</div>
+    <div class="hj-sm hj-muted">Your tax certificate for FY {{ fy_label }}, or a salary certificate for a bank or visa application. Print or save as PDF.</div></div>
+  <div class="hj-row hj-gap-xs">
+    <a class="hj-btn default sm" href="{% url 'payroll:certificate' 'me' %}?kind=tax&amp;fiscalYearStart={{ fy }}" target="_blank" rel="noopener"><i class="ti ti-file-certificate" aria-hidden="true"></i>Tax certificate</a>
+    <a class="hj-btn default sm" href="{% url 'payroll:certificate' 'me' %}?kind=salary&amp;fiscalYearStart={{ fy }}" target="_blank" rel="noopener"><i class="ti ti-file-certificate" aria-hidden="true"></i>Salary certificate</a>
+  </div>
+</div></div>
+{% endif %}
+</div>
+{% endblock %}

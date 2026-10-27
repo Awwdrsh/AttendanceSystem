@@ -1,0 +1,22 @@
+{% extends "bare.html" %}
+{% block title %}{% if job %}{{ job.title }} · {% endif %}{% if company %}Careers at {{ company }}{% else %}Careers{% endif %}{% endblock %}
+{% block content %}
+<div style="min-height:100vh;background:var(--hj-canvas)">
+{% include "careers/_shell_head.html" %}
+<main class="hj-stack hj-gap-lg" style="max-width:920px;margin:0 auto;padding:32px 16px">
+  <a class="hj-sm" href="{{ back }}"><i class="ti ti-arrow-left" aria-hidden="true"></i> All open positions</a>
+  {% if not job %}
+    {% empty_state title="This job is no longer accepting applications" hint="It may have been filled or closed." icon="briefcase" %}
+  {% else %}
+  <div class="hj-stack hj-gap-xs">
+    <h1 style="font-size:28px;font-weight:700;letter-spacing:-0.02em;margin:0">{{ job.title }}</h1>
+    <div class="hj-sm hj-muted">{{ sub }}{% if job.deadline %} · Apply by {{ job.deadline|bs_date_short }}{% endif %}</div>
+    {% include "careers/_meta.html" with m=job.meta loc=job.location %}
+  </div>
+  {% if job.description %}{% card "About the role" padding="lg" %}{% include "careers/_prose.html" with blocks=description %}{% endcard %}{% endif %}
+  {% if job.requirements %}{% card "What you need" padding="lg" %}{% include "careers/_prose.html" with blocks=requirements %}{% endcard %}{% endif %}
+  <div class="hj-card p-lg" id="apply">{% include "careers/partials/apply.html" %}</div>
+  {% endif %}
+</main>
+</div>
+{% endblock %}

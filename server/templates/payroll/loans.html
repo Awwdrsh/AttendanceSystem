@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Loans & advances · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack" style="--gap:24px">
+{% page_header "Loans & advances" subtitle="Monthly instalments are deducted on each payslip after statutory deductions (Labour Act, section 38)." %}
+  <form hx-get="{% url 'payroll:loans' %}" hx-target="#loans" hx-swap="outerHTML" hx-push-url="true" hx-trigger="change[target.name==='employee_id']">{% employee_picker "employee_id" value=employee_id label="" status="all" %}</form>
+  <button type="button" class="hj-btn" hx-get="{% url 'payroll:loan_new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>New loan or advance</button>
+{% endpage_header %}
+{% include "payroll/partials/loans_table.html" %}
+</div>
+{% endblock %}

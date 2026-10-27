@@ -1,0 +1,25 @@
+<div id="kiosks" hx-get="{% url 'field:kiosks' %}" hx-trigger="hj:refresh-kiosks from:body" hx-target="this" hx-swap="outerHTML">
+{% if kiosks %}
+<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+  <thead><tr><th>Kiosk</th><th>Status</th><th>Last seen</th><th class="right">Punches today</th><th>Photo</th><th>Paired</th><th></th></tr></thead>
+  <tbody>{% for k in kiosks %}
+  <tr>
+    <td><div class="hj-row nowrap hj-gap-sm"><i class="ti ti-device-tablet" aria-hidden="true"></i><div><div class="hj-strong">{{ k.name }}</div><div class="hj-small hj-muted">{{ k.place }}</div></div></div></td>
+    <td>{% badge k.status_label k.status_tone %}</td>
+    <td class="hj-muted">{{ k.seen }}</td>
+    <td class="right num">{{ k.punches_today }}</td>
+    <td class="hj-muted">{% if k.selfie_required %}Required{% else %}Off{% endif %}</td>
+    <td class="hj-muted">{{ k.paired }}</td>
+    <td class="right">{% if k.status != 'revoked' %}<div class="hj-row nowrap hj-gap-xs hj-end">
+      <button type="button" class="hj-btn subtle xs" hx-get="{% url 'field:kiosk_edit' k.id %}" hx-target="#hj-modal-body">Edit</button>
+      <button type="button" class="hj-btn subtle xs" hx-post="{% url 'field:kiosk_action' k.id 'pairing-code' %}" hx-target="#hj-modal-body">New pairing code</button>
+      {% if k.locked %}<button type="button" class="hj-btn subtle xs" hx-post="{% url 'field:kiosk_action' k.id 'unlock' %}" hx-swap="none">Unpause</button>{% endif %}
+      <button type="button" class="hj-btn subtle danger xs" hx-post="{% url 'field:kiosk_action' k.id 'revoke' %}" hx-swap="none"
+              {% confirm_attrs k.name|add:" will stop working straight away. To use the tablet again, add a new kiosk." title="Revoke kiosk" label="Revoke" %}>Revoke</button>
+    </div>{% endif %}</td>
+  </tr>{% endfor %}</tbody>
+</table></div></div>
+{% else %}
+{% empty_state title="No kiosks yet" hint="Add a kiosk, then open the kiosk page on a tablet and pair it with the code." icon="device-tablet" %}
+{% endif %}
+</div>

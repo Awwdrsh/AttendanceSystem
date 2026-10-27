@@ -1,0 +1,26 @@
+<div class="hj-stack" style="--gap:20px" data-modal-title="{{ d.name|default:d.serial_no }}" data-modal-size="lg">
+  <div class="hj-fields" style="grid-template-columns:1fr 1fr">
+    <div><div class="hj-field-label">Status</div><div class="hj-field-value">{% status_badge status %}</div></div>
+    {% if d.last_seen_at %}{% field "Last seen" d.last_seen_at|relative_time %}{% else %}{% field "Last seen" "Never" %}{% endif %}
+    {% field "Serial number" d.serial_no %}
+    {% field "Vendor" vendor|add:" ("|add:protocol|add:")" %}
+    {% field "Firmware" d.fw_version|default:d.push_version|default:"—" %}
+    {% field "Mapped PINs" d.mapped_users %}
+  </div>
+  <div class="hj-row hj-gap-xs">
+    <button type="button" class="hj-btn xs" hx-get="{% url 'devices:map' %}?device={{ d.id }}" hx-target="#hj-modal-body"><i class="ti ti-link" aria-hidden="true"></i>Map a PIN</button>
+    <button type="button" class="hj-btn default xs" hx-post="{% url 'devices:sync_users' d.id %}" hx-swap="none"><i class="ti ti-refresh" aria-hidden="true"></i>Sync users</button>
+    <form hx-post="{% url 'devices:command' d.id %}" hx-trigger="change" hx-swap="none" x-data @htmx:after-request="$el.reset()">
+      <select class="hj-select" name="command" aria-label="Send a command" style="width:190px;height:30px">
+        <option value="">Send a command</option>
+        {% for c in page_commands %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+      </select>
+    </form>
+  </div>
+  {% section "PIN mappings" hint="Which device PIN belongs to which employee." %}
+    {% include "devices/partials/mappings.html" %}
+  {% endsection %}
+  {% section "Recent commands" %}
+    {% include "devices/partials/commands.html" %}
+  {% endsection %}
+</div>

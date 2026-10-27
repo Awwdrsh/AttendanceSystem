@@ -1,0 +1,9 @@
+<div id="home-month" hx-get="{% url 'home:month' %}" hx-trigger="hj:home-punched from:body" hx-swap="outerHTML">
+{% if month %}
+  <div class="hj-section-title">
+    <div><h3>This month</h3><p>{{ month.from|bs_date_short }} to {{ month.to|bs_date_short }}</p></div>
+    <div class="hj-actions"><a class="hj-sm" href="/me/attendance">View attendance</a></div>
+  </div>
+  {% stat_strip month_stats %}
+{% endif %}
+</div>

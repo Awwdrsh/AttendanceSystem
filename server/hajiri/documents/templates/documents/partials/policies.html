@@ -1,0 +1,32 @@
+{# PoliciesSection (DocumentsAdminPage.tsx). #}
+<div id="doc-policies" class="hj-stack hj-gap-md" hx-get="{% url 'documents:policies' %}{% if archived %}?archived=1{% endif %}" hx-trigger="hj:refresh-doc-policies from:body" hx-swap="outerHTML">
+  <div class="hj-row hj-between hj-gap-sm">
+    <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="archived" value="1"{% if archived %} checked{% endif %}
+      hx-get="{% url 'documents:policies' %}" hx-target="#doc-policies" hx-swap="outerHTML" hx-trigger="change"> Show archived</label>
+    <button type="button" class="hj-btn" hx-get="{% url 'documents:policy_new' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>Publish a policy</button>
+  </div>
+  {% if not policies %}
+    {% empty_state title="No policies published" hint="Publish the employee handbook, code of conduct or leave policy and track who has read it." icon="file-description" %}
+  {% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Policy</th><th>Acknowledged</th><th class="right"></th></tr></thead>
+    <tbody>
+    {% for p in policies %}
+      <tr>
+        <td><div class="hj-row hj-gap-xs"><span class="hj-strong">{{ p.title }}</span>{% if p.archived_at %}<span class="hj-badge sm hj-tone-idle">Archived</span>{% endif %}</div>
+          <div class="hj-small hj-muted">{{ p.audience_label }} · published {{ p.published_at|bs_date }}</div></td>
+        <td>{% if p.requires_ack %}<div class="hj-stack hj-gap-xs" style="width:160px"><span class="hj-small">{{ p.acks|default:0 }} of {{ p.audience_size|default:0 }}</span>
+            <div class="hj-progress"><div style="width:{{ p.pct }}%"></div></div></div>
+          {% else %}<span class="hj-small hj-muted">For information</span>{% endif %}</td>
+        <td class="right"><div class="hj-row nowrap hj-gap-xs hj-end">
+          <a class="hj-btn subtle xs" href="{% url 'documents:policy_file' p.id %}" target="_blank" rel="noopener">Open</a>
+          {% if p.requires_ack %}<button type="button" class="hj-btn subtle xs" hx-get="{% url 'documents:policy_acks' p.id %}" hx-target="#hj-drawer-body">Who has read it</button>{% endif %}
+          {% if not p.archived_at %}<button type="button" class="hj-btn subtle gray xs" hx-post="{% url 'documents:policy_archive' p.id %}" hx-swap="none"
+            {% confirm_attrs p.title|add:" will be hidden from employees and reminders stop. Acknowledgements are kept." title="Archive policy?" label="Archive" tone="gray" %}><i class="ti ti-archive" aria-hidden="true"></i>Archive</button>{% endif %}
+        </div></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div></div>
+  {% endif %}
+</div>

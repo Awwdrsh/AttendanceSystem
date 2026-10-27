@@ -1,0 +1,85 @@
+{% load expenses_tags %}
+{# TripDrawer: the trip, its advance, the approver's decision, the settlement form and earlier settlements. #}
+<div class="hj-stack" data-modal-title="Trip to {{ t.destination }}" data-modal-size="lg" style="--gap:16px">
+  <div class="hj-between">
+    {% badge status_label status_tone %}
+    {% if not mine %}<span class="hj-sm hj-muted">{{ t.employee.name }} · {{ t.employee.empCode }}{% if t.employee.grade %} · Grade {{ t.employee.grade }}{% endif %}</span>{% endif %}
+  </div>
+  <div class="hj-fields hj-grid" style="--cols:3">
+    {% field "When" when %}
+    {% field "Where" t.destinationLabel %}
+    {% field "Travel by" mode_label %}
+    {% field allowance_label t.daAmount|exmoney tip=allowance_tip %}
+    {% field "Lodging up to" t.lodgingLimit|exmoney %}
+    {% field "Fares and other costs" t.estimatedCost|exmoney %}
+  </div>
+  <p class="hj-sm">{{ t.purpose }}</p>
+  <div class="hj-card p-sm hj-between">
+    <div><div class="hj-small hj-muted">Advance</div><div class="hj-sm hj-strong">{{ adv_text }}</div></div>
+    <span class="hj-sm hj-muted">{{ adv_where }}</span>
+  </div>
+  {% if t.decisionNote %}<p class="hj-sm hj-muted">Approver: “{{ t.decisionNote }}”</p>{% endif %}
+  {% if d.canDecide %}
+  <form class="hj-card p-sm hj-stack" style="--gap:8px" hx-post="{% url 'expenses:trip_review' t.id %}" hx-swap="none" x-data="{ reason: '', adv: '' }">
+    <div class="hj-strong hj-sm">Your decision</div>
+    {% if advance_asked %}<div class="hj-fieldset"><label class="hj-label">Advance to approve (NPR)</label>
+      <div class="hj-help">Requested {{ advance_requested_text }}; leave empty to approve as asked</div>
+      <input class="hj-input" name="advance_approved" inputmode="decimal" style="width:260px" x-model="adv" @input="adv = adv.replace(/[^\d.]/g, '')"></div>{% endif %}
+    <textarea class="hj-input" name="reason" rows="2" maxlength="1000" placeholder="Comment (required to reject)" x-model="reason"></textarea>
+    <div class="hj-end hj-row hj-gap-xs">
+      <button type="submit" class="hj-btn default" name="decision" value="reject" :disabled="!reason.trim()">Reject</button>
+      <button type="submit" class="hj-btn" name="decision" value="approve" :disabled="adv !== '' && !/^\d{1,10}(\.\d{1,2})?$/.test(adv.trim())">Approve</button>
+    </div>
+  </form>
+  {% endif %}
+  {% if can_pay_outside %}
+  <form class="hj-row" style="align-items:flex-end" hx-post="{% url 'expenses:trip_advance_outside' t.id %}" hx-swap="none" x-data="{ note: '' }">
+    <div class="hj-fieldset hj-grow"><label class="hj-label">Advance paid another way?</label>
+      <input class="hj-input" name="note" maxlength="300" placeholder="e.g. Cash, voucher 87" x-model="note"></div>
+    <button type="submit" class="hj-btn default" :disabled="note.trim().length < 3">Mark as paid</button>
+  </form>
+  {% endif %}
+  {% if settle %}
+  <form class="hj-card p-sm hj-stack" style="--gap:10px" hx-post="{% url 'expenses:trip_settle' t.id %}" hx-swap="none">
+    <div class="hj-strong hj-sm">Settle this trip</div>
+    <div class="hj-form-row">
+      {% bs_date_input "actual_from" value=settle.from label="Actually left" max=settle.today %}
+      {% bs_date_input "actual_to" value=settle.to label="Actually returned" min=settle.from max=settle.today %}
+    </div>
+    <div class="hj-small hj-muted">Meals are covered by the daily allowance. Add transport, lodging and other bills; attach the bill for anything above NPR 500.</div>
+    <div class="hj-stack" id="settle-bills" style="--gap:8px"></div>
+    <button type="button" class="hj-btn subtle sm" style="align-self:flex-start" hx-get="{% url 'expenses:bill_row' %}?date={{ settle.from }}&min={{ settle.from }}&max={{ settle.to }}" hx-target="#settle-bills" hx-swap="beforeend"><i class="ti ti-plus" aria-hidden="true"></i>Add a bill</button>
+    <textarea class="hj-input" name="note" rows="1" maxlength="1000" placeholder="Note for the approver (optional)"></textarea>
+    <div hx-post="{% url 'expenses:settle_preview' t.id %}" hx-include="closest form" hx-swap="innerHTML"
+         hx-trigger="load, change from:closest form delay:300ms, input from:closest form delay:300ms"></div>
+    <div class="hj-end"><button type="submit" class="hj-btn">Submit settlement</button></div>
+  </form>
+  {% endif %}
+  {% for s in settlements %}
+  <div class="hj-card p-sm hj-stack" style="--gap:8px">
+    <div class="hj-between"><span class="hj-sm hj-strong">Settlement, {{ s.when }}</span>{% badge s.status_label s.status_tone %}</div>
+    <div class="hj-fields hj-grid" style="--cols:4">
+      {% field s.allowance_label s.daAmount|exmoney %}
+      {% field "Lodging allowed" s.lodgingAllowed|exmoney tip=s.lodging_tip %}
+      {% field "Other bills" s.otherBills|exmoney %}
+      {% field "Advance" s.advance|exmoney %}
+    </div>
+    <div class="hj-sm">{{ s.net_label }}{% if s.net_text %} <span class="hj-strong">{{ s.net_text }}</span>{% endif %}</div>
+    {% for b in s.bills %}
+    <div class="hj-row nowrap hj-small"><span class="hj-muted" style="width:90px">{{ b.date_text }}</span><span class="hj-grow">{{ b.kind_label }}: {{ b.description }}</span>
+      <span>{{ b.amount_text }}</span>{% if b.fileId %}<a href="{% url 'expenses:bill_file' s.id b.id %}" target="_blank" rel="noopener">Bill</a>{% endif %}</div>
+    {% endfor %}
+    {% if s.note %}<div class="hj-small hj-muted">“{{ s.note }}”</div>{% endif %}
+    {% if s.decisionNote %}<div class="hj-small hj-muted">Approver: “{{ s.decisionNote }}”</div>{% endif %}
+    {% if s.can_decide %}
+    <form class="hj-row" style="align-items:flex-end" hx-post="{% url 'expenses:settlement_review' s.id %}" hx-swap="none" x-data="{ reason: '' }">
+      <input class="hj-input hj-grow" name="reason" placeholder="Comment (required to return)" x-model="reason" style="min-width:200px">
+      <button type="submit" class="hj-btn default" name="decision" value="reject" :disabled="!reason.trim()">Return</button>
+      <button type="submit" class="hj-btn" name="decision" value="approve">Approve</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% if settle_payouts %}<p class="hj-sm hj-muted">{{ settle_payouts }}</p>{% endif %}
+  {% if can_cancel %}<div><button type="button" class="hj-btn subtle danger" hx-post="{% url 'expenses:trip_cancel' t.id %}" hx-swap="none">Cancel trip</button></div>{% endif %}
+</div>

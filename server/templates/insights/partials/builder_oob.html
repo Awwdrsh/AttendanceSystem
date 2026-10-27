@@ -1,0 +1,7 @@
+{# Out-of-band updates after saving or deleting a saved report, or switching the dataset. #}
+{% include "insights/partials/builder_saved.html" with saved=saved oob=True %}
+{% if not only_saved %}
+<input type="hidden" id="builder-current" name="current_id" value="{{ current.id|default:'' }}" hx-swap-oob="true">
+{% if save_label %}<span id="builder-save-label" hx-swap-oob="true">{{ save_label }}</span>{% endif %}
+{% endif %}
+{% if clear_result %}<div id="builder-result" hx-swap-oob="true">{% include "insights/partials/builder_result.html" with result=None %}</div>{% endif %}

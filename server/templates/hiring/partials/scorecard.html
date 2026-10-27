@@ -1,0 +1,19 @@
+<form class="hj-form" data-modal-title="Scorecard{% if i.candidate %}: {{ i.candidate }}{% endif %}" hx-post="{% url 'hiring:scorecard' i.id %}" hx-swap="none"
+      x-data="{ r: {{ criteria_values|json_attr }}, rec: '{{ rec }}' }" @hj:hiring-done.window="$el.closest('dialog') && $el.closest('dialog').close()">
+  {% for c in criteria %}
+  <div class="hj-row hj-between">
+    <span class="hj-sm">{{ c.label }}</span>
+    <input type="hidden" name="rating_{{ c.n }}" :value="r[{{ c.n }}]" value="{{ c.value }}">
+    <div class="hj-row nowrap" role="group" aria-label="{{ c.label }} rating">
+      {% for s in stars %}<button type="button" class="hj-iconbtn" aria-label="{{ c.label }} {{ s }} of 5" @click="r[{{ c.n }}] = {{ s }}">
+        <i class="ti" :class="r[{{ c.n }}] >= {{ s }} ? 'ti-star-filled hj-warn-text' : 'ti-star hj-muted'" aria-hidden="true"></i></button>{% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+  <div class="hj-fieldset"><label class="hj-label" for="sc-rec">Recommendation<span class="req" aria-hidden="true">*</span></label>
+    <select id="sc-rec" class="hj-select" name="recommendation" required x-model="rec"><option value=""></option>{% for v, l in recs %}<option value="{{ v }}">{{ l }}</option>{% endfor %}</select></div>
+  <div class="hj-fieldset"><label class="hj-label" for="sc-notes">Notes</label><div class="hj-help">Evidence for your ratings: what the candidate said or did.</div>
+    <textarea id="sc-notes" class="hj-input" name="notes" rows="3" maxlength="4000">{{ notes }}</textarea></div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="!rec || r.filter(x => x > 0).length === 0">Save scorecard</button></div>
+</form>

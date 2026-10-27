@@ -1,0 +1,54 @@
+{# ReviewSection: documents to verify, open letter requests and expiring documents. #}
+<div id="doc-review" class="hj-stack" style="--gap:32px" hx-get="{% url 'documents:review' %}" hx-trigger="hj:refresh-doc-review from:body" hx-swap="outerHTML">
+  {% stat_strip stats %}
+  <section class="hj-section">
+    <div class="hj-section-title"><div><h3>Documents to verify</h3><p>Uploads by employees wait here until you check them against the original.</p></div></div>
+    {% if not pending %}
+      {% empty_state title="Nothing to verify" hint="New uploads by employees will appear here." icon="file-check" %}
+    {% else %}
+    <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+      <thead><tr><th>Employee</th><th>Document</th><th>Expiry</th><th>Uploaded</th><th class="right"></th></tr></thead>
+      <tbody>
+      {% for d in pending %}
+        <tr>
+          <td><a href="/employees/{{ d.employee_id }}">{{ d.name_en }}</a><div class="hj-small hj-muted">{{ d.emp_code }}</div></td>
+          <td><div>{{ d.title }}</div><div class="hj-small hj-muted">{{ d.category_name }}{% if d.version > 1 %} · version {{ d.version }}{% endif %}</div></td>
+          <td>{% include "documents/partials/expiry.html" with e=d.expiry %}</td>
+          <td>{{ d.created_at|bs_date }}</td>
+          <td class="right"><div class="hj-row nowrap hj-gap-xs hj-end">
+            <a class="hj-btn subtle xs" href="{% url 'documents:doc_file' d.id %}" target="_blank" rel="noopener"><i class="ti ti-eye" aria-hidden="true"></i>Open</a>
+            <button type="button" class="hj-btn xs" hx-post="{% url 'documents:verify' d.id %}" hx-swap="none"><i class="ti ti-check" aria-hidden="true"></i>Verify</button>
+            <button type="button" class="hj-btn default xs" hx-get="{% url 'documents:reject' d.id %}?from=review" hx-target="#hj-drawer-body"><i class="ti ti-x" aria-hidden="true"></i>Send back</button>
+          </div></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div></div>
+    {% endif %}
+  </section>
+  <section class="hj-section">
+    <div class="hj-section-title"><div><h3>Letter requests</h3><p>Employees ask for these from their profile. Preparing one issues it with the next reference number.</p></div></div>
+    {% if requests %}{% include "documents/partials/request_list.html" with hr=True %}
+    {% else %}{% empty_state title="No open letter requests" hint="Requests for salary certificates, experience letters and similar appear here." compact=True icon="mail" %}{% endif %}
+  </section>
+  <section class="hj-section">
+    <div class="hj-section-title"><div><h3>Expiring documents</h3><p>Passports, licences and other documents expiring within 30 days, or already expired. Reminders go out automatically at 30, 7 and 0 days.</p></div></div>
+    {% if not expiring %}
+      {% empty_state title="Nothing expiring soon" hint="Add expiry dates to passports, licences and permits to track them here." icon="calendar-time" %}
+    {% else %}
+    <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+      <thead><tr><th>Employee</th><th>Document</th><th>Expiry</th><th class="right"></th></tr></thead>
+      <tbody>
+      {% for d in expiring %}
+        <tr>
+          <td><a href="/employees/{{ d.employee_id }}">{{ d.name_en }}</a><div class="hj-small hj-muted">{{ d.emp_code }}</div></td>
+          <td>{{ d.title }}</td>
+          <td>{% include "documents/partials/expiry.html" with e=d.expiry %}</td>
+          <td class="right"><a class="hj-btn subtle xs" href="{% url 'documents:doc_file' d.id %}" target="_blank" rel="noopener">Open</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div></div>
+    {% endif %}
+  </section>
+</div>

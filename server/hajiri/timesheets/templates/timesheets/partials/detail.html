@@ -1,0 +1,21 @@
+{% load timesheet_tags %}{# ReviewDrawer: one submitted week with its days, and approve or return when it is waiting. #}
+<div class="hj-stack" style="--gap:16px" data-modal-title="{{ title }}" data-modal-size="lg">
+  <div class="hj-row hj-gap-xs" style="align-items:center">{% timesheet_badge sub.status %}<span class="hj-sm hj-muted">Sent {{ sub.submitted_at|relative_time }}</span></div>
+  {% stat_strip stats %}
+  {% if sub.note %}{% alert "info" title="Note" %}{{ sub.note }}{% endalert %}{% endif %}
+  {% if sub.decision_comment %}{% if sub.status == 'rejected' %}{% alert "bad" title=sub.decided_by_name|default:"Reviewer" %}{{ sub.decision_comment }}{% endalert %}{% else %}{% alert "ok" title=sub.decided_by_name|default:"Reviewer" %}{{ sub.decision_comment }}{% endalert %}{% endif %}{% endif %}
+  {% include "timesheets/partials/week_days.html" with days=d.days editable=False %}
+  {% if can_decide %}
+  <form class="hj-stack" style="--gap:8px" hx-post="{% url 'timesheets:decide' sub.id %}" hx-swap="none">
+    <div class="hj-fieldset">
+      <label class="hj-label" for="ts-d-reason">Comment</label>
+      <div class="hj-help">Required when you return the week.</div>
+      <textarea id="ts-d-reason" name="reason" class="hj-input" rows="2" maxlength="500"></textarea>
+    </div>
+    <div class="hj-row hj-end hj-gap-xs">
+      <button type="submit" name="decision" value="reject" class="hj-btn default" style="color:var(--hj-bad)">Return</button>
+      <button type="submit" name="decision" value="approve" class="hj-btn">Approve</button>
+    </div>
+  </form>
+  {% endif %}
+</div>

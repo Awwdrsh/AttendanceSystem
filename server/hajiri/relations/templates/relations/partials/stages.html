@@ -1,0 +1,27 @@
+<form class="hj-form" data-modal-title="Disciplinary stages" data-modal-size="xl" hx-post="{% url 'relations:stages' %}" hx-swap="none"
+      x-data="{ shown: {{ stages|length }}, changed: false }" @input="changed = true" @change="changed = true">
+  <p class="hj-sm hj-muted">The actions HR can decide, from least to most serious. Suspension asks for dates and goes on the career timeline; termination starts the exit.</p>
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table" style="min-width:640px">
+    <thead><tr><th>Name</th><th>Severity</th><th>Effect</th><th>Letter template code</th><th>Active</th></tr></thead>
+    <tbody>
+    {% for i in slots %}{% with s=stages|get_item:i %}
+      <tr x-show="{{ i }} < shown" {% if i >= stages|length %}x-cloak{% endif %}>
+        <td><input type="hidden" name="s-{{ i }}-present" value="1" :disabled="{{ i }} >= shown">
+          {% if s.id %}<input type="hidden" name="s-{{ i }}-id" value="{{ s.id }}">{% endif %}
+          <input type="hidden" name="s-{{ i }}-code" value="{{ s.code|default:'' }}{% if not s %}stage_{{ i|add:1 }}{% endif %}">
+          <input name="s-{{ i }}-name" class="hj-input sm" value="{{ s.name|default:'New stage' }}" maxlength="80" aria-label="Name"></td>
+        <td><input name="s-{{ i }}-severity" type="number" min="1" max="9" class="hj-input sm" style="width:70px" value="{{ s.severity|default:3 }}" aria-label="Severity"></td>
+        <td><select name="s-{{ i }}-effect" class="hj-select sm" style="width:140px" aria-label="Effect">
+          <option value="none"{% if not s or s.effect == 'none' %} selected{% endif %}>None</option>
+          <option value="suspension"{% if s.effect == 'suspension' %} selected{% endif %}>Suspension</option>
+          <option value="termination"{% if s.effect == 'termination' %} selected{% endif %}>Termination</option></select></td>
+        <td><input name="s-{{ i }}-letter" class="hj-input sm" style="width:130px" maxlength="40" value="{{ s.letter_template_code|default:'' }}" aria-label="Letter template code"></td>
+        <td><input type="checkbox" name="s-{{ i }}-active" value="1"{% if not s or s.active %} checked{% endif %} aria-label="Active"></td>
+      </tr>
+    {% endwith %}{% endfor %}
+    </tbody></table></div></div>
+  <div class="hj-row hj-between">
+    <button type="button" class="hj-btn subtle xs" x-show="shown < 20" @click="shown++; changed = true"><i class="ti ti-plus" aria-hidden="true"></i>Add stage</button>
+    <button type="submit" class="hj-btn" :disabled="!changed">Save</button>
+  </div>
+</form>

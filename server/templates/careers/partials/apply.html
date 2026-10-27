@@ -1,0 +1,56 @@
+{% if done %}
+<div class="hj-stack hj-gap-xs" style="align-items:center;text-align:center;padding:24px 0">
+  <i class="ti ti-circle-check hj-ok-text" style="font-size:40px" aria-hidden="true"></i>
+  <div class="hj-strong" style="font-size:18px">{{ done }}</div>
+  <p class="hj-sm hj-muted" style="margin:0">We have sent a confirmation to your e-mail. We will contact you if your profile matches the role.</p>
+</div>
+{% else %}
+<form class="hj-form" hx-post="{% url 'careers:apply' job_id %}{% if code %}?company={{ code|urlencode }}{% endif %}" hx-encoding="multipart/form-data"
+      hx-target="#apply" hx-swap="innerHTML"
+      x-data="{ name: '{{ form.name|escapejs }}', email: '{{ form.email|escapejs }}', phone: '{{ form.phone|escapejs }}', cv: '', big: false, consent: {{ consent|yesno:'true,false' }} }">
+  <div class="hj-strong" style="font-size:18px">Apply for this job</div>
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="c-name">Full name<span class="req" aria-hidden="true">*</span></label>
+      <input id="c-name" class="hj-input" name="name" required maxlength="120" autocomplete="name" x-model="name" value="{{ form.name }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="c-email">E-mail<span class="req" aria-hidden="true">*</span></label>
+      <input id="c-email" class="hj-input" type="email" name="email" required maxlength="200" autocomplete="email" x-model="email" value="{{ form.email }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="c-phone">Phone<span class="req" aria-hidden="true">*</span></label>
+      <input id="c-phone" class="hj-input" type="tel" name="phone" required maxlength="30" autocomplete="tel" x-model="phone" value="{{ form.phone }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="c-exp">Years of work experience</label>
+      <input id="c-exp" class="hj-input" type="number" name="experienceYears" min="0" max="60" step="0.1" value="{{ form.experienceYears }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="c-emp">Current or last employer</label>
+      <input id="c-emp" class="hj-input" name="currentEmployer" maxlength="120" value="{{ form.currentEmployer }}"></div>
+  </div>
+  {% for x in job.questions %}
+  <div class="hj-fieldset">
+    <label class="hj-label" for="c-{{ x.id }}">{{ x.label }}{% if x.required %}<span class="req" aria-hidden="true">*</span>{% endif %}</label>
+    {% with v=answers|get_item:x.id %}
+    {% if x.kind == 'yes_no' %}
+      <select id="c-{{ x.id }}" class="hj-select" name="answer_{{ x.id }}"{% if x.required %} required{% endif %}>
+        <option value=""></option><option value="yes"{% if v == 'yes' %} selected{% endif %}>Yes</option><option value="no"{% if v == 'no' %} selected{% endif %}>No</option>
+      </select>
+    {% elif x.kind == 'number' %}
+      <input id="c-{{ x.id }}" class="hj-input" type="number" min="0" step="any" name="answer_{{ x.id }}" value="{{ v|default_if_none:'' }}"{% if x.required %} required{% endif %}>
+    {% else %}
+      <input id="c-{{ x.id }}" class="hj-input" name="answer_{{ x.id }}" maxlength="1000" value="{{ v|default_if_none:'' }}"{% if x.required %} required{% endif %}>
+    {% endif %}
+    {% endwith %}
+  </div>
+  {% endfor %}
+  <div class="hj-fieldset"><label class="hj-label" for="c-cover">Why are you a good fit?</label><div class="hj-help">Optional</div>
+    <textarea id="c-cover" class="hj-input" name="coverNote" rows="3" maxlength="4000">{{ form.coverNote }}</textarea></div>
+  {# Hidden from people; bots fill it in. #}
+  <input type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true" style="position:absolute;left:-10000px;width:1px;height:1px;opacity:0">
+  <div class="hj-row hj-gap-sm">
+    <label class="hj-btn default"><i class="ti ti-paperclip" aria-hidden="true"></i><span x-text="cv ? 'Change CV' : 'Attach CV (PDF, max 4 MB)'">Attach CV (PDF, max 4 MB)</span>
+      <input type="file" name="cv" accept="application/pdf" hidden @change="const f = $event.target.files[0]; cv = f ? f.name : ''; big = !!f && f.size > {{ 4194304 }}"></label>
+    <span class="hj-sm" :class="big ? 'hj-bad-text' : 'hj-muted'" x-show="cv" x-text="cv + (big ? ' is larger than 4 MB' : '')"></span>
+  </div>
+  <label class="hj-check-row hj-sm" style="display:flex;gap:8px;align-items:flex-start">
+    <input type="checkbox" class="hj-check" name="consent" value="1" x-model="consent"{% if consent %} checked{% endif %}>
+    <span>I agree that {{ company|default:"the company" }} may store and use my details and CV to consider me for this and similar roles. Details of people who are not selected are deleted after a few months.</span>
+  </label>
+  {% if error %}{% alert "bad" %}{{ error }}{% endalert %}{% endif %}
+  <div class="hj-row hj-end"><button type="submit" class="hj-btn lg" :disabled="!(name.trim().length >= 2 && /^\S+@\S+\.\S+$/.test(email) && /^[0-9+\- ()]{6,30}$/.test(phone.trim()) && cv && !big && consent)">Submit application</button></div>
+</form>
+{% endif %}

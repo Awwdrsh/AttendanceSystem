@@ -1,0 +1,16 @@
+<form id="committee" class="hj-card p-sm" hx-post="{% url 'relations:committee' %}" hx-target="this" hx-swap="outerHTML"
+      x-data="{ q: '', changed: false }" @change="changed = true">
+  <div class="hj-stack hj-gap-sm">
+    <input type="search" class="hj-input" placeholder="Add people" x-model="q" aria-label="Find people">
+    <div class="hj-stack hj-gap-xs" style="max-height:220px;overflow:auto">
+      {% for u in users %}
+      <label class="hj-check" x-show="!q || '{{ u.name|lower|escapejs }} {{ u.email|lower|escapejs }}'.includes(q.toLowerCase())">
+        <input type="checkbox" name="userIds" value="{{ u.id }}"{% if u.id in member_ids %} checked{% endif %}> {{ u.name }} <span class="hj-muted">({{ u.email }})</span></label>
+      {% endfor %}
+    </div>
+    <div class="hj-row hj-between">
+      {% if not committee.members %}<span class="hj-small hj-warn-text">No committee yet: only HR will be told about new grievances.</span>{% else %}<span class="hj-small hj-muted">{{ committee.members|length }} member{{ committee.members|length|pluralize }}</span>{% endif %}
+      <button type="submit" class="hj-btn" :disabled="!changed">Save</button>
+    </div>
+  </div>
+</form>

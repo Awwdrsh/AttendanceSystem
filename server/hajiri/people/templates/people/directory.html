@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}People · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack hj-gap-lg">
+  {% page_header "People" subtitle="Find a colleague, see who they report to and how to reach them at work." %}{% endpage_header %}
+  {% stat_strip stats %}
+  <form class="hj-filters" hx-get="{% url 'people:directory' %}" hx-target="#people-grid" hx-push-url="true"
+        hx-trigger="change, input delay:250ms from:input[type=search]">
+    <div class="hj-input-wrap hj-grow" style="flex:1 1 260px"><i class="ti ti-search" aria-hidden="true"></i>
+      <input type="search" name="search" class="hj-input" placeholder="Search by name, role, team or skill" value="{{ q.search|default:'' }}" aria-label="Search people"></div>
+    <select name="unit" class="hj-select" aria-label="Department">
+      <option value="">All departments</option>
+      {% for u in units %}<option value="{{ u.id }}"{% if q.orgUnitId == u.id %} selected{% endif %}>{{ u.name_en }}</option>{% endfor %}
+    </select>
+    <select name="branch" class="hj-select" aria-label="Branch">
+      <option value="">All branches</option>
+      {% for b in branches %}<option value="{{ b.id }}"{% if q.branchId == b.id %} selected{% endif %}>{{ b.name_en }}</option>{% endfor %}
+    </select>
+  </form>
+  <div id="people-grid">{% include "people/partials/directory_grid.html" %}</div>
+</div>
+{% endblock %}

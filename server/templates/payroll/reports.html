@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Payroll reports · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack" style="--gap:24px">
+{% page_header "Payroll reports" subtitle="Monthly deposits, changes between months, leave liability and the annual tax picture. Figures come from locked pay runs only." %}{% endpage_header %}
+<div class="hj-pills" role="tablist" style="overflow-x:auto">
+  {% for k, l in kinds %}<a class="hj-pill" href="?kind={{ k }}"{% if k == kind %} aria-current="page"{% endif %}>{{ l }}</a>{% endfor %}
+</div>
+{% include "payroll/partials/report.html" %}
+{% alert "info" %}Tax rules (bands, deduction limits, the medical credit and the donation deduction) follow the versions under Tax & SSF rules. Confirm them with your accountant before filing.{% endalert %}
+</div>
+{% endblock %}

@@ -1,0 +1,31 @@
+{% extends "bare.html" %}
+{% block title %}{% if company %}Careers at {{ company }}{% else %}Careers{% endif %}{% endblock %}
+{% block content %}
+<div style="min-height:100vh;background:var(--hj-canvas)">
+{% include "careers/_shell_head.html" %}
+<main class="hj-stack hj-gap-lg" style="max-width:920px;margin:0 auto;padding:32px 16px">
+  <div>
+    <h1 style="font-size:30px;font-weight:700;letter-spacing:-0.02em;margin:0">{% if company %}Work with {{ company }}{% else %}Open positions{% endif %}</h1>
+    <p class="hj-muted" style="margin:4px 0 0">Find a role that fits you and apply in a few minutes. All you need is your CV as a PDF.</p>
+  </div>
+  <form class="hj-filters hj-row hj-gap-sm" action="/careers" method="get" hx-get="/careers" hx-target="#careers-jobs" hx-swap="innerHTML" hx-push-url="true"
+        hx-trigger="change, input delay:300ms from:input[type=search]" x-data="{ mode: '{{ mode }}' }">
+    {% if code %}<input type="hidden" name="company" value="{{ code }}">{% endif %}
+    <div class="hj-input-wrap hj-grow" style="flex:1 1 220px"><i class="ti ti-search" aria-hidden="true"></i>
+      <input type="search" class="hj-input" name="q" value="{{ q }}" placeholder="Search jobs" maxlength="100" aria-label="Search jobs"></div>
+    <input type="hidden" name="mode" :value="mode === 'all' ? '' : mode" value="{% if mode != 'all' %}{{ mode }}{% endif %}">
+    <div class="hj-pills" role="group" aria-label="Work mode">
+      {% for v, l in modes %}<button type="button" class="hj-pill" :aria-selected="mode === '{{ v }}'" aria-selected="{% if mode == v %}true{% else %}false{% endif %}"
+        @click="mode = '{{ v }}'; $nextTick(() => $el.form.dispatchEvent(new Event('change', {bubbles: true})))">{{ l }}</button>{% endfor %}
+    </div>
+    {% if data.categories %}
+    <select class="hj-select" name="category" aria-label="Category" style="width:180px">
+      <option value="">All categories</option>
+      {% for c in data.categories %}<option value="{{ c }}"{% if c == category %} selected{% endif %}>{{ c }}</option>{% endfor %}
+    </select>
+    {% endif %}
+  </form>
+  <div id="careers-jobs">{% include "careers/partials/jobs.html" %}</div>
+</main>
+</div>
+{% endblock %}

@@ -1,0 +1,7 @@
+{# ChangeList.tsx: field-by-field "from → to". #}
+{% if not changes %}<p class="hj-sm hj-muted" style="margin:0">No differences.</p>{% else %}
+<table class="hj-table" style="border:0"><tbody>
+  {% for c in changes %}<tr><td class="muted" style="width:32%;vertical-align:top;border:0;padding:4px 8px 4px 0">{{ c.label }}</td>
+    <td style="border:0;padding:4px 0"><div class="hj-sm hj-muted"{% if c.from %} style="text-decoration:line-through"{% endif %}>{{ c.from|default:"(empty)" }}</div><div class="hj-sm hj-strong">{{ c.to|default:"(cleared)" }}</div></td></tr>{% endfor %}
+</tbody></table>
+{% endif %}

@@ -1,0 +1,19 @@
+<form class="hj-form" data-modal-title="Raise a grievance" data-modal-size="lg" hx-post="{% url 'relations:grievance_new' %}" hx-swap="none"
+      x-data="{ category: '', subject: '', description: '', slots: 1 }">
+  {% alert "accent" %}Your grievance goes to the grievance committee and HR, never to your manager. It is confidential, not anonymous: the committee needs to know who you are to look into it.{% endalert %}
+  <div class="hj-fieldset"><label class="hj-label" for="g-category">What is it about?<span class="req" aria-hidden="true">*</span></label>
+    <select id="g-category" name="category" class="hj-select" x-model="category" required><option value="" disabled selected>Choose</option>
+      {% for k, l in categories %}<option value="{{ k }}">{{ l }}</option>{% endfor %}</select></div>
+  <div class="hj-fieldset"><label class="hj-label" for="g-subject">Subject<span class="req" aria-hidden="true">*</span></label>
+    <input id="g-subject" name="subject" class="hj-input" maxlength="160" required x-model="subject"></div>
+  <div class="hj-fieldset"><label class="hj-label" for="g-description">What happened?<span class="req" aria-hidden="true">*</span></label>
+    <div class="hj-help">Dates, places and who was there help the committee.</div>
+    <textarea id="g-description" name="description" class="hj-input" rows="6" maxlength="8000" required x-model="description"></textarea></div>
+  <div class="hj-fieldset"><label class="hj-label" for="g-concerns">Who or what it concerns (optional)</label>
+    <input id="g-concerns" name="concerns" class="hj-input" maxlength="500"></div>
+  <div class="hj-row hj-gap-xs">
+    {% for i in "12345" %}<div x-show="slots >= {{ i }}" {% if i != '1' %}x-cloak{% endif %} @change="if (slots == {{ i }} && slots < 5) slots++">{% file_upload "fileIds" "grievance_attachment" label="Attach evidence" %}</div>{% endfor %}
+  </div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="!category || !subject.trim() || !description.trim()">Submit grievance</button></div>
+</form>

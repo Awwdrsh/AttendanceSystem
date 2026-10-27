@@ -1,0 +1,8 @@
+<div class="hj-card p-md"><div class="hj-row hj-between hj-gap-sm">
+  <div style="min-width:0">
+    <div class="hj-row hj-gap-xs"><i class="ti ti-hand-stop" aria-hidden="true"></i><span class="hj-strong hj-sm">Held pay</span>{% if holds %}{% badge holds|length "warn" %}{% endif %}</div>
+    {% if holds %}<div class="hj-stack hj-mt-sm" style="--gap:2px">{% for h in holds %}<div class="hj-sm">{{ h.name_en }} <span class="hj-small hj-muted">({{ h.emp_code }})</span>: <span class="num">{{ h.amount|npr }}</span> <span class="hj-small hj-muted">· {{ h.reason }}</span></div>{% endfor %}</div>
+    {% else %}<div class="hj-sm hj-muted">Everyone in this run is paid. Hold someone's net pay if, for example, their documents are pending.</div>{% endif %}
+  </div>
+  {% if can_hold %}<button type="button" class="hj-btn default sm" hx-get="{% url 'payroll:hold_new' run.id %}" hx-target="#hj-modal-body">Hold pay</button>{% endif %}
+</div></div>

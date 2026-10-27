@@ -1,0 +1,9 @@
+{# The builder body: definition and saved reports on the left, the preview on the right. #}
+{% if oob %}<span id="builder-save-label" hx-swap-oob="true">{{ save_label }}</span>{% endif %}
+<div class="hj-builder-grid" style="display:grid;gap:20px;grid-template-columns:minmax(0,1fr) minmax(0,2fr)">
+  <div class="hj-stack" style="--gap:16px">
+    {% include "insights/partials/builder_form.html" %}
+    {% include "insights/partials/builder_saved.html" %}
+  </div>
+  <div id="builder-result">{% include "insights/partials/builder_result.html" %}</div>
+</div>

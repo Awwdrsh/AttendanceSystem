@@ -1,0 +1,26 @@
+{# LetterTable (Letters.tsx): reference, subject, date; HR also sees the employee and can void a letter. #}
+<div id="doc-letters" hx-get="{% url 'documents:letters' %}?{{ letters_query }}{% if term %}&q={{ term|urlencode }}{% endif %}" hx-trigger="hj:refresh-doc-letters from:body" hx-swap="outerHTML">
+  {% if not letters %}
+    {% empty_state title="No letters yet" hint=empty_hint icon="file-certificate" %}
+  {% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Reference</th>{% if show_employee %}<th>Employee</th>{% endif %}<th>Letter</th><th>Issued</th><th class="right"></th></tr></thead>
+    <tbody>
+    {% for l in letters %}
+      <tr>
+        <td class="mono"{% if l.voided_at %} style="text-decoration:line-through"{% endif %}>{{ l.ref_no }}</td>
+        {% if show_employee %}<td><div>{{ l.name_en }}</div><div class="hj-small hj-muted">{{ l.emp_code }}</div></td>{% endif %}
+        <td><div class="hj-row nowrap hj-gap-xs"><span>{{ l.subject }}</span>
+          {% if l.voided_at %}<span class="hj-badge sm hj-tone-bad">Void</span>{% endif %}
+          {% if hr and not l.visible_to_employee %}<span class="hj-badge sm hj-tone-idle">HR only</span>{% endif %}</div></td>
+        <td>{{ l.issued_at|bs_date }}</td>
+        <td class="right"><div class="hj-row nowrap hj-gap-xs hj-end">
+          <a class="hj-btn subtle xs" href="{% url 'documents:letter_html' l.id %}" target="_blank" rel="noopener"><i class="ti ti-eye" aria-hidden="true"></i>Open</a>
+          {% if hr and not l.voided_at %}<button type="button" class="hj-btn subtle danger xs" hx-get="{% url 'documents:void' l.id %}" hx-target="#hj-drawer-body"><i class="ti ti-ban" aria-hidden="true"></i>Void</button>{% endif %}
+        </div></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div></div>
+  {% endif %}
+</div>

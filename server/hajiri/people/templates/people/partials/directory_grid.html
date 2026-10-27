@@ -1,0 +1,23 @@
+{% if not people %}
+  {% if filtered %}{% url 'people:directory' as clear_url %}{% empty_state title="Nobody matches that search" hint="Try a shorter name, or clear the filters." icon="users" action_url=clear_url action_label="Clear filters" %}
+  {% else %}{% empty_state title="No one here yet" hint="People appear here once HR adds employees." icon="users" %}{% endif %}
+{% else %}
+<p class="hj-small hj-muted" style="margin:0 0 8px">{{ people|length }} {% if people|length == 1 %}person{% else %}people{% endif %}</p>
+<div class="hj-grid" style="--cols:4">
+  {% for p in people %}
+  <button type="button" class="hj-card p-md" style="text-align:left;cursor:pointer;font:inherit;color:inherit" aria-label="Open {{ p.name_en }}"
+          hx-get="{% url 'people:card' p.id %}" hx-target="#hj-modal-body">
+    <div class="hj-row nowrap hj-gap-md" style="align-items:flex-start">
+      {% include "people/partials/avatar.html" with pid=p.id name=p.name_en has=p.has_avatar size=44 %}
+      <div style="min-width:0">
+        <div class="hj-strong hj-sm hj-truncate">{{ p.name_en }}</div>
+        <div class="hj-small hj-muted hj-truncate">{{ p.designation|default:"—" }}</div>
+        <div class="hj-small hj-muted hj-truncate">{% if p.unit_name %}{{ p.unit_name }}{% endif %}{% if p.unit_name and p.branch_name %} · {% endif %}{{ p.branch_name|default:"" }}</div>
+        {% if p.temp_assignment %}<span class="hj-badge sm {% if p.temp_assignment.kind == 'acting' %}hj-tone-accent{% else %}hj-tone-info{% endif %}" style="margin-top:4px">{% if p.temp_assignment.kind == 'acting' %}Acting{% else %}Deputed to{% endif %} {{ p.temp_assignment.label|default:"" }}</span>{% endif %}
+        {% if p.work_email %}<div class="hj-small hj-truncate hj-mt-sm">{{ p.work_email }}</div>{% endif %}
+      </div>
+    </div>
+  </button>
+  {% endfor %}
+</div>
+{% endif %}

@@ -1,0 +1,12 @@
+{# InterviewForm of ExitsPage.tsx: filled in by the leaver or by HR on their behalf. #}
+{% if not questions %}<p class="hj-sm hj-muted" style="margin:0">No questions set up.</p>{% else %}
+<form class="hj-card p-md hj-stack hj-gap-md" hx-post="{% url 'lifecycle:interview' exit_id %}" hx-swap="none">
+  {% for q in questions %}
+    {% if q.kind == 'text' %}<div class="hj-fieldset"><label class="hj-label">{{ q.question }}</label><textarea name="q-{{ q.id }}" class="hj-input" rows="2" maxlength="3000"></textarea></div>
+    {% elif q.kind == 'rating' %}<fieldset class="hj-fieldset" style="border:0;padding:0;margin:0"><legend class="hj-label">{{ q.question }}</legend>
+      <div class="hj-row hj-gap-sm">{% for n in "12345" %}<label class="hj-row nowrap hj-gap-xs hj-sm"><input type="radio" name="q-{{ q.id }}" value="{{ n }}">{{ n }}</label>{% endfor %}</div></fieldset>
+    {% else %}<div class="hj-fieldset"><label class="hj-label">{{ q.question }}</label><select name="q-{{ q.id }}" class="hj-select"><option value=""></option>{% for o in q.options %}<option>{{ o }}</option>{% endfor %}</select></div>{% endif %}
+  {% endfor %}
+  <div class="hj-row hj-end"><button type="submit" class="hj-btn">Save answers</button></div>
+</form>
+{% endif %}

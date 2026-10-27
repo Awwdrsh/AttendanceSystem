@@ -1,0 +1,2 @@
+<option value="">Optional</option>
+{% for a in activities %}{% if not only_global or not a.project_id %}<option value="{{ a.id }}"{% if selected == a.id %} selected{% endif %}>{{ a.name }}</option>{% endif %}{% endfor %}

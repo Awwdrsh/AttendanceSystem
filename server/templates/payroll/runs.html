@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Pay runs · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack" style="--gap:24px">
+{% page_header "Pay runs" subtitle="Each run moves through pre-flight, inputs, review, HR approval and lock, then gives you the salary sheet. Locked runs never change; corrections go in a supplementary run." %}
+  <button type="button" class="hj-btn default" hx-get="{% url 'payroll:bonus_new' %}" hx-target="#hj-modal-body"><i class="ti ti-coins" aria-hidden="true"></i>Bonus run</button>
+  <button type="button" class="hj-btn" hx-get="{% url 'payroll:run_new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>New pay run</button>
+{% endpage_header %}
+{% if not runs %}
+  {% url 'payroll:run_new' as new_url %}
+  {% empty_state title="No pay runs yet" hint="A pay run calculates every employee's payslip for one month from their salary structure and locked attendance. Once approved and locked, it produces the salary sheet and the SSF sheet, and employees can see their payslips." icon="receipt-2" action_label="Create your first pay run" action_attrs='hx-get="/_/payroll/runs/new" hx-target="#hj-modal-body"' %}
+{% else %}
+<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+  <thead><tr><th>Period</th><th>Run type</th><th>Status</th><th class="right">Headcount</th><th class="right">Gross</th><th class="right">Net</th><th>Created</th></tr></thead>
+  <tbody>
+  {% for r in runs %}
+  <tr data-href="{% url 'payroll:run' r.id %}">
+    <td><a class="hj-strong" href="{% url 'payroll:run' r.id %}">{{ r.period_label }}</a></td>
+    <td class="hj-muted">{{ r.type_label }}</td>
+    <td>{% status_badge r.status %}</td>
+    <td class="right num">{{ r.headcount }}</td>
+    <td class="right num">{{ r.gross_label }}</td>
+    <td class="right num hj-strong">{{ r.net_label }}</td>
+    <td class="hj-muted">{{ r.created_at|bs_date }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table></div></div>
+{% endif %}
+{% if period_count %}<p class="hj-small hj-muted" style="margin:0">{{ period_count }} pay {% if period_count == 1 %}period{% else %}periods{% endif %} opened so far.</p>{% endif %}
+</div>
+{% endblock %}

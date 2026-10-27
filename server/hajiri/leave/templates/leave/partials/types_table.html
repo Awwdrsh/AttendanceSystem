@@ -1,0 +1,29 @@
+<div id="leave-types" hx-get="{% url 'leave:policies' %}" hx-trigger="hj:refresh-leave-types from:body" hx-target="this" hx-swap="outerHTML">
+{% if not types %}
+  {% empty_state title="No leave types yet" hint="Create a leave type to start tracking balances." %}
+{% else %}
+<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+  <thead><tr><th style="width:76px">Order</th><th>Leave type</th><th>Pay</th><th>Accrual</th><th class="right">Max balance</th><th>Basis</th></tr></thead>
+  <tbody>
+  {% for l in types %}
+  <tr class="clickable" hx-get="{% url 'leave:type_edit' l.id %}" hx-target="#hj-drawer-body" hx-trigger="click">
+    <td><div class="hj-row nowrap" style="gap:2px" @click.stop>
+      <button type="button" class="hj-iconbtn" aria-label="Move {{ l.name_en }} up" {% if l.first %}disabled{% endif %} hx-post="{% url 'leave:type_move' l.id %}" hx-vals='{"dir": "up"}' hx-swap="none"><i class="ti ti-arrow-up" aria-hidden="true" style="font-size:14px"></i></button>
+      <button type="button" class="hj-iconbtn" aria-label="Move {{ l.name_en }} down" {% if l.last %}disabled{% endif %} hx-post="{% url 'leave:type_move' l.id %}" hx-vals='{"dir": "down"}' hx-swap="none"><i class="ti ti-arrow-down" aria-hidden="true" style="font-size:14px"></i></button>
+    </div></td>
+    <td><div class="hj-row nowrap hj-gap-sm">
+      <div><div class="hj-sm" style="font-weight:500">{{ l.name_en }}</div><div class="hj-small hj-muted mono">{{ l.code }}</div></div>
+      {% if l.statutory %}<span class="hj-badge sm hj-tone-idle"><i class="ti ti-lock" aria-hidden="true"></i> Statutory</span>{% endif %}
+      {% if l.club_with_id %}<span class="hj-badge sm hj-tone-accent" data-tip="Follows this type's place in the order and its sandwich rule"><i class="ti ti-link" aria-hidden="true"></i> With {{ l.club_name }}</span>{% endif %}
+      {% if l.sandwich_rule %}<span class="hj-badge sm hj-tone-info">Sandwich</span>{% endif %}
+    </div></td>
+    <td><span class="hj-sm{% if not l.paid %} hj-muted{% endif %}">{% if l.paid %}Paid{% else %}Unpaid{% endif %}</span></td>
+    <td class="hj-sm">{{ l.accrual_text }}</td>
+    <td class="right num">{{ l.max_balance|default_if_none:"—" }}</td>
+    <td class="hj-small hj-muted">{{ l.cite }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table></div></div>
+{% endif %}
+</div>

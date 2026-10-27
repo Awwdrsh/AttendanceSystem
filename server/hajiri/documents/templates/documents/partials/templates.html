@@ -1,0 +1,37 @@
+{# TemplatesSection: letterhead and signature settings, then the templates. #}
+<div id="doc-templates" class="hj-stack hj-gap-md" hx-get="{% url 'documents:templates' %}" hx-trigger="hj:refresh-doc-templates from:body" hx-swap="outerHTML">
+  <div class="hj-card p-md">
+    <div class="hj-strong" style="margin-bottom:4px">Letterhead and signature</div>
+    <form class="hj-stack hj-gap-sm" hx-post="{% url 'documents:letter_settings' %}" hx-swap="none" x-data="{ prefix: '{{ settings.refPrefix|escapejs }}' }">
+      <p class="hj-small hj-muted" style="margin:0">Letters use the company name, address and logo from Settings, Company &amp; rules. References read like <span x-text="prefix || 'HR'">{{ settings.refPrefix|default:'HR' }}</span>/2083/0001 and restart every BS year.</p>
+      <div class="hj-grid" style="--cols:4;--gap:12px;align-items:end">
+        <div class="hj-fieldset"><label class="hj-label" for="ls-name">Signed by</label><input id="ls-name" class="hj-input" name="signatory_name" maxlength="80" value="{{ settings.signatoryName|default:'' }}" placeholder="e.g. Sita Sharma"></div>
+        <div class="hj-fieldset"><label class="hj-label" for="ls-title">Title</label><input id="ls-title" class="hj-input" name="signatory_title" maxlength="80" value="{{ settings.signatoryTitle|default:'' }}" placeholder="e.g. HR Manager"></div>
+        <div class="hj-fieldset"><label class="hj-label" for="ls-prefix">Reference prefix</label><input id="ls-prefix" class="hj-input" name="ref_prefix" maxlength="20" x-model="prefix" value="{{ settings.refPrefix }}" placeholder="e.g. CV/HR"></div>
+        <div><button type="submit" class="hj-btn" :disabled="!/^[A-Za-z0-9/_-]{1,20}$/.test(prefix.trim())">Save</button></div>
+      </div>
+    </form>
+  </div>
+  <div class="hj-row hj-end"><button type="button" class="hj-btn" hx-get="{% url 'documents:template_new' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>New template</button></div>
+  {% if not templates %}
+    {% empty_state title="No templates" hint="Create a template for the letters you issue most." icon="file-text" %}
+  {% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Template</th><th>Subject</th><th></th><th>Updated</th></tr></thead>
+    <tbody>
+    {% for t in templates %}
+      <tr style="cursor:pointer" hx-get="{% url 'documents:template_edit' t.id %}" hx-target="#hj-drawer-body" hx-trigger="click">
+        <td><div class="hj-strong{% if not t.active %} hj-muted{% endif %}">{{ t.name }}</div><div class="hj-small hj-muted mono">{{ t.code }}</div></td>
+        <td>{{ t.subject }}</td>
+        <td><div class="hj-row hj-gap-xs">
+          {% if t.requestable %}<span class="hj-badge sm hj-tone-info">Requestable</span>{% endif %}
+          {% if t.is_builtin %}<span class="hj-badge sm hj-tone-idle">Built in</span>{% endif %}
+          {% if not t.active %}<span class="hj-badge sm hj-tone-idle">Inactive</span>{% endif %}
+        </div></td>
+        <td>{{ t.updated_at|bs_date }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div></div>
+  {% endif %}
+</div>

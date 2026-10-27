@@ -1,0 +1,3 @@
+<div id="my-requests" hx-get="{% url 'documents:my_requests' %}" hx-trigger="hj:refresh-my-requests from:body" hx-swap="outerHTML">
+  {% if requests %}{% include "documents/partials/request_list.html" with hr=False %}{% endif %}
+</div>

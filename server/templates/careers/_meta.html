@@ -1,0 +1,7 @@
+<div class="hj-row hj-gap-xs">
+  <span class="hj-badge hj-tone-accent">{{ m.mode }}</span>
+  <span class="hj-badge hj-tone-idle">{{ m.type }}</span>
+  {% if loc %}<span class="hj-badge hj-tone-idle"><i class="ti ti-map-pin" aria-hidden="true"></i>{{ loc }}</span>{% endif %}
+  {% if m.experience %}<span class="hj-badge hj-tone-idle">{{ m.experience }}</span>{% endif %}
+  {% if m.salary %}<span class="hj-badge hj-tone-ok">{{ m.salary }}</span>{% endif %}
+</div>

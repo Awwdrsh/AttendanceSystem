@@ -1,0 +1,15 @@
+<div class="hj-stack" data-modal-title="Approval history">
+  <div class="hj-row hj-gap-xs"><span class="hj-sm hj-muted">Approval chain:</span><span class="hj-sm">{{ chain }}</span></div>
+  <div class="hj-row hj-gap-xs"><span class="hj-sm hj-muted">State:</span><span class="hj-sm">{{ state }}</span></div>
+  <ol class="hj-timeline">
+    <li><div class="hj-sm hj-strong">Submitted</div><div class="hj-small hj-muted">{{ inst.created_at|bs_date_short }} at {{ inst.created_at|npt_time }}</div></li>
+    {% for a in actions %}
+    <li>
+      <div class="hj-sm hj-strong">{{ a.decision|capfirst }} by {{ a.actor_name }}</div>
+      <div class="hj-small hj-muted">{{ a.acted_at|bs_date_short }} at {{ a.acted_at|npt_time }}</div>
+      {% if a.reason %}<div class="hj-small">“{{ a.reason }}”</div>{% endif %}
+      <div class="hj-small hj-muted mono">Signature {{ a.signature|slice:":16" }}…</div>
+    </li>
+    {% endfor %}
+  </ol>
+</div>

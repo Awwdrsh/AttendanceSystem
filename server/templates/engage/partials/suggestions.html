@@ -1,0 +1,22 @@
+{% if not suggestions %}
+  {% if status == 'open' %}{% empty_state title="No suggestions waiting" hint="Employees send suggestions from the Engage page." icon="bulb" %}{% else %}{% empty_state title="Nothing here" hint="Employees send suggestions from the Engage page." icon="bulb" %}{% endif %}
+{% else %}
+<div class="hj-stack" style="--gap:10px">
+  {% for s in suggestions %}
+  <div class="hj-card p-md">
+    <div class="hj-row nowrap hj-between" style="margin-bottom:6px">
+      <div class="hj-row" style="gap:6px"><span class="hj-badge hj-tone-{{ s.badge.1 }}">{{ s.badge.0 }}</span><span class="hj-badge hj-tone-idle">{{ s.category_label }}</span>{% if s.isPublic %}<span class="hj-badge hj-tone-ok">Shared</span>{% endif %}</div>
+      <span class="hj-small hj-muted">{{ s.receivedOn|bs_date }}</span>
+    </div>
+    <div class="hj-sm" style="white-space:pre-wrap;overflow-wrap:anywhere">{{ s.body }}</div>
+    {% if s.reply %}<div class="hj-mt-sm" style="background:var(--hj-canvas);border-radius:8px;padding:8px"><div class="hj-small hj-muted" style="margin-bottom:2px">HR reply</div><div class="hj-sm" style="white-space:pre-wrap">{{ s.reply }}</div></div>{% endif %}
+    <div class="hj-row hj-mt-sm" style="gap:6px">
+      <button type="button" class="hj-btn xs" hx-get="{% url 'engage:suggestion_reply' s.id %}" hx-target="#hj-modal-body">{% if s.reply %}Edit reply{% else %}Reply{% endif %}</button>
+      {% if s.status == 'new' %}<button type="button" class="hj-btn default xs" hx-post="{% url 'engage:suggestion_update' s.id %}" hx-vals='{"status": "reviewed"}' hx-swap="none">Mark reviewed</button>{% endif %}
+      {% if s.status != 'archived' %}<button type="button" class="hj-btn subtle gray xs" hx-post="{% url 'engage:suggestion_update' s.id %}" hx-vals='{"status": "archived"}' hx-swap="none">Archive</button>{% endif %}
+      {% if s.reply %}<button type="button" class="hj-btn subtle xs" hx-post="{% url 'engage:suggestion_update' s.id %}" hx-vals='{"is_public": "{% if s.isPublic %}0{% else %}1{% endif %}"}' hx-swap="none">{% if s.isPublic %}Stop sharing{% else %}Share with everyone{% endif %}</button>{% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}

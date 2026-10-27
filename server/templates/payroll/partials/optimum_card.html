@@ -1,0 +1,12 @@
+{% if not saving %}
+{% if o.reason == 'already_optimal' %}{% alert "ok" title="Your CIT is already working for you" %}Your current contribution of {{ m.currentMonthly }} a month already gets the lowest tax the rules allow this year.{% endalert %}
+{% else %}{% alert "ok" title="Your CIT is already working for you" %}More CIT would not lower your tax this year: your retirement savings already reach the limit, or your remaining income is not taxed.{% endalert %}{% endif %}
+{% else %}
+<div class="hj-card p-md" style="border-color:var(--hj-accent)"><div class="hj-row hj-between hj-gap-md" style="align-items:flex-start">
+  <div style="max-width:620px">
+    <div class="hj-row hj-gap-xs" style="margin-bottom:4px"><i class="ti ti-bulb" style="color:var(--hj-accent)" aria-hidden="true"></i><span class="hj-strong">Save {{ m.annualSaving }} in tax this year</span></div>
+    <p class="hj-sm hj-muted" style="margin:0">Contributing <b class="num">{{ m.optimumMonthly }}</b> a month to the Citizen Investment Trust for the {{ o.remainingMonths }} {{ months_word }} left (now {{ m.currentMonthly }}) brings your tax for the year from {{ m.currentAnnualTax }} to {{ m.optimumAnnualTax }}. Retirement savings reduce taxable income up to {{ m.deductionLimit }} a year (one third of income or NPR 5,00,000, whichever is lower). The money stays yours in the CIT account.</p>
+  </div>
+  <button type="button" class="hj-btn light" @click="$dispatch('hj-use-cit', { value: '{{ optimum_plain }}' })">Use this amount</button>
+</div></div>
+{% endif %}

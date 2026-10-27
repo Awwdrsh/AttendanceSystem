@@ -1,0 +1,17 @@
+{% extends "bare.html" %}
+{% block title %}Set up two-step sign-in · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-auth">
+  <div class="hj-auth-box wide">
+    <div class="hj-row" style="justify-content:center">{% include "components/brand.html" with height=24 %}</div>
+    <div class="hj-card p-xl hj-stack">
+      <div>
+        <h2 style="font-size:20px;font-weight:600;letter-spacing:-0.01em">Set up two-step sign-in</h2>
+        <p class="hj-sm hj-muted" style="margin:4px 0 0">CoreValley requires a second step for your role. It takes a minute and protects salaries and personal records if your password is ever leaked.</p>
+      </div>
+      <div id="two-factor-setup">{% include "web/partials/two_factor_setup.html" with done_url="/" %}</div>
+    </div>
+    <form method="post" action="/logout" class="hj-center">{% csrf_token %}<button class="hj-link-btn muted" type="submit">Sign out</button></form>
+  </div>
+</div>
+{% endblock %}

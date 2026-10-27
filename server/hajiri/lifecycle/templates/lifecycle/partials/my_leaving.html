@@ -1,0 +1,35 @@
+{# Leaving of MyTicketsPage.tsx: resign, follow the notice and clearance, fill in the exit interview, see the assets you hold. #}
+<div id="my-leaving" class="hj-stack hj-gap-md" hx-get="{% url 'lifecycle:my_leaving' %}" hx-trigger="hj:refresh-my-leaving from:body" hx-swap="outerHTML">
+  {% if assets %}
+  {% section "Company assets with you" hint="Return these to HR before your last day." %}
+  <div class="hj-card p-sm"><div class="hj-stack hj-gap-xs">{% for a in assets %}<div class="hj-row hj-between"><span class="hj-sm">{{ a.name }} <span class="hj-small hj-muted mono">{{ a.tag }}</span></span><span class="hj-small hj-muted">since {{ a.assigned_on|bs_date }}</span></div>{% endfor %}</div></div>
+  {% endsection %}
+  {% endif %}
+  {% section "Leaving the company" hint="Resignations go to your manager and then HR." %}
+  {% if current %}
+  <div class="hj-card p-md hj-stack hj-gap-sm">
+    <div class="hj-row hj-between">{% badge current.badge.0 current.badge.1 %}{% if current.status == 'pending' %}<button type="button" class="hj-btn subtle gray xs" hx-post="{% url 'lifecycle:exit_withdraw' current.id %}" hx-swap="none">Withdraw resignation</button>{% endif %}</div>
+    <p class="hj-sm" style="margin:0">Last working day: <b>{{ current.lwd|bs_date }}</b></p>
+    {% if current.status == 'accepted' and current.tasks_total %}<p class="hj-sm hj-muted" style="margin:0">Clearance: {{ current.tasks_done }} of {{ current.tasks_total }} done. Your own tasks are on Home.</p>{% endif %}
+    {% if current.status == 'accepted' and policy.selfExitInterview and not current.interview_done %}
+      <div class="hj-small hj-muted hj-strong">Exit interview (only HR reads this)</div>
+      {% include "lifecycle/partials/interview_form.html" with exit_id=current.id %}
+    {% endif %}
+    {% if current.interview_done %}<p class="hj-sm hj-muted" style="margin:0">Thank you for completing the exit interview.</p>{% endif %}
+  </div>
+  {% elif form %}
+  <form class="hj-card p-md hj-stack hj-gap-md" hx-post="{% url 'lifecycle:resign' %}" hx-swap="none"
+        x-data="{ lwd: '{{ default_lwd|date:'Y-m-d' }}', notice: {{ policy.noticeDays }}, today: '{{ today|date:'Y-m-d' }}',
+                  short() { if (!this.lwd) return 0; const d = Math.round((Date.parse(this.lwd) - Date.parse(this.today)) / 86400000); return Math.max(0, this.notice - d); } }"
+        @change="lwd = $el.querySelector('input[name=proposedLastWorkingDay]').value">
+    {% bs_date_input "proposedLastWorkingDay" value=default_lwd label="Proposed last working day" required=True min=today %}
+    <p class="hj-sm hj-warn-text" style="margin:0" x-show="short() > 0" x-cloak>That is <span x-text="short()"></span> <span x-text="short() === 1 ? 'day' : 'days'"></span> short of the {{ policy.noticeDays }}-day notice. Your manager and HR will see this.</p>
+    <div class="hj-fieldset"><label class="hj-label">Main reason (optional)</label><select name="reasonCategory" class="hj-select"><option value=""></option>{% for r in reasons %}<option>{{ r }}</option>{% endfor %}</select></div>
+    <div class="hj-fieldset"><label class="hj-label">Anything you want to add (optional)</label><textarea name="reason" class="hj-input" rows="2" maxlength="2000"></textarea></div>
+    <div class="hj-row hj-end hj-gap-xs"><button type="button" class="hj-btn default" hx-get="{% url 'lifecycle:my_leaving' %}" hx-target="#my-leaving" hx-swap="outerHTML">Cancel</button><button type="submit" class="hj-btn danger">Submit resignation</button></div>
+  </form>
+  {% else %}
+  <button type="button" class="hj-btn default" hx-get="{% url 'lifecycle:my_leaving' %}?form=1" hx-target="#my-leaving" hx-swap="outerHTML"><i class="ti ti-door-exit" aria-hidden="true"></i>Resign</button>
+  {% endif %}
+  {% endsection %}
+</div>

@@ -1,0 +1,1 @@
+<button type="button" class="hj-btn default xs" hx-get="{% url 'devices:map' %}?device={{ row.device_id }}&amp;pin={{ row.device_user_pin|urlencode }}&amp;from={{ row.local_date|date:'Y-m-d' }}" hx-target="#hj-modal-body"><i class="ti ti-link" aria-hidden="true"></i>Map PIN</button>

@@ -1,0 +1,19 @@
+{% load perf_tags %}
+<div class="hj-card p-md" style="cursor:pointer" role="button" tabindex="0" hx-get="{% url 'performance:goal_detail' g.id %}" hx-target="#hj-drawer-body">
+  <div class="hj-stack" style="--gap:8px">
+    <div class="hj-between" style="align-items:flex-start">
+      <div style="min-width:0">
+        <div class="hj-strong hj-sm">{{ g.title }}</div>
+        <div class="hj-small hj-muted">{% if show_owner and g.employee_name %}{{ g.employee_name }} · {% endif %}{% if g.scope == 'department' %}{{ g.org_unit_name }} · {% elif g.scope == 'company' %}Company goal · {% endif %}{% if g.due_date %}Due {{ g.due_date|bs_date_short }}{% else %}No due date{% endif %}{% if g.weight|numstr != '0' %} · Weight {{ g.weight|numstr }}%{% endif %}</div>
+      </div>
+      <div class="hj-row nowrap" style="gap:4px">
+        {% if g.status != 'active' %}{% include "performance/partials/status_badge.html" with status=g.status %}{% endif %}
+        {% if g.last_checkin.confidence %}{% badge g.last_checkin.confidence|confidence_label g.last_checkin.confidence|confidence_tone %}{% endif %}
+      </div>
+    </div>
+    {% include "performance/partials/progress.html" with value=g.progress %}
+    {% if g.key_results %}<div class="hj-stack" style="--gap:2px">{% for k in g.key_results|slice:":4" %}
+      <div class="hj-between hj-small"><span class="hj-truncate">{{ k.title }}</span><span class="hj-muted" style="flex:none">{{ k|kr_value }}</span></div>{% endfor %}</div>{% endif %}
+    {% if g.parent_title %}<div class="hj-small hj-muted">Supports: {{ g.parent_title }}</div>{% endif %}
+  </div>
+</div>

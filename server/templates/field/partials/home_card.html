@@ -1,0 +1,41 @@
+{% load static %}
+<div id="home-field" class="hj-grid" style="--cols:{% if d.fieldWork and show_break_card %}2{% else %}1{% endif %}" hx-get="{% url 'field:home_card' %}" hx-trigger="hj:refresh-home-field from:body, every 30s" hx-target="this" hx-swap="outerHTML">
+  <script src="{% static 'field/geo.js' %}" defer></script>
+  {% if show_break_card %}
+  <div class="hj-card p-lg">
+    <div class="hj-row hj-between" style="margin-bottom:12px">
+      <span class="hj-row nowrap hj-gap-xs"><i class="ti ti-coffee" aria-hidden="true"></i><span class="hj-strong">Breaks</span></span>
+      {% if break_total %}<span class="hj-sm hj-muted">{{ break_total }} today</span>{% endif %}
+    </div>
+    {% if open_break %}
+    <div class="hj-stack" style="--gap:8px">
+      <div class="hj-row nowrap hj-gap-xs"><span class="hj-dot" style="background:var(--hj-{% if open_break.over %}bad{% else %}warn{% endif %})" aria-hidden="true"></span><span class="hj-sm">{{ open_break.text }}</span></div>
+      <button type="button" class="hj-btn block" hx-post="{% url 'field:break' 'end' %}" hx-swap="none"><i class="ti ti-player-stop" aria-hidden="true"></i>End break</button>
+    </div>
+    {% elif show_breaks %}
+    <div class="hj-row hj-gap-xs">{% for t in break_types %}
+      <button type="button" class="hj-btn default sm" hx-post="{% url 'field:break' 'start' %}" hx-vals='{"kind": "{{ t.kind }}"}' hx-swap="none">{{ t.label }} <span class="hj-small hj-muted" style="margin-left:6px">{{ t.maxMin }} min{% if not t.paid %}, unpaid{% endif %}</span></button>
+    {% endfor %}</div>
+    {% else %}<p class="hj-sm hj-muted" style="margin:0">Clock in to take a break.</p>{% endif %}
+    {% if ended_breaks %}<div class="hj-stack" style="--gap:4px;margin-top:12px">{% for b in ended_breaks %}
+      <div class="hj-row nowrap hj-between"><span class="hj-small hj-muted">{{ b.label }}, {{ b.times }}</span><span class="hj-small num {% if b.over_limit %}hj-bad-text{% else %}hj-muted{% endif %}">{{ b.minutes|default:0|minutes_hm }}</span></div>
+    {% endfor %}</div>{% endif %}
+  </div>
+  {% endif %}
+  {% if d.fieldWork %}
+  <div class="hj-card p-lg">
+    <div class="hj-row nowrap hj-gap-xs" style="margin-bottom:12px"><i class="ti ti-map-pin" aria-hidden="true"></i><span class="hj-strong">Field visits</span></div>
+    {% if open_visit %}
+    <div class="hj-stack" style="--gap:8px">
+      <p class="hj-sm" style="margin:0">At <b>{{ open_visit.place }}</b> since {{ open_visit.since }} ({{ open_visit.so_far }})</p>
+      <button type="button" class="hj-btn block" hx-get="{% url 'field:visit_end' open_visit.id %}" hx-target="#hj-modal-body"><i class="ti ti-map-pin-check" aria-hidden="true"></i>End visit</button>
+    </div>
+    {% else %}
+    <button type="button" class="hj-btn default block" hx-get="{% url 'field:visit_start' %}" hx-target="#hj-modal-body"><i class="ti ti-map-pin" aria-hidden="true"></i>Start a visit</button>
+    {% endif %}
+    {% if ended_visits %}<div class="hj-stack" style="--gap:4px;margin-top:12px">{% for v in ended_visits %}
+      <div class="hj-row nowrap hj-between"><span class="hj-small hj-muted hj-truncate">{{ v.place }}</span>{% badge v.times "idle" %}</div>
+    {% endfor %}</div>{% endif %}
+  </div>
+  {% endif %}
+</div>

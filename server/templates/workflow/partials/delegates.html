@@ -1,0 +1,35 @@
+{# DelegateApprovals.tsx: "Away? Hand over your approvals". #}
+<div class="hj-stack" id="wf-delegates" data-modal-title="Hand over your approvals" style="--gap:12px">
+  <p class="hj-sm hj-muted" style="margin:0">While a delegation is on, the person you choose also receives and decides requests that would come to you. When you are on leave, only they get them.</p>
+  {% if mine %}
+  <div class="hj-stack" style="--gap:6px">
+    {% for d in mine %}
+    <div class="hj-between hj-row nowrap">
+      <span class="hj-sm">{{ d.delegate_name }}, {{ d.from_date|bs_date }} to {{ d.to_date|bs_date }}{% if d.note %} · {{ d.note }}{% endif %}</span>
+      <button type="button" class="hj-iconbtn" aria-label="Cancel delegation" data-tip="Cancel this delegation" hx-post="{% url 'workflow:delegate_cancel' d.id %}" hx-target="#wf-delegates" hx-swap="outerHTML"><i class="ti ti-trash hj-bad-text" aria-hidden="true"></i></button>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <form class="hj-form" hx-post="{% url 'workflow:delegate_new' %}" hx-target="#wf-delegates" hx-swap="outerHTML">
+    <div class="hj-fieldset">
+      <label class="hj-label" for="wf-delegate">Delegate</label>
+      <select id="wf-delegate" name="delegate_id" class="hj-select" required>
+        <option value="">Choose a colleague</option>
+        {% for u in people %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="hj-form-row">
+      {% bs_date_input "from" value=today label="From" min=today required=True %}
+      {% bs_date_input "to" label="To" min=today required=True %}
+    </div>
+    <div class="hj-fieldset">
+      <label class="hj-label" for="wf-note">Note (optional)</label>
+      <input id="wf-note" name="note" class="hj-input" maxlength="300" placeholder="e.g. Annual leave">
+    </div>
+    <div class="hj-modal-foot">
+      <button type="button" class="hj-btn default" data-modal-close>Close</button>
+      <button type="submit" class="hj-btn">Delegate</button>
+    </div>
+  </form>
+</div>

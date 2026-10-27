@@ -1,0 +1,62 @@
+{
+ "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+ "pepper": "parity-test-pepper",
+ "cipher": [
+  {
+   "plain": "ABCDE1234F",
+   "aad": "employee:10",
+   "blob": "ASb0SaTqvzuBXHJJUFtfB0hw+m1bkoRpzhUEL1/CroBDmP5T7dxu",
+   "bidx": "b5dedd3a75e875c6fc4d20e52d860564"
+  },
+  {
+   "plain": "नेपाल बैंक 0123456789",
+   "aad": "employee:21",
+   "blob": "AW3rcjon7XrskQ75fSq1wtu8tOaqXhhfvpZkJxex3CQCbHKIAYt+REIiaOZD7r850nnBNH0F49sL1NjRIOYsRJ3/owA=",
+   "bidx": "b1b6f42ef748e18da1e7079bbe835517"
+  },
+  {
+   "plain": "",
+   "aad": "employee:0",
+   "blob": "Ab9K+QQeSkucQq/X/rjH7sjKWBsODri8EmgFNfo=",
+   "bidx": "4378f33f59ba941d7d6603fba00676b1"
+  },
+  {
+   "plain": " pan-with-space ",
+   "aad": "employee:16",
+   "blob": "AakkGJ91hoJchMxYrkUfutrwMcm8ae0o9Isb63zg5fSMRB6ROK2ZxJSIKldw",
+   "bidx": "a37951a01ad4bb446082aaf292fc1609"
+  }
+ ],
+ "passwords": [
+  {
+   "password": "correct horse battery",
+   "hash": "scrypt$32768$8$1$YYo8/PqhgcJaMQYfKAnVGg==$uBwvcuMfR8koHqCu21GJokm7gETBvkuO1Fi4YsEAtK/1NjJp9ZX58NKAr0IRPbXHrJmjaEht1i9wkBVzKmAzmQ=="
+  },
+  {
+   "password": "पासवर्ड-१२३४५६७८९",
+   "hash": "scrypt$32768$8$1$uG7EOnqyEplfjob0MBpXVg==$CAnAr/11tqUKdE7pg0XIBbmlns+JR9dC4qHu1Etbv5KneNokH4++QTKOVKIRBUl1xyRUqyI4mrAyOWAFdXCuVg=="
+  },
+  {
+   "password": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "hash": "scrypt$32768$8$1$ppL/0qR6CRHbuBPEX3f4tQ==$ASATLchC+nqXJePVHCKGY2mdS1G+TRFT/b2qyYGv5xLnH7HDLpa/Gb4H7ruMQ9D9ygCYIJqutLZAxR1jOLnJ3g=="
+  }
+ ],
+ "sha256": [
+  {
+   "in": "ABCDE1234F",
+   "out": "556873ad6ab44095c8201b821c0ca06701f9c05ccaf1a14bb5cee6bbae5bc48b"
+  },
+  {
+   "in": "नेपाल बैंक 0123456789",
+   "out": "41c1ea756a1d887ad90b7be43f630c6ff73f293442a1b46ecd7e77467ad95fe7"
+  },
+  {
+   "in": "",
+   "out": "d48e08ed306a7f85cc3af22a3ff450ee158ecd9b55137fb94b21ff57de71a996"
+  },
+  {
+   "in": " pan-with-space ",
+   "out": "95a03509955b55e927b3c3b7e7b5ee064c55b988f4ccd831957ddd0ff1a365d9"
+  }
+ ]
+}

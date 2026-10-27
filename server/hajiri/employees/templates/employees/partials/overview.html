@@ -1,0 +1,10 @@
+<div id="employee-overview" class="hj-stack hj-gap-lg" hx-get="{% url 'employees:overview' id %}" hx-trigger="hj:refresh-employee-overview from:body" hx-swap="outerHTML">
+  <div class="hj-card p-lg"><div class="hj-fields hj-grid" style="--cols:4">{% for l, v in ov %}{% field l v %}{% endfor %}</div></div>
+  <div class="hj-card p-lg" id="sensitive-box">
+    <div class="hj-row hj-between hj-gap-sm">
+      <div class="hj-row nowrap hj-gap-sm"><i class="ti ti-lock hj-muted" aria-hidden="true"></i>
+        <div><div class="hj-sm hj-strong">Sensitive fields</div><div class="hj-small hj-muted">PAN and bank account are encrypted. Revealing them is logged.</div></div></div>
+      <div id="sensitive-values"><button type="button" class="hj-btn default" hx-post="{% url 'employees:sensitive' id %}" hx-target="#sensitive-values" hx-swap="innerHTML"><i class="ti ti-eye" aria-hidden="true"></i>Reveal</button></div>
+    </div>
+  </div>
+</div>

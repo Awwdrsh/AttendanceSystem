@@ -1,0 +1,7 @@
+<form class="hj-form" data-modal-title="Set CIT for {{ name }}" hx-post="{% url 'payroll:optimum_apply' employee_id %}" hx-swap="none">
+  <p class="hj-sm hj-muted" style="margin:0">This changes the CIT deducted from {{ name }}'s pay from the month you choose until the end of the fiscal year. Talk to them first: the money goes to their CIT account and lowers their take-home pay, but saves {{ saving }} in tax this year.</p>
+  <div class="hj-fieldset"><label class="hj-label" for="cit-amt">Monthly CIT (NPR)</label><input class="hj-input" id="cit-amt" name="monthly_cit" type="number" min="0" step="0.01" value="{{ amount }}"></div>
+  <div class="hj-fieldset"><label class="hj-label" for="cit-from">Starting from</label>
+    <select class="hj-select" id="cit-from" name="from_bs_month">{% for v, l in months %}<option value="{{ v }}"{% if v == month %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn">Apply</button></div>
+</form>

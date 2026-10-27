@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Tax declarations · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack" style="--gap:24px">
+{% page_header "Tax declarations" subtitle="Insurance premiums and retirement contributions you declare reduce taxable income, within the legal limits. Keep the receipts; HR verifies them." %}
+  <form class="hj-row hj-gap-xs" hx-get="{% url 'payroll:declarations' %}" hx-target="#declaration" hx-swap="outerHTML" hx-push-url="true" hx-trigger="change[target.name==='employee_id'||target.name==='fy']">
+    {% if is_verifier %}{% employee_picker "employee_id" value=employee_id label="" %}{% endif %}
+    <select class="hj-select" name="fy" aria-label="Fiscal year" style="width:140px">{% for y, l in fy_options %}<option value="{{ y }}"{% if y == fy %} selected{% endif %}>{{ l }}</option>{% endfor %}</select>
+  </form>
+{% endpage_header %}
+{% include "payroll/partials/declaration.html" %}
+</div>
+{% endblock %}

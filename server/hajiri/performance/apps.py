@@ -1,0 +1,6 @@
+from django.apps import AppConfig
+
+
+class PerformanceConfig(AppConfig):
+    name = 'hajiri.performance'
+    label = 'performance'

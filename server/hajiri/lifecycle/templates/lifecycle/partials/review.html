@@ -1,0 +1,18 @@
+{# ProbationReviewModal.tsx: a rating, a recommendation and comments, sent to HR for approval. #}
+<form class="hj-form" data-modal-title="Probation review: {{ e.name_en }}" hx-post="{% url 'lifecycle:review' e.id %}" hx-swap="none"
+      x-data="{ rec: 'confirm', comments: '' }">
+  <p class="hj-sm hj-muted" style="margin:0">{% if e.probation_end %}Probation ends on {{ e.probation_end|bs_date }}.{% else %}No probation end date is recorded.{% endif %} HR approves your recommendation before it takes effect.</p>
+  <div class="hj-fieldset"><label class="hj-label" for="f-rt">Overall rating</label>
+    <select id="f-rt" name="rating" class="hj-select">{% for n, l in ratings %}<option value="{{ n }}"{% if n == 4 %} selected{% endif %}>{{ n }} of 5, {{ l }}</option>{% endfor %}</select></div>
+  <div class="hj-pills" role="radiogroup" aria-label="Recommendation">
+    <label class="hj-pill" :aria-selected="rec === 'confirm'"><input type="radio" name="recommendation" value="confirm" x-model="rec" hidden checked>Confirm</label>
+    <label class="hj-pill" :aria-selected="rec === 'extend'"><input type="radio" name="recommendation" value="extend" x-model="rec" hidden>Extend</label>
+    <label class="hj-pill" :aria-selected="rec === 'terminate'"><input type="radio" name="recommendation" value="terminate" x-model="rec" hidden>End employment</label>
+  </div>
+  <div x-show="rec === 'extend'" x-cloak>{% bs_date_input "extendTo" value=extend_default label="New probation end" min=min_extend %}</div>
+  <div x-show="rec === 'terminate'" x-cloak>{% bs_date_input "lastWorkingDay" value=lwd_default label="Last working day" %}</div>
+  <div class="hj-fieldset"><label class="hj-label" for="f-rc">Comments<span class="req">*</span></label><div class="hj-help">Strengths, gaps and the reason for your recommendation.</div>
+    <textarea id="f-rc" name="comments" class="hj-input" rows="3" maxlength="4000" x-model="comments" required></textarea></div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :class="rec === 'terminate' && 'danger'" :disabled="comments.trim().length < 3">Send for approval</button></div>
+</form>

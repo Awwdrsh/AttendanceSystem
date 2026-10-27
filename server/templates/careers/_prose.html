@@ -1,0 +1,1 @@
+{% for b in blocks %}{% if b.ul %}<ul style="margin:4px 0 12px;padding-left:20px">{% for i in b.ul %}<li class="hj-sm">{{ i }}</li>{% endfor %}</ul>{% else %}<p class="hj-sm" style="margin:0 0 8px">{{ b.p }}</p>{% endif %}{% endfor %}

@@ -1,0 +1,1 @@
+{% load timesheet_tags %}<td class="right mono"{% if min|diff_off %} style="color:var(--hj-warn)"{% else %} style="color:var(--hj-muted)"{% endif %}>{{ min|diff_hm }}</td>

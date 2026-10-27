@@ -1,0 +1,6 @@
+<form class="hj-form" data-modal-title="Calculate despite blockers" hx-post="{% url 'payroll:run_override' run_id %}" hx-swap="none" x-data="{ reason: '' }">
+  <p class="hj-sm hj-muted" style="margin:0">Pre-flight found blockers. Calculating anyway is recorded in the audit log with your reason. Fix the underlying data before approval.</p>
+  <div class="hj-fieldset"><label class="hj-label" for="ov-reason">Reason<span class="req" aria-hidden="true">*</span></label><div class="hj-help">At least 5 characters.</div>
+    <textarea class="hj-input" id="ov-reason" name="reason" rows="2" maxlength="500" required x-model="reason"></textarea></div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn" :disabled="reason.trim().length < 5">Calculate anyway</button></div>
+</form>

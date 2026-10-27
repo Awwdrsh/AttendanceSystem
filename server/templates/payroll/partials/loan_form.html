@@ -1,0 +1,17 @@
+<form class="hj-form" data-modal-title="New loan or advance" data-modal-size="lg" hx-post="{% url 'payroll:loan_new' %}" hx-swap="none"
+      x-data="{ principal: 0, emi: 0, emp: '' }" @change="emp = $el.querySelector('[name=employee_id]').value">
+  <div class="hj-form-row">
+    {% employee_picker "employee_id" required=True %}
+    <div class="hj-fieldset"><label class="hj-label" for="ln-kind">Type</label>
+      <select class="hj-select" id="ln-kind" name="kind"><option value="loan">Loan</option><option value="advance">Salary advance</option></select></div>
+    <div class="hj-fieldset"><label class="hj-label" for="ln-p">Principal (NPR)</label><input class="hj-input" id="ln-p" name="principal" type="number" min="1" step="0.01" x-model.number="principal"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="ln-e">Monthly instalment (NPR)</label>
+      <div class="hj-help" x-text="principal > 0 && emi > 0 ? Math.ceil(principal / emi) + ' instalments' : 'Instalments = principal ÷ monthly amount, rounded up'">Instalments = principal ÷ monthly amount, rounded up</div>
+      <input class="hj-input" id="ln-e" name="emi" type="number" min="1" step="0.01" x-model.number="emi"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="ln-m">First deduction month</label>
+      <select class="hj-select" id="ln-m" name="start_bs_month">{% for i, n in months %}<option value="{{ i }}"{% if i == m %} selected{% endif %}>{{ n }}</option>{% endfor %}</select></div>
+    <div class="hj-fieldset"><label class="hj-label" for="ln-y">Year</label><div class="hj-help">Nepali year, e.g. 2083</div><input class="hj-input" id="ln-y" name="start_bs_year" type="number" value="{{ y }}"></div>
+  </div>
+  <div class="hj-fieldset"><label class="hj-label" for="ln-note">Note</label><input class="hj-input" id="ln-note" name="note" placeholder="Optional"></div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn" :disabled="!emp || !principal || !emi">Create</button></div>
+</form>

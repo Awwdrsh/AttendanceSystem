@@ -1,0 +1,15 @@
+{% load perf_tags %}
+<form class="hj-form" data-modal-title="{% if kpi.id %}Edit KPI{% else %}New KPI{% endif %}" hx-post="{% if kpi.id %}{% url 'performance:kpi_edit' kpi.id %}{% else %}{% url 'performance:kpi_new' %}{% endif %}" hx-swap="none">
+  <div class="hj-fieldset"><label class="hj-label" for="kp-t">KPI<span class="req">*</span></label><input class="hj-input" id="kp-t" name="title" required maxlength="200" value="{{ kpi.title|default:'' }}"></div>
+  <div class="hj-fieldset"><label class="hj-label" for="kp-d">How it is measured</label><textarea class="hj-input" id="kp-d" name="description" rows="2" maxlength="2000">{{ kpi.description|default:'' }}</textarea></div>
+  <div class="hj-fieldset"><label class="hj-label" for="kp-des">Designation</label><div class="hj-help">Leave empty for everyone</div><input class="hj-input" id="kp-des" name="designation" maxlength="120" value="{{ kpi.designation|default:'' }}"></div>
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="kp-m">Measure</label><select class="hj-select" id="kp-m" name="measure">
+      <option value="number"{% if kpi.measure == 'number' %} selected{% endif %}>Number</option><option value="percent"{% if kpi.measure == 'percent' %} selected{% endif %}>Percent</option>
+      <option value="currency"{% if kpi.measure == 'currency' %} selected{% endif %}>Amount (NPR)</option><option value="boolean"{% if kpi.measure == 'boolean' %} selected{% endif %}>Done / not done</option></select></div>
+    <div class="hj-fieldset"><label class="hj-label" for="kp-dt">Default target</label><input class="hj-input" id="kp-dt" name="default_target" type="number" step="any" value="{{ kpi.default_target|numstr }}"></div>
+  </div>
+  <div class="hj-fieldset"><label class="hj-label" for="kp-u">Unit</label><input class="hj-input" id="kp-u" name="unit" maxlength="20" placeholder="e.g. tickets" value="{{ kpi.unit|default:'' }}"></div>
+  <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="active"{% if kpi.active %} checked{% endif %}> Active</label>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit">Save</button></div>
+</form>

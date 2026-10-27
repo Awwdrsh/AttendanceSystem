@@ -1,0 +1,11 @@
+{% load static %}{# CoreValley logo with the internal product name (Brand.tsx). h: height in px #}
+{% with h=height|default:20 %}
+<span class="hj-brand" aria-label="CoreValley Hajiri">
+  <span class="hj-brand-mark">
+    <img src="{% static 'brand/cv-brandmark.svg' %}" alt="CoreValley" height="{{ h }}" style="height:{{ h }}px;width:auto;margin-right:-{% widthratio h 100 24 %}px">
+    <img class="wordmark-light" src="{% static 'brand/cv-wordmark-carbon.svg' %}" alt="" aria-hidden="true" style="height:{% widthratio h 100 86 %}px;width:auto">
+    <img class="wordmark-dark" src="{% static 'brand/cv-wordmark-green.svg' %}" alt="" aria-hidden="true" style="height:{% widthratio h 100 86 %}px;width:auto">
+  </span>
+  {% if not no_product %}<span class="hj-product">hajiri</span>{% endif %}
+</span>
+{% endwith %}

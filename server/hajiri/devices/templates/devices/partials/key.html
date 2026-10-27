@@ -1,0 +1,6 @@
+<div class="hj-stack" data-modal-title="Device key for {{ d.name|default:d.serial_no }}">
+  <p class="hj-sm hj-muted">Enter this key in the terminal's listening-host settings as <code>?key=…</code>. It is shown only once; issuing a new key stops the old one working.</p>
+  <pre class="hj-card p-sm mono" id="device-key" style="margin:0;white-space:pre-wrap;word-break:break-all">{{ key }}</pre>
+  {% alert "warn" %}Copy it now. Hajiri stores only a fingerprint of the key.{% endalert %}
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-copy="{{ key }}">Copy key</button><button type="button" class="hj-btn" data-modal-close>Done</button></div>
+</div>

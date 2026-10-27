@@ -1,0 +1,52 @@
+{# ExitDrawer of ExitsPage.tsx. #}
+<div id="exit-{{ x.id }}" class="hj-stack hj-gap-lg" data-modal-title="{{ x.name_en }}" data-modal-size="xl"
+     hx-get="{% url 'lifecycle:exit' x.id %}" hx-trigger="hj:refresh-exit-{{ x.id }} from:body{% if x.case_id %}, hj:refresh-case-{{ x.case_id }} from:body{% endif %}" hx-swap="outerHTML">
+  <div class="hj-small hj-muted">{{ kind_label }}, {% if x.voluntary %}voluntary{% else %}involuntary{% endif %}</div>
+  <div class="hj-row hj-gap-xs">{% badge badge.0 badge.1 %}{% if x.reason_category %}<span class="hj-badge hj-tone-idle">{{ x.reason_category }}</span>{% endif %}</div>
+  <div class="hj-fields hj-grid" style="--cols:3">{% field "Submitted" x.submitted_on|bs_date %}{% field "Last working day" x.lwd|bs_date %}{% field "Joined" x.join_date|bs_date %}</div>
+  {% if x.reason %}<p class="hj-sm hj-muted" style="margin:0;white-space:pre-wrap">“{{ x.reason }}”</p>{% endif %}
+  {% if open and hr %}
+  <form class="hj-row hj-gap-sm" style="align-items:flex-end" hx-post="{% url 'lifecycle:exit_update' x.id %}" hx-swap="none">
+    {% bs_date_input "lastWorkingDay" value=x.lwd label="Change last working day" id="f-lwd-"|add:x.id %}
+    <button type="submit" class="hj-btn default">Save</button>
+  </form>
+  {% endif %}
+  {% if s %}
+  <div class="hj-card p-md">
+    <div class="hj-row hj-gap-xs hj-mb"><i class="ti ti-cash" aria-hidden="true"></i><span class="hj-sm hj-strong">Final settlement</span>{% if s.run.locked %}<span class="hj-badge sm hj-tone-ok">Paid in a locked run</span>{% endif %}</div>
+    {% if s.steps %}<ul class="hj-sm" style="margin:0;padding-left:18px">{% for t in s.steps %}<li>{{ t }}</li>{% endfor %}</ul>{% else %}<p class="hj-sm hj-muted" style="margin:0">Nothing left to do in payroll.</p>{% endif %}
+    <div class="hj-row hj-gap-lg hj-mt-sm">
+      {% if s.period %}<span class="hj-small hj-muted">Pay period {{ s.period_label }}</span>{% endif %}
+      {% if s.activeLoans %}<span class="hj-small hj-muted">Loans outstanding {{ s.loanOutstanding|npr }}</span>{% endif %}
+      {% if s.encashableLeaveDays %}<span class="hj-small hj-muted">Encashable leave {{ s.encashableLeaveDays|floatformat:1 }} days</span>{% endif %}
+    </div>
+    <a class="hj-sm" href="{% if s.run %}/payroll/runs/{{ s.run.id }}{% else %}/payroll{% endif %}">{% if s.run %}Open the settlement run{% else %}Go to payroll{% endif %}</a>
+  </div>
+  {% endif %}
+  {% section "Clearance" hint=clearance_hint %}
+    {% if b.assetsHeld %}{% alert "warn" %}Still holds {{ b.assetsHeld }} company {% if b.assetsHeld == 1 %}asset{% else %}assets{% endif %}. Record the return under Onboarding, Assets (or mark it lost).{% endalert %}{% endif %}
+    {% if tasks %}<div class="hj-card p-md hj-mt-sm"><div class="hj-stack hj-gap-md">{% for t in tasks %}{% include "lifecycle/partials/task_row.html" %}{% endfor %}</div></div>
+    {% else %}<p class="hj-sm hj-muted" style="margin:0">{% if x.status == 'pending' %}The clearance checklist starts once the resignation is accepted.{% else %}No clearance checklist.{% endif %}</p>{% endif %}
+  {% endsection %}
+  {% if hr %}
+  {% section "Exit interview" hint="Confidential: only HR can read it." %}
+    {% if interview %}
+    <div class="hj-card p-md hj-stack hj-gap-sm">
+      <div class="hj-small hj-muted">{% if interview.byEmployee %}Filled in by the employee{% else %}Recorded by {{ interview.recordedBy }}{% endif %}, {{ interview.createdAt|bs_date }}</div>
+      {% for a in interview.answers %}<div><div class="hj-sm hj-strong">{{ a.question }}</div><div class="hj-sm hj-muted">{% if a.kind == 'rating' %}{{ a.answer }} of 5{% else %}{{ a.answer }}{% endif %}</div></div>{% endfor %}
+    </div>
+    {% else %}{% include "lifecycle/partials/interview_form.html" with exit_id=x.id %}{% endif %}
+  {% endsection %}
+  {% if open %}
+  <div class="hj-row hj-between hj-gap-sm">
+    <button type="button" class="hj-btn danger subtle" hx-get="{% url 'lifecycle:exit_cancel' x.id %}" hx-target="#hj-modal-body">Cancel this exit</button>
+    {% if x.status == 'accepted' %}
+    <form class="hj-row hj-gap-sm" hx-post="{% url 'lifecycle:exit_complete' x.id %}" hx-swap="none" x-data="{ force: false }">
+      {% if b.openTasks %}<label class="hj-row nowrap hj-gap-xs hj-sm"><input type="checkbox" class="hj-switch" name="skipOpenTasks" x-model="force">Skip open tasks</label>{% endif %}
+      <button type="submit" class="hj-btn"{% if not past or b.assetsHeld %} disabled{% elif b.openTasks %} :disabled="!force"{% endif %}>{% if past %}Complete exit{% else %}Complete after {{ x.lwd|bs_date }}{% endif %}</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% endif %}
+</div>

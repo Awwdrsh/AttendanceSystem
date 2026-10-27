@@ -1,0 +1,4 @@
+<div class="hj-between">
+  <label class="hj-check-row"><input type="checkbox" class="hj-check" name="done"{% if i.done %} checked{% endif %} hx-post="{% url 'performance:meeting_item_toggle' i.id %}" hx-trigger="change" hx-target="#hj-drawer-body"> {{ i.text }}{% if i.owner_name %} · {{ i.owner_name }}{% endif %}</label>
+  <button class="hj-iconbtn" aria-label="Remove" hx-post="{% url 'performance:meeting_item_delete' i.id %}" hx-target="#hj-drawer-body"><i class="ti ti-trash" aria-hidden="true"></i></button>
+</div>

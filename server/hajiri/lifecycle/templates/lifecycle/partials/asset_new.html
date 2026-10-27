@@ -1,0 +1,12 @@
+<form class="hj-form" data-modal-title="Add asset" data-modal-size="lg" hx-post="{% url 'lifecycle:asset_new' %}" hx-swap="none" x-data="{ tag: '', name: '' }">
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label">Asset tag<span class="req">*</span></label><input name="tag" class="hj-input" placeholder="LT-001" maxlength="40" x-model="tag" required></div>
+    <div class="hj-fieldset"><label class="hj-label">Name<span class="req">*</span></label><input name="name" class="hj-input" placeholder="ThinkPad T14" maxlength="120" x-model="name" required></div>
+    <div class="hj-fieldset"><label class="hj-label">Type</label><select name="typeId" class="hj-select"><option value=""></option>{% for t in types %}<option value="{{ t.id }}">{{ t.name }}</option>{% endfor %}</select></div>
+    <div class="hj-fieldset"><label class="hj-label">Serial number</label><input name="serial" class="hj-input" maxlength="80"></div>
+    <div class="hj-fieldset"><label class="hj-label">Condition</label><select name="condition" class="hj-select">{% for v, l in conditions %}<option value="{{ v }}"{% if v == 'good' %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+    {% bs_date_input "purchaseDate" label="Purchased" %}
+    <div class="hj-fieldset"><label class="hj-label">Cost (NPR)</label><input name="cost" class="hj-input num" inputmode="decimal"></div>
+  </div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn" :disabled="!tag.trim() || !name.trim()">Add asset</button></div>
+</form>

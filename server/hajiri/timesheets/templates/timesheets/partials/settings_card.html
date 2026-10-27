@@ -1,0 +1,35 @@
+{# TimeSettings.tsx: company settings for project time tracking and weekly timesheets (Settings, Time tracking tab). #}
+<form id="ts-settings" class="hj-card p-0" hx-post="{% url 'timesheets:settings' %}" hx-target="this" hx-swap="outerHTML"
+      x-data="{ step: '{{ p.roundingStep }}' }">
+  <div style="padding:16px 24px"><div class="hj-strong">Time tracking</div>
+    <div class="hj-sm hj-muted">Project timers, timesheets and how hours are rounded for approval and reports. Raw minutes are always kept.</div></div>
+  <div class="hj-between hj-row" style="padding:12px 24px;border-top:1px solid var(--hj-line-soft);--gap:12px;align-items:center">
+    <div class="hj-grow"><div class="hj-sm hj-strong">Time tracking</div><div class="hj-small hj-muted">Employees can run a timer and log time against projects.</div></div>
+    <input type="checkbox" class="hj-switch" name="enabled" value="true" aria-label="Time tracking"{% if p.enabled %} checked{% endif %}>
+  </div>
+  <div class="hj-between hj-row" style="padding:12px 24px;border-top:1px solid var(--hj-line-soft);--gap:12px;align-items:center">
+    <div class="hj-grow"><div class="hj-sm hj-strong">Require a project</div><div class="hj-small hj-muted">Every entry must name a project.</div></div>
+    <input type="checkbox" class="hj-switch" name="require_project" value="true" aria-label="Require a project"{% if p.requireProject %} checked{% endif %}>
+  </div>
+  <div class="hj-between hj-row" style="padding:12px 24px;border-top:1px solid var(--hj-line-soft);--gap:12px;align-items:center">
+    <div class="hj-grow"><div class="hj-sm hj-strong">Rounding</div><div class="hj-small hj-muted">Each entry is rounded in timesheets and reports.</div></div>
+    <div class="hj-row nowrap hj-gap-xs">
+      <select name="rounding_step" class="hj-select" style="width:120px" aria-label="Rounding step" x-model="step">
+        {% for v, l in steps %}<option value="{{ v }}"{% if v == p.roundingStep|stringformat:'s' %} selected{% endif %}>{{ l }}</option>{% endfor %}
+      </select>
+      <input type="hidden" name="rounding_mode_kept" value="{{ p.roundingMode }}">
+      <select name="rounding_mode" class="hj-select" style="width:120px" aria-label="Rounding direction" :disabled="step === '0'"{% if not p.roundingStep %} disabled{% endif %}>
+        {% for v, l in modes %}<option value="{{ v }}"{% if v == p.roundingMode %} selected{% endif %}>{{ l }}</option>{% endfor %}
+      </select>
+    </div>
+  </div>
+  <div class="hj-between hj-row" style="padding:12px 24px;border-top:1px solid var(--hj-line-soft);--gap:12px;align-items:center">
+    <div class="hj-grow"><div class="hj-sm hj-strong">Friday reminder</div><div class="hj-small hj-muted">Remind people who have not submitted their week.</div></div>
+    <input type="checkbox" class="hj-switch" name="friday_reminder" value="true" aria-label="Friday reminder"{% if p.fridayReminder %} checked{% endif %}>
+  </div>
+  <div class="hj-between hj-row" style="padding:12px 24px;border-top:1px solid var(--hj-line-soft);--gap:12px;align-items:center">
+    <div class="hj-grow"><div class="hj-sm hj-strong">Stop forgotten timers after</div><div class="hj-small hj-muted">A timer running longer is stopped at this length and the person is told.</div></div>
+    <div class="hj-row nowrap hj-gap-xs" style="align-items:center"><input type="number" name="auto_stop_hours" class="hj-input" style="width:90px" min="1" max="24" value="{{ p.autoStopHours }}" aria-label="Hours"><span class="hj-sm hj-muted">h</span></div>
+  </div>
+  <div class="hj-row hj-end" style="padding:12px 24px;border-top:1px solid var(--hj-line-soft)"><button type="submit" class="hj-btn">Save</button></div>
+</form>

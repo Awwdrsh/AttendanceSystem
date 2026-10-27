@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% load perf_tags %}
+{% block title %}Feedback · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Feedback" subtitle="Feedback goes to the person and their manager. Mark it private to share it with their manager only." %}
+  <button class="hj-btn default sm" hx-get="{% url 'performance:feedback_ask' %}" hx-target="#hj-modal-body">Ask for feedback</button>
+  <button class="hj-btn sm" hx-get="{% url 'performance:feedback_give' %}" hx-target="#hj-modal-body"><i class="ti ti-send" aria-hidden="true"></i>Give feedback</button>
+{% endpage_header %}
+{% include "performance/partials/pills.html" with pills=boxes %}
+<div id="perf-main" hx-get="{{ request.get_full_path }}" hx-trigger="hj:refresh-perf-main from:body" hx-select="#perf-main" hx-swap="outerHTML" class="hj-stack" style="--gap:12px">
+  {% for f in rows %}
+  <div class="hj-card p-md">
+    <div class="hj-between" style="align-items:flex-start">
+      <div style="min-width:0">
+        <div class="hj-sm hj-strong">{% if box == 'received' %}From {{ f.giver_name }}{% elif box == 'given' %}To {{ f.subject_name }}{% elif f.to_answer %}{{ f.requester_name|default:f.subject_name }} asked you{% if f.subject_employee_id != f.requester_employee_id %} about {{ f.subject_name }}{% endif %}{% else %}Asked {{ f.giver_name }}{% endif %}</div>
+        <div class="hj-small hj-muted">{% if f.given_at %}{{ f.given_at|short_dt }}{% else %}{{ f.created_at|short_dt }}{% endif %}</div>
+      </div>
+      <div class="hj-row nowrap" style="gap:4px">
+        {% if f.private_to_manager %}{% badge "Manager only" "idle" %}{% endif %}
+        {% if box == 'requests' %}{% if f.status == 'requested' %}{% badge "Waiting" "warn" %}{% elif f.status == 'given' %}{% badge "given" "ok" %}{% else %}{% badge f.status "idle" %}{% endif %}{% endif %}
+      </div>
+    </div>
+    {% if f.prompt %}<div class="hj-sm hj-muted" style="margin-top:6px">“{{ f.prompt }}”</div>{% endif %}
+    {% if f.body %}<div class="hj-sm" style="margin-top:6px;white-space:pre-wrap">{{ f.body }}</div>{% elif f.status == 'given' and box == 'requests' %}<div class="hj-small hj-muted" style="margin-top:6px">Shared with your manager only.</div>{% endif %}
+    {% if f.to_answer %}
+    <div class="hj-end hj-mt-sm" style="gap:8px">
+      <button class="hj-btn subtle gray xs" hx-post="{% url 'performance:feedback_decline' f.id %}" hx-swap="none">Decline</button>
+      <button class="hj-btn xs" hx-get="{% url 'performance:feedback_answer' f.id %}" hx-target="#hj-modal-body">Answer</button>
+    </div>
+    {% endif %}
+  </div>
+  {% empty %}
+  {% url 'performance:feedback_ask' as ask_url %}{% with ask_attrs='hx-get="'|add:ask_url|add:'" hx-target="#hj-modal-body"' %}
+  {% if box == 'received' %}{% empty_state title="No feedback yet" hint="Ask two or three colleagues you worked with recently what went well and what to improve." icon="message-circle" action_label="Ask for feedback" action_attrs=ask_attrs %}
+  {% elif box == 'given' %}{% empty_state title="You have not given feedback yet" hint="Ask two or three colleagues you worked with recently what went well and what to improve." icon="message-circle" action_label="Ask for feedback" action_attrs=ask_attrs %}
+  {% else %}{% empty_state title="No open requests" hint="Ask two or three colleagues you worked with recently what went well and what to improve." icon="message-circle" action_label="Ask for feedback" action_attrs=ask_attrs %}{% endif %}
+  {% endwith %}
+  {% endfor %}
+</div>
+{% endblock %}

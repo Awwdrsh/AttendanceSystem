@@ -1,0 +1,42 @@
+<div id="attendance-issues" class="hj-stack" style="--gap:16px">
+{% section title hint="Fix these before payroll: a missing punch is paid as worked, an absence with no leave or time request is unpaid, and waiting requests do not count until approved." %}
+<div class="hj-row hj-between hj-gap-sm">
+  <nav class="hj-pills" aria-label="Period">
+    <a class="hj-pill" href="?mode=month&amp;y={{ y }}&amp;m={{ m }}" hx-get="?mode=month&amp;y={{ y }}&amp;m={{ m }}" hx-target="#attendance-issues" hx-swap="outerHTML" hx-push-url="true"{% if mode == 'month' %} aria-current="page"{% endif %}>Month</a>
+    <a class="hj-pill" href="?mode=recent" hx-get="?mode=recent" hx-target="#attendance-issues" hx-swap="outerHTML" hx-push-url="true"{% if mode == 'recent' %} aria-current="page"{% endif %}>Last 14 days</a>
+  </nav>
+  {% if mode == 'month' %}
+  <form hx-get="{% url 'attendance_tools:issues' %}" hx-target="#attendance-issues" hx-swap="outerHTML" hx-push-url="true" hx-trigger="change">
+    <input type="hidden" name="mode" value="month">
+    {% bs_month_input "y" "m" year=y month=m %}
+  </form>
+  {% endif %}
+</div>
+{% stat_strip stats %}
+{% if rows %}
+<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+  <thead><tr><th>Name</th><th>Missing punch</th><th>Absent, no request</th><th>Waiting for approval</th><th></th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td><div class="hj-strong">{{ r.name }}</div><div class="hj-small hj-muted">{{ r.empCode }}</div></td>
+    <td>{% if r.missing %}<span class="hj-badge hj-tone-warn sm" data-tip="{{ r.missing_list }}">{{ r.missing_label }}</span>{% else %}<span class="hj-muted">—</span>{% endif %}</td>
+    <td>{% if r.absent %}<span class="hj-badge hj-tone-bad sm" data-tip="{{ r.absent_list }}">{{ r.absent_label }}</span>{% else %}<span class="hj-muted">—</span>{% endif %}</td>
+    <td>{% if r.pending %}<div class="hj-stack" style="--gap:4px">{% for p in r.pending %}
+      <div class="hj-row nowrap hj-gap-xs">
+        <span class="hj-badge sm {% if p.type == 'leave' %}hj-tone-info{% else %}hj-tone-warn{% endif %}">{{ p.label }}</span>
+        <span class="hj-small hj-muted">{{ p.text }}</span>
+        <button type="button" class="hj-btn subtle xs icon" data-tip="Remind the approver" aria-label="Remind the approver"
+                hx-post="{% url 'attendance_tools:nudge' %}" hx-vals='{"target": "approver", "instance_id": "{{ p.instanceId }}"}' hx-swap="none"><i class="ti ti-bell" aria-hidden="true"></i></button>
+      </div>{% endfor %}</div>{% else %}<span class="hj-muted">—</span>{% endif %}</td>
+    <td class="right">{% if r.missing or r.absent %}<button type="button" class="hj-btn light xs" hx-post="{% url 'attendance_tools:nudge' %}"
+        hx-vals='{"target": "employee", "employee_id": "{{ r.employeeId }}", "from": "{{ from }}", "to": "{{ to }}"}' hx-swap="none"><i class="ti ti-bell" aria-hidden="true"></i>Remind</button>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table></div></div>
+{% else %}
+{% empty_state title="No attendance issues" hint="Everyone's punches, absences and requests for this period are in order." icon="circle-check" %}
+{% endif %}
+{% endsection %}
+</div>

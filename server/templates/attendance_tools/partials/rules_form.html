@@ -1,0 +1,34 @@
+{% with lp=policy.latePenalty %}
+<form class="hj-card p-lg" hx-post="{% url 'attendance_tools:policy' %}" hx-swap="none"
+      x-data="{ lp: {{ lp.enabled|yesno:'true,false' }}, block: {{ policy.blockLateClockIn|yesno:'true,false' }} }">
+  {% section "Attendance rules" hint="Rules for late arrivals and clock-ins. They apply to the whole company." %}
+  <div class="hj-grid" style="--cols:2">
+    <div class="hj-stack" style="--gap:12px">
+      <label class="hj-switch"><input type="checkbox" name="lp_enabled" x-model="lp"{% if lp.enabled %} checked{% endif %}><span>Late-arrival penalty</span></label>
+      <p class="hj-help" style="margin:0">Repeated late arrivals in a month cost leave, or pay when there is no leave left</p>
+      <div class="hj-form-row">
+        <label class="hj-fieldset"><span class="hj-label">Every (late days)</span><input class="hj-input" type="number" name="lp_lateCount" min="1" max="31" value="{{ lp.lateCount }}" :disabled="!lp"></label>
+        <label class="hj-fieldset"><span class="hj-label">Costs (day(s))</span><input class="hj-input" type="number" name="lp_penaltyDays" min="0.25" max="5" step="0.25" value="{{ lp.penaltyDays }}" :disabled="!lp"></label>
+      </div>
+      <label class="hj-fieldset"><span class="hj-label">Count a day as late when arriving at least (min after the grace time)</span>
+        <input class="hj-input" type="number" name="lp_minLateMinutes" min="1" max="240" value="{{ lp.minLateMinutes }}" :disabled="!lp"></label>
+      <fieldset class="hj-fieldset" :disabled="!lp">
+        <span class="hj-label">Take the penalty from</span>
+        <span class="hj-help">In this order; what these cannot cover is unpaid</span>
+        {% for t in types %}<label class="hj-check"><input type="checkbox" name="lp_leaveTypeIds" value="{{ t.id }}"{% if t.id in lp.leaveTypeIds %} checked{% endif %}> {{ t.name_en }}</label>{% empty %}<span class="hj-small hj-muted">Unpaid only</span>{% endfor %}
+      </fieldset>
+    </div>
+    <div class="hj-stack" style="--gap:12px">
+      <label class="hj-switch"><input type="checkbox" name="blockLateClockIn" x-model="block"{% if policy.blockLateClockIn %} checked{% endif %}><span>Close clock-in after the grace time</span></label>
+      <p class="hj-help" style="margin:0">A first clock-in later than the shift start and grace is refused; the employee raises a time request with the time they arrived instead</p>
+      <label class="hj-fieldset"><span class="hj-label">Extra minutes after the grace time</span>
+        <input class="hj-input" type="number" name="blockAfterMin" min="0" max="240" value="{{ policy.blockAfterMin }}" :disabled="!block"></label>
+      <label class="hj-fieldset"><span class="hj-label">Who's out shows</span>
+        <select class="hj-select" name="whosOutScope">{% for v, l in scopes %}<option value="{{ v }}"{% if v == policy.whosOutScope %} selected{% endif %}>{{ l }}</option>{% endfor %}</select>
+        <span class="hj-help">The Who's out card on Home. Leave types are never shown, only that someone is away.</span></label>
+    </div>
+  </div>
+  <div class="hj-row hj-end hj-mt"><button type="submit" class="hj-btn sm">Save rules</button></div>
+  {% endsection %}
+</form>
+{% endwith %}

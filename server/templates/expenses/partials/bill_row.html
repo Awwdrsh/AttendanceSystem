@@ -1,0 +1,11 @@
+<div class="hj-card p-sm" data-bill>
+  <div class="hj-row" style="align-items:flex-end">
+    <div class="hj-fieldset"><label class="hj-label">Type</label>
+      <select class="hj-select" name="bill_kind" style="width:130px">{% for v, label in kinds %}<option value="{{ v }}">{{ label }}</option>{% endfor %}</select></div>
+    {% bs_date_input "bill_date" value=date label="Date" min=min max=max %}
+    <div class="hj-fieldset hj-grow"><label class="hj-label">Description</label><input class="hj-input" name="bill_description" maxlength="300"></div>
+    <div class="hj-fieldset"><label class="hj-label">Amount</label><input class="hj-input" name="bill_amount" inputmode="decimal" style="width:110px"></div>
+    {% file_upload "bill_file_id" "travel_bill" label="Bill" %}
+    <button type="button" class="hj-iconbtn" aria-label="Remove bill" @click="let f = $el.closest('form'); $el.closest('[data-bill]').remove(); f.dispatchEvent(new Event('change', { bubbles: true }))"><i class="ti ti-trash" aria-hidden="true"></i></button>
+  </div>
+</div>

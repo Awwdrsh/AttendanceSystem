@@ -1,0 +1,8 @@
+{# After issuing: the letter opens in a new tab straight away, as the TS drawer did; the button stays in case the browser blocked it. #}
+<div class="hj-stack hj-gap-md" data-modal-title="Letter issued" x-data x-init="window.open('{% url 'documents:letter_html' letter.id %}', '_blank', 'noopener')">
+  {% alert "ok" title="Letter "|add:letter.refNo|add:" issued." %}The letter has its reference number and is in the letters register.{% endalert %}
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Close</button>
+    <a class="hj-btn" href="{% url 'documents:letter_html' letter.id %}" target="_blank" rel="noopener"><i class="ti ti-printer" aria-hidden="true"></i>Open letter</a>
+  </div>
+</div>

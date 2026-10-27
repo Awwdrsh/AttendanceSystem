@@ -1,0 +1,46 @@
+<form class="hj-form" data-modal-title="{% if id %}Edit checklist{% else %}New checklist{% endif %}" data-modal-size="xl"
+      hx-post="{% if id %}{% url 'lifecycle:template_edit' kind id %}{% else %}{% url 'lifecycle:template_new' kind %}{% endif %}" hx-swap="none"
+      x-data="{ shown: {{ shown }}, removed: {}, name: {{ t.name|json_attr }}, order: [...Array({{ slots|length }}).keys()],
+                live(i) { return i < this.shown && !this.removed[i]; },
+                visible() { return this.order.filter((k) => this.live(k)); },
+                move(i, d) { const v = this.visible(); const p = v.indexOf(i); const q = p + d; if (p < 0 || q < 0 || q >= v.length) return;
+                             const a = this.order.indexOf(v[p]); const b = this.order.indexOf(v[q]); const o = [...this.order]; o[a] = v[q]; o[b] = v[p]; this.order = o; },
+                offText(n) { n = Number(n) || 0; if (n === 0) return {{ zero_label|json_attr }}; const a = Math.abs(n);
+                             return a + ' ' + (a === 1 ? 'day' : 'days') + ' ' + (n < 0 ? 'before' : 'after') + ' ' + {{ anchor|json_attr }}; } }">
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="f-tn">Name<span class="req">*</span></label><input id="f-tn" name="name" class="hj-input" maxlength="120" x-model="name" required></div>
+    <div class="hj-row hj-gap-lg">
+      <label class="hj-row nowrap hj-gap-xs hj-sm"><input type="checkbox" class="hj-switch" name="isDefault"{% if t.is_default %} checked{% endif %}>Default</label>
+      <label class="hj-row nowrap hj-gap-xs hj-sm"><input type="checkbox" class="hj-switch" name="active"{% if t.active %} checked{% endif %}>In use</label>
+    </div>
+  </div>
+  <div class="hj-fieldset"><label class="hj-label" for="f-td">Description</label><textarea id="f-td" name="description" class="hj-input" rows="1" maxlength="1000">{{ t.description|default:'' }}</textarea></div>
+  <div class="hj-section-title"><div><h3>Tasks</h3><p>Days count from the join date (onboarding) or the last working day (exit). Use a minus sign for days before.</p></div></div>
+  <div class="hj-stack hj-gap-sm">
+  {% for s in slots %}{% with x=s.t i=s.i %}
+  <fieldset class="hj-card p-sm" style="border:1px solid var(--hj-line)" x-show="live({{ i }})" {% if i >= shown %}x-cloak{% endif %} :disabled="!live({{ i }})"
+            :style="{ order: order.indexOf({{ i }}) }" x-data="{ at: '{{ x.assignee_type|default:'hr' }}', off: {{ x.due_offset_days|default:0 }} }">
+    <input type="hidden" name="t-{{ i }}-sort" :value="visible().indexOf({{ i }})" value="{{ i }}">
+    <div class="hj-row nowrap hj-gap-xs" style="align-items:flex-end">
+      <div class="hj-fieldset hj-grow"><label class="hj-label" x-text="'Task ' + (visible().indexOf({{ i }}) + 1)">Task {{ i|add:1 }}</label><input name="t-{{ i }}-title" class="hj-input" maxlength="160" value="{{ x.title|default:'' }}"></div>
+      <button type="button" class="hj-iconbtn" aria-label="Move up" @click="move({{ i }}, -1)" :disabled="visible()[0] === {{ i }}"><i class="ti ti-arrow-up" aria-hidden="true"></i></button>
+      <button type="button" class="hj-iconbtn" aria-label="Move down" @click="move({{ i }}, 1)" :disabled="visible()[visible().length - 1] === {{ i }}"><i class="ti ti-arrow-down" aria-hidden="true"></i></button>
+      <button type="button" class="hj-iconbtn" aria-label="Remove task" @click="removed[{{ i }}] = true"><i class="ti ti-trash" aria-hidden="true"></i></button>
+    </div>
+    <div class="hj-form-row" style="--cols:3">
+      <div class="hj-fieldset"><label class="hj-label">Who does it</label><select name="t-{{ i }}-assigneeType" class="hj-select" x-model="at">{% for k, l in assignees %}<option value="{{ k }}"{% if x.assignee_type == k %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+      <div class="hj-fieldset" x-show="at === 'user'"><label class="hj-label">Person</label><select name="t-{{ i }}-assigneeUserId" class="hj-select"><option value=""></option>{% for v, l in users %}<option value="{{ v }}"{% if x.assignee_user_id == v %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+      <div class="hj-fieldset" x-show="at !== 'user'"><label class="hj-label">Department</label><input name="t-{{ i }}-department" class="hj-input" placeholder="IT, Finance, Admin" maxlength="60" value="{{ x.department|default:'' }}"></div>
+      <div class="hj-fieldset"><label class="hj-label">Due (days)</label><input type="number" min="-90" max="365" name="t-{{ i }}-dueOffsetDays" class="hj-input" x-model="off" value="{{ x.due_offset_days|default:0 }}">
+        <div class="hj-help" x-text="offText(off)"></div></div>
+    </div>
+    <div class="hj-form-row">
+      <div class="hj-fieldset"><label class="hj-label">Details</label><input name="t-{{ i }}-description" class="hj-input" maxlength="1000" value="{{ x.description|default:'' }}"></div>
+      <div class="hj-fieldset"><label class="hj-label">Link to a page</label><input name="t-{{ i }}-link" class="hj-input" placeholder="/me/profile" maxlength="200" value="{{ x.link|default:'' }}"></div>
+    </div>
+  </fieldset>
+  {% endwith %}{% endfor %}
+  </div>
+  <button type="button" class="hj-btn subtle" style="align-self:flex-start" x-show="shown < {{ slots|length }}" @click="shown++"><i class="ti ti-plus" aria-hidden="true"></i>Add task</button>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn" :disabled="!name.trim()">Save checklist</button></div>
+</form>

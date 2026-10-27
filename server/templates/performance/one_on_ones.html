@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% load perf_tags %}
+{% block title %}1-on-1s · Hajiri{% endblock %}
+{% block content %}
+{% page_header "1-on-1s" subtitle="Regular conversations with your manager or your team. Only the two of you see the meeting; private notes are yours alone." %}
+  <button class="hj-btn sm" hx-get="{% url 'performance:meeting_new' %}" hx-target="#hj-modal-body"{% if not people %} disabled{% endif %}><i class="ti ti-plus" aria-hidden="true"></i>Schedule</button>
+{% endpage_header %}
+{% include "performance/partials/pills.html" with pills=shows %}
+<div id="perf-main" hx-get="{{ request.get_full_path }}" hx-trigger="hj:refresh-perf-main from:body" hx-select="#perf-main" hx-swap="outerHTML" class="hj-stack" style="--gap:12px">
+  {% for m in meetings %}
+  <div class="hj-card p-md" style="cursor:pointer" role="button" tabindex="0" hx-get="{% url 'performance:meeting_detail' m.id %}" hx-target="#hj-drawer-body">
+    <div class="hj-between">
+      <div><div class="hj-strong">{% if m.side == 'manager' %}{{ m.employee_name }}{% else %}{{ m.manager_name }}{% endif %}</div>
+        <div class="hj-small hj-muted">{{ m.scheduled_at|short_dt }}{% if m.cadence != 'none' %} · {{ m.cadence|cadence_label }}{% endif %}</div></div>
+      <div class="hj-row" style="gap:6px">
+        {% if m.agenda_items %}<span class="hj-badge hj-tone-idle">{{ m.agenda_items }} agenda</span>{% endif %}
+        {% if m.open_actions %}<span class="hj-badge hj-tone-warn">{{ m.open_actions }} open actions</span>{% endif %}
+        {% if m.status != 'scheduled' %}{% if m.status == 'done' %}{% badge "done" "ok" %}{% else %}{% badge m.status "idle" %}{% endif %}{% endif %}
+      </div>
+    </div>
+  </div>
+  {% empty %}
+  {% if show == 'upcoming' %}{% if people %}{% url 'performance:meeting_new' as new_url %}{% empty_state title="No 1-on-1s scheduled" hint="Schedule a recurring 1-on-1 to keep goals, feedback and growth on track." icon="messages" action_label="Schedule a 1-on-1" action_attrs='hx-get="'|add:new_url|add:'" hx-target="#hj-modal-body"' %}{% else %}{% empty_state title="No 1-on-1s scheduled" hint="You need a manager or direct reports in the system to schedule 1-on-1s." icon="messages" %}{% endif %}
+  {% else %}{% if people %}{% empty_state title="No past 1-on-1s" hint="Schedule a recurring 1-on-1 to keep goals, feedback and growth on track." icon="messages" %}{% else %}{% empty_state title="No past 1-on-1s" hint="You need a manager or direct reports in the system to schedule 1-on-1s." icon="messages" %}{% endif %}{% endif %}
+  {% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,9 @@
+{% if preview %}
+  {% if preview.unknown %}{% alert "bad" title="Unknown placeholders" %}{{ preview.unknown|join:", " }} will not save. Use the list on the left.{% endalert %}{% endif %}
+  {% if preview.missing %}<div class="hj-small hj-warn-text">Missing for this employee: {{ preview.missing|join:", " }}</div>{% endif %}
+  <div style="border:1px solid var(--hj-line);border-radius:12px;overflow:hidden;background:#fff">
+    <iframe title="Letter preview" sandbox="" srcdoc="{{ preview.html }}" style="width:100%;height:620px;border:0;display:block;background:#fff"></iframe>
+  </div>
+{% else %}
+  {% empty_state title="Live preview" hint="Choose an employee to see the letter exactly as it will print." compact=True icon="eye" %}
+{% endif %}

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Profile · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack hj-gap-lg">
+  {% page_header "Profile" subtitle="Your account and employment details. Ask HR if anything here is wrong." %}{% endpage_header %}
+  <div class="hj-card p-lg">
+    <div class="hj-row hj-between hj-gap-md hj-mb">
+      <div class="hj-row nowrap hj-gap-md" style="min-width:0">
+        {% if not person %}<span class="hj-avatar lg" aria-hidden="true">{{ request.hajiri_user.name|initials }}</span>{% endif %}
+        <div style="min-width:0">
+          <div class="hj-strong hj-truncate" style="font-size:1.1rem">{{ request.hajiri_user.name }}</div>
+          <div class="hj-sm hj-muted hj-truncate">{% if e.designation %}{{ e.designation }}, {% endif %}{{ request.hajiri_user.email }}</div>
+        </div>
+      </div>
+      {% if person %}{% include "people/partials/avatar_editor.html" with p=person own=True %}{% endif %}
+    </div>
+    <div class="hj-fields hj-grid" style="--cols:4">
+      {% field "Email" request.hajiri_user.email %}
+      {% field "Roles" roles %}
+      {% if e %}{% field "Employee code" e.emp_code mono=True %}{% field "Designation" e.designation %}{% field "Joined" e.join_date|bs_date %}{% field "Retirement scheme" regime %}{% field "Bank account" bank %}{% endif %}
+    </div>
+  </div>
+  {% if request.hajiri_user.employee_id %}
+  {% section "My details" hint="Something wrong or out of date? Request a change and HR will review it." %}
+    <div hx-get="{% url 'people:sections' request.hajiri_user.employee_id %}?mode=self" hx-trigger="load" hx-swap="outerHTML"><div class="hj-skeleton" style="height:110px"></div></div>
+  {% endsection %}
+  <div hx-get="{% url 'people:my_requests' %}" hx-trigger="load" hx-swap="outerHTML"></div>
+  {% section "My career" %}
+    <div hx-get="{% url 'people:career' request.hajiri_user.employee_id %}" hx-trigger="load" hx-swap="outerHTML"></div>
+  {% endsection %}
+  {% endif %}
+  {% section "Security" %}
+  <div class="hj-card p-lg"><div class="hj-row hj-between hj-gap-sm">
+    <div><div class="hj-sm hj-strong">Password</div><div class="hj-sm hj-muted">Changing it signs you out on every device.</div></div>
+    <a class="hj-btn default" href="/change-password"><i class="ti ti-key" aria-hidden="true"></i>Change password</a>
+  </div></div>
+  {% endsection %}
+</div>
+{% endblock %}

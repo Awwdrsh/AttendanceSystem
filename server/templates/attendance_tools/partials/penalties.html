@@ -1,0 +1,38 @@
+<div id="late-penalties" class="hj-stack" style="--gap:12px" hx-get="{% url 'attendance_tools:penalties' %}?y={{ y }}&amp;m={{ m }}" hx-trigger="hj:refresh-late-penalties from:body" hx-target="this" hx-swap="outerHTML">
+<form class="hj-stack" style="--gap:12px" hx-post="{% url 'attendance_tools:apply' %}" hx-swap="none" x-data="{ picked: 0 }" @change="picked = $el.querySelectorAll('[data-row-check]:checked').length">
+<input type="hidden" name="bsYear" value="{{ y }}"><input type="hidden" name="bsMonth" value="{{ m }}">
+<div class="hj-section-title">
+  <div><h3>Late-arrival penalties, {{ month_label }}</h3>
+    <p class="hj-small hj-muted" style="margin:0">Late days per person for the month and what the penalty would be. Apply before running payroll; unpaid days are deducted in the pay run.</p></div>
+  <div class="hj-row hj-gap-xs">
+    <div hx-get="{% url 'attendance_tools:penalties' %}" hx-target="#late-penalties" hx-swap="outerHTML" hx-push-url="true" hx-trigger="change" hx-include="this" hx-params="y,m">{% bs_month_input "y" "m" year=y month=m %}</div>
+    <button type="submit" class="hj-btn"{% if not enabled or locked or not due %} disabled{% endif %}><i class="ti ti-check" aria-hidden="true"></i><span x-text="picked ? 'Apply ' + picked + ' selected' : 'Apply all ({{ due|length }})'">Apply all ({{ due|length }})</span></button>
+  </div>
+</div>
+{% if not enabled %}{% alert "info" %}The late-arrival penalty is off. Late days are still listed so you can see who is often late.{% endalert %}{% endif %}
+{% if locked %}{% alert "info" %}This month's payroll is locked; penalties can no longer be applied or reversed.{% endalert %}{% endif %}
+{% stat_strip stats %}
+{% if lines %}
+<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+  <thead><tr>{% if selectable %}<th style="width:32px"><span class="hj-sr">Select</span></th>{% endif %}<th>Name</th><th class="right">Late days</th><th class="right">Minutes late</th><th class="right">Penalty</th><th>Taken from</th><th>Status</th></tr></thead>
+  <tbody>
+  {% for l in lines %}
+  <tr>
+    {% if selectable %}<td>{% if l.due %}<input type="checkbox" class="hj-check" data-row-check name="late-penalties-selected" value="{{ l.employeeId }}" aria-label="Select {{ l.name }}">{% endif %}</td>{% endif %}
+    <td><div class="hj-strong">{{ l.name }}</div><div class="hj-small hj-muted">{{ l.empCode }}</div></td>
+    <td class="right num"><span data-tip="{{ l.late_list }}">{{ l.lateDays }}</span></td>
+    <td class="right num hj-muted">{{ l.lateMinutes }}</td>
+    <td class="right">{% if l.penalty_label %}<span class="hj-strong num">{{ l.penalty_label }}</span>{% else %}<span class="hj-muted">None</span>{% endif %}</td>
+    <td>{% if l.show_split %}<div class="hj-row hj-gap-xs">{% if l.leave_label %}{% badge l.leave_label "info" %}{% endif %}{% if l.unpaid_label %}{% badge l.unpaid_label "bad" %}{% endif %}</div>{% else %}<span class="hj-muted">—</span>{% endif %}</td>
+    <td>{% if l.applied %}<div class="hj-row nowrap hj-gap-xs">{% badge "Applied" "ok" %}{% if not locked %}<button type="button" class="hj-btn subtle gray xs" hx-get="{% url 'attendance_tools:reverse' l.applied.id %}?name={{ l.name|urlencode }}" hx-target="#hj-modal-body"><i class="ti ti-arrow-back-up" aria-hidden="true"></i>Reverse</button>{% endif %}</div>
+      {% elif l.penaltyDays %}{% if enabled %}{% badge "To apply" "warn" %}{% else %}<span class="hj-muted">Rule off</span>{% endif %}
+      {% else %}<span class="hj-muted">Under the limit</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table></div></div>
+{% else %}
+{% empty_state title="Nobody was late this month" hint="Late days come from attendance: arrivals after the shift start and its grace time." icon="clock-check" %}
+{% endif %}
+</form>
+</div>

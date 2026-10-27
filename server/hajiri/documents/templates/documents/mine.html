@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Documents & letters · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Documents & letters" subtitle="Your documents on file, letters from HR and company policies." %}{% endpage_header %}
+<div class="hj-stack" style="--gap:32px">
+  {% include "documents/partials/my_policies.html" %}
+  <section class="hj-section">
+    <div class="hj-section-title"><div><h3>My documents</h3></div></div>
+    {% include "documents/partials/docs_grid.html" %}
+  </section>
+  <section class="hj-section">
+    <div class="hj-section-title"><div><h3>Letters from HR</h3></div>
+      <div class="hj-actions"><button type="button" class="hj-btn light xs" hx-get="{% url 'documents:request_new' %}" hx-target="#hj-drawer-body"><i class="ti ti-mail-plus" aria-hidden="true"></i>Request a letter</button></div>
+    </div>
+    <div class="hj-stack hj-gap-md">
+      {% include "documents/partials/my_requests.html" %}
+      {% include "documents/partials/letters_table.html" %}
+    </div>
+  </section>
+</div>
+{% endblock %}

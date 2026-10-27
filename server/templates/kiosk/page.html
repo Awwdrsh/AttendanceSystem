@@ -1,0 +1,80 @@
+{% extends "bare.html" %}
+{% load static %}
+{% block title %}Kiosk · Hajiri{% endblock %}
+{% block scripts %}<script src="{% static 'kiosk/kiosk.js' %}" defer></script>{% endblock %}
+{% block content %}
+<div x-data="hjKiosk()" x-init="init()" @hj:photo="punch($event.detail.photo)" style="min-height:100vh;display:flex;flex-direction:column;padding:24px">
+  <template x-if="state === 'loading'"><div style="flex:1;display:grid;place-items:center"><span class="hj-loader" aria-label="Loading"></span></div></template>
+
+  <template x-if="state === 'unpaired'">
+    <div style="flex:1;display:grid;place-items:center">
+      <form class="hj-stack" style="--gap:20px;width:100%;max-width:420px" @submit.prevent="pair()">
+        {% include "components/brand.html" with height=28 %}
+        <div><h2 style="margin:0">Set up this kiosk</h2>
+          <p class="hj-muted" style="margin:4px 0 0">HR adds the kiosk under Attendance, Kiosks and gives you a one-time pairing code.</p></div>
+        <label class="hj-fieldset"><span class="hj-label">Pairing code</span>
+          <input class="hj-input lg" placeholder="ABCD-EFGH" x-model="pairCode" @input="pairCode = pairCode.toUpperCase()" autofocus autocomplete="off"></label>
+        <div class="hj-alert hj-tone-bad" x-show="error" x-cloak><div x-text="error"></div></div>
+        <button type="submit" class="hj-btn lg" :disabled="busy || pairCode.replace(/[^A-Z0-9]/gi, '').length < 8">Pair kiosk</button>
+      </form>
+    </div>
+  </template>
+
+  <template x-if="state === 'ready'">
+    <div style="flex:1;display:flex;flex-direction:column">
+      <div class="hj-row hj-between">{% include "components/brand.html" with height=24 %}<span class="hj-sm hj-muted" x-text="session ? session.company.name + ' · ' + session.kiosk.name : ''"></span></div>
+      <div style="flex:1;display:grid;place-items:center">
+        <div class="hj-stack" style="--gap:28px;width:100%;max-width:520px">
+          <div class="hj-stack" style="--gap:0;align-items:center">
+            <div class="num" style="font-size:clamp(56px,10vw,88px);font-weight:600;line-height:1;letter-spacing:-0.04em"><span x-text="clock.hm"></span><span class="hj-muted" style="font-size:.4em" x-text="':' + clock.s"></span></div>
+            <div class="hj-muted" style="font-size:18px;margin-top:6px" x-text="clock.date"></div>
+          </div>
+          <template x-if="done">
+            <div class="hj-stack" style="--gap:12px;align-items:center;padding:16px 0">
+              <i class="ti ti-circle-check" style="font-size:64px;color:var(--hj-ok)" aria-hidden="true"></i>
+              <div style="font-size:24px;font-weight:600;text-align:center" x-text="done.message"></div>
+              <button type="button" class="hj-btn subtle" @click="done = null">Next person</button>
+            </div>
+          </template>
+          <template x-if="!done && who">
+            <div class="hj-stack" style="--gap:16px;align-items:center">
+              <div style="font-size:28px;font-weight:600;text-align:center" x-text="'Hello, ' + who.employee.name"></div>
+              <div class="hj-muted" x-text="who.employee.empCode + (who.employee.designation ? ' · ' + who.employee.designation : '')"></div>
+              <div class="hj-alert hj-tone-warn" style="width:100%" x-show="who.openBreak && who.nextDirection === 'out'"><div>You are on a break. Clocking out also ends it.</div></div>
+              <div class="hj-grid" style="--cols:2;width:100%">
+                <button type="button" class="hj-btn default lg" @click="reset()" :disabled="busy">Cancel</button>
+                <button type="button" class="hj-btn lg" :disabled="busy" @click="who.selfieRequired ? openCamera() : punch()">
+                  <i class="ti" :class="who.nextDirection === 'in' ? 'ti-login-2' : 'ti-logout-2'" aria-hidden="true"></i><span x-text="who.nextDirection === 'in' ? 'Clock in' : 'Clock out'"></span></button>
+              </div>
+            </div>
+          </template>
+          <template x-if="!done && !who">
+            <form class="hj-stack" style="--gap:16px" @submit.prevent="identify({ empCode: empCode.trim(), pin: pin })">
+              <div class="hj-alert hj-tone-bad" x-show="locked()"><div>This kiosk is paused after too many wrong attempts. Try again in a few minutes.</div></div>
+              <div class="hj-grid" style="--cols:2">
+                <label class="hj-fieldset"><span class="hj-label">Employee code</span><input class="hj-input lg" placeholder="E001" x-model="empCode" autocomplete="off" @keydown.enter.prevent="$refs.pin.focus()"></label>
+                <label class="hj-fieldset"><span class="hj-label">Kiosk PIN</span><input class="hj-input lg" type="password" x-ref="pin" placeholder="4 to 6 digits" inputmode="numeric" autocomplete="off" maxlength="6" x-model="pin" @input="pin = pin.replace(/\D/g, '')"></label>
+              </div>
+              <div class="hj-alert hj-tone-bad" x-show="error" x-cloak><div x-text="error"></div></div>
+              <button type="submit" class="hj-btn lg" :disabled="busy || !empCode.trim() || pin.length < 4">Continue</button>
+              <button type="button" class="hj-btn default lg" @click="error = null; openScanner()"><i class="ti ti-qrcode" aria-hidden="true"></i>Scan my QR badge</button>
+            </form>
+          </template>
+        </div>
+      </div>
+      <p class="hj-small hj-muted" style="text-align:center;margin:0">Your photo is encrypted and seen only by you, your manager and HR. Set or change your kiosk PIN in the Hajiri app under My attendance.</p>
+    </div>
+  </template>
+
+  <form>{% camera_capture name="selfie" title="Take a photo" confirm_label="Clock in" id="kiosk-camera" %}</form>
+  <dialog class="hj-modal lg" id="kiosk-scanner" aria-labelledby="kiosk-scanner-title" @close="stopScanner()">
+    <div class="hj-modal-head"><div class="hj-modal-title" id="kiosk-scanner-title">Show your QR badge</div>
+      <button type="button" class="hj-iconbtn" data-modal-close aria-label="Close"><i class="ti ti-x" aria-hidden="true"></i></button></div>
+    <div class="hj-modal-body hj-stack">
+      <div class="hj-alert hj-tone-warn" x-show="scanProblem" x-cloak><div x-text="scanProblem"></div></div>
+      <div x-show="!scanProblem" style="aspect-ratio:4/3;border-radius:14px;overflow:hidden;background:#111"><video x-ref="scan" playsinline muted style="width:100%;height:100%;object-fit:cover;transform:scaleX(-1)"></video></div>
+      <p class="hj-sm hj-muted" style="margin:0">Open Hajiri on your phone, go to My attendance, Kiosk badge, and hold the code up to the camera.</p>
+    </div>
+  </dialog>
+</div>
+{% endblock %}

@@ -1,0 +1,10 @@
+<form class="hj-form" data-modal-title="Release {{ h.name_en }}'s pay" hx-post="{% url 'payroll:hold_release' h.id %}" hx-swap="none" x-data="{ mode: 'payroll' }">
+  <p class="hj-sm" style="margin:0">NPR <b class="num">{{ amount }}</b> held in {{ held_in }}.</p>
+  <div class="hj-pills" role="radiogroup">
+    <label class="hj-pill" :aria-selected="mode === 'payroll'"><input type="radio" name="mode" value="payroll" x-model="mode" class="hj-sr"> Pay with next run</label>
+    <label class="hj-pill" :aria-selected="mode === 'outside'"><input type="radio" name="mode" value="outside" x-model="mode" class="hj-sr"> Already paid outside</label>
+  </div>
+  <p class="hj-small hj-muted" style="margin:0" x-text="mode === 'payroll' ? 'Added to the next regular, supplementary or off-cycle run as &quot;Released pay&quot;. Tax was already counted when the pay was held.' : 'Use this when HR has paid the amount another way (for example by cheque). Nothing is added to payroll.'">Added to the next regular, supplementary or off-cycle run as "Released pay". Tax was already counted when the pay was held.</p>
+  <div class="hj-fieldset"><label class="hj-label" for="rl-note">Note</label><input class="hj-input" id="rl-note" name="note" placeholder="Optional" maxlength="500"></div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn">Release</button></div>
+</form>

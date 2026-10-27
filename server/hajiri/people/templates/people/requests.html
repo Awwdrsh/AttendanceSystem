@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Profile change requests · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack hj-gap-lg">
+  {% page_header "Profile change requests" subtitle="Check each change against the proof, then approve it to update the employee's record." %}
+    <nav class="hj-pills" style="margin:0" aria-label="Status">{% for v, l in pills %}<a class="hj-pill" href="?status={{ v }}"{% if status == v %} aria-current="page"{% endif %}>{{ l }}</a>{% endfor %}</nav>
+  {% endpage_header %}
+  <div id="change-requests" hx-get="{% url 'people:requests' %}?status={{ status }}" hx-trigger="hj:refresh-change-requests from:body" hx-swap="innerHTML">
+    {% include "people/partials/requests_list.html" %}
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Components · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Components" subtitle="Every shared template component, with the tag that renders it. See docs/django-conventions.md." eyebrow="Design system" %}
+  <button type="button" class="hj-btn default" data-theme-toggle><i class="ti ti-moon" data-theme-icon aria-hidden="true"></i><span data-theme-label>Dark mode</span></button>
+  <button type="button" class="hj-btn" data-palette-open><i class="ti ti-search" aria-hidden="true"></i>Command palette</button>
+{% endpage_header %}
+
+<div class="hj-stack hj-gap-lg">
+
+{% section "Stat strip" hint="stat_strip stats" %}{% stat_strip stats %}{% endsection %}
+
+{% section "Buttons" hint='class="hj-btn" plus default, light, subtle, danger, gray; sizes xs, sm, lg; icon, block' %}
+<div class="hj-row">
+  <button class="hj-btn">Primary</button><button class="hj-btn default">Default</button><button class="hj-btn light">Light</button>
+  <button class="hj-btn subtle">Subtle</button><button class="hj-btn danger">Danger</button><button class="hj-btn danger subtle">Danger subtle</button>
+  <button class="hj-btn sm"><i class="ti ti-plus" aria-hidden="true"></i>Small</button><button class="hj-btn xs default">Extra small</button>
+  <button class="hj-btn lg">Large <i class="ti ti-arrow-right" aria-hidden="true"></i></button><button class="hj-btn default icon" aria-label="Settings"><i class="ti ti-settings" aria-hidden="true"></i></button>
+  <button class="hj-btn is-busy">Busy</button><button class="hj-btn" disabled>Disabled</button>
+</div>
+{% endsection %}
+
+{% section "Badges and statuses" hint="status_badge row.status late=row.late_minutes remote=row.remote and badge 'Text' 'ok'" %}
+<div class="hj-row">{% for s in statuses %}{% status_badge s %}{% endfor %}{% status_badge "Present" late=12 remote=True %}</div>
+<div class="hj-row hj-mt-sm">{% badge "ok" "ok" %}{% badge "warn" "warn" %}{% badge "bad" "bad" %}{% badge "info" "info" %}{% badge "idle" "idle" %}{% badge "accent" "accent" True %}</div>
+{% endsection %}
+
+{% section "Alerts" hint='alert "warn" title="..."...endalert' %}
+<div class="hj-stack hj-gap-sm">
+  {% alert "info" title="For your information" %}Payroll for Kartik locks on 5 Mangsir.{% endalert %}
+  {% alert "warn" %}Two employees have no PAN on file.{% endalert %}
+  {% alert "bad" title="Not saved" %}That shift overlaps another one.{% endalert %}
+  {% alert "ok" %}Everything is set up.{% endalert %}
+</div>
+{% endsection %}
+
+{% section "Toasts over HTMX" hint="Server: toast(request, response, message, tone, title) puts hj:toast in HX-Trigger" %}
+<div class="hj-row">
+  <button class="hj-btn default" hx-post="/_/web/components/action" hx-vals='{"kind": "ok"}'>OK toast</button>
+  <button class="hj-btn default" hx-post="/_/web/components/action" hx-vals='{"kind": "info"}'>Info toast</button>
+  <button class="hj-btn default" hx-post="/_/web/components/action" hx-vals='{"kind": "warn"}'>Warning toast</button>
+  <button class="hj-btn default" hx-post="/_/web/components/action" hx-vals='{"kind": "error"}'>Server error (HttpError)</button>
+  <button class="hj-btn danger" hx-post="/_/web/components/action" hx-vals='{"kind": "err"}' {% confirm_attrs "This sends a test request. Nothing changes." title="Send it?" label="Send" %}>Confirm first</button>
+</div>
+{% endsection %}
+
+{% section "Forms" hint="form_field form.x, bs_date_input, employee_picker, file_upload, 422 re-render" %}
+<div class="hj-grid" style="--cols:2">
+  {% card "Field types" %}
+  <div class="hj-form">
+    <div class="hj-form-row">
+      <div class="hj-fieldset"><label class="hj-label" for="d1">Text</label><input id="d1" class="hj-input" placeholder="Placeholder"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="d2">Select</label><select id="d2" class="hj-select"><option>Kathmandu</option><option>Pokhara</option></select></div>
+    </div>
+    {% bs_date_input "from" value=today label="From (Bikram Sambat)" holidays=holidays description="Picks a BS date, posts the ISO (AD) date" %}
+    {% bs_date_input "to" label="Optional date" min=today %}
+    {% bs_month_input year=2083 month=7 label="Pay period" %}
+    {% employee_picker "employee_id" label="Employee" %}
+    <div class="hj-fieldset"><span class="hj-label">Attachment</span>{% file_upload "receipt_file_id" "expense_receipt" %}</div>
+    <label class="hj-check-row"><input type="checkbox" class="hj-check" checked> A checkbox</label>
+    <label class="hj-check-row"><input type="checkbox" class="hj-switch" checked> A switch</label>
+    <div class="hj-fieldset"><label class="hj-label" for="d3">Notes</label><textarea id="d3" class="hj-input" placeholder="Textarea"></textarea></div>
+    <div class="hj-fieldset"><label class="hj-label" for="d4">Invalid</label><input id="d4" class="hj-input" aria-invalid="true" value="abc"><div class="hj-error">PAN must be 9 digits</div></div>
+  </div>
+  {% endcard %}
+  {% card "HTMX form with a 422 answer" hint="Validation errors re-render the form in place" %}{% include "web/partials/demo_form.html" %}{% endcard %}
+</div>
+{% endsection %}
+
+{% section "DataTable" hint="Table(...) + data_table table: search, sort, pagination, CSV export, selection" %}{% data_table table %}{% endsection %}
+
+{% section "Report table" hint="report_table columns rows" %}{% report_table report_columns report_rows %}{% endsection %}
+
+{% section "Charts" hint="chart_card, column_chart, line_chart, donut, hbars, trend_bars, sparkline" %}
+<div class="hj-grid" style="--cols:2">
+  {% chart_card "Payroll cost (chart card)" subtitle="Gross pay and TDS, last six months" legend=chart_legend table=chart_table csv_url="?export=chart" %}{% column_chart months column_series money=True aria_label="Payroll cost by month" %}{% endchart_card %}
+  {% card "Attendance (line)" %}{% line_chart months line_series suffix="%" aria_label="Attendance by month" %}{% endcard %}
+  {% card "Headcount by department (donut)" %}{% donut donut_data center_label="people" aria_label="Headcount" %}{% endcard %}
+  {% card "Branches (bars)" %}{% hbars hbar_data %}<div class="hj-mt">{% sparkline spark %}</div>{% endcard %}
+</div>
+<div class="hj-mt">{% trend_bars trend "Attendance, last 21 days" %}</div>
+{% endsection %}
+
+{% section "Dates, money and numbers" hint="Filters: bs_date, bs_date_long, bs_datetime, bs_month, dual_date, npr, money, minutes_hm, relative_time, devanagari" %}
+<div class="hj-card"><dl class="hj-kv">
+  <dt>bs_date</dt><dd>{{ sample_date|bs_date }}</dd>
+  <dt>bs_date_long</dt><dd>{{ sample_date|bs_date_long }}</dd>
+  <dt>bs_date_short</dt><dd>{{ today|bs_date_short }}</dd>
+  <dt>dual_date</dt><dd>{{ sample_date|dual_date }}</dd>
+  <dt>bs_datetime</dt><dd>{{ past_instant|bs_datetime }}</dd>
+  <dt>relative_time</dt><dd>{{ past_instant|relative_time }}</dd>
+  <dt>bs_month</dt><dd>{{ 2083|bs_month:7 }}</dd>
+  <dt>fiscal_label</dt><dd>{{ sample_date|fiscal_label }}</dd>
+  <dt>npr</dt><dd>{% for m in money_values %}{{ m|npr }}{% if not forloop.last %} · {% endif %}{% endfor %}</dd>
+  <dt>minutes_hm</dt><dd>{{ 503|minutes_hm }} · {{ 60|minutes_hm }} · {{ 5|minutes_hm }}</dd>
+  <dt>devanagari</dt><dd>{{ "2083-05-12"|devanagari }}</dd>
+</dl></div>
+{% endsection %}
+
+{% section "Empty state, fields, QR code" %}
+<div class="hj-grid" style="--cols:3">
+  {% empty_state title="No leave requests" hint="Requests your team sends appear here." action_label="Apply for leave" action_url="#" %}
+  {% card %}<div class="hj-fields">{% field "PAN" "123456789" mono=True %}{% field "Joined" sample_date|bs_date %}{% field "Branch" None %}{% field "Grade" "G4" tip="Grade from the salary structure" %}</div>{% endcard %}
+  {% card "QR code" %}{% qr_code "otpauth://totp/Hajiri:demo?secret=JBSWY3DPEHPK3PXP&issuer=Hajiri" 160 %}{% endcard %}
+</div>
+{% endsection %}
+
+{% section "Tabs, pills, modal, drawer, camera" %}
+<div x-data="{ tab: 'a' }">
+  <div class="hj-tabs" role="tablist"><button class="hj-tab" role="tab" :aria-selected="tab === 'a'" @click="tab = 'a'">First</button><button class="hj-tab" role="tab" :aria-selected="tab === 'b'" @click="tab = 'b'">Second</button></div>
+  <div class="hj-pills" role="tablist"><button class="hj-pill" :aria-selected="tab === 'a'" @click="tab = 'a'">Pill one</button><button class="hj-pill" :aria-selected="tab === 'b'" @click="tab = 'b'">Pill two</button></div>
+  <p class="hj-sm" x-show="tab === 'a'">First tab content.</p><p class="hj-sm" x-show="tab === 'b'" x-cloak>Second tab content.</p>
+</div>
+<div class="hj-row">
+  <button class="hj-btn default" data-modal-open="demo-modal">Open a modal</button>
+  <button class="hj-btn default" data-modal-open="demo-drawer">Open a drawer</button>
+  <button class="hj-btn default" hx-get="/_/web/components?partial=modal" hx-target="#hj-modal-body">Load into the shared modal</button>
+  <form class="hj-row" style="display:inline-flex">{% camera_capture name="photo" title="Clock in from home" confirm_label="Clock in" id="demo-camera" %}<button type="button" class="hj-btn default" data-modal-open="demo-camera"><i class="ti ti-camera" aria-hidden="true"></i>Camera</button></form>
+</div>
+{% modal "demo-modal" "A modal" %}<p class="hj-sm">Modals are &lt;dialog&gt; elements. Escape or the backdrop closes them.</p>
+  <div class="hj-modal-foot"><button class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" hx-post="/_/web/components/action" hx-vals='{"kind": "modal"}'>Do it</button></div>{% endmodal %}
+{% drawer "demo-drawer" "A drawer" %}<p class="hj-sm">Drawers slide in from the right, for record details.</p>{% enddrawer %}
+{% endsection %}
+
+{% section "Approval chain" hint="approval_chain 'leave' employee_id=... (renders when the workflow app provides workflow:preview)" %}
+{% approval_chain "leave" %}<p class="hj-small hj-muted">Nothing above means the workflow app has not registered its preview yet.</p>
+{% endsection %}
+
+</div>
+{% endblock %}

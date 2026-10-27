@@ -1,0 +1,16 @@
+<form class="hj-form" data-modal-title="Edit document" hx-post="{% url 'documents:doc_edit' d.id %}" hx-swap="none" x-data="{ title: '{{ d.title|escapejs }}' }">
+  <div class="hj-fieldset">
+    <label class="hj-label" for="de-title">Title</label>
+    <input id="de-title" class="hj-input" name="title" maxlength="120" x-model="title" value="{{ d.title }}">
+  </div>
+  {% bs_date_input "expiry_date" value=d.expiry_date label="Expiry date" %}
+  <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="visible_to_employee" value="1"{% if d.visible_to_employee %} checked{% endif %}> Employee can see this document</label>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="de-notes">Notes</label>
+    <textarea id="de-notes" class="hj-input" name="notes" rows="2" maxlength="500">{{ d.notes|default:'' }}</textarea>
+  </div>
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="!title.trim()">Save</button>
+  </div>
+</form>

@@ -1,0 +1,44 @@
+{# BoardSettings: name, columns (rename, mark done, remove, add), where tasks of removed columns go, and the people on a team board. #}
+<form class="hj-form" data-modal-title="Board settings" data-modal-size="lg" hx-post="{% url 'tasks:board_settings' board.id %}" hx-swap="none"
+      x-data="{ name: '{{ board.name|escapejs }}', cols: {{ board.columns|json_attr }}, original: {{ board.columns|json_attr }}, moveTo: '',
+                get removed() { return this.original.filter(o => !this.cols.some(c => c.id === o.id)) },
+                add() { this.cols.push({ id: 'col-' + Date.now().toString(36).slice(-6), name: 'New column', done: false }) } }">
+  <div class="hj-fieldset">
+    <label class="hj-label" for="tk-set-name">Name</label>
+    <input id="tk-set-name" class="hj-input" name="name" maxlength="80" x-model="name">
+  </div>
+  <div class="hj-fieldset">
+    <span class="hj-label">Columns</span>
+    <div class="hj-stack" style="--gap:6px">
+      <template x-for="(c, i) in cols" :key="c.id">
+        <div class="hj-row nowrap hj-gap-xs">
+          <input type="hidden" name="col_id" :value="c.id">
+          <input class="hj-input hj-grow" name="col_name" maxlength="40" x-model="c.name" :aria-label="'Column ' + (i + 1)">
+          <label class="hj-check-row hj-sm"><input type="checkbox" name="col_done" :value="c.id" x-model="c.done"> Done</label>
+          <button type="button" class="hj-iconbtn" :aria-label="'Remove ' + c.name" :disabled="cols.length <= 1" @click="cols.splice(i, 1)"><i class="ti ti-trash" aria-hidden="true"></i></button>
+        </div>
+      </template>
+      <button type="button" class="hj-btn subtle xs" style="width:fit-content" x-show="cols.length < 8" @click="add()"><i class="ti ti-plus" aria-hidden="true"></i>Add column</button>
+    </div>
+    <div class="hj-fieldset hj-mt-sm" x-show="removed.length" x-cloak>
+      <label class="hj-label" for="tk-move-to">Move tasks from removed columns to</label>
+      <select id="tk-move-to" class="hj-select" name="move_to" x-model="moveTo">
+        <option value=""></option>
+        <template x-for="c in cols" :key="c.id"><option :value="c.id" x-text="c.name"></option></template>
+      </select>
+    </div>
+  </div>
+  {% if board.kind == 'team' %}
+  <div class="hj-fieldset">
+    <span class="hj-label">People on this board</span>
+    <div class="hj-help">They can see and work on its tasks</div>
+    <div class="hj-stack" style="--gap:4px;max-height:240px;overflow-y:auto">
+      {% for o in options %}<label class="hj-check-row hj-sm"><input type="checkbox" name="member_ids" value="{{ o.user_id }}"{% if o.user_id in member_ids %} checked{% endif %}> {{ o.name }}</label>{% empty %}<span class="hj-small hj-muted">Nobody to add.</span>{% endfor %}
+    </div>
+  </div>
+  {% endif %}
+  <div class="hj-modal-foot hj-between">
+    {% if board.kind == 'team' %}<button type="button" class="hj-btn subtle danger" hx-post="{% url 'tasks:board_archive' board.id %}" hx-swap="none">Archive board</button>{% else %}<span></span>{% endif %}
+    <div class="hj-row hj-gap-xs"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit" :disabled="!cols.some(c => c.done) || !name.trim()">Save</button></div>
+  </div>
+</form>

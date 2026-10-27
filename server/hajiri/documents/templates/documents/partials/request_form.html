@@ -1,0 +1,23 @@
+{# RequestLetterDrawer: ask HR for a letter such as a salary certificate. #}
+<form class="hj-form" data-modal-title="Request a letter" hx-post="{% url 'documents:request_new' %}" hx-swap="none" x-data="{ tpl: '', purpose: '' }">
+  <div class="hj-fieldset">
+    <label class="hj-label" for="rq-tpl">Letter <span class="req">*</span></label>
+    <select id="rq-tpl" class="hj-select" name="template_id" x-model="tpl" required>
+      <option value="" disabled selected>{% if templates %}Choose a letter{% else %}HR has not made any letters requestable{% endif %}</option>
+      {% for t in templates %}<option value="{{ t.id }}">{{ t.name }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="rq-purpose">What is it for? <span class="req">*</span></label>
+    <textarea id="rq-purpose" class="hj-input" name="purpose" rows="2" maxlength="300" required x-model="purpose" placeholder="e.g. Home loan application at ABC Bank"></textarea>
+  </div>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="rq-to">Addressed to (optional)</label>
+    <input id="rq-to" class="hj-input" name="addressed_to" maxlength="200" placeholder="e.g. The Manager, ABC Bank, Kathmandu">
+  </div>
+  <p class="hj-small hj-muted" style="margin:0">HR prepares the letter with a reference number. You will get a notification when it is ready to print.</p>
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="!tpl || purpose.trim().length < 3"><i class="ti ti-mail" aria-hidden="true"></i>Send request</button>
+  </div>
+</form>

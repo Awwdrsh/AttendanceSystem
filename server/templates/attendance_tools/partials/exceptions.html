@@ -1,0 +1,38 @@
+<div id="exceptions" class="hj-stack" style="--gap:12px" hx-get="{% url 'attendance_tools:exceptions' %}?from={{ from }}&amp;to={{ to }}&amp;filter={{ filter }}" hx-trigger="hj:refresh-exceptions from:body" hx-target="this" hx-swap="outerHTML" x-data="{ picked: 0 }">
+{% page_header "Exceptions" subtitle=subtitle %}
+  <form class="hj-row nowrap hj-gap-xs" hx-get="{% url 'attendance_tools:exceptions' %}" hx-target="#exceptions" hx-swap="outerHTML" hx-push-url="true" hx-trigger="change">
+    <input type="hidden" name="filter" value="{{ filter }}">
+    {% bs_date_input "from" value=from max=to %}
+    <span class="hj-small hj-muted">to</span>
+    {% bs_date_input "to" value=to min=from %}
+  </form>
+{% endpage_header %}
+<nav class="hj-pills" aria-label="Filter">
+  {% for key, label in filters %}<a class="hj-pill" href="?from={{ from }}&amp;to={{ to }}&amp;filter={{ key }}" hx-get="?from={{ from }}&amp;to={{ to }}&amp;filter={{ key }}" hx-target="#exceptions" hx-swap="outerHTML" hx-push-url="true"{% if key == filter %} aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
+</nav>
+{% if rows %}
+<form hx-post="{% url 'attendance_tools:recompute' %}" hx-swap="none" @change="picked = $el.querySelectorAll('[data-row-check]:checked').length">
+<div class="hj-row hj-gap-sm" x-show="picked > 0" x-cloak>
+  <span class="hj-small" x-text="picked + ' selected'"></span>
+  <button type="submit" class="hj-btn xs"><i class="ti ti-refresh" aria-hidden="true"></i>Recalculate selected</button>
+</div>
+<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+  <thead><tr><th style="width:32px"><span class="hj-sr">Select</span></th><th>Employee</th><th>Date</th><th>Status</th><th class="right">Worked</th><th>Flags</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td><input type="checkbox" class="hj-check" data-row-check name="exceptions-selected" value="{{ r.employee_id }}|{{ r.local_date }}" aria-label="Select {{ r.name_en }}, {{ r.local_date|bs_date_long }}"></td>
+    <td><div class="hj-strong">{{ r.name_en }}</div><div class="hj-small hj-muted">{{ r.emp_code }}</div></td>
+    <td style="white-space:nowrap">{{ r.local_date|bs_date_long }}</td>
+    <td>{% status_badge r.status late=r.late_min %}</td>
+    <td class="right num">{{ r.worked_min|minutes_hm }}</td>
+    <td>{% if r.flag_texts %}<div class="hj-row hj-gap-xs">{% for f in r.flag_texts %}{% badge f "idle" %}{% endfor %}</div>{% else %}<span class="hj-muted">None</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table></div></div>
+</form>
+{% else %}
+{% empty_state title=empty_title hint=empty_hint icon="circle-check" %}
+{% endif %}
+</div>

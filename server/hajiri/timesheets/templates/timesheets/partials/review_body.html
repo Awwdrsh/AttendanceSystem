@@ -1,0 +1,83 @@
+{% load timesheet_tags %}
+<div id="ts-review" class="hj-stack hj-mt" style="--gap:16px" hx-get="{{ request.get_full_path }}" hx-trigger="hj:refresh-timesheets-review from:body" hx-swap="outerHTML"
+>
+<div class="hj-pills" role="tablist">
+  {% for v, l in views %}<a class="hj-pill" href="?view={{ v }}" hx-get="?view={{ v }}" hx-target="#ts-review" hx-swap="outerHTML" hx-push-url="true"{% if view == v %} aria-current="page" aria-selected="true"{% endif %}>{{ l }}</a>{% endfor %}
+</div>
+{% if view == 'approve' %}
+  {% include "timesheets/partials/timesheet_table.html" with rows=timesheets kind="approve" empty_title="Nothing waiting" empty_hint="Submitted timesheets from your team appear here for approval." %}
+{% elif view == 'history' %}
+  <form class="hj-filters hj-row hj-end" hx-get="{% url 'timesheets:review' %}" hx-target="#ts-review" hx-swap="outerHTML" hx-push-url="true" hx-trigger="change">
+    <input type="hidden" name="view" value="history">
+    <select name="status" class="hj-select sm" style="width:200px" aria-label="Status">
+      <option value="">Every status</option>
+      {% for v, l in statuses %}<option value="{{ v }}"{% if status == v %} selected{% endif %}>{{ l }}</option>{% endfor %}
+    </select>
+  </form>
+  {% include "timesheets/partials/timesheet_table.html" with rows=timesheets kind="history" empty_title="No timesheets yet" empty_hint="Timesheets appear here once people submit their weeks." %}
+{% elif view == 'week' %}
+  <div class="hj-section-title">
+    <div><h3>Who has submitted</h3><p>{{ label }}</p></div>
+    <div class="hj-actions hj-row hj-gap-xs">
+      <a class="hj-iconbtn" href="?view=week&week={{ prev_week }}" hx-get="?view=week&week={{ prev_week }}" hx-target="#ts-review" hx-swap="outerHTML" hx-push-url="true" aria-label="Previous week"><i class="ti ti-chevron-left" aria-hidden="true"></i></a>
+      {% if week == this_week %}<button type="button" class="hj-btn default sm" disabled>This week</button>{% else %}<a class="hj-btn default sm" href="?view=week" hx-get="?view=week" hx-target="#ts-review" hx-swap="outerHTML" hx-push-url="true">This week</a>{% endif %}
+      {% if week >= this_week %}<button type="button" class="hj-iconbtn" aria-label="Next week" disabled><i class="ti ti-chevron-right" aria-hidden="true"></i></button>
+      {% else %}<a class="hj-iconbtn" href="?view=week&week={{ next_week }}" hx-get="?view=week&week={{ next_week }}" hx-target="#ts-review" hx-swap="outerHTML" hx-push-url="true" aria-label="Next week"><i class="ti ti-chevron-right" aria-hidden="true"></i></a>{% endif %}
+    </div>
+  </div>
+  {% stat_strip stats %}
+  {% if not people %}
+  {% empty_state title="No one to show" hint="People who report to you appear here." %}
+  {% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th scope="col">Employee</th><th class="right" scope="col">Logged</th><th class="right" scope="col">Attended</th><th class="right" scope="col">Difference</th><th scope="col">Timesheet</th></tr></thead>
+    <tbody>
+    {% for r in people %}
+      <tr{% if r.timesheet_id %} class="clickable" hx-get="{% url 'timesheets:detail' r.timesheet_id %}" hx-target="#hj-drawer-body" hx-swap="innerHTML" hx-trigger="click"{% endif %}>
+        <td><div class="hj-sm hj-strong">{{ r.name_en }}</div><div class="hj-small hj-muted">{{ r.emp_code }}</div></td>
+        <td class="right mono">{{ r.tracked_min|hhmm }}</td>
+        <td class="right mono muted">{{ r.attendance_min|hhmm }}</td>
+        {% include "timesheets/partials/diff_cell.html" with min=r.diff_min %}
+        <td>{% timesheet_badge r.status %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div></div>
+  {% endif %}
+{% else %}
+  <form class="hj-row hj-between" style="--gap:12px;align-items:flex-end" hx-get="{% url 'timesheets:review' %}" hx-target="#ts-review" hx-swap="outerHTML" hx-push-url="true" hx-trigger="change">
+    <input type="hidden" name="view" value="report">
+    <div class="hj-row" style="--gap:12px;align-items:flex-end">
+      <div style="width:180px">{% bs_date_input "from" value=from label="From" max=to clearable=False %}</div>
+      <div style="width:180px">{% bs_date_input "to" value=to label="To" max=today clearable=False %}</div>
+      <div class="hj-pills" role="radiogroup" aria-label="Group by" style="margin:0">
+        {% for v, l in groups %}<label class="hj-pill"{% if group_by == v %} aria-selected="true"{% endif %}><input type="radio" name="group_by" value="{{ v }}" style="position:absolute;opacity:0;width:0;height:0"{% if group_by == v %} checked{% endif %}>{{ l }}</label>{% endfor %}
+      </div>
+    </div>
+    <div class="hj-row hj-gap-xs">
+      <a class="hj-btn default sm" href="{% url 'timesheets:report_csv' %}?kind=summary&from={{ from }}&to={{ to }}&group_by={{ group_by }}" download><i class="ti ti-download" aria-hidden="true"></i>Summary CSV</a>
+      <a class="hj-btn default sm" href="{% url 'timesheets:report_csv' %}?kind=entries&from={{ from }}&to={{ to }}" download><i class="ti ti-download" aria-hidden="true"></i>All entries CSV</a>
+    </div>
+  </form>
+  {% stat_strip stats %}
+  {% if report.rounding.step %}<p class="hj-small hj-muted" style="margin:0">Each entry is rounded {{ report.rounding.mode }} to {{ report.rounding.step }} minutes.</p>{% endif %}
+  {% if not report.rows %}
+  {% empty_state title="No time in this range" hint="Pick a longer range or check that people are logging time." %}
+  {% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th scope="col">{{ label_header }}</th><th class="right" scope="col">Hours</th><th class="right" scope="col">Billable</th><th class="right" scope="col">Amount</th>{% if group_by == 'project' %}<th class="right" scope="col">Budget used</th>{% endif %}</tr></thead>
+    <tbody>
+    {% for r in report.rows %}
+      <tr>
+        <td><span class="hj-row nowrap" style="--gap:6px"><span class="hj-sm hj-strong">{% if group_by == 'day' %}{{ r.label|bs_date_short }}{% else %}{{ r.label }}{% endif %}</span>{% if r.code %}<span class="hj-small hj-muted mono">{{ r.code }}</span>{% endif %}</span></td>
+        <td class="right mono">{{ r.hours|fixed2 }}</td>
+        <td class="right mono">{{ r.billable_hours|fixed2 }}</td>
+        <td class="right">{% if r.billable_amount %}{{ r.billable_amount|npr }}{% else %}—{% endif %}</td>
+        {% if group_by == 'project' %}<td class="right">{% if r.budget_used_pct is None %}<span class="hj-muted">—</span>{% else %}<span class="hj-badge hj-tone-{% if r.budget_used_pct >= 100 %}bad{% elif r.budget_used_pct >= 80 %}warn{% else %}ok{% endif %}">{{ r.budget_used_pct }}% of {{ r.budget_hours }} h</span>{% endif %}</td>{% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div></div>
+  {% endif %}
+{% endif %}
+</div>

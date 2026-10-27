@@ -1,0 +1,16 @@
+{% load timesheet_tags %}{# MyTimesheetPage: "Submit this week?" #}
+<form class="hj-form" data-modal-title="Submit this week?" hx-post="{% url 'timesheets:submit' %}" hx-swap="none">
+  <input type="hidden" name="week" value="{{ week }}">
+  <p class="hj-sm" style="margin:0">{{ w.totals.roundedMin|minutes_hm }} for {{ label }} goes to your manager. The week is locked until they decide.</p>
+  {% if w.totals.flaggedDays > 0 %}
+  {% alert "warn" %}{{ w.totals.flaggedDays }} {% if w.totals.flaggedDays == 1 %}day differs{% else %}days differ{% endif %} from your attendance. Add a note so your manager knows why.{% endalert %}
+  {% endif %}
+  <div class="hj-fieldset">
+    <label class="hj-label" for="ts-s-note">Note for your manager</label>
+    <textarea id="ts-s-note" name="note" class="hj-input" rows="2" maxlength="500"></textarea>
+  </div>
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn">Submit</button>
+  </div>
+</form>

@@ -1,0 +1,40 @@
+{# Publish a policy drawer. The title defaults to the uploaded file's name. #}
+<form class="hj-form" data-modal-title="Publish a policy" hx-post="{% url 'documents:policy_new' %}" hx-swap="none"
+      x-data="{ title: '', file: '', audience: 'all', picked: 0 }">
+  <div class="hj-fieldset">
+    <label class="hj-label" for="pl-title">Title <span class="req">*</span></label>
+    <input id="pl-title" class="hj-input" name="title" maxlength="160" required x-model="title" placeholder="e.g. Employee handbook 2083">
+  </div>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="pl-desc">Short description (optional)</label>
+    <textarea id="pl-desc" class="hj-input" name="description" rows="2" maxlength="2000"></textarea>
+  </div>
+  <div class="hj-fieldset" @change="if ($event.target.name === 'file_id') { file = $event.target.value; const n = $el.querySelector('[x-text=filename]'); if (!title && n) title = n.textContent.replace(/\.[a-z]+$/i, '') }" @click="if ($event.target.closest('.hj-file button')) file = ''">
+    <span class="hj-label">Document</span>
+    {% file_upload "file_id" "company_document" label="Choose PDF" accept="application/pdf" %}
+  </div>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="pl-aud">Who it applies to</label>
+    <select id="pl-aud" class="hj-select" name="audience" x-model="audience" @change="picked = 0">
+      {% for k, label in audiences %}<option value="{{ k }}">{{ label }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="hj-fieldset" x-show="audience === 'branch'" x-cloak>
+    <span class="hj-label">Branches</span>
+    <div class="hj-stack hj-gap-xs" style="max-height:200px;overflow:auto">
+      {% for b in branches %}<label class="hj-check-row"><input type="checkbox" name="audience_ids" value="{{ b.id }}" :disabled="audience !== 'branch'" @change="picked += $event.target.checked ? 1 : -1"> {{ b.name_en }}</label>{% empty %}<span class="hj-small hj-muted">No branches yet.</span>{% endfor %}
+    </div>
+  </div>
+  <div class="hj-fieldset" x-show="audience === 'department'" x-cloak>
+    <span class="hj-label">Departments</span>
+    <div class="hj-stack hj-gap-xs" style="max-height:200px;overflow:auto">
+      {% for u in units %}<label class="hj-check-row"><input type="checkbox" name="audience_ids" value="{{ u.id }}" :disabled="audience !== 'department'" @change="picked += $event.target.checked ? 1 : -1"> {{ u.name_en }}</label>{% empty %}<span class="hj-small hj-muted">No departments yet.</span>{% endfor %}
+    </div>
+  </div>
+  <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="requires_ack" value="1" checked>
+    <span>Ask everyone to acknowledge it<br><span class="hj-small hj-muted">Employees confirm they have read it; reminders go out weekly until they do.</span></span></label>
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="!title.trim() || !file || (audience !== 'all' && picked < 1)">Publish</button>
+  </div>
+</form>

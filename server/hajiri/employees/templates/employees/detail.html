@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}{{ e.name_en }} · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack hj-gap-md">
+  {% url 'employees:list' as back %}
+  <div class="hj-page-header">
+    <a class="hj-back" href="{{ back }}"><i class="ti ti-chevron-left" aria-hidden="true"></i>Employees</a>
+    <div class="hj-page-header-row">
+      <div class="hj-row nowrap hj-gap-md" style="min-width:0">
+        <span class="hj-avatar lg" aria-hidden="true">{{ e.name_en|initials }}</span>
+        <div style="min-width:0"><h1 class="hj-page-title">{{ e.name_en }}</h1><p class="hj-page-subtitle">{{ subtitle }}</p></div>
+      </div>
+      <div class="hj-actions">
+        {% status_badge e.status %}
+        <a class="hj-btn default" href="/me/payslips?employeeId={{ id }}"><i class="ti ti-receipt" aria-hidden="true"></i>Payslips</a>
+        <button type="button" class="hj-btn" hx-get="{% url 'employees:edit' id %}" hx-target="#hj-drawer-body"><i class="ti ti-pencil" aria-hidden="true"></i>Edit profile</button>
+      </div>
+    </div>
+  </div>
+  <nav class="hj-tabs" aria-label="Employee">{% for k, l in tabs %}<a class="hj-tab" href="?tab={{ k }}"{% if tab == k %} aria-current="page"{% endif %}>{{ l }}</a>{% endfor %}</nav>
+
+  {% if tab == 'overview' %}{% include "employees/partials/overview.html" %}
+  {% elif tab == 'profile' %}
+    <div class="hj-stack hj-gap-md">
+      <div class="hj-card p-md" hx-get="{% url 'people:avatar_editor' id %}" hx-trigger="load" hx-swap="innerHTML"></div>
+      <div hx-get="{% url 'people:sections' id %}?mode=hr" hx-trigger="load" hx-swap="outerHTML"><div class="hj-skeleton" style="height:110px"></div></div>
+    </div>
+  {% elif tab == 'career' %}<div hx-get="{% url 'people:career' id %}?edit=1" hx-trigger="load" hx-swap="outerHTML"></div>
+  {% elif tab == 'changes' %}<div hx-get="{% url 'people:history' id %}" hx-trigger="load" hx-swap="outerHTML"></div>
+  {% elif tab == 'lifecycle' %}{% if lifecycle_on %}<div hx-get="{% url 'lifecycle:employee_section' id %}" hx-trigger="load" hx-swap="outerHTML"></div>{% else %}<p class="hj-sm hj-muted" style="margin:0">feature off</p>{% endif %}
+  {% elif tab == 'leave' %}
+    <div class="hj-stack hj-gap-lg">
+      {% section "Balances" %}
+      {% if not balances %}{% empty_state title="No leave balances" hint="Balances appear once leave types are set up." %}{% else %}
+      <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table"><thead><tr><th>Leave type</th><th class="right">Available</th><th>How it adds up</th></tr></thead>
+        <tbody>{% for b in balances %}<tr><td class="hj-strong">{{ b.nameEn }}</td><td class="right num">{{ b.available|floatformat:1 }} days</td><td class="hj-small hj-muted">{{ b.explanation }}</td></tr>{% endfor %}</tbody></table></div></div>
+      {% endif %}
+      {% endsection %}
+      {% if apply_url %}
+      <div class="hj-card p-lg">{% section "Apply on their behalf" hint="Files a leave request for this employee." %}
+        <div hx-get="{{ apply_url }}?employee_id={{ id }}&inline=1" hx-trigger="load" hx-swap="innerHTML"></div>{% endsection %}</div>
+      {% endif %}
+    </div>
+  {% elif tab == 'history' %}
+    {% if not assignments %}{% empty_state title="No employment history yet" hint="Changes to branch, manager or employment type are recorded here." %}{% else %}
+    <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table"><thead><tr><th>Period</th><th>Type</th><th>Branch</th><th>Manager</th></tr></thead>
+      <tbody>{% for a in assignments %}<tr><td class="num">{{ a.period }}</td><td>{{ a.type }}</td><td>{{ a.branch_name|default:"—" }}</td><td>{{ a.manager_name|default:"—" }}</td></tr>{% endfor %}</tbody></table></div></div>
+    {% endif %}
+  {% elif tab == 'relations' %}
+    {% if relations_url %}<div hx-get="{{ relations_url }}" hx-trigger="load" hx-swap="outerHTML"></div>{% else %}{% empty_state title="Nothing recorded" hint="Grievances, warnings and other employee relations cases appear here." %}{% endif %}
+  {% elif tab == 'pay' %}
+    <div class="hj-stack hj-gap-md">
+      <div class="hj-row hj-gap-xs"><a class="hj-btn default" href="/payroll/assignments?employeeId={{ id }}">Salary assignments</a><a class="hj-btn default" href="/payroll/loans?employeeId={{ id }}">Loans</a></div>
+      {% if not payslips %}{% empty_state title="No payslips yet" hint="Payslips appear here after a payroll run is calculated." %}{% else %}
+      <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table"><thead><tr><th>Month</th><th class="right">Net pay</th><th>Status</th><th></th></tr></thead>
+        <tbody>{% for s in payslips %}<tr><td class="hj-strong">{{ s.bs_year|bs_month:s.bs_month }}{% if s.extra %} <span class="hj-small hj-muted">{{ s.extra }}</span>{% endif %}</td>
+          <td class="right num">{{ s.net|npr }}</td><td>{% if s.published_at %}{% status_badge "published" %}{% else %}{% status_badge "draft" %}{% endif %}</td>
+          <td class="right"><a class="hj-btn subtle xs" href="/me/payslips/{{ s.id }}">Open</a></td></tr>{% endfor %}</tbody></table></div></div>
+      {% endif %}
+    </div>
+  {% elif tab == 'documents' %}
+    {% if documents_url %}<div hx-get="{{ documents_url }}" hx-trigger="load" hx-swap="outerHTML"></div>{% else %}{% empty_state title="No documents" %}{% endif %}
+  {% elif tab == 'biometrics' %}
+    <div class="hj-stack hj-gap-lg">
+      {% if consent_url %}
+      <div class="hj-row hj-gap-xs">
+        <form hx-post="{{ consent_url }}" hx-swap="none"><input type="hidden" name="employee_id" value="{{ id }}"><input type="hidden" name="modality" value="face"><input type="hidden" name="notice_version" value="2026-10">
+          <button type="submit" class="hj-btn default"><i class="ti ti-fingerprint" aria-hidden="true"></i>Record face consent</button></form>
+        <form hx-post="{{ consent_url }}" hx-swap="none"><input type="hidden" name="employee_id" value="{{ id }}"><input type="hidden" name="modality" value="fingerprint"><input type="hidden" name="notice_version" value="2026-10">
+          <button type="submit" class="hj-btn default"><i class="ti ti-fingerprint" aria-hidden="true"></i>Record fingerprint consent</button></form>
+        {% if shred_url %}<button type="button" class="hj-btn danger subtle" style="margin-left:auto" hx-post="{{ shred_url }}" hx-swap="none"
+          {% confirm_attrs "Every stored template for "|add:e.name_en|add:" will be permanently destroyed and their consents withdrawn. They will need to enrol again to use face or fingerprint." title="Shred all biometric templates?" label="Shred templates" %}><i class="ti ti-trash" aria-hidden="true"></i>Shred all templates</button>{% endif %}
+      </div>
+      {% endif %}
+      {% section "Consents" %}{% if consents_url %}<div hx-get="{{ consents_url }}?employeeId={{ id }}" hx-trigger="load" hx-swap="outerHTML"></div>{% endif %}{% endsection %}
+      {% section "Templates" %}{% if templates_url %}<div hx-get="{{ templates_url }}?employeeId={{ id }}" hx-trigger="load" hx-swap="outerHTML"></div>{% endif %}{% endsection %}
+    </div>
+  {% elif tab == 'audit' %}
+    {% if not events %}{% empty_state title="No changes recorded yet" %}{% else %}
+    <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table"><thead><tr><th>When</th><th>Action</th><th>Record</th><th>By</th></tr></thead>
+      <tbody>{% for x in events %}<tr><td class="num">{{ x.occurred_at|bs_datetime }}</td><td>{{ x.what }}</td><td class="mono muted">{{ x.table_name }}</td><td>{{ x.actor_name|default:x.actor_id|default:"System" }}</td></tr>{% endfor %}</tbody></table></div></div>
+    {% endif %}
+  {% endif %}
+</div>
+{% endblock %}

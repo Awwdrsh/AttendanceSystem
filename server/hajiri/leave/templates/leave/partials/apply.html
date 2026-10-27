@@ -1,0 +1,66 @@
+<form class="hj-form" data-modal-title="Request time off" hx-post="{% url 'leave:apply' %}" hx-target="this" hx-swap="outerHTML"
+      x-data="{ type: '{{ v.leave_type_id|escapejs }}', from: '{{ v.from }}', to: '{{ v.to }}', half: {{ v.half|yesno:'true,false' }}, hourly: {{ v.hourly|yesno:'true,false' }}, hourlyIds: {{ hourly_ids|json_attr }}, fromTime: '{{ v.from_time|escapejs }}', toTime: '{{ v.to_time|escapejs }}',
+                get badTimes() { return !!this.fromTime && !!this.toTime && this.toTime <= this.fromTime },
+                get single() { return !!this.from && this.from === this.to },
+                get canHourly() { return this.hourlyIds.includes(this.type) && this.single },
+                get byHours() { return this.hourly && this.canHourly },
+                sync(f) { this.type = f.elements['leave_type_id'].value; this.from = f.elements['from'].value; this.to = f.elements['to'].value;
+                          if (this.from && (!this.to || this.to < this.from)) { this.to = this.from; f.elements['to'].value = this.from } } }"
+      @change="sync($el)">
+  <input type="hidden" name="employee_id" value="{{ employee_id }}">
+  {% if inline %}<input type="hidden" name="inline" value="1">{% endif %}
+  <div class="hj-fieldset">
+    <label class="hj-label" for="lv-type">Type<span class="req" aria-hidden="true">*</span></label>
+    <select class="hj-select" id="lv-type" name="leave_type_id" required>
+      <option value="" {% if not v.leave_type_id %}selected{% endif %} disabled>Choose a type of leave</option>
+      {% for t in types %}<option value="{{ t.id }}" {% if t.id == v.leave_type_id %}selected{% endif %}>{{ t.label }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="hj-form-row">
+    {% bs_date_input "from" value=v.from label="From" required=True holidays=holidays id="lv-from" %}
+    {% bs_date_input "to" value=v.to label="To" required=True holidays=holidays min=v.from id="lv-to" %}
+  </div>
+  <div class="hj-row hj-gap-md">
+    <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="half" x-model="half" :disabled="!single" @change="if (half) hourly = false"> <span>Half day</span></label>
+    <span class="hj-help" x-show="!single" x-cloak>Only for a single day</span>
+    <select class="hj-select" name="half_which" aria-label="Which half" style="width:160px" x-show="half && !byHours" x-cloak>
+      <option value="first_half" {% if v.half_which == 'first_half' %}selected{% endif %}>First half</option>
+      <option value="second_half" {% if v.half_which == 'second_half' %}selected{% endif %}>Second half</option>
+    </select>
+    <template x-if="hourlyIds.includes(type)">
+      <div class="hj-stack" style="--gap:2px">
+        <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="hourly" x-model="hourly" :disabled="!canHourly" @change="if (hourly) half = false"> <span>By the hour</span></label>
+        <span class="hj-help" x-text="canHourly ? 'Leave for part of the day, e.g. 10:00 to 12:00' : 'Only for a single day'"></span>
+      </div>
+    </template>
+  </div>
+  <div class="hj-form-row" x-show="byHours" x-cloak>
+    <div class="hj-fieldset"><label class="hj-label" for="lv-ft">From<span class="req" aria-hidden="true">*</span></label>
+      <input class="hj-input" type="time" id="lv-ft" name="from_time" value="{{ v.from_time }}" step="900" x-model="fromTime"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="lv-tt">To<span class="req" aria-hidden="true">*</span></label>
+      <input class="hj-input" type="time" id="lv-tt" name="to_time" value="{{ v.to_time }}" step="900" x-model="toTime" :aria-invalid="badTimes">
+      <div class="hj-error" x-show="badTimes" x-cloak>Must be after the start time</div></div>
+  </div>
+  {% approval_chain "leave_request" employee_id=employee_id %}
+  <div id="lv-preview" hx-get="{% url 'leave:preview' %}" hx-include="closest form" hx-trigger="load, change from:closest form, input delay:400ms from:closest form" aria-live="polite"></div>
+  {% if suggestion %}
+  {% alert "warn" title="Not enough balance" %}
+    <div class="hj-sm">{{ suggestion.msg }}</div>
+    <div class="hj-sm hj-muted hj-mt-sm">You can take {{ suggestion.paidDays }} paid and {{ suggestion.lwpDays }} unpaid. Change the dates, or request the unpaid part as leave without pay.</div>
+  {% endalert %}
+  {% endif %}
+  <div class="hj-fieldset">
+    <label class="hj-label" for="lv-reason">Reason</label>
+    <div class="hj-help">Optional. Your manager sees this.</div>
+    <textarea class="hj-input" id="lv-reason" name="reason" rows="2" maxlength="1000">{{ v.reason }}</textarea>
+  </div>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="lv-att">Attachment reference</label>
+    <div class="hj-help">Optional. For example a medical certificate number; required for sick leave over 3 days.</div>
+    <input class="hj-input" id="lv-att" name="attachment" maxlength="200" value="{{ v.attachment }}">
+  </div>
+  <div class="hj-modal-foot">
+    {% if not inline %}<button type="button" class="hj-btn default" data-modal-close>Cancel</button>{% endif %}
+    <button type="submit" class="hj-btn" :disabled="!type || !from || !to">Send request</button>
+  </div>
+</form>

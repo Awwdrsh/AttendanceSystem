@@ -1,0 +1,14 @@
+{# The board switcher, the "Team board" button and the settings button (TasksPage header actions). #}
+<div id="tk-picker" class="hj-row nowrap hj-gap-xs"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if picker.boards %}
+  <select class="hj-select" style="width:240px" aria-label="Board" @change="window.location = $event.target.value" x-data>
+    {% for x in picker.boards %}<option value="{% url 'tasks:board_detail' x.id %}"{% if x.id == picker.current_id %} selected{% endif %}>{{ x.name }}{% if x.kind == 'personal' %} (just you){% endif %}{% if x.open %} · {{ x.open }} open{% endif %}</option>{% endfor %}
+  </select>
+  {% endif %}
+  {% if picker.can_create %}
+  <button type="button" class="hj-btn default" hx-get="{% url 'tasks:board_new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>Team board</button>
+  {% endif %}
+  {% if is_owner %}
+  <button type="button" class="hj-iconbtn" aria-label="Board settings" data-tip="Board settings" hx-get="{% url 'tasks:board_settings' board.id %}" hx-target="#hj-modal-body"><i class="ti ti-settings" aria-hidden="true"></i></button>
+  {% endif %}
+</div>

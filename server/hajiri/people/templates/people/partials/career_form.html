@@ -1,0 +1,43 @@
+{# The "Record a career change" drawer of CareerTimeline.tsx. Changing "What happened" reloads the form for that kind. #}
+<form class="hj-form" id="career-form" data-modal-title="Record a career change" hx-post="{% url 'people:career_new' employee_id %}" hx-swap="none">
+  <div class="hj-fieldset"><label class="hj-label" for="f-kind">What happened</label><div class="hj-help">{{ hint }}</div>
+    <select id="f-kind" name="kind" class="hj-select" hx-get="{% url 'people:career_new' employee_id %}" hx-target="#hj-drawer-body" hx-trigger="change" hx-include="this">
+      {% for k, l, h in kinds %}<option value="{{ k }}"{% if k == kind %} selected{% endif %}>{{ l }}</option>{% endfor %}
+    </select></div>
+  <div x-data="{ d: '{{ today }}' }" @change="d = $el.querySelector('input[name=effectiveDate]').value">
+    {% if kind == 'separation' %}{% bs_date_input "effectiveDate" value=today label="Last working day" required=True %}{% else %}{% bs_date_input "effectiveDate" value=today label="Effective from" required=True %}{% endif %}
+    <div class="hj-help" x-show="d > '{{ today }}'" x-cloak>A future date is scheduled and applied automatically on that day.</div>
+  </div>
+  {% if kind == 'promotion' or kind == 'designation_change' %}
+  <div class="hj-fieldset"><label class="hj-label" for="f-des">New designation</label>
+    {% if designations %}<select id="f-des" name="designationId" class="hj-select"><option value=""></option>{% for v, l in designations %}<option value="{{ v }}">{{ l }}</option>{% endfor %}</select>
+    {% else %}<div class="hj-help">Add designations under Employees, Org structure</div>{% endif %}</div>
+  {% endif %}
+  {% if kind == 'promotion' or kind == 'grade_change' %}
+  <div class="hj-fieldset"><label class="hj-label" for="f-grade">New grade</label>{% if kind == 'promotion' %}<div class="hj-help">Leave blank to use the designation’s grade.</div>{% endif %}
+    <input id="f-grade" name="grade" class="hj-input" maxlength="40"></div>
+  {% endif %}
+  {% if kind == 'transfer' %}
+  <div class="hj-fieldset"><label class="hj-label" for="f-br">New branch</label>
+    <select id="f-br" name="branchId" class="hj-select"><option value=""></option>{% for b in branches %}<option value="{{ b.id }}">{{ b.name_en }}</option>{% endfor %}</select></div>
+  <div class="hj-fieldset"><label class="hj-label" for="f-unit">New department or team</label>
+    <select id="f-unit" name="orgUnitId" class="hj-select"><option value=""></option>{% for u in units %}<option value="{{ u.id }}">{{ u.name_en }}</option>{% endfor %}</select></div>
+  {% endif %}
+  {% if kind == 'manager_change' %}{% employee_picker "managerId" label="New manager" %}{% endif %}
+  {% if kind == 'transfer' %}{% employee_picker "managerId" label="New manager (optional)" %}{% endif %}
+  {% if kind == 'employment_type_change' %}
+  <div class="hj-fieldset"><label class="hj-label" for="f-et">New employment type</label>
+    <select id="f-et" name="employmentType" class="hj-select"><option value=""></option>{% for v, l in employment %}<option value="{{ v }}">{{ l }}</option>{% endfor %}</select></div>
+  {% endif %}
+  {% if kind == 'salary_revision' %}
+  <div class="hj-fieldset"><label class="hj-label" for="f-rp">Change (%)</label><div class="hj-help">Optional, for the record.</div>
+    <input id="f-rp" type="number" step="0.01" name="revisionPercent" class="hj-input"></div>
+  {% endif %}
+  {% if kind == 'separation' %}
+  <div class="hj-fieldset"><label class="hj-label" for="f-sep">Type of separation<span class="req">*</span></label>
+    <select id="f-sep" name="separationType" class="hj-select" required><option value=""></option>{% for v, l in separation %}<option value="{{ v }}">{{ l }}</option>{% endfor %}</select></div>
+  {% endif %}
+  {% if kind != 'note' %}<div class="hj-fieldset"><label class="hj-label" for="f-cr">Reason</label><input id="f-cr" name="reason" class="hj-input" maxlength="500"></div>{% endif %}
+  <div class="hj-fieldset"><label class="hj-label" for="f-cn">Note</label><textarea id="f-cn" name="note" class="hj-input" rows="2" maxlength="1000"></textarea></div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn">Save</button></div>
+</form>

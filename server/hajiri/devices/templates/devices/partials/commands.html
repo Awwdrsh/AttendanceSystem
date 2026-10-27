@@ -1,0 +1,8 @@
+<div id="device-commands-{{ d.id }}" class="hj-card p-sm" style="max-height:200px;overflow:auto" hx-get="{% url 'devices:commands' d.id %}" hx-trigger="hj:refresh-device-commands from:body" hx-swap="outerHTML">
+  {% for c in commands %}
+  <div class="hj-row nowrap hj-between hj-gap-sm" style="padding:3px 0">
+    <span class="hj-small mono hj-truncate">#{{ c.id }} {{ c.command|slice:":50" }}</span>
+    <span class="hj-small hj-muted" style="white-space:nowrap">{{ c.status }}{% if c.return_code is not None %} ({{ c.return_code }}){% endif %}</span>
+  </div>
+  {% empty %}<span class="hj-sm hj-muted">No commands sent yet.</span>{% endfor %}
+</div>

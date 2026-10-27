@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Onboarding · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack hj-gap-md">
+  {% page_header "Onboarding" subtitle="Getting new joiners ready: checklists for HR, managers and the joiner, probation reviews and the equipment they receive." %}{% endpage_header %}
+  <nav class="hj-pills" aria-label="Onboarding">{% for k, l in tabs %}<a class="hj-pill" href="?tab={{ k }}"{% if tab == k %} aria-current="page"{% endif %}>{{ l }}</a>{% endfor %}</nav>
+  {% if tab == 'joiners' %}{% include "lifecycle/partials/joiners.html" %}
+  {% elif tab == 'probation' %}{% include "lifecycle/partials/probation.html" %}
+  {% elif tab == 'templates' %}{% include "lifecycle/partials/templates.html" %}
+  {% elif tab == 'assets' %}{% include "lifecycle/partials/assets.html" %}
+  {% else %}
+  <form class="hj-card p-lg hj-stack hj-gap-md" style="max-width:640px" hx-post="{% url 'lifecycle:settings' %}" hx-swap="none">
+    <label class="hj-row nowrap hj-gap-sm" style="align-items:flex-start"><input type="checkbox" class="hj-switch" name="autoStartOnboarding"{% if policy.autoStartOnboarding %} checked{% endif %}>
+      <span><span class="hj-sm hj-strong">Start onboarding when an employee is added</span><br><span class="hj-small hj-muted">Uses the best matching onboarding checklist.</span></span></label>
+    <div class="hj-fieldset" style="max-width:320px"><label class="hj-label" for="f-nd">Resignation notice (calendar days)</label><div class="hj-help">Shown to employees when they resign; shorter notice is flagged to approvers.</div>
+      <input id="f-nd" type="number" min="0" max="180" name="noticeDays" class="hj-input" value="{{ policy.noticeDays }}"></div>
+    <div class="hj-fieldset" style="max-width:360px"><label class="hj-label" for="f-pr">Probation reminders (days before the end)</label><div class="hj-help">Up to four numbers, separated by commas.</div>
+      <input id="f-pr" name="probationReminderDays" class="hj-input" value="{{ reminders }}"></div>
+    <label class="hj-row nowrap hj-gap-sm" style="align-items:flex-start"><input type="checkbox" class="hj-switch" name="selfExitInterview"{% if policy.selfExitInterview %} checked{% endif %}>
+      <span><span class="hj-sm hj-strong">Leavers fill in the exit interview themselves</span><br><span class="hj-small hj-muted">Turn off if HR holds every exit interview in person.</span></span></label>
+    <div class="hj-row hj-end"><button type="submit" class="hj-btn">Save settings</button></div>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

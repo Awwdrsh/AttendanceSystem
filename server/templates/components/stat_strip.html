@@ -1,0 +1,10 @@
+{# A row of headline numbers inside one panel, divided by hairlines (Kpi.tsx StatStrip). #}
+<div class="hj-stats" style="--cols: {{ cols }}">
+  {% for s in stats %}
+  {% if s.url %}<a class="hj-stat" href="{{ s.url }}">{% else %}<div class="hj-stat">{% endif %}
+    <div class="hj-stat-label">{% if s.tone %}<span class="hj-dot" style="background:var(--hj-{{ s.tone }})" aria-hidden="true"></span>{% endif %}<span class="hj-truncate">{{ s.label }}</span></div>
+    <div class="hj-stat-value">{{ s.value }}</div>
+    {% if s.hint %}<div class="hj-stat-hint">{{ s.hint }}</div>{% endif %}
+  {% if s.url %}</a>{% else %}</div>{% endif %}
+  {% endfor %}
+</div>

@@ -1,0 +1,10 @@
+<input type="hidden" name="chain_amount" value="{{ chain_amount }}">
+<span hidden x-init="quoted = {{ quote|yesno:'true,false' }}"></span>
+{% if quote %}
+<div class="hj-card p-sm"><div class="hj-fields hj-grid" style="--cols:4">
+  {% field "Days" days_text %}
+  {% field "Daily allowance" da_text tip=per_day %}
+  {% field "Lodging up to" lodging_text tip=lodging_tip %}
+  {% field "Allowance + lodging" both_text %}
+</div></div>
+{% elif error %}<p class="hj-sm hj-bad-text">{{ error }}</p>{% endif %}

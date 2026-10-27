@@ -1,0 +1,22 @@
+{# Correction requests: GET {% url 'regularisation:list' %}?scope=&status=&employee_id= ; reloads on hj:refresh-regularisation-requests. #}
+<div id="regularisation-requests" hx-get="{% url 'regularisation:list' %}{% if query %}?{{ query }}{% endif %}" hx-trigger="hj:refresh-regularisation-requests from:body" hx-swap="outerHTML">
+{% if items %}
+<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+  <thead><tr>{% if show_employee %}<th>Employee</th>{% endif %}<th>Date</th><th>Kind</th><th>Detail</th><th>Status</th><th></th></tr></thead>
+  <tbody>
+  {% for r in items %}
+  <tr>
+    {% if show_employee %}<td><div class="hj-strong hj-sm">{{ r.name_en }}</div><div class="hj-small hj-muted">{{ r.emp_code }}</div></td>{% endif %}
+    <td>{{ r.local_date|bs_date }}</td>
+    <td>{{ r.kind_label }}</td>
+    <td class="hj-sm">{% if r.punch_time %}{% if r.punch_direction == 'in' %}Clock-in{% else %}Clock-out{% endif %} at {{ r.punch_time|npt_time }} · {% endif %}<span class="hj-muted">{{ r.reason|truncate_text:60 }}</span></td>
+    <td>{% status_badge r.status %}</td>
+    <td class="right">{% if r.status == 'pending' %}<button class="hj-btn subtle danger xs" hx-post="{% url 'regularisation:cancel' r.id %}" {% confirm_attrs "Cancel this correction request? The approval stops." label="Cancel request" %}>Cancel</button>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table></div></div>
+{% else %}
+{% empty_state title="No correction requests" hint="Requests to fix a punch, work from home or a different shift show here." icon="clock-edit" compact=True %}
+{% endif %}
+</div>

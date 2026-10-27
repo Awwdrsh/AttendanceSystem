@@ -1,0 +1,62 @@
+{# AttendanceRules (SettingsPage.tsx). The same form saves (Save rules) or previews the last 30 days (Preview impact). #}
+<form class="hj-stack" style="--gap:20px" hx-post="{% url 'home:settings_attendance' %}" hx-swap="none" x-data="{ penalty: {{ penalty.enabled|yesno:'true,false' }} }">
+  <div class="hj-card p-0">
+    <div style="padding:12px 24px;border-bottom:1px solid var(--hj-line)"><div class="hj-strong">Overtime</div><div class="hj-sm hj-muted">When extra time beyond the shift counts as overtime.</div></div>
+    {% include "home/partials/setting_row_open.html" with label="Minimum overtime" description="Shorter stays after the shift are ignored." %}
+      {% include "home/partials/number.html" with name="otMinThresholdMin" value=p.otMinThresholdMin min=0 max=240 suffix="min" %}</div></div>
+    {% include "home/partials/setting_row_open.html" with label="Round overtime down to" description="Overtime is rounded down to this step." %}
+      {% include "home/partials/number.html" with name="otRoundingMin" value=p.otRoundingMin min=0 max=60 suffix="min" %}</div></div>
+    {% include "home/partials/setting_row_open.html" with label="Require manager pre-approval" description="Overtime without approval is not paid." %}
+      <input type="checkbox" class="hj-switch" name="requirePreapproval" aria-label="Require manager pre-approval"{% if p.requirePreapproval %} checked{% endif %}></div></div>
+    {% include "home/partials/setting_row_open.html" with label="Maximum overtime" %}
+      {% include "home/partials/locked.html" with text="4 h a day, 24 h a week" cite="Labour Act Sec 30(1)" %}</div></div>
+    {% include "home/partials/setting_row_open.html" with label="Overtime pay" %}
+      {% include "home/partials/locked.html" with text="1.5 times basic" cite="Labour Act Sec 31(1)" %}</div></div>
+  </div>
+
+  <div class="hj-card p-0">
+    <div style="padding:12px 24px;border-bottom:1px solid var(--hj-line)"><div class="hj-strong">Holidays and night work</div></div>
+    {% include "home/partials/setting_row_open.html" with label="Work on a holiday or weekly off" description="What employees get when they work on a day off." %}
+      <select class="hj-select" name="holidayWork" aria-label="Work on a holiday or weekly off" style="width:200px">
+        {% for v, l in holiday_work %}<option value="{{ v }}"{% if v == p.holidayWork|default:'substitute_leave' %} selected{% endif %}>{{ l }}</option>{% endfor %}
+      </select></div></div>
+    {% include "home/partials/setting_row_open.html" with label="Night work premium" description="Pay extra for hours worked between 22:00 and 04:00. Company policy, not statutory." %}
+      <input type="checkbox" class="hj-switch" name="nightWindowEnabled" aria-label="Night work premium"{% if p.nightWindowEnabled %} checked{% endif %}></div></div>
+    {% include "home/partials/setting_row_open.html" with label="Night premium rate" description="Added to the hourly rate, for example 0.25 for 25% extra." %}
+      {% include "home/partials/number.html" with name="nightPremiumRate" value=p.nightPremiumRate min=0 max=1 step="0.05" %}</div></div>
+  </div>
+
+  <div class="hj-card p-0">
+    <div style="padding:12px 24px;border-bottom:1px solid var(--hj-line)"><div class="hj-strong">Missing punches and corrections</div></div>
+    {% include "home/partials/setting_row_open.html" with label="Auto clock-out" description="If nobody clocks out, close the day this long after shift end and flag it as a missing punch. 0 turns it off." %}
+      {% include "home/partials/number.html" with name="autoClockOutAfterMin" value=p.autoClockOutAfterMin min=0 max=720 suffix="min" %}</div></div>
+    {% include "home/partials/setting_row_open.html" with label="Correction window" description="How far back employees can request an attendance correction." %}
+      {% include "home/partials/number.html" with name="regularisationBackdateDays" value=p.regularisationBackdateDays min=0 max=90 suffix="days" %}</div></div>
+    {% include "home/partials/setting_row_open.html" with label="Corrections per month" description="Maximum attendance corrections an employee can request each month." %}
+      {% include "home/partials/number.html" with name="regularisationMonthlyCap" value=p.regularisationMonthlyCap min=0 max=31 %}</div></div>
+  </div>
+
+  <div class="hj-card p-0">
+    <div style="padding:12px 24px;border-bottom:1px solid var(--hj-line)"><div class="hj-strong">Work from home</div></div>
+    {% include "home/partials/setting_row_open.html" with label="Photo at clock-in" description="Ask for a quick photo when someone clocks in from home. Managers and HR see it under Attendance, Work from home." %}
+      <input type="checkbox" class="hj-switch" name="wfhPhotoRequired" aria-label="Photo at clock-in"{% if p.wfhPhotoRequired is not False %} checked{% endif %}></div></div>
+    {% include "home/partials/setting_row_open.html" with label="Keep photos for" description="Photos are deleted automatically after this many days." %}
+      {% include "home/partials/number.html" with name="wfhPhotoRetentionDays" value=p.wfhPhotoRetentionDays min=7 max=365 suffix="days" %}</div></div>
+  </div>
+
+  <div class="hj-card p-0">
+    <div style="padding:12px 24px;border-bottom:1px solid var(--hj-line)"><div class="hj-strong">Late penalty</div><div class="hj-sm hj-muted">Deduct pay for repeated late arrivals (Sec 38(e)). Applies from the next payroll period.</div></div>
+    {% include "home/partials/setting_row_open.html" with label="Apply late penalty" %}
+      <input type="checkbox" class="hj-switch" name="latePenalty.enabled" aria-label="Apply late penalty" x-model="penalty"></div></div>
+    {% include "home/partials/setting_row_open.html" with label="Late arrivals per month" description="Number of late days that triggers a deduction." %}
+      <input class="hj-input num" type="number" name="latePenalty.lateCount" value="{{ penalty.lateCount }}" min="1" aria-label="Late arrivals per month" style="width:200px" :disabled="!penalty"></div></div>
+    {% include "home/partials/setting_row_open.html" with label="Deduction" description="Days of pay deducted each time." %}
+      <div class="hj-row nowrap hj-gap-xs"><input class="hj-input num" type="number" name="latePenalty.deductionDays" value="{{ penalty.deductionDays }}" min="0" max="1" step="0.5" aria-label="Deduction" style="width:200px" :disabled="!penalty"><span class="hj-sm hj-muted">day</span></div></div></div>
+  </div>
+
+  <div id="settings-preview"></div>
+  <div class="hj-row hj-end hj-gap-sm">
+    <button type="button" class="hj-btn default" hx-post="{% url 'home:settings_preview' %}" hx-include="closest form" hx-target="#settings-preview" hx-swap="innerHTML"><i class="ti ti-eye" aria-hidden="true"></i>Preview impact</button>
+    <button type="submit" class="hj-btn">Save rules</button>
+  </div>
+</form>

@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}Leave adjustments · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Leave adjustments" subtitle="Credit or debit leave days. Every change is recorded in the ledger; balances are never edited directly." %}{% endpage_header %}
+{% include "leave/partials/balances_panel.html" %}
+{% endblock %}

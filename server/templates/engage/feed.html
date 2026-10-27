@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Engage · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Engage" subtitle="Say thanks, catch up on company news and celebrate each other." %}
+  {% if is_hr and kudos_on %}<button type="button" class="hj-btn subtle gray" hx-get="{% url 'engage:values' %}" hx-target="#hj-modal-body"><i class="ti ti-settings" aria-hidden="true"></i>Kudos settings</button>{% endif %}
+  {% if can_announce %}<button type="button" class="hj-btn default" hx-get="{% url 'engage:announcement_new' %}" hx-target="#hj-modal-body"><i class="ti ti-speakerphone" aria-hidden="true"></i>Announce</button>{% endif %}
+  {% if is_employee and kudos_on %}<button type="button" class="hj-btn" hx-get="{% url 'engage:kudos_new' %}" hx-target="#hj-modal-body"><i class="ti ti-heart-handshake" aria-hidden="true"></i>Give kudos</button>{% endif %}
+{% endpage_header %}
+<div class="hj-grid" style="--cols:3;align-items:start">
+  <div class="hj-stack" style="--gap:16px;grid-column:span 2;min-width:0">
+    {% if kudos_on %}
+    <div class="hj-pills" role="tablist" style="margin-bottom:0">
+      {% for value, label in filters %}<a class="hj-pill" href="?show={{ value }}"{% if show == value %} aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
+    </div>
+    {% endif %}
+    <div id="engage-feed" class="hj-stack" style="--gap:16px" hx-get="{% url 'engage:feed_partial' %}?show={{ show }}" hx-trigger="hj:refresh-engage-feed from:body" hx-swap="innerHTML">
+      {% include "engage/partials/feed.html" %}
+    </div>
+  </div>
+  <div class="hj-stack" style="--gap:16px;min-width:0">
+    <div id="engage-celebrations" hx-get="{% url 'engage:celebrations' %}" hx-trigger="load, hj:refresh-engage-celebrations from:body" hx-swap="innerHTML">
+      {% card padding="md" %}<div class="hj-skeleton" style="height:80px"></div>{% endcard %}
+    </div>
+    {% if kudos_on %}
+    <div id="engage-leaderboard" hx-get="{% url 'engage:leaderboard' %}" hx-trigger="load, hj:refresh-engage-leaderboard from:body" hx-swap="innerHTML"></div>
+    {% endif %}
+    {% if suggestions_on %}
+    <div id="engage-suggestion-box" hx-get="{% url 'engage:suggestion_box' %}" hx-trigger="load" hx-swap="innerHTML"></div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

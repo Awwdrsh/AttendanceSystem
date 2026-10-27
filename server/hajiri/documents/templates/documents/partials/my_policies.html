@@ -1,0 +1,27 @@
+{# MyPolicies (MyDocumentsPage.tsx): policies addressed to me; unacknowledged first. "I have read this" waits until it is opened. #}
+<div id="my-policies" hx-get="{% url 'documents:my_policies' %}" hx-trigger="hj:refresh-my-policies from:body" hx-swap="outerHTML">
+  {% if policies %}
+  <section class="hj-section">
+    <div class="hj-section-title"><div><h3>Company policies</h3>{% if pending %}<p>{{ pending }} waiting for you to read and acknowledge</p>{% endif %}</div></div>
+    <div class="hj-stack hj-gap-xs">
+      {% for p in policies %}
+      <div class="hj-card p-sm" x-data="{ opened: false }"{% if p.requires_ack and not p.my_ack_at %} style="border-color:var(--hj-warn)"{% endif %}>
+        <div class="hj-row hj-between hj-gap-xs">
+          <div class="hj-row nowrap hj-gap-sm" style="min-width:0">
+            <i class="ti ti-file-description" aria-hidden="true" style="font-size:22px;color:var(--hj-hydro)"></i>
+            <div style="min-width:0"><div class="hj-sm hj-strong">{{ p.title }}</div>
+              <div class="hj-small hj-muted">Published {{ p.published_at|bs_date }}{% if p.description %} · {{ p.description }}{% endif %}</div></div>
+          </div>
+          <div class="hj-row hj-gap-xs">
+            <a class="hj-btn default xs" href="{% url 'documents:policy_file' p.id %}" target="_blank" rel="noopener" @click="opened = true">Read</a>
+            {% if p.my_ack_at %}<span class="hj-badge hj-tone-ok"><i class="ti ti-circle-check" aria-hidden="true"></i>Acknowledged {{ p.my_ack_at|bs_date }}</span>
+            {% elif p.requires_ack %}<button type="button" class="hj-btn xs" hx-post="{% url 'documents:acknowledge' p.id %}" hx-swap="none" :disabled="!opened"
+              :title="opened ? 'Confirm you have read it' : 'Open the document first'" disabled>I have read this</button>{% endif %}
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+</div>

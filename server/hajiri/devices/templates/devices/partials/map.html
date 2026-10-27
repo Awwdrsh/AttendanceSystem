@@ -1,0 +1,11 @@
+<form class="hj-form" data-modal-title="Map a device PIN" hx-post="{% url 'devices:map' %}" hx-target="this" hx-swap="outerHTML">
+  <input type="hidden" name="device_id" value="{{ device_id }}">
+  {% if replace %}<input type="hidden" name="replace" value="1"><input type="hidden" name="replace_pin" value="{{ pin }}">{% endif %}
+  {% if error %}{% alert "bad" %}{{ error }}{% endalert %}{% endif %}
+  {% form_field form.pin %}
+  {% employee_picker "employee_id" value=employee_id label="Employee" required=True error=form.employee_id.errors.0 %}
+  {% bs_date_input "valid_from" value=valid_from label="Valid from" required=True description="Unmapped punches from this date on are re-attributed to the employee." error=form.valid_from.errors.0 %}
+  {% if replace and conflict %}{% alert "warn" title="This PIN is already in use" %}{{ conflict }} Replacing it moves that person's punches from the chosen date to the employee above and recalculates both.{% endalert %}{% endif %}
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button class="hj-btn" type="submit"{% if replace %} style="background:var(--hj-warn);border-color:var(--hj-warn)"{% endif %}>{% if replace %}Replace mapping{% else %}Map PIN{% endif %}</button></div>
+</form>

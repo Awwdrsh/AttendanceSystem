@@ -1,0 +1,21 @@
+<div id="joiners" class="hj-stack hj-gap-md" hx-get="{% url 'lifecycle:onboarding' %}?tab=joiners&show={{ show }}" hx-trigger="hj:refresh-joiners from:body" hx-swap="outerHTML">
+  {% if show == 'active' %}{% stat_strip stats %}{% endif %}
+  <div class="hj-row hj-between hj-gap-sm">
+    <nav class="hj-pills" style="margin:0"><a class="hj-pill" href="?tab=joiners&show=active"{% if show == 'active' %} aria-current="page"{% endif %}>In progress</a>
+      <a class="hj-pill" href="?tab=joiners&show=completed"{% if show == 'completed' %} aria-current="page"{% endif %}>Completed</a></nav>
+    <button type="button" class="hj-btn" hx-get="{% url 'lifecycle:case_new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>Start onboarding</button>
+  </div>
+  {% if not cases %}
+    {% if show == 'active' %}{% empty_state title="Nobody is onboarding right now" hint="Onboarding starts by itself when you add an employee, or start it here for someone already on the list." %}
+    {% else %}{% empty_state title="No completed onboardings yet" hint="Onboarding starts by itself when you add an employee, or start it here for someone already on the list." %}{% endif %}
+  {% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Joiner</th><th>Joins</th><th>Checklist</th><th>Progress</th><th>Next due</th></tr></thead>
+    <tbody>{% for r in cases %}
+      <tr style="cursor:pointer" hx-get="{% url 'lifecycle:case' r.id %}" hx-target="#hj-drawer-body">
+        <td><div class="hj-sm hj-strong">{{ r.name_en }}</div><div class="hj-small hj-muted">{{ r.emp_code }}{% if r.designation %}, {{ r.designation }}{% endif %}</div></td>
+        <td class="num">{{ r.anchor_date|bs_date }}</td><td class="muted">{{ r.template_name|default:"Custom" }}</td>
+        <td>{% include "lifecycle/partials/progress.html" with pr=r.progress %}</td><td class="num">{% if r.next_due %}{{ r.next_due|bs_date }}{% else %}—{% endif %}</td></tr>
+    {% endfor %}</tbody></table></div></div>
+  {% endif %}
+</div>

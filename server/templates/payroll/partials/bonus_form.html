@@ -1,0 +1,11 @@
+<form class="hj-form" data-modal-title="Bonus run" hx-post="{% url 'payroll:bonus_new' %}" hx-swap="none">
+  <p class="hj-sm hj-muted" style="margin:0">The pool is 10% of assessed net profit, shared in proportion to wages. Each share is capped at 8 months' pay (for pay up to 39,100) or 6 months'. Employees qualify after working at least half the fiscal year (Bonus Act, sections 5 to 7).</p>
+  {% bs_month_input "bs_year" "bs_month" year=y month=m label="Pay period" %}
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="bn-fy">Fiscal year start</label><div class="hj-help">Nepali year, e.g. 2082</div>
+      <input class="hj-input" id="bn-fy" name="fiscal_year_start" type="number" value="{{ fy }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="bn-profit">Assessed net profit (NPR)</label>
+      <input class="hj-input" id="bn-profit" name="net_profit" inputmode="decimal" value="0"></div>
+  </div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn">Create bonus run</button></div>
+</form>

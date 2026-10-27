@@ -1,0 +1,57 @@
+<div class="hj-stack hj-gap-xl">
+  <section class="hj-section">
+    <div class="hj-section-title"><div><h3>Departments and teams</h3><p>Departments hold teams. Each unit can have a head.</p></div>
+      <div class="hj-actions"><button type="button" class="hj-btn xs" hx-get="{% url 'people:structure_new' 'unit' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>New department</button></div></div>
+    {% if tree %}
+    <div class="hj-card" style="padding:0 12px">
+      {% for u in tree %}
+      <div class="hj-row nowrap hj-between" style="padding:8px 8px 8px {{ u.indent }}px;border-bottom:1px solid var(--hj-line-soft)">
+        <div class="hj-row nowrap hj-gap-sm" style="min-width:0">
+          <i class="ti {% if u.kind == 'department' %}ti-building{% else %}ti-sitemap{% endif %} hj-muted" aria-hidden="true"></i>
+          <div style="min-width:0"><div class="hj-row nowrap hj-gap-xs"><span class="hj-sm hj-strong hj-truncate">{{ u.name_en }}</span><span class="hj-small hj-muted mono">{{ u.code }}</span></div>
+            <div class="hj-small hj-muted hj-truncate">{% if u.head_name %}Head: {{ u.head_name }}{% else %}No head set{% endif %}</div></div>
+        </div>
+        <div class="hj-row nowrap hj-gap-xs">
+          <span class="hj-badge sm hj-tone-idle" data-tip="People in this unit and its sub-units">{{ u.total }} people</span>
+          <button type="button" class="hj-iconbtn" data-tip="Add a team under this unit" aria-label="Add a team under {{ u.name_en }}" hx-get="{% url 'people:structure_new' 'unit' %}?parent={{ u.id }}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i></button>
+          <button type="button" class="hj-iconbtn" data-tip="Edit" aria-label="Edit {{ u.name_en }}" hx-get="{% url 'people:structure_edit' 'unit' u.id %}" hx-target="#hj-drawer-body"><i class="ti ti-pencil" aria-hidden="true"></i></button>
+          <button type="button" class="hj-iconbtn" data-tip="Delete" aria-label="Delete {{ u.name_en }}" hx-post="{% url 'people:structure_delete' 'unit' u.id %}" hx-swap="none"
+                  {% confirm_attrs "This cannot be undone. Anything still assigned to it must be moved first." title="Delete "|add:u.name_en|add:"?" label="Delete" %}><i class="ti ti-trash" aria-hidden="true"></i></button>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}{% empty_state title="No departments yet" hint="Start with your main departments, then add teams under them." icon="building" %}
+    <div class="hj-row" style="justify-content:center"><button type="button" class="hj-btn default sm" hx-get="{% url 'people:structure_new' 'unit' %}" hx-target="#hj-drawer-body">Add a department</button></div>{% endif %}
+  </section>
+
+  <section class="hj-section">
+    <div class="hj-section-title"><div><h3>Designations</h3><p>Job titles with their grade and level. Picking one on a promotion sets both.</p></div>
+      <div class="hj-actions"><button type="button" class="hj-btn xs" hx-get="{% url 'people:structure_new' 'designation' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>New designation</button></div></div>
+    {% if designations %}
+    <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+      <thead><tr><th>Designation</th><th>Grade</th><th class="right">Level</th><th>Department</th><th class="right">People</th><th></th></tr></thead>
+      <tbody>{% for x in designations %}
+        <tr><td><button type="button" class="hj-link-btn" hx-get="{% url 'people:structure_edit' 'designation' x.id %}" hx-target="#hj-drawer-body"><span class="hj-sm hj-strong">{{ x.name_en }}</span></button>{% if not x.active %} <span class="hj-badge sm hj-tone-idle">Inactive</span>{% endif %}<div class="hj-small hj-muted mono">{{ x.code }}</div></td>
+          <td>{{ x.grade|default:"—" }}</td><td class="right num">{{ x.job_level|default:"—" }}</td><td>{{ x.unit_name }}</td><td class="right num">{{ x.headcount }}</td>
+          <td class="right"><button type="button" class="hj-iconbtn" aria-label="Delete {{ x.name_en }}" hx-post="{% url 'people:structure_delete' 'designation' x.id %}" hx-swap="none"
+                  {% confirm_attrs "This cannot be undone. Anything still assigned to it must be moved first." title="Delete "|add:x.name_en|add:"?" label="Delete" %}><i class="ti ti-trash" aria-hidden="true"></i></button></td></tr>
+      {% endfor %}</tbody></table></div></div>
+    {% else %}{% empty_state title="No designations yet" hint="Add the job titles you use, such as Software Engineer or Accountant." %}{% endif %}
+  </section>
+
+  <section class="hj-section">
+    <div class="hj-section-title"><div><h3>Branches</h3><p>Offices and sites. Holidays, devices and reports can be set per branch.</p></div>
+      <div class="hj-actions"><button type="button" class="hj-btn xs" hx-get="{% url 'people:structure_new' 'branch' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>New branch</button></div></div>
+    {% if branches %}
+    <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+      <thead><tr><th>Branch</th><th>Address</th><th>Head</th><th class="right">People</th><th></th></tr></thead>
+      <tbody>{% for x in branches %}
+        <tr><td><button type="button" class="hj-link-btn" hx-get="{% url 'people:structure_edit' 'branch' x.id %}" hx-target="#hj-drawer-body"><span class="hj-sm hj-strong">{{ x.name_en }}</span></button><div class="hj-small hj-muted mono">{{ x.code }}</div></td>
+          <td>{{ x.address|default:"—" }}</td><td>{{ x.head_name|default:"—" }}</td><td class="right num">{{ x.headcount }}</td>
+          <td class="right"><button type="button" class="hj-iconbtn" aria-label="Delete {{ x.name_en }}" hx-post="{% url 'people:structure_delete' 'branch' x.id %}" hx-swap="none"
+                  {% confirm_attrs "This cannot be undone. Anything still assigned to it must be moved first." title="Delete "|add:x.name_en|add:"?" label="Delete" %}><i class="ti ti-trash" aria-hidden="true"></i></button></td></tr>
+      {% endfor %}</tbody></table></div></div>
+    {% else %}{% empty_state title="No branches yet" hint="Add your head office first." %}{% endif %}
+  </section>
+</div>

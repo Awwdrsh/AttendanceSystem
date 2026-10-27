@@ -1,0 +1,31 @@
+<form class="hj-form" data-modal-title="Request to hire" data-modal-size="lg" hx-post="{% url 'hiring:requisition_new' %}" hx-swap="none"
+      x-data="{ kind: 'new', title: '', justification: '', replacing: '' }"
+      @change="if ($event.target.name === 'replacingEmployeeId') replacing = $event.target.value"
+      @input="if ($event.target.closest('.hj-combo')) replacing = ''">
+  <div class="hj-pills" role="group" aria-label="Kind" style="margin:0">
+    <button type="button" class="hj-pill" :aria-selected="kind === 'new'" @click="kind = 'new'">New position</button>
+    <button type="button" class="hj-pill" :aria-selected="kind === 'replacement'" @click="kind = 'replacement'">Replacement</button>
+  </div>
+  <input type="hidden" name="kind" :value="kind" value="new">
+  <div x-show="kind === 'replacement'" x-cloak>
+    {% employee_picker "replacingEmployeeId" label="Replacing" status="all" required=True %}
+  </div>
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="rq-title">Role<span class="req" aria-hidden="true">*</span></label>
+      <input id="rq-title" class="hj-input" name="title" placeholder="Backend engineer" maxlength="120" required x-model="title"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="rq-des">Designation</label><input id="rq-des" class="hj-input" name="designation" maxlength="120"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="rq-unit">Department</label>
+      <select id="rq-unit" class="hj-select" name="orgUnitId"><option value=""></option>{% for u in lookups.orgUnits %}<option value="{{ u.id }}">{{ u.name_en }}</option>{% endfor %}</select></div>
+    <div class="hj-fieldset"><label class="hj-label" for="rq-branch">Branch</label>
+      <select id="rq-branch" class="hj-select" name="branchId"><option value=""></option>{% for b in lookups.branches %}<option value="{{ b.id }}">{{ b.name_en }}</option>{% endfor %}</select></div>
+    <div class="hj-fieldset"><label class="hj-label" for="rq-hc">How many people</label><input id="rq-hc" class="hj-input" type="number" name="headcount" min="1" max="500" value="1"></div>
+    <div></div>
+    <div class="hj-fieldset"><label class="hj-label" for="rq-smin">Budget from (NPR a month)</label><input id="rq-smin" class="hj-input" type="number" name="salaryMin" min="0"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="rq-smax">Budget to (NPR a month)</label><input id="rq-smax" class="hj-input" type="number" name="salaryMax" min="0"></div>
+  </div>
+  <div class="hj-fieldset"><label class="hj-label" for="rq-why">Why is this needed?<span class="req" aria-hidden="true">*</span></label>
+    <div class="hj-help">At least 10 characters. HR sees this when deciding.</div>
+    <textarea id="rq-why" class="hj-input" name="justification" rows="3" maxlength="4000" required x-model="justification"></textarea></div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="title.trim().length < 2 || justification.trim().length < 10 || (kind === 'replacement' && !replacing)">Send request</button></div>
+</form>

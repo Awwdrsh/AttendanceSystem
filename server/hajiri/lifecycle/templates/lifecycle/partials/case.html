@@ -1,0 +1,25 @@
+{# CaseDrawer.tsx: a checklist (onboarding or exit clearance) in the shared drawer. #}
+<div id="case-{{ c.id }}" class="hj-stack hj-gap-md" data-modal-title="{% if c.kind == 'onboarding' %}Onboarding{% else %}Exit clearance{% endif %}: {{ emp.name_en }}" data-modal-size="lg"
+     hx-get="{% url 'lifecycle:case' c.id %}" hx-trigger="hj:refresh-case-{{ c.id }} from:body" hx-swap="outerHTML">
+  <div class="hj-small hj-muted">{% if c.kind == 'onboarding' %}Joins {{ c.anchor_date|bs_date }}{% else %}Last working day {{ c.anchor_date|bs_date }}{% endif %}</div>
+  <div><div class="hj-row hj-between hj-mb"><span class="hj-sm hj-muted">{{ progress.done }} of {{ progress.total }} done</span>{% badge badge.0 badge.1 %}</div>
+    <div class="hj-progress"><div style="width:{{ progress.pct }}%"></div></div></div>
+  {% if tasks %}
+  <div class="hj-card p-md"><div class="hj-stack hj-gap-md">{% for t in tasks %}{% include "lifecycle/partials/task_row.html" %}{% endfor %}</div></div>
+  {% else %}{% if hr %}{% empty_state title="No tasks in this checklist" hint="Add the first task below." compact=True %}{% else %}{% empty_state title="No tasks in this checklist" compact=True %}{% endif %}{% endif %}
+  {% if hr and active %}
+  <div x-data="{ adding: false, title: '' }">
+    <button type="button" class="hj-btn subtle" x-show="!adding" @click="adding = true"><i class="ti ti-plus" aria-hidden="true"></i>Add a task</button>
+    <form class="hj-card p-md hj-stack hj-gap-sm" x-show="adding" x-cloak hx-post="{% url 'lifecycle:task_add' c.id %}" hx-swap="none">
+      <div class="hj-fieldset"><label class="hj-label">Task</label><input name="title" class="hj-input" maxlength="160" x-model="title"></div>
+      <div class="hj-form-row">
+        <div class="hj-fieldset"><label class="hj-label">Who does it</label><select name="assigneeType" class="hj-select">{% for k, l in assignees %}<option value="{{ k }}">{{ l }}</option>{% endfor %}</select></div>
+        {% bs_date_input "dueDate" label="Due" id="f-due-"|add:c.id %}
+      </div>
+      <div class="hj-row hj-end hj-gap-xs"><button type="button" class="hj-btn default" @click="adding = false">Cancel</button><button type="submit" class="hj-btn" :disabled="!title.trim()">Add task</button></div>
+    </form>
+  </div>
+  {% if c.kind == 'onboarding' %}<div class="hj-row hj-end"><button type="button" class="hj-btn danger subtle xs" hx-post="{% url 'lifecycle:case_cancel' c.id %}" hx-swap="none"
+     {% confirm_attrs "The checklist closes and its open tasks are no longer shown to anyone." title="Cancel this onboarding?" label="Cancel onboarding" %}>Cancel onboarding</button></div>{% endif %}
+  {% endif %}
+</div>

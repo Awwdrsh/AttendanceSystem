@@ -1,0 +1,24 @@
+<div id="assignments" hx-get="{% url 'relations:assignments' %}?status={{ status }}" hx-trigger="hj:refresh-assignments from:body" hx-target="this" hx-swap="outerHTML">
+  {% if assignments %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Employee</th><th>Type</th><th>Position or place</th><th>Period</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    {% for r in assignments %}
+      <tr>
+        <td><div class="hj-sm">{{ r.employee_name }}</div><div class="hj-small hj-muted">{{ r.emp_code }}</div></td>
+        <td>{% if r.kind == 'acting' %}{% badge "Acting" "accent" %}{% else %}{% badge "Deputation" "info" %}{% endif %}</td>
+        <td>{{ r.where }}</td>
+        <td>{{ r.start_date|bs_date }} to {{ r.end_date|bs_date }}</td>
+        <td>{% if r.status == 'active' %}{% badge r.status_label "ok" %}{% else %}{% badge r.status_label "idle" %}{% endif %}</td>
+        <td class="right">{% if r.status == 'active' %}
+          <div class="hj-row nowrap hj-gap-xs hj-end">
+            <button type="button" class="hj-btn subtle xs" hx-post="{% url 'relations:assignment_end' r.id %}" hx-swap="none">End today</button>
+            <button type="button" class="hj-btn subtle danger xs" hx-post="{% url 'relations:assignment_end' r.id %}" hx-vals='{"cancel": "1"}' hx-swap="none">Cancel</button>
+          </div>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody></table></div></div>
+  {% else %}
+    {% empty_state title="No temporary roles" hint="Add one when someone covers a post or works from another branch for a period." %}
+  {% endif %}
+</div>

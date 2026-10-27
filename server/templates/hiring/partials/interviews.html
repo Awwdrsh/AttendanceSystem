@@ -1,0 +1,29 @@
+{% if not groups %}
+  {% empty_state title=empty_title hint="Schedule interviews from a candidate's card in Candidates." icon="calendar-event" %}
+{% endif %}
+{% for g in groups %}
+{% section g.label %}
+<div class="hj-stack hj-gap-sm">
+  {% for i in g.items %}
+  <div class="hj-card p-sm"{% if i.status == 'cancelled' %} style="opacity:.55"{% endif %}>
+    <div class="hj-row hj-between hj-gap-sm">
+      <div class="hj-row nowrap hj-gap-md">
+        <span class="hj-strong num" style="width:52px">{{ i.time|npt_time }}</span>
+        <div>
+          <div class="hj-sm hj-strong">{{ i.candidate }} <span class="hj-muted" style="font-weight:400">· {{ i.job }}</span></div>
+          <div class="hj-small hj-muted">{{ i.title }} · {{ i.duration_min }} min · {{ i.mode_label }}{% if i.location %} · {{ i.location }}{% endif %}</div>
+          <div class="hj-small hj-muted">Panel: {{ i.panel_names|join:", " }}</div>
+        </div>
+      </div>
+      <div class="hj-row hj-gap-xs">
+        {% if i.status != 'scheduled' %}<span class="hj-badge hj-tone-{% if i.status == 'cancelled' %}idle{% else %}ok{% endif %} sm">{% if i.status == 'cancelled' %}Cancelled{% else %}Done{% endif %}</span>{% endif %}
+        <span class="hj-badge hj-tone-idle sm">{{ i.scorecards }} scorecards</span>
+        {% if i.on_panel and i.status != 'cancelled' %}<button type="button" class="hj-btn {% if i.my_scorecard %}default{% endif %} xs" hx-get="{% url 'hiring:scorecard' i.id %}" hx-target="#hj-modal-body">{% if i.my_scorecard %}Update scorecard{% else %}Add scorecard{% endif %}</button>{% endif %}
+        <button type="button" class="hj-btn subtle xs" hx-get="{% url 'hiring:candidate' i.application_id %}" hx-target="#hj-drawer-body">Open candidate</button>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endsection %}
+{% endfor %}

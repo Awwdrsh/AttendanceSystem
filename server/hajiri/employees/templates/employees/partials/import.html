@@ -1,0 +1,25 @@
+{# The "Import employees from CSV" modal of EmployeesPage.tsx: check the file first, nothing is saved until Import. #}
+<form class="hj-form" data-modal-title="Import employees from CSV" data-modal-size="lg" hx-post="{% url 'employees:import' %}" hx-target="this" hx-swap="outerHTML"
+      x-data="{ csv: {{ csv|json_attr }}, checked: {% if result and not err_count %}true{% else %}false{% endif %} }">
+  <p class="hj-sm" style="margin:0">Paste a CSV with a header row. Required columns: <code>emp_code</code> and <code>name_en</code>.</p>
+  <p class="hj-small hj-muted" style="margin:0">Optional columns: gender, dob, marital_status, join_date, designation, grade, phone, email, regime, ssf_id, pan, bank_code, bank_branch, bank_account, ot_eligible. Dates use YYYY-MM-DD.</p>
+  <textarea name="csv" class="hj-input mono" rows="8" aria-label="CSV contents" x-model="csv" @input="checked = false"
+            placeholder="emp_code,name_en,join_date,designation,work_from_home&#10;E010,Hari Lal,2026-01-01,Accountant,yes" style="font-size:12px">{{ csv }}</textarea>
+  {% if result %}
+    {% if err_count %}
+    <div class="hj-alert hj-tone-bad" role="alert"><i class="ti ti-alert-triangle" aria-hidden="true"></i><div>
+      <div class="hj-alert-title">{{ err_title }}</div>
+      <ul class="hj-small" style="margin:4px 0 0;padding-left:18px">{% for e in errors %}<li>{% if e.row %}Row {{ e.row }}: {% endif %}{{ e.message }}</li>{% endfor %}</ul>
+      {% if more %}<div class="hj-small hj-muted">and {{ more }} more</div>{% endif %}</div></div>
+    {% else %}
+    <div class="hj-alert hj-tone-ok" role="status" x-show="checked"><i class="ti ti-check" aria-hidden="true"></i><div class="hj-alert-title">{{ valid_label }}</div></div>
+    {% endif %}
+  {% endif %}
+  <div class="hj-row hj-between hj-gap-sm">
+    <span class="hj-small hj-muted">Check the file first. Nothing is saved until you import.</span>
+    <div class="hj-row hj-gap-xs">
+      <button type="submit" name="action" value="check" class="hj-btn default" :disabled="!csv.trim()">Check file</button>
+      <button type="submit" name="action" value="import" class="hj-btn" :disabled="!csv.trim() || !checked"><i class="ti ti-upload" aria-hidden="true"></i>Import</button>
+    </div>
+  </div>
+</form>

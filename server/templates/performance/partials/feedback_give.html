@@ -1,0 +1,12 @@
+<form class="hj-form" data-modal-title="{% if request_ %}Feedback about {{ request_.subject_name }}{% else %}Give feedback{% endif %}"
+      hx-post="{% if request_ %}{% url 'performance:feedback_answer' request_.id %}{% else %}{% url 'performance:feedback_give' %}{% endif %}" hx-swap="none">
+  {% if request_.prompt %}<p class="hj-sm hj-muted" style="margin:0">“{{ request_.prompt }}”</p>{% endif %}
+  {% if not request_ %}
+  <div class="hj-fieldset"><label class="hj-label" for="fb-to">To<span class="req">*</span></label>
+    <select class="hj-select" id="fb-to" name="to_employee_id" required><option value=""></option>{% for c in colleagues %}<option value="{{ c.id }}">{{ c.name_en }}{% if c.designation %}, {{ c.designation }}{% endif %}</option>{% endfor %}</select></div>
+  {% endif %}
+  <div class="hj-fieldset"><label class="hj-label" for="fb-body">Feedback<span class="req">*</span></label>
+    <textarea class="hj-input" id="fb-body" name="body" rows="4" maxlength="4000" required placeholder="Be specific: what happened, the effect, and what to keep or change"></textarea></div>
+  <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="private"> Share with their manager only</label>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit">Send</button></div>
+</form>

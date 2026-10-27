@@ -1,0 +1,31 @@
+{# RequestCard of ChangeRequestsPage.tsx. #}
+<div class="hj-card p-lg" id="req-{{ it.r.id }}">
+  <div class="hj-row hj-between hj-gap-sm hj-mb">
+    <div>
+      <div class="hj-row hj-gap-xs"><a class="hj-strong hj-sm" href="{% url 'employees:detail' it.r.employee_id %}">{{ it.r.employee_name }}</a><span class="hj-small hj-muted mono">{{ it.r.emp_code }}</span></div>
+      <div class="hj-sm">{{ it.r.sectionLabel }}{% if it.r.summary.byHr %} <span class="hj-badge sm hj-tone-accent">HR edit, needs second approval</span>{% endif %}</div>
+      <div class="hj-small hj-muted">Requested {{ it.r.created_at|bs_date }}{% if it.r.requested_by_name %} by {{ it.r.requested_by_name }}{% endif %}</div>
+    </div>
+    {% badge it.r.badge.0 it.r.badge.1 %}
+  </div>
+  {% include "people/partials/change_list.html" with changes=it.changes %}
+  {% if it.r.reason %}<p class="hj-sm hj-muted" style="margin:6px 0 0">“{{ it.r.reason }}”</p>{% endif %}
+  {% if it.r.status == 'rejected' and it.r.decision_reason %}<p class="hj-sm hj-bad-text" style="margin:6px 0 0">Declined: {{ it.r.decision_reason }}</p>{% endif %}
+  <div class="hj-row hj-between hj-gap-xs hj-mt">
+    <div class="hj-row hj-gap-xs">
+      {% if it.r.proof_file_id %}<a class="hj-btn default xs" href="{% url 'people:request_proof' it.r.id %}" target="_blank" rel="noopener"><i class="ti ti-paperclip" aria-hidden="true"></i>View proof</a>{% endif %}
+      {% if it.r.status == 'pending' and not it.revealed and it.sensitive %}
+      <button type="button" class="hj-btn subtle xs" hx-get="{% url 'people:request_reveal' it.r.id %}" hx-target="#req-{{ it.r.id }}" hx-swap="outerHTML"><i class="ti ti-eye" aria-hidden="true"></i>Show full numbers</button>
+      {% endif %}
+    </div>
+    {% if it.r.status == 'pending' and it.r.instance_id %}
+      {% if it.own %}<span class="hj-small hj-muted">You made this change; another HR person must approve it.</span>
+      {% else %}
+      <div class="hj-row hj-gap-xs">
+        <button type="button" class="hj-btn default xs" hx-get="{% url 'people:request_reject' it.r.id %}" hx-target="#hj-modal-body"><i class="ti ti-x" aria-hidden="true"></i>Decline</button>
+        <button type="button" class="hj-btn xs" hx-post="{% url 'people:request_approve' it.r.id %}" hx-swap="none"><i class="ti ti-check" aria-hidden="true"></i>Approve and apply</button>
+      </div>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>

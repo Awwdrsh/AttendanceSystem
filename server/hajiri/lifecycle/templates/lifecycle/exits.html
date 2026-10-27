@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Exits · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack hj-gap-md">
+  {% page_header "Exits" subtitle="Resignations and other exits: approval, notice, clearance by each department, the exit interview and the final settlement." %}{% endpage_header %}
+  <nav class="hj-pills" aria-label="Exits">{% for k, l in tabs %}<a class="hj-pill" href="?tab={{ k }}"{% if tab == k %} aria-current="page"{% endif %}>{{ l }}</a>{% endfor %}</nav>
+  {% if tab == 'exits' %}{% include "lifecycle/partials/exits.html" %}
+  {% elif tab == 'templates' %}{% include "lifecycle/partials/templates.html" %}
+  {% else %}
+  <form class="hj-stack hj-gap-md" style="max-width:760px" hx-post="{% url 'lifecycle:questions' %}" hx-swap="none" x-data="{ shown: {{ shown }}, removed: {} }">
+    <div class="hj-section-title"><div><h3>Exit interview questions</h3><p>Answers are encrypted and only HR can read them. Removing a question switches it off; old answers keep it.</p></div></div>
+    {% for s in slots %}{% with q=s.q i=s.i %}
+    <fieldset class="hj-card p-sm" style="border:1px solid var(--hj-line)" x-show="{{ i }} < shown && !removed[{{ i }}]" {% if i >= shown %}x-cloak{% endif %} :disabled="{{ i }} >= shown || removed[{{ i }}]" x-data="{ kind: '{{ q.kind }}' }">
+      {% if q.id %}<input type="hidden" name="q-{{ i }}-id" value="{{ q.id }}">{% endif %}
+      <div class="hj-row nowrap hj-gap-xs" style="align-items:flex-end">
+        <div class="hj-fieldset hj-grow"><label class="hj-label">Question {{ i|add:1 }}</label><input name="q-{{ i }}-question" class="hj-input" maxlength="300" value="{{ q.question }}"></div>
+        <div class="hj-fieldset" style="width:130px"><label class="hj-label">Answer</label><select name="q-{{ i }}-kind" class="hj-select" x-model="kind">
+          <option value="text"{% if q.kind == 'text' %} selected{% endif %}>Text</option><option value="rating"{% if q.kind == 'rating' %} selected{% endif %}>Rating 1–5</option><option value="choice"{% if q.kind == 'choice' %} selected{% endif %}>Choice</option></select></div>
+        <label class="hj-row nowrap hj-gap-xs hj-sm" style="margin-bottom:8px"><input type="checkbox" class="hj-switch" name="q-{{ i }}-active"{% if q.active %} checked{% endif %}>On</label>
+        {% if not q.id %}<button type="button" class="hj-iconbtn" aria-label="Remove" @click="removed[{{ i }}] = true"><i class="ti ti-trash" aria-hidden="true"></i></button>{% endif %}
+      </div>
+      <div class="hj-fieldset hj-mt-sm" x-show="kind === 'choice'"><label class="hj-label">Options</label><div class="hj-help">Separate them with commas.</div>
+        <input name="q-{{ i }}-options" class="hj-input" value="{{ q.options|join:', ' }}"></div>
+    </fieldset>
+    {% endwith %}{% endfor %}
+    <div class="hj-row hj-between"><button type="button" class="hj-btn subtle" x-show="shown < 30" @click="shown++"><i class="ti ti-plus" aria-hidden="true"></i>Add question</button>
+      <button type="submit" class="hj-btn">Save questions</button></div>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

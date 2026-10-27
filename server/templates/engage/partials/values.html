@@ -1,0 +1,23 @@
+{# Composers.tsx ValuesManager: company values for kudos and the monthly kudos limit. #}
+<div class="hj-stack" id="engage-values" data-modal-title="Kudos settings" data-modal-size="lg" style="--gap:14px">
+  <p class="hj-sm hj-muted" style="margin:0">Company values people can tag their kudos with. Hidden values stay on old kudos but can't be picked.</p>
+  <div class="hj-stack" style="--gap:6px">
+    {% for v in values %}
+    <div class="hj-row nowrap hj-between"{% if not v.active %} style="opacity:.55"{% endif %}>
+      <div style="min-width:0"><div class="hj-sm hj-strong">{{ v.emoji }} {{ v.name }}</div>{% if v.description %}<div class="hj-small hj-muted hj-truncate">{{ v.description }}</div>{% endif %}</div>
+      <button type="button" class="hj-iconbtn" aria-label="{% if v.active %}Hide{% else %}Show{% endif %} {{ v.name }}" hx-post="{% url 'engage:value_toggle' v.id %}" hx-target="#engage-values" hx-swap="outerHTML"><i class="ti {% if v.active %}ti-eye{% else %}ti-eye-off{% endif %}" aria-hidden="true"></i></button>
+    </div>
+    {% endfor %}
+  </div>
+  <form class="hj-row" style="gap:8px;align-items:flex-end" hx-post="{% url 'engage:value_new' %}" hx-target="#engage-values" hx-swap="outerHTML" x-data="{ name: '', emoji: '⭐' }">
+    <div class="hj-fieldset" style="width:70px"><label class="hj-label" for="vl-emoji">Emoji</label><input id="vl-emoji" name="emoji" class="hj-input" maxlength="8" x-model="emoji"></div>
+    <div class="hj-fieldset" style="flex:1;min-width:140px"><label class="hj-label" for="vl-name">New value</label><input id="vl-name" name="name" class="hj-input" maxlength="40" x-model="name"></div>
+    <div class="hj-fieldset" style="flex:2;min-width:180px"><label class="hj-label" for="vl-desc">Description</label><input id="vl-desc" name="description" class="hj-input" maxlength="200"></div>
+    <button type="submit" class="hj-btn default" :disabled="!name.trim() || !emoji.trim()">Add</button>
+  </form>
+  <form class="hj-row" style="gap:8px;align-items:flex-end" hx-post="{% url 'engage:settings' %}" hx-swap="none">
+    <div class="hj-fieldset" style="width:280px"><label class="hj-label" for="vl-limit">Kudos each person can give per month</label><div class="hj-help">Leave empty for no limit.</div>
+      <input id="vl-limit" name="kudos_monthly_limit" type="number" min="1" max="100" class="hj-input" value="{{ limit|default_if_none:'' }}"></div>
+    <button type="submit" class="hj-btn default">Save limit</button>
+  </form>
+</div>

@@ -1,0 +1,8 @@
+<form class="hj-form" data-modal-title="Hold pay in this run" hx-post="{% url 'payroll:hold_new' run_id %}" hx-swap="none" x-data="{ emp: '', reason: '' }">
+  <div class="hj-fieldset"><label class="hj-label" for="hd-emp">Employee<span class="req" aria-hidden="true">*</span></label>
+    <select class="hj-select" id="hd-emp" name="employee_id" required x-model="emp"><option value="">Choose who</option>{% for v, l in options %}<option value="{{ v }}">{{ l }}</option>{% endfor %}</select></div>
+  <div class="hj-fieldset"><label class="hj-label" for="hd-reason">Reason<span class="req" aria-hidden="true">*</span></label><div class="hj-help">Kept for HR; the employee sees only that the payment is on hold.</div>
+    <textarea class="hj-input" id="hd-reason" name="reason" rows="2" maxlength="500" required x-model="reason"></textarea></div>
+  <p class="hj-small hj-muted" style="margin:0">The payslip, tax and SSF stay as calculated. The net pay is paid later, when you release it.</p>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn danger" :disabled="!emp || reason.trim().length < 3">Hold pay</button></div>
+</form>

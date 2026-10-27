@@ -1,0 +1,2 @@
+{# PersonAvatar.tsx: the photo when there is one, otherwise initials on the brand tint. Needs pid, name, has; size (px), v (cache key). #}
+{% if has %}<img class="hj-avatar" src="{% url 'people:avatar' pid %}{% if v %}?v={{ v }}{% endif %}" alt="{{ name }}" width="{{ size|default:40 }}" height="{{ size|default:40 }}" style="width:{{ size|default:40 }}px;height:{{ size|default:40 }}px;object-fit:cover">{% else %}<span class="hj-avatar" aria-hidden="true" style="width:{{ size|default:40 }}px;height:{{ size|default:40 }}px">{{ name|initials }}</span>{% endif %}

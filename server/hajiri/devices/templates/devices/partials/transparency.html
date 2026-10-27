@@ -1,0 +1,13 @@
+<div class="hj-stack" id="biometric-transparency" style="--gap:16px">
+  <div class="hj-grid" style="--cols:2">
+    {% card "What we store" %}<ul class="hj-sm" style="margin:0;padding-left:18px">{% for s in t.stored.en %}<li>{{ s }}</li>{% endfor %}</ul>
+      <ul class="hj-sm hj-muted" lang="ne" style="margin:8px 0 0;padding-left:18px">{% for s in t.stored.ne %}<li>{{ s }}</li>{% endfor %}</ul>{% endcard %}
+    {% card "What we never store" %}<ul class="hj-sm" style="margin:0;padding-left:18px">{% for s in t.notStored.en %}<li>{{ s }}</li>{% endfor %}</ul>
+      <ul class="hj-sm hj-muted" lang="ne" style="margin:8px 0 0;padding-left:18px">{% for s in t.notStored.ne %}<li>{{ s }}</li>{% endfor %}</ul>{% endcard %}
+    {% card "How long we keep it" %}<ul class="hj-sm" style="margin:0;padding-left:18px">{% for k, v in t.retention.items %}<li>{{ v.en }}<div class="hj-muted" lang="ne">{{ v.ne }}</div></li>{% endfor %}</ul>{% endcard %}
+    {% card "Who can see it" %}<ul class="hj-sm" style="margin:0;padding-left:18px">{% for s in t.access.en %}<li>{{ s }}</li>{% endfor %}</ul>
+      <ul class="hj-sm hj-muted" lang="ne" style="margin:8px 0 0;padding-left:18px">{% for s in t.access.ne %}<li>{{ s }}</li>{% endfor %}</ul>{% endcard %}
+  </div>
+  {% alert "info" title="Withdrawing consent" %}{{ t.withdraw.en }}<div lang="ne" class="hj-mt-sm">{{ t.withdraw.ne }}</div>{% endalert %}
+  <p class="hj-small hj-muted">{{ t.legalBasis.en }} · <span lang="ne">{{ t.legalBasis.ne }}</span></p>
+</div>

@@ -1,0 +1,7 @@
+{# One Insights chart card: chart, table view and its CSV download. `card` comes from views.insight_cards. #}
+{% url 'insights:export' card.dataset as export_url %}
+{% if card.empty %}
+{% chart_card card.title subtitle=card.subtitle csv_url=export_url|add:"?"|add:export_qs %}{% empty_state title=card.empty hint=card.empty_hint compact=True %}{% endchart_card %}
+{% else %}
+{% chart_card card.title subtitle=card.subtitle legend=card.legend table=card.table csv_url=export_url|add:"?"|add:export_qs %}{% include card.template with c=card.c %}{% if card.note %}<div class="hj-small hj-muted" style="margin-top:6px">{{ card.note }}</div>{% endif %}{% endchart_card %}
+{% endif %}

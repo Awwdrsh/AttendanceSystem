@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% load perf_tags %}
+{% block title %}Reviews · Hajiri{% endblock %}
+{% block content %}
+<div id="perf-main" hx-get="{{ request.get_full_path }}" hx-trigger="hj:refresh-perf-main from:body" hx-select="#perf-main" hx-swap="outerHTML" class="hj-stack" style="--gap:20px">
+  {% if pending %}
+  <div>
+    <div class="hj-section-title"><div><h3>Peer feedback requested</h3><p>Your answers are combined anonymously with others before the colleague sees them.</p></div></div>
+    <div class="hj-grid" style="--cols:2">{% for p in pending %}
+      <div class="hj-card p-md hj-between"><div><div class="hj-strong hj-sm">{{ p.employee_name }}</div><div class="hj-small hj-muted">{{ p.cycle_name }}{% if p.peer_due %} · due {{ p.peer_due|bs_date_short }}{% endif %}</div></div>
+        <button class="hj-btn xs" hx-get="{% url 'performance:peer_respond' p.id %}" hx-target="#hj-modal-body">Give feedback</button></div>{% endfor %}</div>
+  </div>
+  {% endif %}
+  <div>
+    {% page_header "Performance reviews" subtitle="Rate yourself against your goals and competencies, then read your manager's review when it is released." %}{% endpage_header %}
+    <div class="hj-stack" style="--gap:10px">
+    {% for r in reviews %}
+      <div class="hj-card p-md" style="cursor:pointer" role="button" tabindex="0" hx-get="{% url 'performance:review_detail' r.id %}" hx-target="#hj-drawer-body">
+        <div class="hj-between">
+          <div><div class="hj-row" style="gap:8px"><span class="hj-strong">{{ r.cycle_name }}</span>{% badge r.cycle_status|phase_label r.cycle_status|phase_tone %}</div>
+            <div class="hj-small hj-muted">{{ r.period_start|bs_date_short }} to {{ r.period_end|bs_date_short }}{% if not r.self_submitted_at and r.self_due %} · self review due {{ r.self_due|bs_date_short }}{% endif %}</div></div>
+          <div class="hj-row" style="gap:8px">{% if r.final_rating is not None %}<span class="hj-sm hj-strong">{{ r.final_rating|rating_label:r.rating_labels }}</span>{% endif %}{% badge r.step r.step_tone %}</div>
+        </div>
+      </div>
+    {% empty %}{% empty_state title="No reviews yet" hint="When HR opens a review cycle, your self review appears here." icon="clipboard-check" %}{% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock %}

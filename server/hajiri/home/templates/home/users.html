@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Users & roles · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Users & roles" subtitle="Who can sign in and what they can do. Employees see only their own data, managers approve for their team, HR runs attendance, leave and payroll." %}
+  {% if is_admin %}<button type="button" class="hj-btn" hx-get="{% url 'home:user_new' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>Add user</button>{% endif %}
+{% endpage_header %}
+{% data_table table %}
+{% endblock %}

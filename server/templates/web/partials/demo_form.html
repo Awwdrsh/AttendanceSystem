@@ -1,0 +1,11 @@
+<form id="demo-form" class="hj-form" hx-post="/_/web/components/action" hx-target="this" hx-swap="outerHTML" style="max-width:420px">
+  <input type="hidden" name="kind" value="form">
+  {% if saved %}{% alert "ok" %}Saved <b>{{ saved }}</b>. The form re-rendered from the server's answer.{% endalert %}{% endif %}
+  <div class="hj-fieldset">
+    <label class="hj-label" for="demo-name">Name<span class="req" aria-hidden="true">*</span></label>
+    <div class="hj-help">Type one letter to see a 422 validation answer swapped in.</div>
+    <input id="demo-name" class="hj-input" name="name" value="{{ name|default:'' }}"{% if error %} aria-invalid="true"{% endif %}>
+    {% if error %}<div class="hj-error">{{ error }}</div>{% endif %}
+  </div>
+  <div><button type="submit" class="hj-btn">Save</button></div>
+</form>

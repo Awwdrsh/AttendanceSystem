@@ -1,0 +1,29 @@
+{# Panels.tsx CelebrationsPanel: birthdays (opt-in), work anniversaries and new joiners for the next two weeks. #}
+<div class="hj-card p-md">
+  <div class="hj-row" style="gap:8px;margin-bottom:12px"><i class="ti ti-confetti" aria-hidden="true"></i><span class="hj-strong hj-sm">Celebrations</span></div>
+  {% if not celebrations %}
+  <p class="hj-sm hj-muted" style="margin:0">No birthdays, anniversaries or new joiners in the next two weeks.</p>
+  {% else %}
+  <div class="hj-stack" style="--gap:12px">
+    {% for c in celebrations %}
+    <div class="hj-row nowrap" style="align-items:flex-start;gap:10px" x-data="{ wish: false }">
+      <span class="hj-avatar" aria-hidden="true">{% if c.kind == 'birthday' %}<i class="ti ti-balloon"></i>{% elif c.kind == 'joined' %}<i class="ti ti-user-plus"></i>{% else %}{{ c.name|initials }}{% endif %}</span>
+      <div style="flex:1;min-width:0">
+        <div class="hj-sm hj-strong hj-truncate">{{ c.name }}{% if c.isMe %} (you){% endif %}</div>
+        <div class="hj-small hj-muted">{{ c.what }} · {{ c.when }}</div>
+        {% if c.daysAway <= 0 %}
+        <button type="button" class="hj-link-btn hj-small" x-show="!wish" @click="wish = true">{% if c.comments %}{{ c.comments }} wishes · {% endif %}{% if c.kind == 'joined' %}Say welcome{% else %}Send a wish{% endif %}</button>
+        <div x-show="wish" x-cloak>{% include "engage/partials/social.html" with s=c.social %}</div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if prefs %}
+  <form class="hj-mt" hx-post="{% url 'engage:prefs' %}" hx-trigger="change" hx-swap="none">
+    <label class="hj-switch"><input type="checkbox" name="show_birthday" value="1"{% if prefs.showBirthday %} checked{% endif %}{% if not prefs.hasBirthday %} disabled{% endif %}><span>Show my birthday to colleagues</span></label>
+    <div class="hj-help">{% if prefs.hasBirthday %}Only the day and month, never your age.{% else %}Ask HR to add your date of birth first.{% endif %}</div>
+  </form>
+  {% endif %}
+</div>

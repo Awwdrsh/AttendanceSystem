@@ -1,0 +1,25 @@
+{# Setup: topics (categories) with their owners. A row opens the edit form. #}
+<section class="hj-section" id="hd-topics" hx-get="{% url 'helpdesk:queue' %}?tab=setup" hx-trigger="hj:refresh-hd-topics from:body" hx-target="this" hx-swap="outerHTML">
+  <div class="hj-section-title">
+    <div><h3>Topics</h3><p>Each topic can have an owner who answers its tickets. Confidential topics are seen only by HR, never by managers.</p></div>
+    <div class="hj-actions"><button type="button" class="hj-btn sm" hx-get="{% url 'helpdesk:category_new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>New topic</button></div>
+  </div>
+  {% if not categories %}{% empty_state title="No topics yet" compact=True %}{% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll">
+    <table class="hj-table">
+      <thead><tr><th scope="col">Topic</th><th scope="col">Owner</th></tr></thead>
+      <tbody>
+        {% for c in categories %}
+        <tr style="cursor:pointer" hx-get="{% url 'helpdesk:category_edit' c.id %}" hx-target="#hj-modal-body" tabindex="0" hx-trigger="click, keyup[key=='Enter']">
+          <td><div class="hj-row hj-gap-xs"><span class="hj-sm hj-strong">{{ c.name }}</span>
+              {% if c.confidential %}<span class="hj-badge sm hj-tone-accent">Confidential</span>{% endif %}
+              {% if not c.active %}<span class="hj-badge sm hj-tone-idle">Off</span>{% endif %}</div>
+              {% if c.description %}<div class="hj-small hj-muted">{{ c.description }}</div>{% endif %}</td>
+          <td class="{% if not c.owner_name %}muted{% endif %}">{{ c.owner_name|default:"HR team" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div></div>
+  {% endif %}
+</section>

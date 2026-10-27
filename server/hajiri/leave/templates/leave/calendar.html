@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Team calendar · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Team calendar" subtitle="See who is off before you approve leave." %}
+  <div class="hj-row nowrap hj-gap-xs">
+    <a class="hj-iconbtn" href="?y={{ prev.year }}&m={{ prev.month }}&view={{ view }}" aria-label="Previous month" data-tip="Previous month"><i class="ti ti-chevron-left" aria-hidden="true"></i></a>
+    <a class="hj-btn default" href="?y={{ now.year }}&m={{ now.month }}&view={{ view }}">This month</a>
+    <a class="hj-iconbtn" href="?y={{ next.year }}&m={{ next.month }}&view={{ view }}" aria-label="Next month" data-tip="Next month"><i class="ti ti-chevron-right" aria-hidden="true"></i></a>
+  </div>
+  <div class="hj-pills" role="tablist">
+    <a class="hj-pill" href="?y={{ y }}&m={{ m }}&view=grid" {% if view == 'grid' %}aria-current="page"{% endif %}>Calendar</a>
+    <a class="hj-pill" href="?y={{ y }}&m={{ m }}&view=list" {% if view == 'list' %}aria-current="page"{% endif %}>List</a>
+  </div>
+{% endpage_header %}
+<div class="hj-stack" style="--gap:12px">
+  <div>
+    <div style="font-size:24px;font-weight:700;line-height:1.1;letter-spacing:-0.02em">{{ y|bs_month:m }}</div>
+    <div class="mono hj-muted" style="font-size:11px;margin-top:4px;letter-spacing:0.08em;text-transform:uppercase">{{ span }}</div>
+  </div>
+  {% if view == 'grid' %}
+  <div class="hj-card p-0" style="overflow:hidden">
+    <div style="overflow-x:auto">
+      <div class="lv-cal" style="display:grid;grid-template-columns:repeat(7, minmax(96px, 1fr));min-width:700px">
+        {% for d in weekdays %}<div class="mono" style="font-size:10.5px;font-weight:500;padding:8px 12px;border-bottom:1px solid var(--hj-line);letter-spacing:0.08em;text-transform:uppercase;background:var(--hj-raised);color:{% if forloop.last %}var(--hj-bad){% else %}var(--hj-muted){% endif %}">{{ d }}</div>{% endfor %}
+        {% for g in grid %}
+        <div style="min-height:104px;padding:8px;display:flex;flex-direction:column;gap:4px;min-width:0;{% if g.i|divisibleby:7 %}{% else %}border-left:1px solid var(--hj-line-soft);{% endif %}{% if g.i >= 7 %}border-top:1px solid var(--hj-line-soft);{% endif %}{% if g.holidays %}background:rgba(180, 83, 9, 0.05);{% elif g.c.saturday %}background:rgba(220, 38, 38, 0.035);{% endif %}{% if not g.c.in_month %}opacity:0.45;{% endif %}" title="{{ g.c.ad|bs_date_long }}">
+          <div class="hj-row nowrap hj-between">
+            <span class="num" style="font-size:17px;line-height:1;{% if g.today %}font-weight:800;background:var(--hj-hydro);color:var(--hj-on-hydro);border-radius:6px;min-width:28px;height:26px;line-height:26px;text-align:center{% else %}font-weight:650;padding-left:2px;{% if g.c.saturday or g.holidays %}color:var(--hj-bad){% endif %}{% endif %}">{{ g.c.bs.day }}</span>
+            <span class="mono hj-muted" style="font-size:10px">{{ g.ad_label }}</span>
+          </div>
+          {% if g.holidays %}<div class="hj-small hj-muted hj-truncate" title="{{ g.holidays|join:', ' }}">{{ g.holidays.0 }}</div>{% endif %}
+          <div class="hj-stack" style="--gap:3px">
+            {% for o in g.off %}
+            <div class="hj-row nowrap" data-tip="{{ o.tip }}" style="gap:5px;padding:0 6px;height:20px;border-radius:4px;font-size:12px;line-height:20px;min-width:0;{% if o.pending %}background:transparent;border:1px dashed var(--hj-line){% else %}background:var(--hj-info-soft, rgba(37, 99, 235, 0.1));border:1px solid transparent{% endif %}">
+              <span class="hj-dot" style="background:{{ o.color }}" aria-hidden="true"></span><span class="hj-truncate">{{ o.first }}</span>
+            </div>
+            {% endfor %}
+            {% if g.more %}<div class="hj-small hj-muted" data-tip="{{ g.more_names }}">+{{ g.more }} more</div>{% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  <p class="hj-small hj-muted" style="margin:0">Big numbers are Nepali dates, small ones Gregorian. Saturdays and public holidays are in red. Filled names are approved leave, outlined names are pending.</p>
+  {% elif not list_days %}
+  {% empty_state title="Everyone is in this month" hint="No approved or pending leave and no public holidays in this month." icon="calendar-event" %}
+  {% else %}
+  <div class="hj-card p-0" style="overflow:hidden">
+    {% for d in list_days %}
+    <div class="hj-row hj-gap-md" style="padding:10px 16px;align-items:flex-start;{% if not forloop.first %}border-top:1px solid var(--hj-line-soft){% endif %}">
+      <div style="width:150px">
+        <div class="hj-sm" style="font-weight:500">{{ d.date|bs_date_long }}</div>
+        {% if d.today %}<div class="hj-small hj-ok-text">Today</div>{% endif %}
+      </div>
+      <div class="hj-stack" style="--gap:6px;flex:1;min-width:220px">
+        {% for h in d.holidays %}<div class="hj-sm hj-muted">Public holiday: {{ h }}</div>{% endfor %}
+        {% for o in d.off %}
+        <div class="hj-row hj-gap-sm">
+          <span class="hj-sm" style="font-weight:500">{{ o.nameEn }}</span>
+          <span class="hj-small hj-muted">{{ o.empCode }}</span>
+          <span class="hj-sm">{{ o.type }}{% if o.halfDay %} (half day){% endif %}</span>
+          {% status_badge o.status %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

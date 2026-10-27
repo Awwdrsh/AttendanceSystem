@@ -1,0 +1,67 @@
+{# StepsEditor: ordered approver steps; add, move, remove and kind changes re-render this block on the server. #}
+<div class="wf-steps hj-stack" style="--gap:8px" data-prefix="{{ e.prefix }}">
+  {% for s in e.steps %}
+  {% with i=forloop.counter0 %}
+  <div class="hj-card p-sm wf-step">
+    <div class="hj-row hj-gap-xs" style="align-items:flex-end">
+      <span class="hj-badge hj-tone-accent" style="margin-bottom:6px">Step {{ forloop.counter }}</span>
+      {% if s.label %}<input type="hidden" name="{{ e.prefix }}-{{ i }}-label" value="{{ s.label }}">{% endif %}
+      <div class="hj-fieldset" style="width:200px">
+        <label class="hj-label" for="{{ e.prefix }}-{{ i }}-kind">Approved by</label>
+        <select class="hj-select" id="{{ e.prefix }}-{{ i }}-kind" name="{{ e.prefix }}-{{ i }}-kind"
+                hx-post="{% url 'workflow:steps_editor' %}" hx-trigger="change" hx-include="closest .wf-steps" hx-target="closest .wf-steps" hx-swap="outerHTML"
+                hx-vals='{"op": "kind:{{ i }}", "prefix": "{{ e.prefix }}", "money": "{{ e.money|yesno:"1,0" }}"}'>
+          {% for v, l in e.kinds %}<option value="{{ v }}" {% if s.kind == v %}selected{% endif %}>{{ l }}</option>{% endfor %}
+        </select>
+      </div>
+      {% if s.kind == 'role' %}
+      <div class="hj-fieldset" style="width:170px">
+        <label class="hj-label" for="{{ e.prefix }}-{{ i }}-role">Role</label>
+        <select class="hj-select" id="{{ e.prefix }}-{{ i }}-role" name="{{ e.prefix }}-{{ i }}-role">
+          {% for v, l in e.roles %}<option value="{{ v }}" {% if s.role == v %}selected{% endif %}>{{ l }}</option>{% endfor %}
+        </select>
+      </div>
+      {% elif s.kind == 'user' %}
+      <div class="hj-fieldset" style="width:220px">
+        <label class="hj-label" for="{{ e.prefix }}-{{ i }}-user">Person</label>
+        <select class="hj-select" id="{{ e.prefix }}-{{ i }}-user" name="{{ e.prefix }}-{{ i }}-user">
+          <option value="">Choose a person</option>
+          {% for u in e.lk.users %}<option value="{{ u.value }}" {% if s.userId == u.value %}selected{% endif %}>{{ u.label }}</option>{% endfor %}
+        </select>
+      </div>
+      {% elif s.kind == 'group' %}
+      <div class="hj-fieldset" style="width:200px">
+        <label class="hj-label" for="{{ e.prefix }}-{{ i }}-group">Group</label>
+        <select class="hj-select" id="{{ e.prefix }}-{{ i }}-group" name="{{ e.prefix }}-{{ i }}-group">
+          <option value="">{% if e.lk.groups %}Choose a group{% else %}Create a group first{% endif %}</option>
+          {% for g in e.lk.groups %}<option value="{{ g.value }}" {% if s.groupId == g.value %}selected{% endif %}>{{ g.label }}</option>{% endfor %}
+        </select>
+      </div>
+      {% endif %}
+      {% if e.money %}
+      <div class="hj-fieldset" style="width:150px">
+        <label class="hj-label" for="{{ e.prefix }}-{{ i }}-min">Only from (Rs)</label>
+        <input class="hj-input num" id="{{ e.prefix }}-{{ i }}-min" name="{{ e.prefix }}-{{ i }}-min" inputmode="decimal" placeholder="Any amount" value="{% if s.minAmount is not None %}{{ s.minAmount }}{% endif %}">
+      </div>
+      {% endif %}
+      <div class="hj-row nowrap" style="margin-left:auto;gap:2px">
+        <button type="button" class="hj-iconbtn" aria-label="Move up" {% if forloop.first %}disabled{% endif %}
+                hx-post="{% url 'workflow:steps_editor' %}" hx-include="closest .wf-steps" hx-target="closest .wf-steps" hx-swap="outerHTML"
+                hx-vals='{"op": "up:{{ i }}", "prefix": "{{ e.prefix }}", "money": "{{ e.money|yesno:"1,0" }}"}'><i class="ti ti-arrow-up" aria-hidden="true"></i></button>
+        <button type="button" class="hj-iconbtn" aria-label="Move down" {% if forloop.last %}disabled{% endif %}
+                hx-post="{% url 'workflow:steps_editor' %}" hx-include="closest .wf-steps" hx-target="closest .wf-steps" hx-swap="outerHTML"
+                hx-vals='{"op": "down:{{ i }}", "prefix": "{{ e.prefix }}", "money": "{{ e.money|yesno:"1,0" }}"}'><i class="ti ti-arrow-down" aria-hidden="true"></i></button>
+        <button type="button" class="hj-iconbtn" aria-label="Remove step" {% if e.steps|length == 1 %}disabled{% endif %}
+                hx-post="{% url 'workflow:steps_editor' %}" hx-include="closest .wf-steps" hx-target="closest .wf-steps" hx-swap="outerHTML"
+                hx-vals='{"op": "remove:{{ i }}", "prefix": "{{ e.prefix }}", "money": "{{ e.money|yesno:"1,0" }}"}'><i class="ti ti-trash hj-bad-text" aria-hidden="true"></i></button>
+      </div>
+    </div>
+  </div>
+  {% endwith %}
+  {% endfor %}
+  {% if e.can_add %}
+  <button type="button" class="hj-btn subtle xs" style="align-self:flex-start"
+          hx-post="{% url 'workflow:steps_editor' %}" hx-include="closest .wf-steps" hx-target="closest .wf-steps" hx-swap="outerHTML"
+          hx-vals='{"op": "add", "prefix": "{{ e.prefix }}", "money": "{{ e.money|yesno:"1,0" }}"}'><i class="ti ti-plus" aria-hidden="true"></i>Add a step</button>
+  {% endif %}
+</div>

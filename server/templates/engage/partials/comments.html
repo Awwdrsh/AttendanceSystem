@@ -1,0 +1,17 @@
+<div class="hj-stack" style="--gap:8px;padding-top:4px">
+  {% for c in comments %}
+  <div class="hj-row nowrap" style="align-items:flex-start;gap:8px">
+    <div style="flex:1;min-width:0;background:var(--hj-canvas);border-radius:10px;padding:6px 10px">
+      <div class="hj-row nowrap" style="gap:6px"><span class="hj-small hj-strong hj-truncate">{{ c.name }}</span><span class="hj-small hj-muted" style="flex:none">{{ c.createdAt|relative_time }}</span></div>
+      <div class="hj-sm" style="white-space:pre-wrap;overflow-wrap:anywhere">{{ c.body }}</div>
+    </div>
+    {% if c.canDelete %}<button type="button" class="hj-iconbtn" aria-label="Remove comment" hx-post="{% url 'engage:comment_delete' c.id %}" hx-target="#{{ s.dom }}-thread" hx-swap="innerHTML"><i class="ti ti-trash" aria-hidden="true"></i></button>{% endif %}
+  </div>
+  {% endfor %}
+  <form class="hj-row nowrap" style="gap:8px;align-items:flex-end" hx-post="{% url 'engage:comments' %}" hx-target="#{{ s.dom }}-thread" hx-swap="innerHTML" x-data="{ text: '' }">
+    <input type="hidden" name="target_type" value="{{ s.target_type }}"><input type="hidden" name="target_id" value="{{ s.target_id }}">
+    <textarea class="hj-input" name="body" rows="1" maxlength="1000" style="flex:1" aria-label="Comment" x-model="text" placeholder="{% if s.target_type == 'celebration' %}Write a wish…{% else %}Write a comment…{% endif %}"></textarea>
+    <button type="submit" class="hj-btn sm" :disabled="!text.trim()">Send</button>
+  </form>
+</div>
+<button type="button" class="hj-btn subtle gray xs" id="{{ s.dom }}-cc" hx-swap-oob="outerHTML" @click="open = !open" :aria-expanded="open"><i class="ti ti-message-circle" aria-hidden="true"></i>{{ s.comment_label }}</button>

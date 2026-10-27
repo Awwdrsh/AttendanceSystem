@@ -1,0 +1,443 @@
+{
+  "name": "13_lwp_3_days",
+  "input": {
+    "employee": {
+      "id": "E1",
+      "code": "E001",
+      "nameEn": "Test Employee",
+      "nameNe": "परीक्षण",
+      "gender": "male",
+      "maritalStatus": "single",
+      "isResident": true,
+      "regime": "ssf",
+      "remoteAreaClass": null,
+      "disability": false,
+      "otEligible": true,
+      "festivalMonth": null
+    },
+    "period": {
+      "bsYear": 2083,
+      "bsMonth": 4,
+      "daysInMonth": 31,
+      "fiscalYearStart": 2083,
+      "monthIndexInFy": 1
+    },
+    "components": [
+      {
+        "code": "BASIC",
+        "type": "earning",
+        "nameEn": "Basic salary",
+        "nameNe": "आधारभूत तलब",
+        "dependsOnPaymentDays": true,
+        "taxable": true,
+        "rounding": "paisa",
+        "sortOrder": 10
+      },
+      {
+        "code": "DA",
+        "type": "earning",
+        "nameEn": "Dearness allowance",
+        "nameNe": "महँगी भत्ता",
+        "dependsOnPaymentDays": true,
+        "taxable": true,
+        "rounding": "paisa",
+        "sortOrder": 20
+      },
+      {
+        "code": "HRA",
+        "type": "earning",
+        "nameEn": "House rent allowance",
+        "nameNe": "घर भाडा भत्ता",
+        "dependsOnPaymentDays": true,
+        "taxable": true,
+        "rounding": "paisa",
+        "sortOrder": 30
+      },
+      {
+        "code": "ALLOWANCE",
+        "type": "earning",
+        "nameEn": "Other allowance",
+        "nameNe": "अन्य भत्ता",
+        "dependsOnPaymentDays": true,
+        "taxable": true,
+        "rounding": "paisa",
+        "sortOrder": 40
+      },
+      {
+        "code": "OT",
+        "type": "earning",
+        "nameEn": "Overtime",
+        "nameNe": "ओभरटाइम",
+        "dependsOnPaymentDays": false,
+        "taxable": true,
+        "rounding": "rupee",
+        "sortOrder": 50
+      },
+      {
+        "code": "FESTIVAL",
+        "type": "earning",
+        "nameEn": "Festival allowance",
+        "nameNe": "चाडपर्व खर्च",
+        "dependsOnPaymentDays": false,
+        "taxable": true,
+        "rounding": "paisa",
+        "sortOrder": 60
+      },
+      {
+        "code": "ARREARS",
+        "type": "earning",
+        "nameEn": "Arrears",
+        "nameNe": "बक्यौता",
+        "dependsOnPaymentDays": false,
+        "taxable": true,
+        "rounding": "paisa",
+        "sortOrder": 70
+      },
+      {
+        "code": "BONUS",
+        "type": "earning",
+        "nameEn": "Bonus",
+        "nameNe": "बोनस",
+        "dependsOnPaymentDays": false,
+        "taxable": true,
+        "rounding": "paisa",
+        "sortOrder": 80
+      },
+      {
+        "code": "LEAVE_ENCASH",
+        "type": "earning",
+        "nameEn": "Leave encashment",
+        "nameNe": "बिदा नगदीकरण",
+        "dependsOnPaymentDays": false,
+        "taxable": true,
+        "rounding": "paisa",
+        "sortOrder": 90
+      },
+      {
+        "code": "NOTICE_PAY",
+        "type": "earning",
+        "nameEn": "Notice pay",
+        "nameNe": "सूचना अवधि भुक्तानी",
+        "dependsOnPaymentDays": false,
+        "taxable": true,
+        "rounding": "paisa",
+        "sortOrder": 95
+      },
+      {
+        "code": "SSF_EE",
+        "type": "deduction",
+        "nameEn": "SSF contribution (employee)",
+        "nameNe": "सामाजिक सुरक्षा कोष (कर्मचारी)",
+        "dependsOnPaymentDays": false,
+        "taxable": false,
+        "statutory": true,
+        "rounding": "rupee",
+        "sortOrder": 200
+      },
+      {
+        "code": "PF_EE",
+        "type": "deduction",
+        "nameEn": "Provident fund (employee)",
+        "nameNe": "सञ्चय कोष (कर्मचारी)",
+        "dependsOnPaymentDays": false,
+        "taxable": false,
+        "statutory": true,
+        "rounding": "rupee",
+        "sortOrder": 210
+      },
+      {
+        "code": "CIT",
+        "type": "deduction",
+        "nameEn": "Citizen investment trust",
+        "nameNe": "नागरिक लगानी कोष",
+        "dependsOnPaymentDays": false,
+        "taxable": false,
+        "rounding": "paisa",
+        "sortOrder": 220
+      },
+      {
+        "code": "TDS",
+        "type": "deduction",
+        "nameEn": "Income tax (TDS)",
+        "nameNe": "आयकर",
+        "dependsOnPaymentDays": false,
+        "taxable": false,
+        "statutory": true,
+        "rounding": "rupee",
+        "sortOrder": 230
+      },
+      {
+        "code": "INSURANCE_LIFE",
+        "type": "deduction",
+        "nameEn": "Life insurance premium",
+        "nameNe": "जीवन बीमा",
+        "dependsOnPaymentDays": false,
+        "taxable": false,
+        "rounding": "paisa",
+        "sortOrder": 240
+      },
+      {
+        "code": "INSURANCE_HEALTH",
+        "type": "deduction",
+        "nameEn": "Health insurance premium",
+        "nameNe": "स्वास्थ्य बीमा",
+        "dependsOnPaymentDays": false,
+        "taxable": false,
+        "rounding": "paisa",
+        "sortOrder": 250
+      },
+      {
+        "code": "ABSENCE",
+        "type": "deduction",
+        "nameEn": "Absence deduction",
+        "nameNe": "अनुपस्थिति कट्टी",
+        "dependsOnPaymentDays": false,
+        "taxable": false,
+        "rounding": "paisa",
+        "sortOrder": 260
+      },
+      {
+        "code": "ADVANCE",
+        "type": "deduction",
+        "nameEn": "Salary advance recovery",
+        "nameNe": "पेश्की असुली",
+        "dependsOnPaymentDays": false,
+        "taxable": false,
+        "rounding": "paisa",
+        "sortOrder": 270
+      },
+      {
+        "code": "NOTICE_DEDUCTION",
+        "type": "deduction",
+        "nameEn": "Deduction in lieu of notice",
+        "nameNe": "सूचना अवधि कट्टी",
+        "dependsOnPaymentDays": false,
+        "taxable": false,
+        "rounding": "paisa",
+        "sortOrder": 275
+      },
+      {
+        "code": "LOAN",
+        "type": "deduction",
+        "nameEn": "Loan instalment",
+        "nameNe": "ऋण किस्ता",
+        "dependsOnPaymentDays": false,
+        "taxable": false,
+        "rounding": "paisa",
+        "sortOrder": 280
+      },
+      {
+        "code": "SSF_ER",
+        "type": "employer_contribution",
+        "nameEn": "SSF contribution (employer)",
+        "nameNe": "सामाजिक सुरक्षा कोष (रोजगारदाता)",
+        "dependsOnPaymentDays": false,
+        "taxable": true,
+        "statutory": true,
+        "rounding": "rupee",
+        "sortOrder": 300
+      },
+      {
+        "code": "PF_ER",
+        "type": "employer_contribution",
+        "nameEn": "Provident fund (employer)",
+        "nameNe": "सञ्चय कोष (रोजगारदाता)",
+        "dependsOnPaymentDays": false,
+        "taxable": true,
+        "statutory": true,
+        "rounding": "rupee",
+        "sortOrder": 310
+      },
+      {
+        "code": "GRATUITY",
+        "type": "employer_contribution",
+        "nameEn": "Gratuity accrual",
+        "nameNe": "उपदान",
+        "dependsOnPaymentDays": false,
+        "taxable": true,
+        "statutory": true,
+        "rounding": "rupee",
+        "sortOrder": 320
+      },
+      {
+        "code": "GROSS",
+        "type": "statistical",
+        "nameEn": "Gross pay",
+        "nameNe": "कुल तलब",
+        "dependsOnPaymentDays": false,
+        "taxable": false,
+        "rounding": "paisa",
+        "sortOrder": 400
+      },
+      {
+        "code": "TAXABLE",
+        "type": "statistical",
+        "nameEn": "Taxable pay",
+        "nameNe": "करयोग्य आय",
+        "dependsOnPaymentDays": false,
+        "taxable": false,
+        "rounding": "paisa",
+        "sortOrder": 410
+      }
+    ],
+    "baseAmounts": {
+      "BASIC": "40000",
+      "ALLOWANCE": "20000"
+    },
+    "inputs": [],
+    "attendance": {
+      "paidDays": "28",
+      "lopDays": "3",
+      "otHours": "0"
+    },
+    "ytd": {
+      "taxable": "0",
+      "tdsPaid": "0",
+      "retirementEmployee": "0",
+      "retirementEmployer": "0",
+      "festivalPaid": false
+    },
+    "declaration": {
+      "lifePremium": "0",
+      "healthPremium": "0",
+      "citMonthly": "0",
+      "medicalCost": "0",
+      "otherRetirementAnnual": "0"
+    },
+    "loans": [],
+    "rules": {
+      "tax.schedule": {
+        "fiscalYearStart": 2083,
+        "nonResidentRate": "0.25",
+        "bands": {
+          "all": [
+            {
+              "upTo": "1000000",
+              "rate": "0.01",
+              "sst": true
+            },
+            {
+              "upTo": "1500000",
+              "rate": "0.10"
+            },
+            {
+              "upTo": "2500000",
+              "rate": "0.20"
+            },
+            {
+              "upTo": "4000000",
+              "rate": "0.27"
+            },
+            {
+              "upTo": null,
+              "rate": "0.29"
+            }
+          ]
+        }
+      },
+      "tax.deductions": {
+        "retirementCap": "500000",
+        "retirementFraction": "0.333333",
+        "retirementDivisor": "3",
+        "lifePremiumCap": "40000",
+        "healthPremiumCap": "20000",
+        "remoteArea": {
+          "A": "50000",
+          "B": "40000",
+          "C": "30000",
+          "D": "10000"
+        },
+        "disabilityExtraFraction": "0.5",
+        "medicalCreditRate": "0.15",
+        "medicalCreditCap": "1500",
+        "femaleRebate": "0.10"
+      },
+      "ssf.rates": {
+        "employee": "0.11",
+        "employer": "0.20",
+        "allocation": {
+          "medical": "0.01",
+          "accident": "0.014",
+          "dependent": "0.0027",
+          "old_age": "0.2833"
+        }
+      },
+      "pf.rates": {
+        "employee": "0.10",
+        "employer": "0.10",
+        "gratuity": "0.0833"
+      },
+      "ot.multiplier": {
+        "working": "1.5",
+        "weekly_off": "1.5",
+        "holiday": "1.5"
+      },
+      "festival.allowance": {
+        "months": "1",
+        "defaultBsMonth": 6
+      },
+      "min_wage": {
+        "basic": "12170",
+        "dearness": "7380",
+        "total": "19550",
+        "daily": "754",
+        "hourly": "101",
+        "partTimeHourly": "107"
+      }
+    },
+    "policy": {
+      "prorationBasis": "bs_calendar_days",
+      "hourlyDivisor": 208,
+      "rounding": "half_up_rupee",
+      "includeEmployerContributionInIncome": true,
+      "fullTime": true
+    }
+  },
+  "expected": {
+    "gross": "54193.55",
+    "taxable": "61419.55",
+    "tds": "0.00",
+    "employeeStatutory": "3974.00",
+    "employerStatutory": "7226.00",
+    "net": "50220.00",
+    "annualTax": "0.00",
+    "lines": [
+      {
+        "code": "BASIC",
+        "type": "earning",
+        "amount": "36129.03"
+      },
+      {
+        "code": "ALLOWANCE",
+        "type": "earning",
+        "amount": "18064.52"
+      },
+      {
+        "code": "SSF_EE",
+        "type": "deduction",
+        "amount": "3974.00"
+      },
+      {
+        "code": "SSF_ER",
+        "type": "employer_contribution",
+        "amount": "7226.00"
+      },
+      {
+        "code": "GROSS",
+        "type": "statistical",
+        "amount": "54193.55"
+      },
+      {
+        "code": "TAXABLE",
+        "type": "statistical",
+        "amount": "61419.55"
+      },
+      {
+        "code": "ROUNDING",
+        "type": "earning",
+        "amount": "0.45"
+      }
+    ],
+    "flags": []
+  }
+}

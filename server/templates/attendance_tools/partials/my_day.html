@@ -1,0 +1,34 @@
+<div class="hj-stack" data-modal-title="{{ title }}" data-modal-size="lg" style="--gap:12px">
+  <div>{% status_badge status late=day.late_min %}</div>
+  {% if holiday %}<div class="hj-row nowrap hj-gap-xs"><i class="ti ti-calendar-event hj-muted" aria-hidden="true"></i><span class="hj-sm">{{ holiday }}</span></div>{% endif %}
+  {% if day %}
+  <div class="hj-fields" style="--cols:4">
+    {% field "First clock-in" day.first_in|npt_time %}
+    {% field "Last clock-out" day.last_out|npt_time %}
+    {% field "Worked" day.worked_min|minutes_hm %}
+    {% field "Overtime" day.ot_min|minutes_hm %}
+  </div>
+  {% endif %}
+  {% if flags %}<div class="hj-stack" style="--gap:4px">{% for f in flags %}
+    <div class="hj-row nowrap hj-gap-xs" style="align-items:flex-start"><i class="ti ti-alert-triangle" style="color:var(--hj-warn)" aria-hidden="true"></i><span class="hj-sm hj-muted">{{ f }}</span></div>
+  {% endfor %}</div>{% endif %}
+  <div>
+    <div class="hj-sm hj-strong" style="margin-bottom:6px">Clock-ins and clock-outs</div>
+    {% if punches %}
+    <div class="hj-card p-0">{% for p in punches %}
+      <div class="hj-row nowrap hj-between" style="padding:8px 12px{% if not forloop.first %};border-top:1px solid var(--hj-line-soft){% endif %}">
+        <span class="hj-row nowrap hj-gap-sm"{% if p.superseded %} style="text-decoration:line-through;color:var(--hj-muted)"{% endif %}><span class="num hj-strong">{{ p.time }}</span><span class="hj-sm">{{ p.dir_label }}</span></span>
+        <span class="hj-small hj-muted" style="text-align:right">{{ p.meta }}</span>
+      </div>{% endfor %}
+    </div>
+    {% else %}<p class="hj-sm hj-muted" style="margin:0">No clock-ins or clock-outs on this day.</p>{% endif %}
+  </div>
+  {% if day.locked_at %}
+  <div class="hj-row nowrap hj-gap-xs"><i class="ti ti-lock hj-muted" aria-hidden="true"></i><span class="hj-sm hj-muted">This day is locked for payroll. Ask HR for a supplementary correction.</span></div>
+  {% elif correct %}
+  <div class="hj-card p-md"><div class="hj-strong" style="margin-bottom:8px">Attendance correction</div>
+    <div hx-get="{% url 'regularisation:new' %}?employee_id={{ employee_id }}&amp;date={{ date }}&amp;inline=1" hx-trigger="load" hx-swap="outerHTML"><span class="hj-loader" aria-label="Loading"></span></div></div>
+  {% elif employee_id %}
+  <div class="hj-row hj-end"><button type="button" class="hj-btn default" hx-get="{% url 'attendance_tools:my_day' %}?date={{ date }}&amp;correct=1" hx-target="#hj-modal-body"><i class="ti ti-clock-edit" aria-hidden="true"></i>Request correction</button></div>
+  {% endif %}
+</div>

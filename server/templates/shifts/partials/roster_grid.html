@@ -1,0 +1,34 @@
+<div id="roster-grid" hx-get="{% url 'shifts:roster_grid' %}?week={{ week }}" hx-trigger="hj:refresh-roster-grid from:body" hx-target="this" hx-swap="outerHTML">
+{% if not employees %}
+  {% empty_state title="No one to roster" hint="People who report to you appear here. HR sees everyone." icon="calendar-event" %}
+{% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll">
+    <table class="hj-table" style="min-width:900px">
+      <thead><tr>
+        <th class="sticky" scope="col">Name</th>
+        {% for d in days %}<th scope="col"{% if d.today %} style="background:var(--hj-hydro-soft)"{% endif %}><div class="hj-small hj-muted">{{ d.weekday }}</div><div class="hj-sm hj-strong">{{ d.label }}</div></th>{% endfor %}
+      </tr></thead>
+      <tbody>
+        {% for e in employees %}
+        <tr>
+          <td class="sticky"><div class="hj-sm hj-strong">{{ e.name_en }}</div><div class="hj-small hj-muted">{{ e.emp_code }}</div></td>
+          {% for c in e.cells %}
+          <td>
+            <select class="hj-select" name="value" aria-label="{{ e.name_en }} on {{ c.date }}"
+                    style="min-width:120px;height:30px;font-size:12px;{% if c.has %}font-weight:600;{% endif %}{% if c.value == 'off' %}color:var(--hj-muted){% endif %}"
+                    hx-post="{% url 'shifts:roster_cell' %}" hx-trigger="change" hx-target="#roster-grid" hx-swap="outerHTML" hx-disabled-elt="this"
+                    data-value="{{ c.value }}" hx-on::response-error="this.value = this.dataset.value"
+                    hx-vals='{"employee_id": "{{ e.id }}", "date": "{{ c.date }}", "week": "{{ week }}"}'>
+              <option value=""{% if c.value == '' %} selected{% endif %}>{{ c.normal }}</option>
+              <option value="off"{% if c.value == 'off' %} selected{% endif %}>Off</option>
+              {% for o in options %}<option value="{{ o.value }}"{% if c.value == o.value %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
+            </select>
+          </td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div></div>
+{% endif %}
+</div>

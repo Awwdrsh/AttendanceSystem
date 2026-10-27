@@ -1,0 +1,51 @@
+<div id="report" class="hj-stack" style="--gap:16px">
+{% if kind == 'tax' or kind == 'funds' %}
+  <div class="hj-row hj-between" style="align-items:flex-end">
+    <form hx-get="{% url 'payroll:report' kind %}" hx-target="#report" hx-swap="outerHTML" hx-trigger="change">{% bs_month_input "bs_year" "bs_month" year=y month=m label="Pay month" %}</form>
+    <a class="hj-btn default" href="{{ csv_url }}" download><i class="ti ti-download" aria-hidden="true"></i>Download CSV</a>
+  </div>
+  <p class="hj-sm hj-muted" style="margin:0">{% if kind == 'tax' %}Tax withheld from every locked run of the month, split into social security tax (the 1% band) and income tax. Deposit with the tax office within 25 days of month end. The CSV includes full PANs.{% else %}SSF, provident fund, gratuity and CIT for every locked run of the month, to deposit with each fund (SSF within 25 days of month end).{% endif %}</p>
+  {% if error %}{% alert "bad" %}{{ error }}{% endalert %}{% else %}{% with "No locked payslips for "|add:month_label as empty %}{% include "payroll/partials/report_table.html" with t=table %}{% endwith %}{% endif %}
+{% elif kind == 'variance' %}
+  <div class="hj-row hj-between" style="align-items:flex-end">
+    <form hx-get="{% url 'payroll:report' 'variance' %}" hx-target="#report" hx-swap="outerHTML" hx-trigger="change">
+      <div class="hj-fieldset"><label class="hj-label" for="rp-run">Pay run</label>
+        <select class="hj-select" id="rp-run" name="run_id" style="width:260px">{% for v, l in run_options %}<option value="{{ v }}"{% if v == run_id %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div></form>
+    {% if run_id %}<a class="hj-btn default" href="{{ csv_url }}" download><i class="ti ti-download" aria-hidden="true"></i>Download CSV</a>{% endif %}
+  </div>
+  <p class="hj-sm hj-muted" style="margin:0">{% if previous_label %}Each person's net pay against {{ previous_label }}, biggest changes first, with the likely reasons.{% else %}No earlier locked regular run to compare with yet.{% endif %}</p>
+  {% if not run_options %}{% empty_state title="No regular pay runs yet" compact=True %}
+  {% elif table %}{% include "payroll/partials/report_table.html" with t=table empty="No payslips in this run" %}{% endif %}
+{% elif kind == 'liability' %}
+  <div class="hj-row hj-between" style="align-items:flex-end">
+    <form hx-get="{% url 'payroll:report' 'liability' %}" hx-target="#report" hx-swap="outerHTML" hx-trigger="change" style="width:200px">{% bs_date_input "as_of" value=as_of label="As of" clearable=False %}</form>
+    <a class="hj-btn default" href="{{ csv_url }}" download><i class="ti ti-download" aria-hidden="true"></i>Download CSV</a>
+  </div>
+  <p class="hj-sm hj-muted" style="margin:0">What unused encashable leave would cost if paid out: balance × basic salary ÷ {{ divisor }} days (Payroll settings).</p>
+  {% stat_strip stats %}
+  {% include "payroll/partials/report_table.html" with t=table empty="No encashable leave balances" %}
+{% elif kind == 'annual' %}
+  <div class="hj-row hj-between" style="align-items:flex-end">
+    <form hx-get="{% url 'payroll:report' 'annual' %}" hx-target="#report" hx-swap="outerHTML" hx-trigger="change">
+      <div class="hj-fieldset"><label class="hj-label" for="rp-fy">Fiscal year</label>
+        <select class="hj-select" id="rp-fy" name="fy" style="width:160px">{% for y, l in fy_options %}<option value="{{ y }}"{% if y == fy %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div></form>
+    <a class="hj-btn default" href="{{ csv_url }}" download><i class="ti ti-download" aria-hidden="true"></i>Download CSV</a>
+  </div>
+  <p class="hj-sm hj-muted" style="margin:0">Remuneration, retirement contributions, tax liability and tax deducted for everyone paid in the year, including opening balances. Until Ashadh is paid, the liability is the projection from the latest payslip.</p>
+  {% include "payroll/partials/report_table.html" with t=table empty="No locked payslips in this fiscal year" %}
+{% else %}
+  <form class="hj-card p-lg hj-stack" style="--gap:12px" action="{% url 'payroll:certificate' 'pick' %}" method="get" target="_blank" x-data="{ emp: '' }" @change="emp = $el.querySelector('[name=employee_id]').value">
+    <div class="hj-grid" style="--cols:3">
+      {% employee_picker "employee_id" status="all" %}
+      <div class="hj-fieldset"><label class="hj-label" for="ct-fy">Fiscal year</label>
+        <select class="hj-select" id="ct-fy" name="fiscalYearStart">{% for y, l in fy_options %}<option value="{{ y }}"{% if y == fy %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+      <div class="hj-fieldset"><label class="hj-label" for="ct-purpose">Purpose (salary certificate)</label><input class="hj-input" id="ct-purpose" name="purpose" placeholder="e.g. Bank loan" maxlength="120"></div>
+    </div>
+    <div class="hj-row hj-gap-xs">
+      <button type="submit" class="hj-btn" name="kind" value="tax" :disabled="!emp"><i class="ti ti-file-certificate" aria-hidden="true"></i>Tax certificate</button>
+      <button type="submit" class="hj-btn default" name="kind" value="salary" :disabled="!emp"><i class="ti ti-file-certificate" aria-hidden="true"></i>Salary certificate</button>
+    </div>
+    <p class="hj-small hj-muted" style="margin:0">Opens a printable page. Employees can open their own certificates from Payslips. Every certificate HR opens is recorded in the audit log.</p>
+  </form>
+{% endif %}
+</div>

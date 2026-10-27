@@ -1,0 +1,34 @@
+{# EmployeeRelationsSection: HR-only tab on the employee page. #}
+<div class="hj-stack hj-gap-lg" x-data @hj:open-case.window="htmx.ajax('GET', $event.detail.url, '#hj-drawer-body')">
+  <div class="hj-grid" style="--cols:2">
+    <div class="hj-card p-md">
+      <div class="hj-sm hj-strong hj-mb">Contract and retirement</div>
+      <form class="hj-row hj-gap-sm" style="align-items:flex-end" hx-post="{% url 'relations:contract' employee_id %}" hx-swap="none"
+            x-data="{ orig: '{{ contract.contractEnd|default:''|escapejs }}', cur: '{{ contract.contractEnd|default:''|escapejs }}' }"
+            @change="if ($event.target.name === 'contractEnd') cur = $event.target.value"
+            @htmx:after-request="if ($event.detail.successful && $event.detail.elt === $el) orig = cur">
+        {% bs_date_input "contractEnd" value=contract.contractEnd label="Contract ends" id="rel-contract-end" %}
+        <button type="submit" class="hj-btn default xs" :disabled="cur === orig">Save</button>
+      </form>
+      <div class="hj-small hj-muted hj-mt-sm">{% if contract.retirementDate %}Reaches retirement age ({{ contract.retirementAge }}) on {{ contract.retirementDate|bs_date }}.{% else %}Add the date of birth to see the retirement date.{% endif %}</div>
+    </div>
+    <div class="hj-card p-md">
+      <div class="hj-sm hj-strong hj-mb">Record completeness</div>
+      {% if comp %}
+        <div class="hj-row nowrap hj-gap-xs"><div class="hj-progress hj-grow {% if comp.percent < 100 %}warn{% else %}ok{% endif %}"><span style="width:{{ comp.percent }}%"></span></div><span class="hj-sm">{{ comp.percent }}%</span></div>
+        {% if comp.missing_labels %}<div class="hj-row hj-gap-xs hj-mt-sm">{% for m in comp.missing_labels %}<span class="hj-badge sm hj-tone-idle">{{ m }}</span>{% endfor %}</div>
+        {% else %}<div class="hj-small hj-muted hj-mt-sm">Nothing missing.</div>{% endif %}
+      {% else %}<div class="hj-small hj-muted">Only active employees are measured.</div>{% endif %}
+    </div>
+  </div>
+  <section class="hj-section">
+    <div class="hj-section-title"><div><h3>Acting and deputation</h3></div>
+      <div class="hj-actions"><button class="hj-btn default xs" hx-get="{% url 'relations:assignment_new' %}?employee={{ employee_id }}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>Add</button></div></div>
+    {% include "relations/partials/employee_assignments.html" %}
+  </section>
+  <section class="hj-section">
+    <div class="hj-section-title"><div><h3>Disciplinary history</h3><p>HR only.</p></div>
+      <div class="hj-actions"><button class="hj-btn default xs" hx-get="{% url 'relations:case_new' %}?employee={{ employee_id }}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>Open case</button></div></div>
+    {% include "relations/partials/employee_cases.html" %}
+  </section>
+</div>

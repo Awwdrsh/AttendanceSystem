@@ -1,0 +1,12 @@
+<div class="hj-stack" data-modal-title="{{ r.type_name }}">
+  <div class="hj-grid" style="--cols:2">
+    {% field "Dates" dates %}
+    {% field "Days" days %}
+  </div>
+  {% if r.reason %}{% field "Reason" r.reason %}{% endif %}
+  <ol class="hj-timeline">
+    <li class="done"><div class="hj-strong hj-sm">Submitted</div><div class="hj-small hj-muted">{{ r.created_at|bs_datetime }}</div></li>
+    <li{% if r.status != 'pending' %} class="done"{% endif %}><div class="hj-strong hj-sm">{{ decided_title }}</div><div class="hj-small hj-muted">{% if r.decided_at %}{{ r.decided_at|bs_datetime }}{% else %}Not decided yet{% endif %}</div></li>
+    <li><div class="hj-strong hj-sm">Balance updated</div></li>
+  </ol>
+</div>

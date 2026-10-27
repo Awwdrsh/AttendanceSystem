@@ -1,0 +1,59 @@
+<form class="hj-form" data-modal-title="{% if t %}Edit {{ e.nameEn|default:e.code }}{% else %}New leave type{% endif %}"
+      hx-post="{% if t %}{% url 'leave:type_edit' t.id %}{% else %}{% url 'leave:type_new' %}{% endif %}" hx-swap="none"
+      x-data="{ paid: {{ e.paid|yesno:'true,false' }} }" style="--gap:24px">
+  {% if locked %}
+  {% alert "info" title="Statutory leave" %}{{ citation }}. Entitlement fields cannot be changed.{% endalert %}
+  {% endif %}
+  {% section "Basics" %}
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="lt-code">Code<span class="req" aria-hidden="true">*</span></label>
+      <input class="hj-input mono" id="lt-code" name="code" maxlength="20" required value="{{ e.code }}" {% if t %}disabled{% endif %} style="text-transform:uppercase"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="lt-name">Name<span class="req" aria-hidden="true">*</span></label>
+      <input class="hj-input" id="lt-name" name="nameEn" maxlength="80" required value="{{ e.nameEn }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="lt-gender">Applies to</label>
+      <select class="hj-select" id="lt-gender" name="genderScope" {% if locked %}disabled{% endif %}>{% for v, l in genders %}<option value="{{ v }}" {% if v == e.genderScope %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+    <label class="hj-check-row" style="align-self:end;padding-bottom:8px"><input type="checkbox" class="hj-switch" name="paid" {% if e.paid %}checked{% endif %} {% if locked %}disabled{% endif %} x-model="paid"> Paid leave</label>
+    {% if locked and e.paid %}<input type="hidden" name="paid" value="on">{% endif %}
+  </div>
+  {% endsection %}
+  {% section "Entitlement" %}
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="lt-basis">Accrual basis</label>
+      <select class="hj-select" id="lt-basis" name="accrualBasis" {% if locked %}disabled{% endif %}>{% for v, l in bases %}<option value="{{ v }}" {% if v == e.accrualBasis %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+    <div class="hj-fieldset"><label class="hj-label" for="lt-ad">Days per accrual</label>
+      <input class="hj-input num" type="number" min="0" step="0.01" id="lt-ad" name="accrualDays" value="{{ e.accrualDays }}" {% if locked %}disabled{% endif %}></div>
+    <div class="hj-fieldset"><label class="hj-label" for="lt-apw">Worked days per accrual</label><div class="hj-help">For example 20</div>
+      <input class="hj-input num" type="number" min="0" step="1" id="lt-apw" name="accrualPerWorkedDays" value="{{ e.accrualPerWorkedDays }}" {% if locked %}disabled{% endif %}></div>
+    <div class="hj-fieldset"><label class="hj-label" for="lt-max">Maximum balance</label>
+      <input class="hj-input num" type="number" min="0" step="0.1" id="lt-max" name="maxBalance" value="{{ e.maxBalance }}" {% if locked %}disabled{% endif %}></div>
+    <div class="hj-fieldset"><label class="hj-label" for="lt-exp">Expires after (days)</label>
+      <input class="hj-input num" type="number" min="0" step="1" id="lt-exp" name="expiryDays" value="{{ e.expiryDays }}" {% if locked %}disabled{% endif %}></div>
+    <div class="hj-fieldset"><label class="hj-label" for="lt-neg">Negative balance allowed (days)</label>
+      <input class="hj-input num" type="number" min="0" step="0.1" id="lt-neg" name="negativeBalanceLimit" value="{{ e.negativeBalanceLimit }}"></div>
+  </div>
+  {% endsection %}
+  {% section "Requests" %}
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="lt-cert">Certificate needed after (days)</label>
+      <input class="hj-input num" type="number" min="0" step="1" id="lt-cert" name="certificateAfterDays" value="{{ e.certificateAfterDays }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="lt-mcd">Max consecutive days</label>
+      <input class="hj-input num" type="number" min="0" step="1" id="lt-mcd" name="maxConsecutiveDays" value="{{ e.maxConsecutiveDays }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="lt-msd">Minimum service (days)</label>
+      <input class="hj-input num" type="number" min="0" step="1" id="lt-msd" name="minServiceDays" value="{{ e.minServiceDays }}"></div>
+  </div>
+  <div class="hj-stack hj-mt" style="--gap:12px">
+    <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="allowHalfDay" {% if e.allowHalfDay %}checked{% endif %}> Allow half days</label>
+    <label class="hj-check-row" x-show="paid"><input type="checkbox" class="hj-switch" name="allowHourly" {% if e.allowHourly %}checked{% endif %}> <span>Allow by the hour<br><span class="hj-help">Short leave for part of a day, deducted as hours of the working day</span></span></label>
+    <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="sandwichRule" {% if e.sandwichRule %}checked{% endif %}> <span>Sandwich rule<br><span class="hj-help">Count weekly offs and holidays that fall between leave days, including between this and another leave just before or after it</span></span></label>
+    <div class="hj-fieldset"><label class="hj-label" for="lt-club">Club with</label>
+      <div class="hj-help">A clubbed type takes the other type's place in the leave order and follows its sandwich rule</div>
+      <select class="hj-select" id="lt-club" name="clubWithId"><option value="">Not clubbed</option>{% for x in club_options %}<option value="{{ x.id }}" {% if x.id == e.clubWithId %}selected{% endif %}>{{ x.name_en }}</option>{% endfor %}</select></div>
+    <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="carryForward" {% if e.carryForward %}checked{% endif %}> <span>Carry forward<br><span class="hj-help">Unused balance moves to the next leave year</span></span></label>
+    <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="encashable" {% if e.encashable %}checked{% endif %}> <span>Encash at separation<br><span class="hj-help">Unused balance is paid out when the employee leaves</span></span></label>
+  </div>
+  {% endsection %}
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn">Save leave type</button>
+  </div>
+</form>

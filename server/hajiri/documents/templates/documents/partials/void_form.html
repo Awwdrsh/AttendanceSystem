@@ -1,0 +1,11 @@
+<form class="hj-form" data-modal-title="Void {{ letter.ref_no }}" data-modal-size="sm" hx-post="{% url 'documents:void' letter.id %}" hx-swap="none" x-data="{ reason: '' }">
+  <p class="hj-sm" style="margin:0">A voided letter keeps its reference number but is marked VOID and hidden from the employee. Issue a corrected letter afterwards if needed.</p>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="vd-reason">Reason <span class="req">*</span></label>
+    <textarea id="vd-reason" class="hj-input" name="reason" rows="2" maxlength="300" required x-model="reason"></textarea>
+  </div>
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn danger" :disabled="reason.trim().length < 3">Void letter</button>
+  </div>
+</form>

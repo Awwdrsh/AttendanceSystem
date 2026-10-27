@@ -1,0 +1,134 @@
+{% load perf_tags %}
+<div class="hj-stack" data-modal-title="{{ cycle.name }}: {{ rv.name_en }}" data-modal-size="xl" style="--gap:16px">
+  <div class="hj-between">
+    <div class="hj-row" style="gap:8px">{% badge cycle.status|phase_label cycle.status|phase_tone %}
+      <span class="hj-sm hj-muted">{{ cycle.period_start|bs_date_short }} to {{ cycle.period_end|bs_date_short }}{% if rv.manager_name %} · Manager {{ rv.manager_name }}{% endif %}</span></div>
+    {% if can_print %}<a class="hj-btn default xs" href="{% url 'performance:review_print' rv.id %}" target="_blank" rel="noopener"><i class="ti ti-printer" aria-hidden="true"></i>Print</a>{% endif %}
+  </div>
+  {% if editable and deadline %}{% alert "info" %}Due {{ deadline|bs_date_short }}. Save a draft any time; submitting locks your answers.{% endalert %}{% endif %}
+  {% if side == 'self' and rv.self_submitted_at and not released %}{% alert "ok" %}Submitted. You will see your manager's review when HR releases the results.{% endalert %}{% endif %}
+  {% if side == 'manager' and cycle.status == 'self_review' and not rv.self_submitted_at %}{% alert "warn" %}Waiting for the self review. You can start once it is submitted or the manager review phase opens.{% endalert %}{% endif %}
+
+  {% if released %}
+  <div class="hj-card p-md hj-between">
+    <div><div class="hj-sm hj-muted">Final rating</div><div class="hj-strong hj-ok-text" style="font-size:1.25rem">{{ rv.final_rating|rating_label:labels }}</div></div>
+    {% if rv.self_score is not None %}<div><div class="hj-sm hj-muted">Your self score</div><div class="hj-strong">{{ rv.self_score|rating_label:labels }}</div></div>{% endif %}
+  </div>
+  {% elif d.role != 'self' %}
+  <div class="hj-grid" style="--cols:3">
+    <div><div class="hj-small hj-muted">Self score</div><div class="hj-sm hj-strong">{{ rv.self_score|rating_label:labels }}</div></div>
+    <div><div class="hj-small hj-muted">Manager score</div><div class="hj-sm hj-strong">{{ rv.manager_score|rating_label:labels }}</div></div>
+    <div><div class="hj-small hj-muted">Final rating</div><div class="hj-sm hj-strong">{{ rv.final_rating|rating_label:labels }}</div></div>
+  </div>
+  {% endif %}
+
+  <form id="rv-form" class="hj-stack" style="--gap:16px" hx-post="{% url 'performance:review_save' rv.id %}" hx-target="#hj-drawer-body"
+        x-data="{ left: {{ unrated }} }" @change="left = [...$el.querySelectorAll('[data-rate-item]')].filter((g) => !g.querySelector('input:checked')).length">
+  {% include "performance/partials/review_items.html" with title="Goals" weight=cycle.goals_weight items=goals type="goal" %}
+  {% include "performance/partials/review_items.html" with title="Competencies" weight=cycle.competency_weight items=competencies type="competency" %}
+
+  <div class="hj-stack" style="--gap:8px">
+    <div class="hj-strong">{% if side == 'self' %}Your summary{% else %}Manager's summary{% endif %}</div>
+    {% if editable %}<textarea class="hj-input" name="summary" rows="3" maxlength="4000" aria-label="Summary" placeholder="{% if side == 'self' %}Highlights, challenges and what you want to grow in{% else %}Overall assessment and next steps{% endif %}">{{ summary }}</textarea>
+    {% else %}<div class="hj-sm" style="white-space:pre-wrap">{{ summary|default:"—" }}</div>{% endif %}
+    {% if side == 'manager' and rv.self_summary %}<div class="hj-sm hj-muted">Employee's summary</div><div class="hj-sm" style="white-space:pre-wrap">{{ rv.self_summary }}</div>{% endif %}
+    {% if side == 'self' and released and rv.manager_summary %}<div class="hj-sm hj-muted">Manager's summary</div><div class="hj-sm" style="white-space:pre-wrap">{{ rv.manager_summary }}</div>{% endif %}
+  </div>
+
+  {% if side == 'manager' %}
+  <fieldset class="hj-stack" style="--gap:8px;border:0;padding:0;margin:0"{% if not editable %} disabled{% endif %}>
+    <div class="hj-strong">Recommendation</div>
+    <div class="hj-form-row" style="--cols:3">
+      <div class="hj-fieldset"><label class="hj-label" for="rv-inc">Increment (%)</label><input class="hj-input" id="rv-inc" name="increment_pct" type="number" min="0" max="100" step="any" value="{{ rec.incrementPct|numstr }}"></div>
+      <label class="hj-check-row" style="margin-top:28px"><input type="checkbox" class="hj-check" name="promotion"{% if rec.promotion %} checked{% endif %}> Promotion</label>
+      <label class="hj-check-row" style="margin-top:28px"><input type="checkbox" class="hj-check" name="pip"{% if rec.pip %} checked{% endif %}> Improvement plan</label>
+    </div>
+    {% if editable %}{% multi_pick "training_course_ids" courses selected=rec_courses label="Training needs" help="Enrolled automatically when the results are released" max=10 text="title" extra="" placeholder="Search courses" id="rv-tr" %}
+    {% else %}<div class="hj-fieldset"><div class="hj-label">Training needs</div><div class="hj-sm">{% for c in courses %}{% if c.id in rec_courses %}{% badge c.title "info" %} {% endif %}{% endfor %}{% if not rec_courses %}—{% endif %}</div></div>{% endif %}
+    <div class="hj-fieldset"><label class="hj-label" for="rv-notes">Notes</label><textarea class="hj-input" id="rv-notes" name="notes" rows="2" maxlength="2000">{{ rec.notes|default:'' }}</textarea></div>
+  </fieldset>
+  {% endif %}
+
+  {% if editable %}
+  <div class="hj-end" style="gap:8px">
+    <button class="hj-btn default" type="submit" name="submit" value="0">Save draft</button>
+    <button class="hj-btn" type="button" hx-post="{% url 'performance:review_save' rv.id %}" hx-include="#rv-form" hx-vals='{"submit": "1"}' hx-target="#hj-drawer-body"
+            {% confirm_attrs "You cannot change your ratings after submitting." title="Submit review?" label="Submit" tone="brand" %}
+            :disabled="left > 0"{% if unrated %} disabled{% endif %}><span x-text="left > 0 ? 'Rate ' + left + ' more' : 'Submit review'">{% if unrated %}Rate {{ unrated }} more{% else %}Submit review{% endif %}</span></button>
+  </div>
+  {% endif %}
+  </form>
+
+  {% if cycle.peer_enabled %}
+  <hr class="hj-divider">
+  <div class="hj-stack" style="--gap:8px">
+    <div class="hj-strong">Peer feedback</div>
+    {% for p in d.peers.nominations %}
+    <div class="hj-between">
+      <div><div class="hj-sm">{{ p.reviewer_name }}</div>
+        {% if d.role != 'self' and p.status == 'submitted' %}<div class="hj-small hj-muted">{{ p.rating|rating_label:labels }}{% if p.strengths %} · Strengths: {{ p.strengths }}{% endif %}{% if p.improvements %} · To improve: {{ p.improvements }}{% endif %}</div>{% endif %}</div>
+      <div class="hj-row nowrap" style="gap:4px">
+        {% if p.status == 'nominated' %}{% badge "Awaiting approval" "warn" %}{% elif p.status == 'approved' %}{% badge "Asked" "ok" %}{% elif p.status == 'declined' %}{% badge "declined" "idle" %}{% else %}{% badge p.status "ok" %}{% endif %}
+        {% if d.role != 'self' and p.status == 'nominated' %}
+          <button class="hj-btn light xs" hx-post="{% url 'performance:peer_decide' p.id %}" hx-vals='{"approve": "1"}' hx-target="#hj-drawer-body"><i class="ti ti-check" aria-hidden="true"></i>Approve</button>
+          <button class="hj-btn subtle gray xs" hx-post="{% url 'performance:peer_decide' p.id %}" hx-vals='{"approve": "0"}' hx-target="#hj-drawer-body"><i class="ti ti-x" aria-hidden="true"></i>Decline</button>
+        {% endif %}
+        {% if p.status == 'nominated' or d.role != 'self' and p.status == 'approved' %}<button class="hj-btn subtle danger xs" hx-post="{% url 'performance:peer_remove' p.id %}" hx-target="#hj-drawer-body">Remove</button>{% endif %}
+      </div>
+    </div>
+    {% empty %}<div class="hj-sm hj-muted">No peer reviewers yet.</div>{% endfor %}
+    {% if d.can.nominatePeers %}
+    <form class="hj-row nowrap" style="align-items:flex-end" hx-post="{% url 'performance:review_peers' rv.id %}" hx-target="#hj-drawer-body">
+      <div class="hj-grow">{% if d.role == 'self' %}{% multi_pick "employee_ids" colleagues label="Suggest colleagues to review you" max=10 required=True id="rv-peers" %}{% else %}{% multi_pick "employee_ids" colleagues label="Add peer reviewers" max=10 required=True id="rv-peers" %}{% endif %}</div>
+      <button class="hj-btn" type="submit">Add</button>
+    </form>
+    {% endif %}
+    {% if d.role == 'self' and released and d.peers.aggregate %}
+      {% if d.peers.aggregate.shown %}
+      <div class="hj-card p-sm">
+        <div class="hj-sm" style="font-weight:500">From {{ d.peers.aggregate.count }} colleagues (anonymous): {{ d.peers.aggregate.averageRating|rating_label:labels }}</div>
+        {% for x in d.peers.aggregate.strengths %}<div class="hj-sm">+ {{ x }}</div>{% endfor %}
+        {% for x in d.peers.aggregate.improvements %}<div class="hj-sm hj-muted">→ {{ x }}</div>{% endfor %}
+      </div>
+      {% else %}<div class="hj-sm hj-muted">Fewer than {{ cycle.peer_min }} colleagues responded, so peer feedback is not shown to keep it anonymous.</div>{% endif %}
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if d.role != 'self' %}
+  <hr class="hj-divider">
+  <div class="hj-stack" style="--gap:8px">
+    <div class="hj-strong">Journal for this period</div>
+    <div class="hj-small hj-muted">{% if d.role == 'hr' %}Notes from every manager.{% else %}Your private notes. Only you and HR see them.{% endif %}</div>
+    {% for j in d.journal %}
+    <div class="hj-card p-sm"><div class="hj-row" style="gap:8px">{% badge j.tag j.tag|tag_tone %}<span class="hj-small hj-muted">{{ j.note_date|bs_date_short }} · {{ j.author_name }}</span></div>
+      <div class="hj-sm" style="margin-top:4px;white-space:pre-wrap">{{ j.note }}</div></div>
+    {% empty %}<div class="hj-sm hj-muted">No notes.</div>{% endfor %}
+  </div>
+  {% endif %}
+
+  {% if d.can.calibrate %}
+  <hr class="hj-divider">
+  <form class="hj-stack" style="--gap:8px" hx-post="{% url 'performance:review_calibrate' rv.id %}" hx-target="#hj-drawer-body">
+    <div class="hj-strong">Calibrate</div>
+    {% if rv.calibration_reason %}<div class="hj-small hj-muted">Last note: {{ rv.calibration_reason }}</div>{% endif %}
+    <div class="hj-form-row" style="--cols:3">
+      <div class="hj-fieldset"><label class="hj-label" for="rv-fr">Final rating<span class="req">*</span></label><input class="hj-input" id="rv-fr" name="final_rating" type="number" min="1" max="5" step="0.25" value="{{ final_value }}" required></div>
+      <div class="hj-fieldset" style="grid-column:span 2"><label class="hj-label" for="rv-reason">Reason<span class="req">*</span></label><textarea class="hj-input" id="rv-reason" name="reason" rows="2" minlength="5" maxlength="1000" placeholder="Why the final rating differs" required></textarea></div>
+    </div>
+    <div class="hj-end"><button class="hj-btn" type="submit">Set final rating</button></div>
+  </form>
+  {% endif %}
+
+  {% if d.role == 'self' and released %}
+  <hr class="hj-divider">
+  {% if rv.acknowledged_at %}<p class="hj-sm hj-muted" style="margin:0">You acknowledged this review on {{ rv.acknowledged_at|bs_date_short }}.{% if rv.employee_comment %} “{{ rv.employee_comment }}”{% endif %}</p>
+  {% else %}
+  <form class="hj-stack" style="--gap:8px" hx-post="{% url 'performance:review_acknowledge' rv.id %}" hx-target="#hj-drawer-body">
+    <div class="hj-strong">Acknowledge</div>
+    <textarea class="hj-input" name="comment" rows="2" maxlength="2000" placeholder="Optional comment for your manager and HR" aria-label="Comment"></textarea>
+    <div class="hj-end"><button class="hj-btn" type="submit">I have read my review</button></div>
+  </form>
+  {% endif %}
+  {% endif %}
+</div>

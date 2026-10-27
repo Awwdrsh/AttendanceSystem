@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Clock-in devices · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack hj-gap-lg">
+  {% page_header "Clock-in devices" subtitle="Phones and computers you may clock in from. HR approves each one." %}{% endpage_header %}
+  {% if required %}{% alert "warn" %}Your company requires a registered device to clock in from the website or app.{% endalert %}
+  {% else %}{% alert "idle" %}Your company does not require registered devices at the moment. You can still register this device in advance.{% endalert %}{% endif %}
+  <div class="hj-card p-md">
+    <form class="hj-stack hj-gap-sm" hx-post="{% url 'relations:device_register' %}" hx-swap="none" x-data="{ label: '{{ guess|escapejs }}', held: !!(window.Hajiri && Hajiri.existingDeviceToken && Hajiri.existingDeviceToken()) }">
+      <div class="hj-row hj-gap-xs"><i class="ti ti-device-mobile" aria-hidden="true"></i><span class="hj-strong">Register this device</span></div>
+      <input type="hidden" name="device_token">
+      <div class="hj-row hj-gap-sm" style="align-items:flex-end">
+        <div class="hj-fieldset hj-grow" style="min-width:200px"><label class="hj-label" for="dev-label">Name</label><input id="dev-label" name="label" class="hj-input" maxlength="80" x-model="label"></div>
+        <button type="submit" class="hj-btn" :disabled="!label.trim()">Register</button>
+      </div>
+      {% if devices %}<div class="hj-small hj-muted" x-show="held" x-cloak>This browser already holds a device key. Registering again only works if the old one was removed.</div>{% endif %}
+      <div class="hj-small hj-muted">The key stays in this browser. Clearing the browser's data removes it and you will need to register again.</div>
+    </form>
+  </div>
+  {% include "relations/partials/my_device_list.html" %}
+</div>
+{% endblock %}

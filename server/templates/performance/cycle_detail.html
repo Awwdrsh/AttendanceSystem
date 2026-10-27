@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% load perf_tags %}
+{% block title %}{{ c.name }} · Review cycles · Hajiri{% endblock %}
+{% block content %}
+<div id="perf-main" hx-get="{{ request.get_full_path }}" hx-trigger="hj:refresh-perf-main from:body" hx-select="#perf-main" hx-swap="outerHTML" class="hj-stack" style="--gap:20px">
+  <div class="hj-between">
+    <div class="hj-row" style="gap:8px">
+      <a class="hj-iconbtn" href="{% url 'performance:cycles' %}" aria-label="Back to cycles"><i class="ti ti-arrow-left" aria-hidden="true"></i></a>
+      <div><div class="hj-row" style="gap:8px"><span class="hj-strong" style="font-size:1.1rem">{{ c.name }}</span>{% badge c.status|phase_label c.status|phase_tone %}</div>
+        <div class="hj-small hj-muted">{{ c.period_start|bs_date_short }} to {{ c.period_end|bs_date_short }}</div></div>
+    </div>
+    {% if action %}<button class="hj-btn" hx-post="{{ action.url }}" hx-swap="none" {% confirm_attrs action.message title=action.title label=action.confirm tone="brand" %}>{{ action.label }}</button>{% endif %}
+  </div>
+  {% if c.status == 'draft' %}<p class="hj-sm hj-muted" style="margin:0">Launching creates a review for every active employee in scope, with their goals for the period and the competencies of their role, and tells them their self review is open.</p>
+  {% else %}{% stat_strip stats %}{% endif %}
+  {% if dist %}
+  <div class="hj-card p-md hj-stack" style="--gap:12px">
+    <div class="hj-strong">Rating distribution</div>
+    <div style="display:flex;height:22px;border-radius:8px;overflow:hidden;background:var(--hj-line-soft)">
+      {% for o in dist.overall %}{% if o.n %}<div style="width:{{ o.pct }}%;background:var(--hj-{{ o.tone }});color:#fff;font-size:12px;display:flex;align-items:center;justify-content:center">{{ o.level }}: {{ o.n }}</div>{% endif %}{% endfor %}
+    </div>
+    <div class="hj-row hj-small hj-muted" style="gap:16px">{% for l in labels %}<span>{{ forloop.counter }} = {{ l }}</span>{% endfor %}</div>
+    <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+      <thead><tr><th>Department</th><th class="right">1</th><th class="right">2</th><th class="right">3</th><th class="right">4</th><th class="right">5</th><th class="right">Average</th></tr></thead>
+      <tbody>{% for dep in dist.departments %}<tr><td>{{ dep.name }}</td>{% for n in dep.counts %}<td class="right">{% if n %}{{ n }}{% endif %}</td>{% endfor %}<td class="right">{{ dep.avg|floatformat:2 }}</td></tr>{% endfor %}</tbody></table></div></div>
+    <div class="hj-small hj-muted">Open a review to set its final rating. Every change needs a reason and is recorded.</div>
+  </div>
+  {% endif %}
+  {% if c.status != 'draft' %}
+  <div>
+    {% include "performance/partials/pills.html" with pills=filters %}
+    {% if rows %}
+    <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+      <thead><tr><th>Employee</th><th>Manager</th><th>Self</th><th>Manager</th>{% if c.peer_enabled %}<th>Peers</th>{% endif %}<th>Rating</th></tr></thead>
+      <tbody>{% for r in rows %}<tr style="cursor:pointer" hx-get="{% url 'performance:review_detail' r.id %}" hx-target="#hj-drawer-body">
+        <td><div class="hj-sm" style="font-weight:500">{{ r.name_en }}</div><div class="hj-small hj-muted">{{ r.designation|default:"" }}{% if r.designation and r.department %} · {% endif %}{{ r.department|default:"" }}</div></td>
+        <td>{% if r.manager_name %}{{ r.manager_name }}{% else %}<span class="hj-warn-text">None (HR reviews)</span>{% endif %}</td>
+        <td>{% if r.self_submitted_at %}{% badge "Done" "ok" %}{% else %}{% badge "Pending" "idle" %}{% endif %}</td>
+        <td>{% if r.manager_submitted_at %}{% badge "Done" "ok" %}{% else %}{% badge "Pending" "idle" %}{% endif %}</td>
+        {% if c.peer_enabled %}<td>{{ r.peers_done }}/{{ r.peers_total }}{% if r.peers_pending %}<span class="hj-small hj-warn-text"> · {{ r.peers_pending }} to approve</span>{% endif %}</td>{% endif %}
+        <td>{% if r.final_rating is not None %}{{ r.final_rating|rating_label:labels }}{% elif r.manager_score is not None %}{{ r.manager_score|rating_label:labels }}{% else %}—{% endif %}</td>
+      </tr>{% endfor %}</tbody></table></div></div>
+    {% else %}{% empty_state title="Nobody here" compact=True %}{% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

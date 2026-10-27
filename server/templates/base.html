@@ -1,0 +1,80 @@
+{% extends "_document.html" %}
+{% comment %}
+  The signed-in app shell (Layout.tsx): sidebar with hubs from every app's nav.py, account menu, command palette,
+  offline banner, and the hub header with tabs when the page is a hub tab. Pages fill {% block content %}.
+  Optional blocks: page_class (e.g. "wide"), title.
+{% endcomment %}
+{% block body %}
+{% with n=hj_nav %}
+<div class="hj-shell">
+  <header class="hj-topbar">
+    <div class="hj-row nowrap hj-gap-sm">
+      <button type="button" class="hj-iconbtn" data-nav-toggle aria-label="Open menu"><i class="ti ti-menu-2" aria-hidden="true"></i></button>
+      <a href="/" aria-label="Home">{% include "components/brand.html" with height=18 %}</a>
+    </div>
+    <button type="button" class="hj-iconbtn" data-palette-open aria-label="Search"><i class="ti ti-search" aria-hidden="true"></i></button>
+  </header>
+  <div class="hj-backdrop" data-nav-toggle></div>
+
+  <nav class="hj-nav" aria-label="Main">
+    <div class="hj-nav-top">
+      <a href="/" aria-label="Home" class="hj-truncate">{% include "components/brand.html" with height=20 %}</a>
+      <a href="/me/notifications" class="hj-iconbtn hj-bell" {% if n.unread %}data-unread{% endif %} aria-label="Notifications{% if n.unread %} ({{ n.unread }} unread){% endif %}" title="Notifications"><i class="ti ti-bell" aria-hidden="true"></i></a>
+    </div>
+    <button type="button" class="hj-search" data-palette-open aria-label="Search pages"><i class="ti ti-search" aria-hidden="true"></i> Search or jump to <span class="hj-kbd">⌘K</span></button>
+
+    <div class="hj-nav-scroll">
+      {% for title, hubs in n.groups %}
+        {% if n.groups|length > 1 %}<div class="hj-nav-section">{{ title }}</div>{% else %}<div style="height:8px"></div>{% endif %}
+        {% for v in hubs %}
+          <a class="hj-nav-link" href="{{ v.url }}" {% if v.active %}aria-current="page"{% endif %}>
+            <i class="ti ti-{{ v.hub.icon }}" aria-hidden="true"></i><span class="hj-truncate">{{ v.hub.title }}</span>
+            {% if v.badge %}<span class="hj-count">{% if v.badge > 99 %}99+{% else %}{{ v.badge }}{% endif %}</span>{% endif %}
+          </a>
+        {% endfor %}
+      {% endfor %}
+    </div>
+
+    {% if n.settings %}
+      <div style="padding-bottom:6px"><a class="hj-nav-link" href="{{ n.settings.url }}" {% if n.settings.active %}aria-current="page"{% endif %}><i class="ti ti-settings" aria-hidden="true"></i>Settings</a></div>
+    {% endif %}
+    <div class="hj-nav-bottom">
+      <button type="button" class="hj-usermenu-btn" data-menu-toggle="hj-usermenu" aria-haspopup="menu" aria-expanded="false" aria-label="Account menu">
+        <span class="hj-avatar">{{ hj_user.name|initials }}</span>
+        <span class="hj-grow"><span class="hj-truncate hj-sm" style="display:block;font-weight:500;line-height:1.25">{{ hj_user.name }}</span><span class="hj-truncate hj-small hj-muted" style="display:block;line-height:1.25">{{ hj_user.email }}</span></span>
+        <i class="ti ti-selector hj-muted" aria-hidden="true"></i>
+      </button>
+      <div class="hj-menu up" id="hj-usermenu" role="menu" hidden>
+        <div class="hj-menu-label">Signed in as {% for r in hj_user.roles %}{{ r }}{% if not forloop.last %}, {% endif %}{% endfor %}</div>
+        {% for a in n.account %}<a class="hj-menu-item" role="menuitem" href="{{ a.url }}"><i class="ti ti-{{ a.icon }}" aria-hidden="true"></i>{{ a.label }}</a>{% endfor %}
+        <button type="button" class="hj-menu-item" role="menuitem" data-theme-toggle><i class="ti ti-moon" data-theme-icon aria-hidden="true"></i><span data-theme-label>Dark mode</span></button>
+        <div class="hj-menu-sep"></div>
+        <form method="post" action="/logout">{% csrf_token %}<button type="submit" class="hj-menu-item danger" role="menuitem"><i class="ti ti-logout" aria-hidden="true"></i>Sign out</button></form>
+      </div>
+    </div>
+  </nav>
+
+  <main class="hj-main" id="main">
+    <div class="hj-offline" id="hj-offline" role="status" hidden><i class="ti ti-cloud-off" aria-hidden="true"></i><span></span></div>
+    <div class="hj-page {% block page_class %}{% endblock %}">
+      {% if n.current_tab %}
+        {% page_header n.current.hub.title in_hub=True %}{% endpage_header %}
+        {% if n.hub_tabs %}
+          <nav class="hj-tabs" aria-label="{{ n.current.hub.title }}">
+            {% for t in n.hub_tabs %}<a class="hj-tab" href="{{ t.url }}" {% if t.active %}aria-current="page"{% endif %}>{{ t.label }}</a>{% endfor %}
+          </nav>
+        {% endif %}
+      {% endif %}
+      {% block content %}{% endblock %}
+    </div>
+    {% if hj_popup_notices_url %}<div id="hj-popup-notices" hx-get="{{ hj_popup_notices_url }}" hx-trigger="load" hx-swap="outerHTML"></div>{% endif %}
+  </main>
+</div>
+
+<dialog class="hj-modal hj-palette" id="hj-palette" aria-label="Search pages and actions">
+  <div class="hj-palette-input"><i class="ti ti-search" aria-hidden="true"></i><input id="hj-palette-input" type="text" placeholder="Search pages and actions" autocomplete="off" aria-controls="hj-palette-list"></div>
+  <ul id="hj-palette-list" role="listbox"></ul>
+</dialog>
+{% if n %}<script type="application/json" id="hj-palette-data">{{ n.palette|to_json }}</script>{% endif %}
+{% endwith %}
+{% endblock %}

@@ -1,0 +1,19 @@
+{# CategoriesSection: document types and their switches. #}
+<div id="doc-categories" class="hj-stack hj-gap-md" hx-get="{% url 'documents:categories' %}" hx-trigger="hj:refresh-doc-categories from:body" hx-swap="outerHTML">
+  <div class="hj-row hj-end"><button type="button" class="hj-btn" hx-get="{% url 'documents:category_new' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>New document type</button></div>
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Document type</th><th>Employees upload</th><th>Expiry date required</th><th>Visible to employee</th><th>In use</th></tr></thead>
+    <tbody>
+    {% for c in categories %}
+      <tr>
+        <td><div class="hj-strong{% if not c.active %} hj-muted{% endif %}">{{ c.name }}</div><div class="hj-small hj-muted mono">{{ c.code }}</div></td>
+        {% for key, label, on in c.toggles %}
+        <td><input type="checkbox" class="hj-switch" aria-label="{{ label }}"{% if on %} checked{% endif %}
+              hx-post="{% url 'documents:category_toggle' c.id %}" hx-vals='{"key": "{{ key }}"}' hx-trigger="change" hx-swap="none"
+              name="value" value="1"></td>
+        {% endfor %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div></div>
+</div>

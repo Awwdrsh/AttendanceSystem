@@ -1,0 +1,20 @@
+{# MyChangeRequests.tsx: the employee's own profile change requests. Hidden when there are none. #}
+<div id="my-requests" hx-get="{% url 'people:my_requests' %}" hx-trigger="hj:refresh-my-requests from:body" hx-swap="outerHTML">
+{% if requests %}
+{% section "My change requests" %}
+<div class="hj-stack hj-gap-sm">
+  {% for r in requests %}
+  <div class="hj-card p-md">
+    <div class="hj-row hj-between hj-gap-xs hj-mb">
+      <div><div class="hj-strong hj-sm">{{ r.sectionLabel }}</div><div class="hj-small hj-muted">Requested {{ r.created_at|bs_date }}</div></div>
+      <div class="hj-row hj-gap-xs">{% badge r.badge.0 r.badge.1 %}
+        {% if r.status == 'pending' %}<button type="button" class="hj-btn danger subtle xs" hx-post="{% url 'people:request_cancel' r.id %}" hx-swap="none">Cancel</button>{% endif %}</div>
+    </div>
+    {% include "people/partials/change_list.html" with changes=r.summary.changes %}
+    {% if r.status == 'rejected' and r.decision_reason %}<p class="hj-sm hj-bad-text" style="margin:6px 0 0">HR: {{ r.decision_reason }}</p>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endsection %}
+{% endif %}
+</div>

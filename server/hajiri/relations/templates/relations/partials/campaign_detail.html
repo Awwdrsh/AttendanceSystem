@@ -1,0 +1,24 @@
+<div class="hj-stack hj-gap-md" data-modal-title="Review request" data-modal-size="lg">
+  <div class="hj-strong">{{ c.title }}</div>
+  <div class="hj-sm hj-muted">Confirm by {{ c.due_date|bs_date }}. Sections: {{ c.section_labels|join:", " }}.</div>
+  {% if c.status == 'open' %}
+  <div class="hj-row hj-gap-xs">
+    <button type="button" class="hj-btn default xs" hx-post="{% url 'relations:kye_nudge' c.id %}" hx-target="#hj-drawer-body">Remind those pending</button>
+    <button type="button" class="hj-btn subtle gray xs" hx-post="{% url 'relations:kye_close' c.id %}" hx-target="#hj-drawer-body">Close</button>
+  </div>
+  {% endif %}
+  {% if responses %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Employee</th><th>Response</th><th>Record</th><th>When</th></tr></thead>
+    <tbody>
+    {% for r in responses %}
+      <tr>
+        <td><a href="/employees/{{ r.employee_id }}" style="color:inherit"><div class="hj-sm">{{ r.name_en }}</div><div class="hj-small hj-muted">{{ r.emp_code }}</div></a></td>
+        <td>{% badge r.status_label r.status_tone %}</td>
+        <td>{% if r.completeness is not None %}<span class="hj-sm{% if r.completeness < 100 %} hj-warn-text{% endif %}">{{ r.completeness }}%</span>{% endif %}</td>
+        <td class="hj-small">{% if r.responded_at %}{{ r.responded_at|relative_time }}{% elif r.last_nudged_at %}reminded {{ r.last_nudged_at|relative_time }}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody></table></div></div>
+  {% else %}{% empty_state title="Nothing here yet." compact=True %}{% endif %}
+</div>

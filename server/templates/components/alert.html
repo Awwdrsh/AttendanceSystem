@@ -1,0 +1,6 @@
+{% with t=tone|default:'info' %}
+<div class="hj-alert hj-tone-{% if t == 'err' %}bad{% else %}{{ t }}{% endif %}" role="{% if t == 'bad' or t == 'err' %}alert{% else %}status{% endif %}">
+  <i class="ti ti-{% if t == 'ok' %}circle-check{% elif t == 'warn' %}alert-triangle{% elif t == 'bad' or t == 'err' %}alert-circle{% else %}info-circle{% endif %}" aria-hidden="true"></i>
+  <div class="hj-grow">{% if title %}<div class="hj-alert-title">{{ title }}</div>{% endif %}{{ body }}</div>
+</div>
+{% endwith %}

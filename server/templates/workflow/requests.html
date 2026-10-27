@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Requests · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Requests" subtitle="Every leave, attendance correction and overtime request across the company. Decisions are made from the Approvals inbox so each one is signed." %}
+  <form method="get" class="hj-row hj-gap-xs" hx-get="{% url 'workflow:history' %}" hx-trigger="change" hx-target=".hj-page" hx-select=".hj-page" hx-swap="outerHTML" hx-push-url="true">
+    <input type="hidden" name="tab" value="{{ tab }}">
+    <select name="status" class="hj-select" aria-label="Filter by status" style="width:160px">
+      <option value="any" {% if not status %}selected{% endif %}>Any status</option>
+      {% for v, l in status_opts %}<option value="{{ v }}" {% if v == status %}selected{% endif %}>{{ l }}</option>{% endfor %}
+    </select>
+  </form>
+  <a class="hj-btn default" href="{% url 'workflow:approvals' %}">Open approvals</a>
+{% endpage_header %}
+<div class="hj-pills" role="tablist">
+  {% for t in tabs %}<a class="hj-pill" href="?tab={{ t.key }}&status={{ status|default:'any' }}" {% if t.key == tab %}aria-current="page"{% endif %}>{{ t.label }} <span class="hj-muted num">{{ counts|get_item:t.key }}</span></a>{% endfor %}
+</div>
+{% data_table table %}
+{% endblock %}

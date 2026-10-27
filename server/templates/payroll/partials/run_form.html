@@ -1,0 +1,16 @@
+<form class="hj-form" data-modal-title="New pay run" hx-post="{% url 'payroll:run_new' %}" hx-swap="none" x-data="{ type: 'regular' }">
+  {% bs_month_input "bs_year" "bs_month" year=y month=m label="Pay period" %}
+  <div class="hj-fieldset"><label class="hj-label" for="pr-type">Run type</label>
+    <select class="hj-select" id="pr-type" name="run_type" x-model="type">{% for v, l in types %}<option value="{{ v }}">{{ l }}</option>{% endfor %}</select></div>
+  <template x-if="type === 'arrears' || type === 'supplementary'">
+    <div class="hj-fieldset"><label class="hj-label" for="pr-ref">Corrects locked run<span class="req" aria-hidden="true" x-show="type === 'arrears'">*</span></label>
+      <div class="hj-help">The locked run this one adjusts.</div>
+      <select class="hj-select" id="pr-ref" name="references_run_id" :required="type === 'arrears'"><option value="">Choose a run</option>{% for v, l in locked_runs %}<option value="{{ v }}">{{ l }}</option>{% endfor %}</select></div>
+  </template>
+  <div x-show="type === 'final_settlement'" x-cloak class="hj-stack" style="--gap:12px">
+    {% employee_picker "employee_id" status="all" required=True %}
+    <div class="hj-fieldset"><label class="hj-label" for="pr-notice">Notice pay (NPR)</label><div class="hj-help">Positive to pay, negative to deduct.</div>
+      <input class="hj-input" id="pr-notice" name="notice_pay" placeholder="0.00" inputmode="decimal"></div>
+  </div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn">Create pay run</button></div>
+</form>

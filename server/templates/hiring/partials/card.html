@@ -1,0 +1,28 @@
+<div class="hj-card p-sm"{% if c.status != 'active' %} style="opacity:.6"{% endif %}>
+  <div class="hj-row hj-between nowrap" style="align-items:flex-start;gap:4px">
+    <button type="button" class="hj-link-btn" style="text-align:left;min-width:0;flex:1;color:inherit" hx-get="{% url 'hiring:candidate' c.id %}" hx-target="#hj-drawer-body">
+      <span class="hj-sm hj-strong hj-truncate" style="display:block">{{ c.name }}</span>
+      <span class="hj-small hj-muted hj-truncate" style="display:block">{{ c.exp }}{% if c.current_employer %} · {{ c.current_employer }}{% endif %}</span>
+    </button>
+    {% if c.status == 'active' %}
+    <div style="position:relative" x-data="{ open: false }" @click.outside="open = false">
+      <button type="button" class="hj-iconbtn" aria-label="Move {{ c.name }}" @click="open = !open"><i class="ti ti-dots" aria-hidden="true"></i></button>
+      <div class="hj-menu down" role="menu" x-show="open" x-cloak @click="open = false">
+        <div class="hj-menu-label">Move to</div>
+        {% for s in c.moves %}<button type="button" class="hj-menu-item" role="menuitem" hx-post="{% url 'hiring:move' c.id %}" hx-vals='{"stage": "{{ s|escapejs }}", "name": "{{ c.name|escapejs }}"}' hx-swap="none">{{ s }}</button>{% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  <div class="hj-row hj-gap-xs" style="margin-top:6px">
+    {% include "hiring/partials/score_badge.html" with b=c.score_badge %}
+    {% if c.rating %}<span class="hj-badge hj-tone-warn sm"><i class="ti ti-star-filled" aria-hidden="true"></i>{{ c.rating }}</span>{% endif %}
+    {% if c.other_applications > 0 %}<span class="hj-badge hj-tone-accent sm">Applied before</span>{% endif %}
+    {% if c.status != 'active' %}<span class="hj-badge hj-tone-idle sm">{% if c.status == 'hired' %}Hired{% else %}Closed{% endif %}</span>{% endif %}
+    {% for t in c.tags|slice:":3" %}<span class="hj-badge hj-tone-idle sm">{{ t }}</span>{% endfor %}
+  </div>
+  <div class="hj-row hj-between" style="margin-top:6px;gap:4px">
+    <span class="hj-small hj-muted">{% if c.when %}<i class="ti ti-calendar-event" aria-hidden="true"></i> {{ c.when }}{% else %}{{ c.stage_changed_at|relative_time }}{% endif %}</span>
+    {% if c.next %}<button type="button" class="hj-btn subtle xs" hx-post="{% url 'hiring:move' c.id %}" hx-vals='{"stage": "{{ c.next|escapejs }}", "name": "{{ c.name|escapejs }}"}' hx-swap="none">{{ c.next }}<i class="ti ti-arrow-right" aria-hidden="true"></i></button>{% endif %}
+  </div>
+</div>

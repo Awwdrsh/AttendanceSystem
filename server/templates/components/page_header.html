@@ -1,0 +1,21 @@
+{# PageHeader.tsx. Inside a hub tab the hub shows the title, so only the subtitle and actions remain. #}
+{% if embedded and not in_hub %}
+  {% if subtitle or body.strip %}
+  <div class="hj-embedded-header">
+    {% if subtitle %}<p class="hj-page-subtitle" style="margin:0">{{ subtitle }}</p>{% else %}<span></span>{% endif %}
+    {% if body.strip %}<div class="hj-actions">{{ body }}</div>{% endif %}
+  </div>
+  {% endif %}
+{% else %}
+<div class="hj-page-header">
+  {% if back %}<a class="hj-back" href="{{ back }}"><i class="ti ti-chevron-left" aria-hidden="true"></i>{{ back_label|default:"Back" }}</a>{% endif %}
+  <div class="hj-page-header-row">
+    <div style="min-width:0">
+      {% if eyebrow %}<div class="hj-eyebrow">{{ eyebrow }}</div>{% endif %}
+      <h1 class="hj-page-title">{{ title }}</h1>
+      {% if subtitle %}<p class="hj-page-subtitle">{{ subtitle }}</p>{% endif %}
+    </div>
+    {% if body.strip %}<div class="hj-actions">{{ body }}</div>{% endif %}
+  </div>
+</div>
+{% endif %}

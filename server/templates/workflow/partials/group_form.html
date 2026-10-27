@@ -1,0 +1,22 @@
+<form class="hj-form" data-modal-title="{% if group %}Edit group: {{ group.name }}{% else %}New user group{% endif %}"
+      hx-post="{% if group %}{% url 'workflow:group_edit' group.id %}{% else %}{% url 'workflow:group_new' %}{% endif %}" hx-swap="none">
+  <p class="hj-sm hj-muted" style="margin:0">A group is a named set of people. Use it as an approval step (anyone in the group can approve) or to aim a flow at its members.</p>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="wf-gname">Name<span class="req" aria-hidden="true">*</span></label>
+    <input class="hj-input" id="wf-gname" name="name" maxlength="80" required placeholder="e.g. Plant supervisors" value="{{ group.name|default:'' }}">
+  </div>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="wf-gdesc">Description</label>
+    <input class="hj-input" id="wf-gdesc" name="description" maxlength="300" value="{{ group.description|default:'' }}">
+  </div>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="wf-gmembers">Members</label>
+    <select class="hj-select" id="wf-gmembers" name="userIds" multiple size="8">
+      {% for u in users %}<option value="{{ u.value }}" {% if u.value in members %}selected{% endif %}>{{ u.label }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn">Save group</button>
+  </div>
+</form>

@@ -1,0 +1,7 @@
+<div id="settings-panel">
+{% if tab == 'attendance' %}{% include "home/partials/attendance_rules.html" %}
+{% elif tab == 'security' %}{% include "home/partials/security.html" %}
+{% elif tab == 'time' %}{% if time_url %}<div hx-get="{{ time_url }}" hx-trigger="load" hx-swap="outerHTML"><div class="hj-skeleton" style="height:120px"></div></div>{% endif %}
+{% elif tab == 'org' %}{% include "home/partials/org.html" %}
+{% else %}{% include "home/partials/generic.html" %}{% endif %}
+</div>

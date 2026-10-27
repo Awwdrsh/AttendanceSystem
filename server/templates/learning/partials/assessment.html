@@ -1,0 +1,8 @@
+<form class="hj-form" data-modal-title="{{ a.title }}" data-modal-size="lg" hx-post="{% url 'learning:assessment' id %}" hx-target="this" hx-swap="outerHTML">
+  <p class="hj-sm hj-muted" style="margin:0">Pass mark {{ a.passMark|default:60 }}%. {{ a.attemptsLeft }} attempts left.</p>
+  {% for q in a.questions %}{% with qi=forloop.counter0 %}
+  <fieldset class="hj-stack" style="--gap:4px;border:0;padding:0;margin:0"><legend class="hj-sm" style="font-weight:500">{{ forloop.counter }}. {{ q.prompt }}</legend>
+    {% for o in q.options %}<label class="hj-check-row"><input type="radio" class="hj-check" name="q{{ qi }}" value="{{ forloop.counter0 }}" required> {{ o }}</label>{% endfor %}
+  </fieldset>{% endwith %}{% endfor %}
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit"{% if not a.attemptsLeft %} disabled{% endif %}>Submit answers</button></div>
+</form>

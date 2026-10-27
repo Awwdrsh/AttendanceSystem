@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Approvals · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Approvals" subtitle=subtitle %}
+  {% include "workflow/partials/delegate_button.html" %}
+  {% if items|length > 1 %}
+  <form hx-post="{% url 'workflow:bulk_approve' %}" hx-swap="none" {% confirm_attrs bulk_message title="Approve all requests?" label=bulk_label tone="brand" %}>
+    {% for it in items %}<input type="hidden" name="ids" value="{{ it.instanceId }}">{% endfor %}
+    <button type="submit" class="hj-btn default"><i class="ti ti-checks" aria-hidden="true"></i>Approve all ({{ items|length }})</button>
+  </form>
+  {% endif %}
+{% endpage_header %}
+<div id="approvals" hx-get="{% url 'workflow:inbox' %}{% if kind != 'all' %}?kind={{ kind|urlencode }}{% endif %}" hx-trigger="hj:refresh-approvals from:body" hx-swap="innerHTML">
+  {% include "workflow/partials/inbox.html" %}
+</div>
+{% endblock %}

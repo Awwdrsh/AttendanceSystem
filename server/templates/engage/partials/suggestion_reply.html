@@ -1,0 +1,9 @@
+<form class="hj-form" data-modal-title="Reply to suggestion" data-modal-size="lg" hx-post="{% url 'engage:suggestion_reply' s.id %}" hx-swap="none" x-data="{ reply: {{ s.reply|default:''|json_attr }} }">
+  <p class="hj-sm hj-muted" style="margin:0;white-space:pre-wrap">“{{ s.body }}”</p>
+  <div class="hj-fieldset"><label class="hj-label" for="sr-reply">Your reply</label>
+    <textarea id="sr-reply" name="reply" class="hj-input" rows="4" maxlength="3000" x-model="reply"></textarea></div>
+  <div><label class="hj-switch"><input type="checkbox" name="is_public" value="1"{% if share %} checked{% endif %}><span>Share the suggestion and reply with everyone</span></label>
+    <div class="hj-help">Shown on the Engage page under the suggestion box.</div></div>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="!reply.trim()">Save reply</button></div>
+</form>

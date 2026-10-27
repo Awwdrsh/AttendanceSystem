@@ -1,0 +1,8 @@
+{# HomeTimer.tsx: compact project timer on Home. #}
+<section class="hj-section">
+  <div class="hj-section-title">
+    <div><h3>Project timer</h3></div>
+    <div class="hj-actions"><a class="hj-sm" href="{% url 'timesheets:mine' %}">Open timesheet</a></div>
+  </div>
+  {% include "timesheets/partials/timer.html" %}
+</section>

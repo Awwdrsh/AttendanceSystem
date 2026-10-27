@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Know your employee · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack hj-gap-lg">
+  {% page_header "Know your employee" subtitle="Ask employees to review and confirm their records. Changes they need go through the usual profile change approval." %}
+    <button class="hj-btn" hx-get="{% url 'relations:kye_new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>New review request</button>
+  {% endpage_header %}
+  {% section "Review requests" %}{% include "relations/partials/campaign_list.html" %}{% endsection %}
+  {% include "relations/partials/completeness.html" %}
+</div>
+{% endblock %}

@@ -1,0 +1,19 @@
+{# New or edit topic. Confidential topics can only be owned by HR, so the owner list narrows when it is ticked. #}
+<form class="hj-form" data-modal-title="{% if category.id %}Edit topic{% else %}New topic{% endif %}"
+      hx-post="{% if category.id %}{% url 'helpdesk:category_edit' category.id %}{% else %}{% url 'helpdesk:category_new' %}{% endif %}" hx-swap="none"
+      x-data="{ name: '{{ category.name|escapejs }}', confidential: {% if category.confidential %}true{% else %}false{% endif %} }">
+  <input type="hidden" name="sort" value="{{ category.sort|default:0 }}">
+  <div class="hj-fieldset"><label class="hj-label" for="cat-name">Name <span class="req">*</span></label>
+    <input id="cat-name" class="hj-input" name="name" maxlength="80" required x-model="name" value="{{ category.name }}"></div>
+  <div class="hj-fieldset"><label class="hj-label" for="cat-desc">Description</label>
+    <input id="cat-desc" class="hj-input" name="description" maxlength="300" value="{{ category.description|default:'' }}"></div>
+  <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="confidential" x-model="confidential"{% if category.confidential %} checked{% endif %}> Confidential (HR only)</label>
+  <div class="hj-fieldset"><label class="hj-label" for="cat-owner">Owner</label>
+    <select id="cat-owner" class="hj-select" name="owner_user_id">
+      <option value="">Whole HR team</option>
+      {% for a in agents %}<option value="{{ a.id }}"{% if not a.is_hr %} :disabled="confidential" :hidden="confidential"{% endif %}{% if category.owner_user_id == a.id %} selected{% endif %}>{{ a.name }}</option>{% endfor %}
+    </select>
+    <p class="hj-help">Leave empty for the whole HR team.</p></div>
+  <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="active"{% if category.active %} checked{% endif %}> In use</label>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn" :disabled="!name.trim()">Save topic</button></div>
+</form>

@@ -1,0 +1,52 @@
+<div id="from-home" class="hj-stack" style="--gap:16px">
+<div class="hj-section-title">
+  <div><h3>Work from home</h3>
+    <p class="hj-small hj-muted" style="margin:0">Everyone who clocked in from home, with the photo taken at clock-in. Photos are encrypted and deleted automatically after the retention period.</p></div>
+  <div class="hj-row hj-gap-xs">
+    <nav class="hj-pills" aria-label="Punches">
+      <a class="hj-pill" href="?date={{ date }}&amp;span={{ span }}&amp;dir=in" hx-get="?date={{ date }}&amp;span={{ span }}&amp;dir=in" hx-target="#from-home" hx-swap="outerHTML" hx-push-url="true"{% if dir == 'in' %} aria-current="page"{% endif %}>Clock-ins</a>
+      <a class="hj-pill" href="?date={{ date }}&amp;span={{ span }}&amp;dir=all" hx-get="?date={{ date }}&amp;span={{ span }}&amp;dir=all" hx-target="#from-home" hx-swap="outerHTML" hx-push-url="true"{% if dir == 'all' %} aria-current="page"{% endif %}>Ins and outs</a>
+    </nav>
+    <nav class="hj-pills" aria-label="Span">
+      <a class="hj-pill" href="?date={{ date }}&amp;span=day&amp;dir={{ dir }}" hx-get="?date={{ date }}&amp;span=day&amp;dir={{ dir }}" hx-target="#from-home" hx-swap="outerHTML" hx-push-url="true"{% if span == 'day' %} aria-current="page"{% endif %}>Day</a>
+      <a class="hj-pill" href="?date={{ date }}&amp;span=week&amp;dir={{ dir }}" hx-get="?date={{ date }}&amp;span=week&amp;dir={{ dir }}" hx-target="#from-home" hx-swap="outerHTML" hx-push-url="true"{% if span == 'week' %} aria-current="page"{% endif %}>7 days</a>
+    </nav>
+    <form hx-get="{% url 'punch:from_home' %}" hx-target="#from-home" hx-swap="outerHTML" hx-push-url="true" hx-trigger="change">
+      <input type="hidden" name="span" value="{{ span }}"><input type="hidden" name="dir" value="{{ dir }}">
+      {% bs_date_input "date" value=date max=today %}
+    </form>
+  </div>
+</div>
+{% stat_strip stats %}
+{% for d in days %}
+<div class="hj-stack" style="--gap:8px">
+  {% if span == 'week' %}<div class="hj-sm hj-strong">{{ d.label }} <span class="hj-muted" style="font-weight:400">· {{ d.punches|length }}</span></div>{% endif %}
+  <div class="hj-grid" style="--cols:4">
+  {% for p in d.punches %}
+    <div class="hj-card p-0" style="overflow:hidden">
+      {% if p.has_photo %}
+      <button type="button" style="display:block;width:100%;border:0;padding:0;background:none;cursor:pointer" data-modal-open="photo-{{ p.punch_id }}" aria-label="Open photo of {{ p.name_en }}">
+        <img src="{% url 'punch:photo' p.photo_id %}" alt="{{ p.name_en }} at {{ p.time }}" loading="lazy" style="width:100%;aspect-ratio:4/3;object-fit:cover;display:block">
+      </button>
+      {% modal "photo-"|add:p.punch_id p.modal_title size="lg" %}<img src="{% url 'punch:photo' p.photo_id %}" alt="{{ p.name_en }}" style="width:100%;border-radius:12px;display:block">{% endmodal %}
+      {% else %}
+      <div style="aspect-ratio:4/3;background:var(--hj-canvas);display:grid;place-items:center"><div class="hj-stack" style="--gap:4px;align-items:center">
+        <i class="ti {% if p.photo_purged %}ti-photo-x{% else %}ti-camera-off{% endif %} hj-muted" style="font-size:22px" aria-hidden="true"></i>
+        <span class="hj-small hj-muted">{% if p.photo_purged %}Deleted after retention period{% else %}No photo{% endif %}</span></div></div>
+      {% endif %}
+      <div class="hj-stack" style="--gap:6px;padding:10px 12px">
+        <div class="hj-row nowrap hj-between hj-gap-xs">
+          <div style="min-width:0"><div class="hj-sm hj-strong hj-truncate">{{ p.name_en }}</div><div class="hj-small hj-muted hj-truncate">{{ p.emp_code }}{% if p.designation %} · {{ p.designation }}{% endif %}</div></div>
+          <span class="hj-badge {% if p.direction == 'in' %}hj-tone-accent{% else %}hj-tone-idle{% endif %}" style="flex:none">{{ p.dir_label }} {{ p.time }}</span>
+        </div>
+        <div class="hj-row nowrap hj-gap-xs"><i class="ti {% if p.location_shared %}ti-map-pin{% else %}ti-map-pin-off{% endif %}" style="color:var(--hj-{% if p.location_shared %}ok{% else %}warn{% endif %})" aria-hidden="true"></i><span class="hj-small hj-muted">{{ p.location_text }}</span></div>
+        {% if p.reason %}<div class="hj-small hj-muted">“{{ p.reason }}”</div>{% endif %}
+      </div>
+    </div>
+  {% endfor %}
+  </div>
+</div>
+{% empty %}
+{% empty_state title=empty_title hint="When someone clocks in from home their photo appears here. Pick another day to look back." icon="home" %}
+{% endfor %}
+</div>

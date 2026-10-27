@@ -1,0 +1,18 @@
+{% if not result.problems %}
+  {% alert "ok" %}All {{ result.checked }} chains reach someone.{% endalert %}
+{% else %}
+<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table" style="min-width:760px">
+  <thead><tr><th>Employee</th><th>Request</th><th>Step</th><th>Problem</th><th>Fix</th></tr></thead>
+  <tbody>
+  {% for p in problems %}
+    <tr>
+      <td><div class="hj-sm">{{ p.name }}</div><div class="hj-small hj-muted">{{ p.empCode }}</div></td>
+      <td><div class="hj-sm">{{ p.typeLabel }}</div>{% if p.flow %}<div class="hj-small hj-muted">{{ p.flow }}</div>{% endif %}</td>
+      <td class="hj-sm">{{ p.step }}. {{ p.stepLabel }}</td>
+      <td class="hj-sm">{{ p.problem }}</td>
+      <td class="hj-sm hj-muted">{{ p.suggestion }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div></div>
+{% endif %}

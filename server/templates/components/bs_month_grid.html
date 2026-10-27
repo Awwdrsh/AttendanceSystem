@@ -1,0 +1,5 @@
+{# A read-only BS month calendar (server-rendered); other slices may wrap cells with their own content. #}
+<div class="hj-date-grid" role="grid" aria-label="{{ year|bs_month:month }}">
+  <div class="hj-date-wd">Sun</div><div class="hj-date-wd">Mon</div><div class="hj-date-wd">Tue</div><div class="hj-date-wd">Wed</div><div class="hj-date-wd">Thu</div><div class="hj-date-wd">Fri</div><div class="hj-date-wd sat">Sat</div>
+  {% for c in cells %}<div role="gridcell" class="hj-date-cell{% if not c.in_month %} out{% endif %}{% if c.saturday %} sat{% if c.in_month %} in{% endif %}{% endif %}{% if c.ad == today %} today{% endif %}" title="{{ c.ad|bs_date_long }}"><span class="d">{{ c.bs.day }}</span><span class="g">{{ c.ad|slice:"8:"|add:0 }}</span></div>{% endfor %}
+</div>

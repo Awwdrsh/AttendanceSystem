@@ -1,0 +1,13 @@
+<form class="hj-form" data-modal-title="Hire and create the employee" hx-post="{% url 'hiring:hire' app.id %}" hx-swap="none"
+      x-data="{ code: '' }" @hj:hiring-done.window="$el.closest('dialog') && $el.closest('dialog').close()">
+  <p class="hj-sm hj-muted" style="margin:0">The employee record is filled from the application and the accepted offer{% if join_date %}, joining on {{ join_date|bs_date_short }}{% endif %}. Department and manager come from the job; you can change them on the employee page.</p>
+  <div class="hj-fieldset"><label class="hj-label" for="hi-code">Employee code<span class="req" aria-hidden="true">*</span></label>
+    <input id="hi-code" class="hj-input mono" name="empCode" maxlength="32" required autofocus x-model="code" @input="code = code.toUpperCase()"></div>
+  <div class="hj-fieldset"><label class="hj-label" for="hi-gender">Gender</label>
+    <select id="hi-gender" class="hj-select" name="gender"><option value=""></option><option value="female">Female</option><option value="male">Male</option><option value="other">Other</option></select></div>
+  <div class="hj-fieldset"><label class="hj-label" for="hi-shift">Shift</label>
+    <select id="hi-shift" class="hj-select" name="shiftId"><option value=""></option>{% for s in shifts %}<option value="{{ s.id }}">{{ s.name_en }} ({{ s.code }})</option>{% endfor %}</select></div>
+  {% bs_date_input "probationEnd" label="Probation ends" min=join_date %}
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="!code.trim()"><i class="ti ti-user-check" aria-hidden="true"></i>Hire</button></div>
+</form>

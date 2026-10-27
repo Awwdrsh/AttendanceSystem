@@ -1,0 +1,23 @@
+{# "Where you're signed in" (SecurityPage.tsx), swapped as a whole after a sign-out. #}
+<div id="sessions">
+  <div class="hj-section-title">
+    <div><h3>Where you're signed in</h3><p>Sessions end after an hour without use and always after 12 hours.</p></div>
+    {% if others %}<button type="button" class="hj-btn default xs" hx-post="/_/web/sessions/revoke-others" hx-target="#sessions" hx-swap="outerHTML"><i class="ti ti-logout" aria-hidden="true"></i>Sign out everywhere else</button>{% endif %}
+  </div>
+  {% if not sessions %}{% empty_state title="No active sessions" %}{% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th scope="col">Device</th><th scope="col">Signed in</th><th scope="col">Last active</th><th scope="col">Two-step</th><th scope="col"></th></tr></thead>
+    <tbody>{% for x in sessions %}
+      <tr>
+        <td><div class="hj-row nowrap hj-gap-sm"><i class="ti ti-{% if 'Android' in x.device or 'iOS' in x.device %}device-mobile{% else %}device-desktop{% endif %}" style="font-size:18px" aria-hidden="true"></i>
+          <div><div class="hj-row nowrap hj-gap-xs"><span class="hj-strong">{{ x.device }}</span>{% if x.current %}<span class="hj-badge sm hj-tone-ok">This device</span>{% endif %}</div>
+          <div class="hj-small hj-muted mono">{{ x.ip|default:"Unknown address" }}</div></div></div></td>
+        <td>{{ x.created_at|bs_datetime }}</td>
+        <td>{{ x.last_seen_at|relative_time }}</td>
+        <td>{% if x.two_factor %}<span class="hj-badge hj-tone-ok">Verified</span>{% else %}<span class="hj-muted">Password only</span>{% endif %}</td>
+        <td class="right">{% if not x.current %}<button type="button" class="hj-btn danger subtle xs" hx-post="/_/web/sessions/{{ x.id }}/revoke" hx-target="#sessions" hx-swap="outerHTML">Sign out</button>{% endif %}</td>
+      </tr>{% endfor %}
+    </tbody>
+  </table></div></div>
+  {% endif %}
+</div>

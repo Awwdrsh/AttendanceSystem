@@ -1,0 +1,14 @@
+{# MyChecklistCard.tsx: the joiner's (or leaver's) own tasks, and tasks owed for others. #}
+<div id="my-checklist" class="hj-card p-lg" hx-get="{% url 'lifecycle:my_checklist' %}" hx-trigger="hj:refresh-my-checklist from:body" hx-swap="outerHTML">
+  {% if own %}
+  {% if leaving %}{% section "Before you leave" hint="Tasks to finish before your last day." %}{% endsection %}{% else %}{% section "Getting started" hint="A few things to set you up. Tick them off as you go." %}{% endsection %}{% endif %}
+  <div class="hj-stack hj-gap-md{% if groups %} hj-mb{% endif %}">{% for t in own %}{% include "lifecycle/partials/task_row.html" %}{% endfor %}</div>
+  {% endif %}
+  {% if groups %}
+  {% section "Checklist tasks for others" hint="Onboarding and exit tasks waiting on you." %}{% endsection %}
+  <div class="hj-stack hj-gap-lg">{% for g in groups %}
+    <div class="hj-stack hj-gap-sm"><div class="hj-row hj-gap-xs"><span class="hj-sm hj-strong">{{ g.name }}</span><span class="hj-badge sm {% if g.kind == 'offboarding' %}hj-tone-bad{% else %}hj-tone-info{% endif %}">{% if g.kind == 'offboarding' %}Leaving{% else %}Joining{% endif %}</span></div>
+      {% for t in g.tasks %}{% include "lifecycle/partials/task_row.html" %}{% endfor %}
+      {% if g.more %}<span class="hj-small hj-muted">and {{ g.more }} more</span>{% endif %}</div>{% endfor %}</div>
+  {% endif %}
+</div>

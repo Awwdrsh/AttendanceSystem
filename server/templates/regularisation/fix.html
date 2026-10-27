@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Fix a punch · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack" style="max-width:560px">
+{% page_header "Fix a punch" subtitle=subtitle %}{% endpage_header %}
+{% card padding="lg" %}{% include "regularisation/partials/fix_form.html" %}{% endcard %}
+</div>
+{% endblock %}

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Employees · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack hj-gap-md">
+  {% page_header "Employees" subtitle="Everyone on the payroll, with their code, role and status." %}
+    <button type="button" class="hj-btn default" hx-get="{% url 'employees:import' %}" hx-target="#hj-modal-body"><i class="ti ti-upload" aria-hidden="true"></i>Import CSV</button>
+    <button type="button" class="hj-btn" hx-get="{% url 'employees:new' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>Add employee</button>
+  {% endpage_header %}
+  <div class="hj-row hj-between hj-gap-sm">
+    <nav class="hj-pills" style="margin:0" aria-label="Status">
+      <a class="hj-pill" href="?status=active"{% if status == 'active' %} aria-current="page"{% endif %}>Active</a>
+      <a class="hj-pill" href="?status=exited"{% if status == 'exited' %} aria-current="page"{% endif %}>Exited</a>
+    </nav>
+    <span class="hj-sm hj-muted num">{{ count }}</span>
+  </div>
+  {% data_table table %}
+</div>
+{% endblock %}

@@ -1,0 +1,28 @@
+{# HomeCompanyCard.tsx: the latest pinned announcement, today's celebrations and a survey waiting for an answer. #}
+<div class="hj-card p-lg" id="engage-home-card">
+  <div class="hj-row hj-between" style="margin-bottom:12px">
+    <div class="hj-row" style="gap:8px"><i class="ti ti-confetti" aria-hidden="true"></i><span class="hj-strong">Company</span></div>
+    <a href="{% url 'engage:feed' %}" class="hj-sm">Open Engage</a>
+  </div>
+  <div class="hj-stack" style="--gap:14px">
+    {% if d.announcement %}
+    <div>
+      <div class="hj-row" style="gap:6px;margin-bottom:2px"><i class="ti ti-pin" aria-hidden="true" style="color:var(--hj-hydro)"></i><span class="hj-sm hj-strong">{{ d.announcement.title }}</span>
+        {% if d.announcement.requiresAck and not d.announcement.acked %}<span class="hj-badge hj-tone-warn sm">Please read</span>{% endif %}</div>
+      <div class="hj-sm hj-muted">{{ d.announcement.body|truncatechars:180 }}</div>
+    </div>
+    {% endif %}
+    {% if d.celebrations %}
+    <div class="hj-row" style="gap:6px">
+      {% for c in d.celebrations|slice:":4" %}<span class="hj-badge {% if c.kind == 'birthday' %}hj-tone-bad{% elif c.kind == 'joined' %}hj-tone-info{% else %}hj-tone-accent{% endif %}"><i class="ti {% if c.kind == 'birthday' %}ti-balloon{% elif c.kind == 'joined' %}ti-user-plus{% else %}ti-confetti{% endif %}" aria-hidden="true"></i>{{ c.label }}</span>{% endfor %}
+      {% if more %}<span class="hj-small hj-muted">and {{ more }} more</span>{% endif %}
+    </div>
+    {% endif %}
+    {% if d.survey %}
+    <div class="hj-row nowrap hj-between" style="gap:10px">
+      <div class="hj-row nowrap" style="gap:8px;min-width:0"><i class="ti ti-clipboard-list" aria-hidden="true"></i><span class="hj-sm hj-truncate">{{ d.survey.title }} <span class="hj-small hj-muted">until {{ d.survey.closesOn|bs_date }}</span></span></div>
+      <a class="hj-btn xs" style="flex:none" href="{% url 'engage:surveys' %}">{% if d.survey.kind == 'poll' %}Vote{% else %}Answer{% endif %}{% if d.surveysWaiting > 1 %} ({{ d.surveysWaiting }}){% endif %}</a>
+    </div>
+    {% endif %}
+  </div>
+</div>

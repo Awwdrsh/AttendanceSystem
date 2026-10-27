@@ -1,0 +1,15 @@
+<form class="hj-form" data-modal-title="{% if c.id %}Edit competency{% else %}New competency{% endif %}" data-modal-size="lg"
+      hx-post="{% if c.id %}{% url 'performance:competency_edit' c.id %}{% else %}{% url 'performance:competency_new' %}{% endif %}" hx-swap="none">
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="cp-n">Name<span class="req">*</span></label><input class="hj-input" id="cp-n" name="name" required maxlength="120" value="{{ c.name|default:'' }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="cp-k">Type</label><select class="hj-select" id="cp-k" name="kind">
+      <option value="knowledge"{% if c.kind == 'knowledge' %} selected{% endif %}>Knowledge</option><option value="skill"{% if c.kind == 'skill' %} selected{% endif %}>Skill</option><option value="attitude"{% if c.kind == 'attitude' %} selected{% endif %}>Attitude</option></select></div>
+  </div>
+  <div class="hj-fieldset"><label class="hj-label" for="cp-d">Description</label><textarea class="hj-input" id="cp-d" name="description" rows="2" maxlength="2000">{{ c.description|default:'' }}</textarea></div>
+  <div class="hj-strong hj-sm">What each level looks like</div>
+  {% for n, t in levels %}<div class="hj-fieldset"><label class="hj-label" for="cp-l{{ n }}">Level {{ n }}</label><input class="hj-input" id="cp-l{{ n }}" name="level_{{ n }}" maxlength="500" value="{{ t }}"></div>{% endfor %}
+  {% include "performance/partials/tags_field.html" with name="designations" tags=c.designations label="Designations" help="Empty means every designation" id="cp-des" maxlength=120 %}
+  {% include "performance/partials/tags_field.html" with name="grades" tags=c.grades label="Grades" help="Empty means every grade" id="cp-g" maxlength=40 %}
+  <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="active"{% if c.active %} checked{% endif %}> Active</label>
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit">Save</button></div>
+</form>

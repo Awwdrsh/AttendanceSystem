@@ -1,0 +1,15 @@
+<form class="hj-form" data-modal-title="{% if id %}Edit kiosk{% else %}Add kiosk{% endif %}" hx-post="{% if id %}{% url 'field:kiosk_edit' id %}{% else %}{% url 'field:kiosk_new' %}{% endif %}" hx-target="#hj-modal-body" x-data="{ name: '{{ k.name|escapejs }}' }">
+  <label class="hj-fieldset"><span class="hj-label">Name <span class="req">*</span></span>
+    <input class="hj-input" name="name" maxlength="80" placeholder="Front desk tablet" required x-model="name" value="{{ k.name }}"></label>
+  <label class="hj-fieldset"><span class="hj-label">Branch</span>
+    <select class="hj-select" name="branch_id"><option value="">Any branch</option>{% for b in branches %}<option value="{{ b.id }}"{% if b.id == k.branch_id %} selected{% endif %}>{{ b.name_en }}</option>{% endfor %}</select></label>
+  <label class="hj-fieldset"><span class="hj-label">Location</span>
+    <select class="hj-select" name="location_id"><option value="">None</option>{% for l in locations %}<option value="{{ l.id }}"{% if l.id == k.location_id %} selected{% endif %}>{{ l.name }}</option>{% endfor %}</select>
+    <span class="hj-help">Punches at this kiosk count as at this location.</span></label>
+  <label class="hj-switch"><input type="checkbox" name="selfie_required"{% if k.selfie_required %} checked{% endif %}><span>Take a photo with every punch</span></label>
+  <p class="hj-help" style="margin:0">Stops one person punching for another. Photos are encrypted and deleted after the retention period.</p>
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="!name.trim()">{% if id %}Save{% else %}Add and get code{% endif %}</button>
+  </div>
+</form>

@@ -1,0 +1,6 @@
+<div class="hj-stack" data-modal-title="Pair {{ name }}" style="--gap:12px;align-items:center">
+  <p class="hj-sm" style="margin:0;text-align:center">On the tablet, open <code>{{ kiosk_url }}</code> and enter this code:</p>
+  <div class="num" style="font-size:36px;font-weight:700;letter-spacing:.12em">{{ code }}</div>
+  <button type="button" class="hj-btn default xs" data-copy="{{ code }}">Copy code</button>
+  {% alert "warn" %}The code works once and expires at {{ expires }}. It is not shown again.{% endalert %}
+</div>

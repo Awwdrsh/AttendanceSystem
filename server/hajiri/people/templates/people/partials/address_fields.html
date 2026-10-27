@@ -1,0 +1,10 @@
+<div class="hj-stack hj-gap-xs">
+  <div class="hj-sm hj-strong">{{ title }}</div>
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label">Province</label><select name="{{ pre }}_province" class="hj-select"><option value=""></option>{% for p in provinces %}<option{% if a.province == p %} selected{% endif %}>{{ p }}</option>{% endfor %}</select></div>
+    <div class="hj-fieldset"><label class="hj-label">District</label><input name="{{ pre }}_district" class="hj-input" value="{{ a.district|default:'' }}"></div>
+    <div class="hj-fieldset"><label class="hj-label">Municipality</label><input name="{{ pre }}_municipality" class="hj-input" value="{{ a.municipality|default:'' }}"></div>
+    <div class="hj-fieldset"><label class="hj-label">Ward</label><input type="number" min="1" max="40" name="{{ pre }}_ward" class="hj-input" value="{{ a.ward|default:'' }}"></div>
+  </div>
+  <div class="hj-fieldset"><label class="hj-label">Street or tole</label><input name="{{ pre }}_street" class="hj-input" value="{{ a.street|default:'' }}"></div>
+</div>

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Travel · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Travel" subtitle="Ask before you travel. The daily allowance follows your grade and destination; settle the trip with your bills when you are back." %}
+  <button class="hj-btn" hx-get="{% url 'expenses:travel_new' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>Request travel</button>
+{% endpage_header %}
+<div id="exp-trips" hx-get="{% url 'expenses:trips_list' %}?own=1" hx-trigger="hj:refresh-exp-trips from:body" hx-swap="innerHTML">
+  {% include "expenses/partials/trips_block.html" %}
+</div>
+{% if open %}<div hx-get="{% url 'expenses:trip_detail' open %}" hx-target="#hj-drawer-body" hx-trigger="load"></div>{% endif %}
+{% endblock %}

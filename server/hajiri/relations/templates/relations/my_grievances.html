@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Grievances · Hajiri{% endblock %}
+{% block content %}
+<div class="hj-stack hj-gap-lg" x-data @hj:open-grievance.window="htmx.ajax('GET', $event.detail.url, '#hj-drawer-body')">
+  {% page_header "Grievances" subtitle="Raise a formal complaint about how you are treated at work. A committee hears it, not your manager." %}
+    <button class="hj-btn" hx-get="{% url 'relations:grievance_new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>Raise a grievance</button>
+  {% endpage_header %}
+  {% include "relations/partials/grievance_list.html" %}
+  {% if is_member %}
+  {% section "Cases for the committee" hint="You are on the grievance committee. Keep these confidential." %}
+    {% include "relations/partials/grievance_list.html" with grievances=handle scope='handle' show_name=True list_id='committee-cases' filter='' %}
+  {% endsection %}
+  {% endif %}
+</div>
+{% endblock %}

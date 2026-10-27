@@ -1,0 +1,38 @@
+{# Upload document drawer (EmployeeDocuments.tsx). The title defaults to the document type's name. #}
+<form class="hj-form" data-modal-title="{% if replaces %}New version of {{ replaces.title }}{% else %}Upload document{% endif %}" hx-post="{% url 'documents:upload' %}" hx-swap="none"
+      x-data="{ cat: '{{ replaces.category_id|default:''|escapejs }}', title: '{{ replaces.title|default:''|escapejs }}', file: '', cats: {{ cat_map|json_attr }} }">
+  <input type="hidden" name="mode" value="{{ mode }}">
+  <input type="hidden" name="employee_id" value="{{ employee_id|default:'' }}">
+  {% if replaces %}<input type="hidden" name="replaces_id" value="{{ replaces.id }}"><input type="hidden" name="category_id" value="{{ replaces.category_id }}">{% endif %}
+  <div class="hj-fieldset">
+    <label class="hj-label" for="doc-cat">Document type <span class="req">*</span></label>
+    <select id="doc-cat" class="hj-select" {% if replaces %}disabled{% else %}name="category_id"{% endif %} x-model="cat" required
+            @change="if (!title && cats[cat]) title = cats[cat].name">
+      <option value="" disabled{% if not replaces %} selected{% endif %}>Choose a document type</option>
+      {% for c in categories %}<option value="{{ c.id }}"{% if replaces.category_id == c.id %} selected{% endif %}>{{ c.name }}</option>{% endfor %}
+      {% if replaces and replaces.category_id not in cat_map %}<option value="{{ replaces.category_id }}" selected>{{ replaces.category_name }}</option>{% endif %}
+    </select>
+  </div>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="doc-title">Title</label>
+    <input id="doc-title" class="hj-input" name="title" maxlength="120" x-model="title" :placeholder="cats[cat] ? cats[cat].name : 'e.g. Bachelor degree certificate'">
+  </div>
+  <div class="hj-fieldset" @change="file = $event.target.name === 'file_id' ? $event.target.value : file" @click="if ($event.target.closest('.hj-file button')) file = ''">
+    <span class="hj-label">File</span>
+    {% file_upload "file_id" "employee_document" label="Choose PDF or photo" %}
+    <p class="hj-help">PDF, JPG, PNG or WebP, up to 4 MB. Files are stored encrypted.</p>
+  </div>
+  <div>
+    <label class="hj-label" for="doc-expiry"><span x-text="cats[cat] && cats[cat].expiry ? 'Expiry date (required)' : 'Expiry date (optional)'">Expiry date (optional)</span><span class="req" aria-hidden="true" x-show="cats[cat] && cats[cat].expiry" x-cloak>*</span></label>
+    {% bs_date_input "expiry_date" id="doc-expiry" description="We will remind you 30 and 7 days before it expires." %}
+  </div>
+  {% if hr %}<label class="hj-check-row"><input type="checkbox" class="hj-switch" name="visible_to_employee" value="1"{% if not replaces or replaces.visible_to_employee %} checked{% endif %}> Employee can see this document</label>{% endif %}
+  <div class="hj-fieldset">
+    <label class="hj-label" for="doc-notes">Notes (optional)</label>
+    <textarea id="doc-notes" class="hj-input" name="notes" rows="2" maxlength="500"></textarea>
+  </div>
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="!cat || !file">{% if hr %}Save document{% else %}Upload for HR check{% endif %}</button>
+  </div>
+</form>

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Goals · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Goals" subtitle="Set goals with measurable key results and check in as you go. Your manager sees your goals and updates." %}
+  {% if view == 'mine' %}
+  <button class="hj-btn default sm" hx-get="{% url 'performance:kpi_apply' %}" hx-target="#hj-modal-body"><i class="ti ti-books" aria-hidden="true"></i>From KPI library</button>
+  <button class="hj-btn sm" hx-get="{% url 'performance:goal_new' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>New goal</button>
+  {% endif %}
+{% endpage_header %}
+<div class="hj-row hj-gap-md">{% include "performance/partials/pills.html" with pills=views %}{% include "performance/partials/pills.html" with pills=statuses %}</div>
+<div id="perf-main" hx-get="{{ request.get_full_path }}" hx-trigger="hj:refresh-perf-main from:body" hx-select="#perf-main" hx-swap="outerHTML" class="hj-stack" style="--gap:16px">
+  {% if stats %}{% stat_strip stats %}{% endif %}
+  {% if not goals %}
+    {% if view == 'mine' %}{% url 'performance:goal_new' as new_url %}{% empty_state title="No goals yet" hint="Write two to five goals for this year, each with a way to measure it." icon="target-arrow" action_label="New goal" action_attrs='hx-get="'|add:new_url|add:'" hx-target="#hj-drawer-body"' %}
+    {% else %}{% empty_state title="No company goals yet" hint="HR publishes company and department goals here." icon="target-arrow" %}{% endif %}
+  {% else %}
+  <div class="hj-grid" style="--cols:3">{% for g in goals %}{% include "performance/partials/goal_card.html" %}{% endfor %}</div>
+  {% endif %}
+</div>
+{% endblock %}

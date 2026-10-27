@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Timesheets · Hajiri{% endblock %}
+{% block content %}
+{% if is_hr %}{% page_header "Timesheets" subtitle="Everyone's project time, compared with their attendance." %}{% endpage_header %}
+{% else %}{% page_header "Timesheets" subtitle="Your team's project time, compared with their attendance." %}{% endpage_header %}{% endif %}
+{% include "timesheets/partials/review_body.html" %}
+{% endblock %}

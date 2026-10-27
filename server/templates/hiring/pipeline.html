@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Candidates · Hiring · Hajiri{% endblock %}
+{% block page_class %}wide{% endblock %}
+{% block content %}
+<div x-data @hj:open-candidate.window="htmx.ajax('GET', $event.detail.url, '#hj-drawer-body')">
+{% page_header "Candidates" subtitle="Candidates by stage. The screening score ranks each column; open a card to see why." %}
+  {% if jobs %}
+  <form method="get" action="{% url 'hiring:pipeline' %}" x-data @change="$el.submit()">
+    {% if include == 'all' %}<input type="hidden" name="include" value="all">{% endif %}
+    <select class="hj-select" name="job" aria-label="Choose a job" style="width:280px">
+      {% for j in jobs %}<option value="{{ j.id }}"{% if j.id == job_id %} selected{% endif %}>{{ j.title }}{% if j.status != 'open' %} ({{ j.status }}){% endif %}</option>{% endfor %}
+    </select>
+  </form>
+  {% endif %}
+  {% if hr and job_id %}<button type="button" class="hj-btn" hx-get="{% url 'hiring:candidate_new' job_id %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>Add candidate</button>{% endif %}
+{% endpage_header %}
+{% if not jobs %}
+  {% empty_state title="No jobs yet" hint="Create a job under Jobs and publish it; applications will appear here." icon="users" %}
+{% else %}
+<div id="board">
+  {% include "hiring/partials/board.html" %}
+</div>
+{% endif %}
+{% if open_candidate %}<div hx-get="{% url 'hiring:candidate' open_candidate %}" hx-trigger="load" hx-target="#hj-drawer-body" hidden></div>{% endif %}
+</div>
+{% endblock %}

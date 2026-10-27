@@ -1,0 +1,32 @@
+{# Trips: own (MyTravelPage) or team/company (TravelReviewPage). Rows open the trip drawer. #}
+<div class="hj-stack" style="--gap:16px">
+  {% if not own %}
+  <div class="hj-pills" role="tablist">
+    {% for v, label in filters %}<a class="hj-pill" href="?status={{ v }}"{% if v == status %} aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
+  </div>
+  {% endif %}
+  {% if stats %}
+  {% stat_strip stats %}
+  {% if hr and not own %}<div class="hj-end"><a class="hj-btn subtle xs" href="{% url 'expenses:report_advances_csv' %}" download><i class="ti ti-download" aria-hidden="true"></i>Download list</a></div>{% endif %}
+  {% endif %}
+  {% if not trips %}
+    {% if own %}{% empty_state title="No trips yet" hint="Travelling for work? Request it here to get the daily allowance and, if you need it, an advance." icon="plane" %}
+    {% elif status == 'pending' %}{% empty_state title="No trips waiting for a decision" hint="Try another filter." icon="plane" %}
+    {% else %}{% empty_state title="No trips here" hint="Try another filter." icon="plane" %}{% endif %}
+  {% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr>{% if not own %}<th>Employee</th>{% endif %}<th>Trip</th><th class="right">Allowance</th><th class="right">Advance</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for t in trips %}
+      <tr class="clickable{% if own and t.to_settle %} highlight{% endif %}" hx-get="{% url 'expenses:trip_detail' t.id %}" hx-target="#hj-drawer-body" hx-trigger="click">
+        {% if not own %}<td><div class="hj-strong">{{ t.employeeName }}</div><div class="hj-small hj-muted">{{ t.empCode }}</div></td>{% endif %}
+        <td><div{% if own %} class="hj-strong"{% endif %}>{{ t.destination }}</div><div class="hj-small hj-muted">{{ t.sub }}</div></td>
+        <td class="right">{{ t.allowance }}</td>
+        <td class="right">{{ t.advance }}</td>
+        <td><span class="hj-row nowrap hj-gap-xs">{% badge t.status_label t.status_tone %}{% if not own and t.returned %}<span class="hj-small hj-muted">settlement returned</span>{% endif %}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div></div>
+  {% endif %}
+</div>

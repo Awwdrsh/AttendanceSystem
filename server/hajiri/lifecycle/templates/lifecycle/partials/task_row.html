@@ -1,0 +1,25 @@
+{# TaskRow of CaseDrawer.tsx: tick it off if it is yours, see who owns it and when it is due, discuss it. #}
+<div x-data="{ open: false }">
+  <div class="hj-row nowrap hj-gap-sm" style="align-items:flex-start">
+    <form hx-post="{% url 'lifecycle:task_update' t.id %}" hx-swap="none" hx-trigger="change">
+      <input type="hidden" name="status" value="{% if t.status == 'open' %}done{% else %}open{% endif %}">
+      <input type="checkbox" class="hj-check" style="margin-top:2px" aria-label="Mark &quot;{{ t.title }}&quot; done"{% if t.status != 'open' %} checked{% endif %}{% if t.can_complete is False %} disabled{% endif %}>
+    </form>
+    <div class="hj-stack hj-gap-xs hj-grow" style="min-width:0;--gap:2px">
+      <div class="hj-sm hj-strong"{% if t.status != 'open' %} style="text-decoration:line-through;color:var(--hj-muted)"{% endif %}>{% if t.link and t.status == 'open' %}<a href="{{ t.link }}">{{ t.title }}</a>{% else %}{{ t.title }}{% endif %}</div>
+      {% if t.description %}<div class="hj-small hj-muted">{{ t.description }}</div>{% endif %}
+      <div class="hj-row hj-gap-xs">
+        <span class="hj-badge sm hj-tone-idle">{{ t.owner }}</span>
+        {% if t.due %}<span class="hj-small {% if t.due.0 == 'bad' %}hj-bad-text{% elif t.due.0 == 'warn' %}hj-warn-text{% else %}hj-muted{% endif %}">{{ t.due.1 }}</span>{% endif %}
+        {% if t.status == 'done' %}<span class="hj-small hj-muted">Done{% if t.done_by_name %} by {{ t.done_by_name }}{% endif %}</span>{% endif %}
+        {% if t.status == 'skipped' %}<span class="hj-small hj-muted">Skipped</span>{% endif %}
+        {% if t.note %}<span class="hj-small hj-muted">“{{ t.note }}”</span>{% endif %}
+      </div>
+    </div>
+    <div class="hj-row nowrap hj-gap-xs">
+      {% if t.can_skip and t.status == 'open' %}<button type="button" class="hj-iconbtn" data-tip="Skip (not needed)" aria-label="Skip task" hx-post="{% url 'lifecycle:task_update' t.id %}" hx-vals='{"status": "skipped"}' hx-swap="none"><i class="ti ti-player-skip-forward" aria-hidden="true"></i></button>{% endif %}
+      <button type="button" class="hj-iconbtn" data-tip="Comments" aria-label="Comments" @click="open = !open" hx-get="{% url 'lifecycle:comments' t.id %}" hx-target="#comments-{{ t.id }}" hx-trigger="click once"><i class="ti ti-message-circle" aria-hidden="true"></i>{% if t.comments %}<span class="hj-small">{{ t.comments }}</span>{% endif %}</button>
+    </div>
+  </div>
+  <div id="comments-{{ t.id }}" x-show="open" x-cloak style="padding-left:30px"></div>
+</div>

@@ -1,0 +1,39 @@
+{# PersonCardModal.tsx: a colleague's work card. #}
+<div class="hj-stack hj-gap-lg" data-modal-title="Profile" data-modal-size="lg">
+  <div class="hj-row nowrap hj-gap-md">
+    {% include "people/partials/avatar.html" with pid=person.id name=person.name_en has=person.has_avatar size=64 %}
+    <div style="min-width:0">
+      <div class="hj-strong hj-truncate" style="font-size:1.15rem">{{ person.name_en }}</div>
+      <div class="hj-sm hj-muted hj-truncate">{% if person.designation or person.unit_name %}{{ person.designation|default:"" }}{% if person.designation and person.unit_name %}, {% endif %}{{ person.unit_name|default:"" }}{% else %}—{% endif %}</div>
+      {% if person.status != 'active' %}<span class="hj-badge sm hj-tone-idle" style="margin-top:4px">Left the company</span>{% endif %}
+    </div>
+  </div>
+  <div class="hj-fields hj-grid" style="--cols:2">
+    <div><div class="hj-field-label">Work email</div><div class="hj-field-value">{% if person.work_email %}<a href="mailto:{{ person.work_email }}"><i class="ti ti-mail" aria-hidden="true"></i> {{ person.work_email }}</a>{% else %}—{% endif %}</div></div>
+    <div><div class="hj-field-label">Work phone</div><div class="hj-field-value">{% if person.work_phone %}<a href="tel:{{ person.work_phone }}"><i class="ti ti-phone" aria-hidden="true"></i> {{ person.work_phone }}</a>{% else %}—{% endif %}</div></div>
+    {% field "Branch" person.branch_name %}
+    {% field "Joined" person.join_date|bs_date %}
+    {% field "Employee code" person.emp_code mono=True %}
+    <div><div class="hj-field-label">Reports to</div><div class="hj-field-value">{% if person.manager_id %}<button type="button" class="hj-link-btn" hx-get="{% url 'people:card' person.manager_id %}" hx-target="#hj-modal-body">{{ person.manager_name }}</button>{% else %}—{% endif %}</div></div>
+  </div>
+  {% if person.skills or person.languages %}
+  <div>
+    <div class="hj-small hj-muted hj-mb">Skills and languages</div>
+    <div class="hj-row hj-gap-xs">{% for s in person.skills %}<span class="hj-badge sm hj-tone-accent">{{ s }}</span>{% endfor %}{% for s in person.languages %}<span class="hj-badge sm hj-tone-idle">{{ s }}</span>{% endfor %}</div>
+  </div>
+  {% endif %}
+  {% if reports %}
+  <div>
+    <div class="hj-small hj-muted hj-mb">Direct reports ({{ reports|length }})</div>
+    <div class="hj-stack hj-gap-xs">
+      {% for r in reports %}
+      <button type="button" class="hj-link-btn hj-row nowrap hj-gap-sm" style="text-align:left" hx-get="{% url 'people:card' r.id %}" hx-target="#hj-modal-body">
+        {% include "people/partials/avatar.html" with pid=r.id name=r.name_en has=r.has_avatar size=28 %}
+        <span class="hj-sm hj-truncate">{{ r.name_en }}</span><span class="hj-small hj-muted hj-truncate">{{ r.designation|default:"" }}</span>
+      </button>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+  {% if is_hr %}<div class="hj-row hj-end"><a class="hj-btn default" href="{% url 'employees:detail' person.id %}"><i class="ti ti-user" aria-hidden="true"></i>Open employee record</a></div>{% endif %}
+</div>

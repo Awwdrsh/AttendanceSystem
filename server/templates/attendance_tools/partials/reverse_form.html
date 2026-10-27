@@ -1,0 +1,10 @@
+<form class="hj-form" data-modal-title="Reverse penalty for {{ name }}" hx-post="{% url 'attendance_tools:reverse' id %}" hx-swap="none" x-data="{ reason: '' }">
+  <input type="hidden" name="name" value="{{ name }}">
+  <p class="hj-small" style="margin:0">The leave taken is given back and the unpaid days are removed from this month's pay run. The employee keeps the record of the late days.</p>
+  <label class="hj-fieldset"><span class="hj-label">Reason</span>
+    <input class="hj-input" name="reason" maxlength="300" placeholder="For example: the device clock was wrong" x-model="reason" autofocus></label>
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn" :disabled="reason.trim().length < 3">Reverse penalty</button>
+  </div>
+</form>

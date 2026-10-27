@@ -1,0 +1,10 @@
+{# Reaction chips, a comment toggle and the thread itself (Social.tsx SocialBar). #}
+<div class="hj-stack" style="--gap:6px" x-data="{ open: false }">
+  <div class="hj-row" style="gap:6px">
+    {% include "engage/partials/reactions.html" %}
+    <button type="button" class="hj-btn subtle gray xs" id="{{ s.dom }}-cc" @click="open = !open" :aria-expanded="open"
+            hx-get="{% url 'engage:comments' %}?target_type={{ s.target_type|urlencode }}&amp;target_id={{ s.target_id|urlencode }}"
+            hx-target="#{{ s.dom }}-thread" hx-trigger="click once"><i class="ti ti-message-circle" aria-hidden="true"></i>{{ s.comment_label }}</button>
+  </div>
+  <div id="{{ s.dom }}-thread" x-show="open" x-cloak><div class="hj-skeleton" style="height:28px"></div></div>
+</div>

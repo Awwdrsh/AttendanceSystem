@@ -1,0 +1,58 @@
+{# EmployeeDocuments.tsx: an employee's documents as cards. `hr` adds verification, HR-only documents, editing and history. #}
+<div id="docs-grid" class="hj-stack hj-gap-md" hx-get="{% url 'documents:docs' %}?{{ grid_query }}{% if history %}&history=1{% endif %}" hx-trigger="hj:refresh-docs-grid from:body" hx-swap="outerHTML">
+  <div class="hj-row hj-between hj-gap-sm">
+    <p class="hj-sm hj-muted" style="max-width:560px;margin:0">
+      {% if hr %}Contracts, certificates and IDs on file. Uploads by the employee wait for your check; expiring documents raise reminders at 30, 7 and 0 days.{% else %}Your certificates and IDs on file with HR. New uploads are checked by HR; you will get a reminder before anything expires.{% endif %}
+    </p>
+    <div class="hj-row hj-gap-sm">
+      {% if hr %}<label class="hj-check-row"><input type="checkbox" class="hj-switch" name="history" value="1"{% if history %} checked{% endif %}
+        hx-get="{% url 'documents:docs' %}?{{ grid_query }}" hx-target="#docs-grid" hx-swap="outerHTML" hx-trigger="change"> Show earlier versions</label>{% endif %}
+      <button type="button" class="hj-btn" hx-get="{% url 'documents:upload' %}?{{ grid_query }}" hx-target="#hj-drawer-body"{% if not employee_id %} disabled{% endif %}><i class="ti ti-plus" aria-hidden="true"></i>Upload document</button>
+    </div>
+  </div>
+  {% if not docs %}
+    {% if hr %}{% empty_state title="No documents yet" hint="Upload the signed contract, citizenship and certificates so they are on file." icon="file-text" %}
+    {% else %}{% empty_state title="No documents yet" hint="Upload your citizenship, PAN card and academic certificates so HR has them on file." icon="file-text" %}{% endif %}
+  {% else %}
+  <div class="hj-grid" style="--cols:3">
+    {% for d in docs %}
+    <div class="hj-card p-md"{% if not d.is_current %} style="opacity:.6"{% endif %}>
+      <div class="hj-stack hj-gap-sm">
+        <div class="hj-row hj-between nowrap" style="align-items:flex-start">
+          <div class="hj-row nowrap hj-gap-sm" style="min-width:0">
+            <i class="ti ti-{% if d.is_pdf %}file-text{% else %}photo{% endif %}" aria-hidden="true" style="font-size:22px;color:var(--hj-hydro)"></i>
+            <div style="min-width:0"><div class="hj-sm hj-strong hj-truncate">{{ d.title }}</div><div class="hj-small hj-muted hj-truncate">{{ d.subline }}</div></div>
+          </div>
+          <div style="position:relative" x-data="{ open: false }" @click.outside="open = false">
+            <button type="button" class="hj-iconbtn" @click="open = !open" aria-label="Actions for {{ d.title }}"><i class="ti ti-dots" aria-hidden="true"></i></button>
+            <div class="hj-menu down" x-show="open" x-cloak role="menu">
+              <a class="hj-menu-item" href="{% url 'documents:doc_file' d.id %}" target="_blank" rel="noopener"><i class="ti ti-eye" aria-hidden="true"></i>Open</a>
+              <a class="hj-menu-item" href="{% url 'documents:doc_file' d.id %}?download=1"><i class="ti ti-download" aria-hidden="true"></i>Download</a>
+              {% if d.is_current %}<button type="button" class="hj-menu-item" hx-get="{% url 'documents:upload' %}?{{ grid_query }}&replaces={{ d.id }}" hx-target="#hj-drawer-body" @click="open = false"><i class="ti ti-refresh" aria-hidden="true"></i>Upload a new version</button>{% endif %}
+              {% if hr %}<button type="button" class="hj-menu-item" hx-get="{% url 'documents:doc_edit' d.id %}" hx-target="#hj-drawer-body" @click="open = false"><i class="ti ti-pencil" aria-hidden="true"></i>Edit details</button>{% endif %}
+              {% if hr or d.status != 'verified' %}<button type="button" class="hj-menu-item hj-bad-text" hx-post="{% url 'documents:doc_delete' d.id %}" hx-swap="none" @click="open = false"
+                {% if d.replaces_id and d.is_current %}{% confirm_attrs d.title|add:" will be removed and its file deleted. The previous version becomes current again." title="Remove document?" label="Remove" %}{% else %}{% confirm_attrs d.title|add:" will be removed and its file deleted." title="Remove document?" label="Remove" %}{% endif %}><i class="ti ti-trash" aria-hidden="true"></i>Remove</button>{% endif %}
+            </div>
+          </div>
+        </div>
+        <div class="hj-row hj-gap-xs">
+          {% badge d.status_label d.status_tone %}
+          {% if hr and not d.visible_to_employee %}<span class="hj-badge sm hj-tone-idle" data-tip="Only HR can see this document"><i class="ti ti-eye-off" aria-hidden="true"></i>HR only</span>{% endif %}
+          {% if not d.is_current %}<span class="hj-badge sm hj-tone-idle"><i class="ti ti-history" aria-hidden="true"></i>Earlier version</span>{% endif %}
+        </div>
+        {% include "documents/partials/expiry.html" with e=d.expiry %}
+        {% if d.status == 'rejected' and d.reject_reason %}<div class="hj-small hj-bad-text">“{{ d.reject_reason }}”</div>{% endif %}
+        {% if d.notes %}<div class="hj-small hj-muted">{{ d.notes|truncate_text:160 }}</div>{% endif %}
+        <div class="hj-small hj-muted">{{ d.size }} · added {{ d.created_at|bs_date }}{% if d.uploaded_by_name %} by {{ d.uploaded_by_name }}{% endif %}</div>
+        {% if hr and d.status == 'pending' %}
+        <div class="hj-row hj-gap-sm hj-mt-sm">
+          <button type="button" class="hj-btn xs" hx-post="{% url 'documents:verify' d.id %}" hx-swap="none"><i class="ti ti-check" aria-hidden="true"></i>Verify</button>
+          <button type="button" class="hj-btn default xs" hx-get="{% url 'documents:reject' d.id %}" hx-target="#hj-drawer-body"><i class="ti ti-x" aria-hidden="true"></i>Not accepted</button>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>

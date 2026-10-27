@@ -1,0 +1,10 @@
+<div id="relations-assignments" hx-get="{% url 'relations:employee_section' employee_id %}" hx-trigger="hj:refresh-relations-assignments from:body" hx-target="this" hx-swap="outerHTML">
+  {% if assignments %}
+  <div class="hj-card p-sm"><div class="hj-stack hj-gap-xs">
+    {% for a in assignments %}
+    <div class="hj-row hj-between"><span class="hj-sm">{% if a.kind == 'acting' %}Acting as{% else %}Deputed to{% endif %} {{ a.where }}</span>
+      <span class="hj-row hj-gap-xs"><span class="hj-small hj-muted">{{ a.start_date|bs_date }} to {{ a.end_date|bs_date }}</span><span class="hj-badge sm {% if a.status == 'active' %}hj-tone-ok{% else %}hj-tone-idle{% endif %}">{{ a.status }}</span></span></div>
+    {% endfor %}
+  </div></div>
+  {% else %}<div class="hj-sm hj-muted">None.</div>{% endif %}
+</div>

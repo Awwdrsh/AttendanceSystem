@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% load perf_tags %}
+{% block title %}Goals · Performance · Hajiri{% endblock %}
+{% block content %}
+{% include "performance/partials/pills.html" with pills=views %}
+<div id="perf-main" hx-get="{{ request.get_full_path }}" hx-trigger="hj:refresh-perf-main from:body" hx-select="#perf-main" hx-swap="outerHTML" class="hj-stack" style="--gap:16px">
+{% if view == 'team' %}
+  <div class="hj-section-title"><div><h3>Team goals</h3><p>{% if hr %}Every individual goal in the company.{% else %}Goals of the people who report to you, directly or through their managers.{% endif %}</p></div><div class="hj-actions">
+    <form hx-get="" hx-target="#perf-main" hx-select="#perf-main" hx-swap="outerHTML" hx-push-url="true" hx-trigger="change"><input type="hidden" name="view" value="team">
+      <select class="hj-select" name="person" aria-label="Person" style="width:220px"><option value="">Everyone</option>{% for t in team %}<option value="{{ t.id }}"{% if t.id == person %} selected{% endif %}>{{ t.name_en }}</option>{% endfor %}</select></form>
+    <button class="hj-btn sm" hx-get="{% url 'performance:goal_new' %}?for=team{% if person %}&employee={{ person }}{% endif %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>Set a goal</button>
+  </div></div>
+  {% if without %}<p class="hj-sm hj-warn-text" style="margin:0">No active goals: {{ without }}</p>{% endif %}
+  {% for grp in groups %}
+  <div class="hj-stack" style="--gap:8px">
+    <div class="hj-row" style="gap:8px"><span class="hj-strong hj-sm">{{ grp.name }}</span><span class="hj-small hj-muted">{{ grp.goals|length }} goal{{ grp.goals|length|pluralize }} · avg {{ grp.avg }}%</span></div>
+    <div class="hj-grid" style="--cols:3">{% for g in grp.goals %}{% include "performance/partials/goal_card.html" %}{% endfor %}</div>
+  </div>
+  {% empty %}{% url 'performance:goal_new' as new_url %}{% empty_state title="No team goals yet" hint="Agree two to five goals with each person." icon="target-arrow" action_label="Set a goal" action_attrs='hx-get="'|add:new_url|add:'?for=team" hx-target="#hj-drawer-body"' %}{% endfor %}
+{% elif view == 'company' %}
+  <div class="hj-section-title"><div><h3>Company & department goals</h3><p>Company and department goals everyone can see and align their own goals to.</p></div><div class="hj-actions">
+    {% if hr %}<button class="hj-btn sm" hx-get="{% url 'performance:goal_new' %}?for=company" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>New goal</button>{% endif %}
+  </div></div>
+  {% if goals %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Goal</th><th>Due</th><th style="width:200px">Progress</th><th>Status</th></tr></thead>
+    <tbody>{% for g in goals %}<tr style="cursor:pointer" hx-get="{% url 'performance:goal_detail' g.id %}" hx-target="#hj-drawer-body">
+      <td><div class="hj-sm" style="font-weight:500">{{ g.title }}</div><div class="hj-small hj-muted">{% if g.scope == 'company' %}Company{% else %}{{ g.org_unit_name }}{% endif %}</div></td>
+      <td>{{ g.due_date|bs_date_short }}</td><td>{% include "performance/partials/progress.html" with value=g.progress %}</td>
+      <td>{% include "performance/partials/status_badge.html" with status=g.status %}</td></tr>{% endfor %}</tbody></table></div></div>
+  {% else %}{% if hr %}{% empty_state title="No company goals yet" hint="Start with three to five company goals for the year." %}{% else %}{% empty_state title="No company goals yet" hint="HR publishes these." %}{% endif %}{% endif %}
+{% elif view == 'kpis' %}
+  <div class="hj-section-title"><div><h3>KPI library</h3><p>Standard measures per designation. Employees and managers turn them into goals with one click.</p></div><div class="hj-actions">
+    <button class="hj-btn sm" hx-get="{% url 'performance:kpi_new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>New KPI</button>
+  </div></div>
+  {% if kpis %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>KPI</th><th>Designation</th><th class="right">Default target</th><th></th></tr></thead>
+    <tbody>{% for k in kpis %}<tr style="cursor:pointer" hx-get="{% url 'performance:kpi_edit' k.id %}" hx-target="#hj-modal-body">
+      <td><div class="hj-sm" style="font-weight:500">{{ k.title }}</div>{% if k.description %}<div class="hj-small hj-muted hj-truncate">{{ k.description }}</div>{% endif %}</td>
+      <td>{{ k.designation|default:"Everyone" }}</td>
+      <td class="right">{% if k.measure == 'boolean' %}Done{% else %}{{ k.default_target|numstr }}{% if k.measure == 'percent' %}%{% elif k.unit %} {{ k.unit }}{% endif %}{% endif %}</td>
+      <td>{% if not k.active %}{% badge "Inactive" "idle" %}{% endif %}</td></tr>{% endfor %}</tbody></table></div></div>
+  {% else %}{% empty_state title="No KPIs yet" hint="Add measures such as 'Tickets resolved within SLA' for support staff." %}{% endif %}
+{% else %}
+  {% if view == 'journal' %}<div class="hj-section-title"><div><h3>Manager's journal</h3><p>Private, dated notes about what happened during the year, so reviews rest on evidence and not memory. Only you and HR see your notes.</p></div><div class="hj-actions">{% include "performance/partials/person_select.html" %}</div></div>
+  {% else %}<div class="hj-section-title"><div><h3>Feedback about your team</h3><p>All feedback colleagues gave a person, including notes shared with you only.</p></div><div class="hj-actions">{% include "performance/partials/person_select.html" %}</div></div>{% endif %}
+  {% if not person %}{% if view == 'journal' %}{% empty_state title="Choose someone from your team" hint="Their journal opens here." icon="notebook" %}{% else %}{% empty_state title="Choose someone from your team" %}{% endif %}
+  {% elif view == 'journal' %}
+  <form class="hj-card p-md hj-stack" style="--gap:8px" hx-post="{% url 'performance:journal_add' %}" hx-swap="none" x-data="{ tag: 'neutral' }">
+    <input type="hidden" name="employee_id" value="{{ person }}"><input type="hidden" name="tag" :value="tag" value="neutral">
+    <div class="hj-row" style="align-items:flex-end">
+      <div style="width:190px">{% bs_date_input "note_date" value=today label="Date" max=today required=True %}</div>
+      <div class="hj-pills" style="margin:0"><button type="button" class="hj-pill" :aria-selected="tag === 'positive'" @click="tag = 'positive'">Went well</button><button type="button" class="hj-pill" :aria-selected="tag === 'improvement'" @click="tag = 'improvement'">To improve</button><button type="button" class="hj-pill" :aria-selected="tag === 'neutral'" @click="tag = 'neutral'">Note</button></div>
+    </div>
+    <textarea class="hj-input" name="note" rows="2" maxlength="4000" required placeholder="What happened, and what was the impact?" aria-label="Note"></textarea>
+    <div class="hj-end"><button class="hj-btn sm" type="submit">Add note</button></div>
+  </form>
+  {% for j in entries %}
+  <div class="hj-card p-sm">
+    <div class="hj-between"><span class="hj-row" style="gap:8px">{% badge j.tag|tag_label j.tag|tag_tone %}<span class="hj-small hj-muted">{{ j.note_date|bs_date_short }} · {{ j.author_name }}</span></span>
+      {% if j.author_id == hj_user.id %}<button class="hj-iconbtn" aria-label="Delete note" hx-post="{% url 'performance:journal_delete' j.id %}" hx-swap="none"><i class="ti ti-trash" aria-hidden="true"></i></button>{% endif %}</div>
+    <div class="hj-sm" style="margin-top:4px;white-space:pre-wrap">{{ j.note }}</div>
+  </div>
+  {% empty %}<p class="hj-sm hj-muted">No notes yet.</p>{% endfor %}
+  {% else %}
+  {% for f in feedback %}
+  <div class="hj-card p-sm">
+    <div class="hj-row" style="gap:8px"><span class="hj-sm" style="font-weight:500">From {{ f.giver_name }}</span>{% if f.private_to_manager %}{% badge "Manager only" "idle" %}{% endif %}<span class="hj-small hj-muted">{{ f.given_at|bs_date_short }}</span></div>
+    <div class="hj-sm" style="margin-top:4px;white-space:pre-wrap">{{ f.body }}</div>
+  </div>
+  {% empty %}<p class="hj-sm hj-muted">No feedback yet.</p>{% endfor %}
+  {% endif %}
+{% endif %}
+</div>
+{% endblock %}

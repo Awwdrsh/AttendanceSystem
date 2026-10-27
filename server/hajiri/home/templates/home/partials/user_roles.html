@@ -1,0 +1,9 @@
+{% if row.is_admin_view %}
+<details class="hj-rolepick" style="position:relative">
+  <summary class="hj-input" style="cursor:pointer;list-style:none;min-height:30px;padding:4px 8px" aria-label="Roles for {{ row.name }}">{{ row.role_text|default:"No roles" }}</summary>
+  <form class="hj-card p-sm hj-stack" style="--gap:6px;position:absolute;z-index:20;min-width:220px;margin-top:4px" hx-post="{% url 'home:user_update' row.id %}" hx-trigger="change" hx-swap="none">
+    <input type="hidden" name="roles_sent" value="1">
+    {% for o in row.role_options %}<label class="hj-check-row"><input type="checkbox" class="hj-check" name="roles" value="{{ o.value }}"{% if o.on %} checked{% endif %}> {{ o.label }}</label>{% endfor %}
+  </form>
+</details>
+{% else %}<span class="hj-sm">{{ row.role_text }}</span>{% endif %}

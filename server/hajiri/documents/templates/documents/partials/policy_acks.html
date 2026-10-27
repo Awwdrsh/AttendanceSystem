@@ -1,0 +1,21 @@
+{# Who has read it (PoliciesSection acks drawer). #}
+<div class="hj-stack hj-gap-md" data-modal-title="{{ p.title }}">
+  <div class="hj-row hj-between">
+    <span class="hj-sm hj-muted">{{ acked }} of {{ employees|length }} have acknowledged.</span>
+    {% if not p.archived_at %}<button type="button" class="hj-btn light xs" hx-post="{% url 'documents:policy_remind' p.id %}" hx-target="closest [data-modal-title]" hx-swap="outerHTML"><i class="ti ti-bell" aria-hidden="true"></i>Remind the rest</button>{% endif %}
+  </div>
+  {% if not employees %}
+    {% empty_state title="Nobody in the audience" compact=True %}
+  {% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Employee</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for e in employees %}
+      <tr><td><div>{{ e.name_en }}</div><div class="hj-small hj-muted">{{ e.emp_code }}</div></td>
+        <td>{% if e.acknowledged_at %}<span class="hj-badge sm hj-tone-ok">Read {{ e.acknowledged_at|bs_date }}</span>
+          {% else %}<span class="hj-small hj-muted">Not yet{% if e.last_reminded_at %}, reminded {{ e.last_reminded_at|bs_date }}{% endif %}</span>{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div></div>
+  {% endif %}
+</div>

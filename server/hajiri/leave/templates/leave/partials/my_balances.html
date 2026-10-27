@@ -1,0 +1,3 @@
+<div id="my-balances" hx-get="{% url 'leave:my_balances' %}" hx-trigger="hj:refresh-my-balances from:body" hx-swap="outerHTML">
+  {% if stats %}{% stat_strip stats %}{% endif %}
+</div>

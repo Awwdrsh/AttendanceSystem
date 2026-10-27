@@ -1,0 +1,108 @@
+{# TaskDrawer: edit the details, move it, tick its checklist, comment and attach files. Each field saves on its own. #}
+<div id="tk-drawer" class="hj-stack hj-gap-md" data-modal-title="{{ board.name }}" data-modal-size="lg">
+  {% url 'tasks:task_update' t.id as save_url %}
+  <div class="hj-fieldset">
+    <label class="hj-label" for="tk-title">Title</label>
+    <input id="tk-title" class="hj-input" name="title" maxlength="200" value="{{ t.title }}"
+           hx-post="{{ save_url }}" hx-trigger="change" hx-target="#tk-drawer" hx-swap="outerHTML">
+  </div>
+  <div class="hj-form-row">
+    <div class="hj-fieldset"><label class="hj-label" for="tk-column">Column</label>
+      <select id="tk-column" class="hj-select" name="column_id" hx-post="{{ save_url }}" hx-trigger="change" hx-target="#tk-drawer" hx-swap="outerHTML">
+        {% for c in board.columns %}<option value="{{ c.id }}"{% if c.id == t.column_id %} selected{% endif %}>{{ c.name }}</option>{% endfor %}
+      </select></div>
+    <div class="hj-fieldset"><label class="hj-label" for="tk-priority">Priority</label>
+      <select id="tk-priority" class="hj-select" name="priority" hx-post="{{ save_url }}" hx-trigger="change" hx-target="#tk-drawer" hx-swap="outerHTML">
+        {% for k, label in priorities %}<option value="{{ k }}"{% if k == t.priority %} selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select></div>
+  </div>
+  <div class="hj-form-row">
+    {# Only the picked date saves: the picker's year list and typed-date box also fire change events. #}
+    <form hx-post="{{ save_url }}" hx-trigger="change[target.name=='due_date']" hx-target="#tk-drawer" hx-swap="outerHTML">
+      {% bs_date_input "due_date" value=t.due_date label="Due" id="tk-due" %}
+    </form>
+    {% if board.kind == 'team' %}
+    <form class="hj-fieldset" hx-post="{{ save_url }}" hx-trigger="change" hx-target="#tk-drawer" hx-swap="outerHTML">
+      <span class="hj-label">Assigned to</span>
+      <input type="hidden" name="assignees_sent" value="1">
+      <div class="hj-stack" style="--gap:4px;max-height:160px;overflow-y:auto">
+        {% for o in options %}<label class="hj-check-row hj-sm"><input type="checkbox" name="assignee_ids" value="{{ o.user_id }}"{% if o.user_id in assigned %} checked{% endif %}> {{ o.name }}</label>{% endfor %}
+      </div>
+      {% if not assigned %}<span class="hj-small hj-muted">Nobody</span>{% endif %}
+    </form>
+    {% else %}
+    <div class="hj-fieldset"><label class="hj-label" for="tk-assigned">Assigned to</label><input id="tk-assigned" class="hj-input" value="You" readonly></div>
+    {% endif %}
+  </div>
+  <form class="hj-fieldset" hx-post="{{ save_url }}" hx-target="#tk-drawer" hx-swap="outerHTML">
+    <label class="hj-label" for="tk-label-new">Labels</label>
+    <input type="hidden" name="labels_sent" value="1">
+    <div class="hj-row hj-gap-xs">
+      {% for l in t.labels %}
+      <input type="hidden" name="labels" value="{{ l }}">
+      <span class="hj-badge hj-tone-idle">{{ l }} <button type="button" class="hj-link-btn" name="remove_label" value="{{ l }}" aria-label="Remove label {{ l }}"
+        hx-post="{{ save_url }}" hx-include="closest form" hx-target="#tk-drawer" hx-swap="outerHTML"><i class="ti ti-x" aria-hidden="true"></i></button></span>
+      {% endfor %}
+      {% if t.labels|length < 8 %}<input id="tk-label-new" class="hj-input hj-grow" name="label_new" maxlength="24" placeholder="Add a label and press Enter" style="min-width:180px">{% endif %}
+    </div>
+  </form>
+  <div class="hj-fieldset">
+    <label class="hj-label" for="tk-desc">Description</label>
+    <textarea id="tk-desc" class="hj-input" name="description" rows="3" maxlength="5000"
+              hx-post="{{ save_url }}" hx-trigger="change" hx-target="#tk-drawer" hx-swap="outerHTML">{{ t.description|default:"" }}</textarea>
+  </div>
+
+  <div class="hj-stack hj-gap-xs">
+    <div class="hj-eyebrow">{{ checklist_label }}</div>
+    {% for c in checklist %}
+    <div class="hj-row hj-between nowrap">
+      <label class="hj-check-row hj-sm"><input type="checkbox" name="done"{% if c.done %} checked{% endif %}
+             hx-post="{% url 'tasks:checklist_update' c.id %}" hx-trigger="change" hx-target="#tk-drawer" hx-swap="outerHTML"> {{ c.text }}</label>
+      <button type="button" class="hj-iconbtn" style="width:24px;height:24px" aria-label="Remove item"
+              hx-post="{% url 'tasks:checklist_delete' c.id %}" hx-target="#tk-drawer" hx-swap="outerHTML"><i class="ti ti-x" aria-hidden="true"></i></button>
+    </div>
+    {% endfor %}
+    <form hx-post="{% url 'tasks:checklist_add' t.id %}" hx-target="#tk-drawer" hx-swap="outerHTML">
+      <input class="hj-input" name="text" maxlength="300" placeholder="Add an item and press Enter" aria-label="New checklist item">
+    </form>
+  </div>
+
+  <div class="hj-stack hj-gap-xs">
+    <div class="hj-eyebrow">Attachments</div>
+    {% for a in attachments %}
+    <div class="hj-row hj-between nowrap">
+      <div class="hj-row nowrap hj-gap-xs"><i class="ti ti-paperclip" aria-hidden="true"></i>
+        <a class="hj-sm" href="{% url 'tasks:attachment_file' a.id %}" target="_blank" rel="noopener noreferrer">{{ a.filename }}</a>
+        <span class="hj-small hj-muted">{{ a.added_by_name|default:"" }}</span></div>
+      <button type="button" class="hj-iconbtn" style="width:24px;height:24px" aria-label="Remove attachment"
+              hx-post="{% url 'tasks:attachment_delete' a.id %}" hx-target="#tk-drawer" hx-swap="outerHTML"><i class="ti ti-x" aria-hidden="true"></i></button>
+    </div>
+    {% endfor %}
+    <form hx-post="{% url 'tasks:attachment_add' t.id %}" hx-trigger="change[target.name=='file_id']" hx-target="#tk-drawer" hx-swap="outerHTML">
+      {% file_upload "file_id" "task_attachment" label="Attach a file" %}
+    </form>
+  </div>
+
+  <div class="hj-stack hj-gap-xs">
+    <div class="hj-eyebrow">Comments</div>
+    {% for c in comments %}
+    <div>
+      <div class="hj-row hj-gap-xs"><span class="hj-sm hj-strong">{{ c.name }}</span><span class="hj-small hj-muted" data-tip="{{ c.created_at|bs_datetime }}">{{ c.created_at|relative_time }}</span></div>
+      <div class="hj-sm" style="white-space:pre-wrap;overflow-wrap:anywhere">{{ c.body }}</div>
+    </div>
+    {% endfor %}
+    <form class="hj-stack hj-gap-xs" hx-post="{% url 'tasks:comment_add' t.id %}" hx-target="#tk-drawer" hx-swap="outerHTML" x-data="{ body: '' }">
+      <textarea class="hj-input" name="body" rows="2" maxlength="2000" placeholder="Write a comment" aria-label="Comment" x-model="body"></textarea>
+      <div class="hj-row hj-end"><button type="submit" class="hj-btn sm" :disabled="!body.trim()">Comment</button></div>
+    </form>
+  </div>
+
+  <div class="hj-row hj-between" style="border-top:1px solid var(--hj-line);padding-top:12px">
+    <span class="hj-small hj-muted">Created {{ t.created_at|bs_date_short }}{% if t.completed_at %}, done {{ t.completed_at|relative_time }}{% endif %}</span>
+    {% if can_remove %}
+    <button type="button" class="hj-btn subtle danger xs" hx-post="{% url 'tasks:task_delete' t.id %}" hx-swap="none"
+            {% confirm_attrs "Remove this task? It disappears from the board." label="Remove task" %}><i class="ti ti-trash" aria-hidden="true"></i>Remove task</button>
+    {% endif %}
+  </div>
+  {% if t.completed_at %}<div>{% badge "Done" "ok" %}</div>{% endif %}
+</div>

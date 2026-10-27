@@ -1,0 +1,6 @@
+<div class="hj-card p-0" style="display:flex;flex-direction:column;overflow:hidden">
+  <div class="hj-strong" style="padding:16px 20px 8px">{{ title }}</div>
+  <div style="flex:1">{% for l in lines %}<div class="hj-row hj-between nowrap" style="padding:10px 20px;align-items:flex-start;{% if not forloop.first %}border-top:1px solid var(--hj-line-soft){% endif %}"><div style="min-width:0"><div class="hj-sm">{{ l.name_en }}</div>{% if l.note %}<div class="hj-small hj-muted">{{ l.note }}</div>{% endif %}</div><span class="hj-sm num">{{ l.label }}</span></div>
+  {% empty %}<div class="hj-sm hj-muted" style="padding:10px 20px">{{ empty }}</div>{% endfor %}</div>
+  <div class="hj-row hj-between" style="padding:12px 20px;border-top:1px solid var(--hj-line);background:var(--hj-canvas)"><span class="hj-sm hj-strong">{{ total_label }}</span><span class="hj-sm hj-strong num">{{ total|npr }}</span></div>
+</div>

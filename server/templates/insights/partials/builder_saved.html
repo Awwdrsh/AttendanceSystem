@@ -1,0 +1,14 @@
+<div id="builder-saved" class="hj-card p-md hj-stack" style="--gap:6px" hx-get="{% url 'insights:builder_saved' %}" hx-trigger="hj:refresh-builder-saved from:body"
+     hx-include="#builder-current" hx-swap="outerHTML"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <div class="hj-sm hj-strong">Saved reports</div>
+  {% if not saved %}<p class="hj-sm hj-muted" style="margin:0">Reports you save, and reports colleagues share, appear here.</p>{% endif %}
+  {% for s in saved %}
+  <div class="hj-row nowrap hj-between hj-gap-xs">
+    <button type="button" class="hj-btn {% if s.active %}light{% else %}subtle{% endif %} gray sm hj-grow" style="justify-content:flex-start;min-width:0"
+            hx-get="{% url 'insights:builder' %}?saved={{ s.id }}" hx-target="#builder" hx-swap="innerHTML"><span class="hj-truncate">{{ s.name }}</span></button>
+    {% if s.badge %}<span class="hj-badge hj-tone-info sm"><i class="ti ti-share" aria-hidden="true"></i>{{ s.badge }}</span>{% endif %}
+    {% if s.mine %}<button type="button" class="hj-iconbtn" aria-label="Delete {{ s.name }}" title="Delete" hx-post="{% url 'insights:builder_saved_delete' s.id %}"
+            hx-include="#builder-current" hx-swap="none"><i class="ti ti-trash" aria-hidden="true"></i></button>{% endif %}
+  </div>
+  {% endfor %}
+</div>

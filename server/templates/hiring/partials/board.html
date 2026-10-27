@@ -1,0 +1,20 @@
+{% if job_id %}
+<div hx-get="{% url 'hiring:pipeline' %}?job={{ job_id }}" hx-trigger="hj:refresh-board from:body" hx-target="#board" hx-swap="innerHTML" hx-include="#hj-include" hidden></div>
+<div class="hj-row hj-between hj-mb">
+  <span class="hj-sm hj-muted">{{ summary }}</span>
+  <label class="hj-row nowrap hj-gap-xs"><input type="checkbox" class="hj-switch" id="hj-include" name="include" value="all"{% if include == 'all' %} checked{% endif %}
+    hx-get="{% url 'hiring:pipeline' %}?job={{ job_id }}" hx-target="#board" hx-swap="innerHTML" hx-trigger="change" hx-push-url="true"><span class="hj-sm">Show hired and closed</span></label>
+</div>
+<div style="overflow-x:auto;padding-bottom:8px">
+  <div class="hj-row nowrap hj-gap-md" style="align-items:flex-start">
+    {% for col in columns %}
+    <div style="flex:0 0 268px;width:268px">
+      <div class="hj-row hj-between" style="margin-bottom:8px;padding:0 2px"><span class="hj-sm hj-strong">{{ col.stage }}</span><span class="hj-badge hj-tone-idle sm">{{ col.cards|length }}</span></div>
+      <div class="hj-stack hj-gap-xs" style="background:var(--hj-line-soft);border-radius:12px;padding:6px;min-height:120px">
+        {% for c in col.cards %}{% include "hiring/partials/card.html" %}{% empty %}<p class="hj-small hj-muted" style="text-align:center;padding:16px 0;margin:0">No one here</p>{% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}

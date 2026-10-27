@@ -1,0 +1,4 @@
+{% if row.status == 'pending' %}
+<button type="button" class="hj-btn subtle danger xs" hx-post="{% url 'ot:request_cancel' row.id %}" hx-swap="none"
+        {% confirm_attrs "Cancel this overtime request? Its approval ends." label="Cancel request" %}>Cancel</button>
+{% endif %}

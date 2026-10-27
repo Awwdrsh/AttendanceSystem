@@ -1,0 +1,24 @@
+{# AssetsPanel.tsx #}
+<div id="assets" class="hj-stack hj-gap-md" hx-get="{% url 'lifecycle:onboarding' %}?tab=assets&status={{ status }}&search={{ search|urlencode }}" hx-trigger="hj:refresh-assets from:body" hx-swap="outerHTML">
+  <div class="hj-section-title"><div><h3>Assets</h3><p>Hand equipment to people and record its return. Someone cannot finish their exit while they still hold an asset.</p></div>
+    <div class="hj-actions"><button type="button" class="hj-btn sm" hx-get="{% url 'lifecycle:asset_new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>Add asset</button></div></div>
+  <form class="hj-filters" hx-get="{% url 'lifecycle:onboarding' %}" hx-target="#assets" hx-swap="outerHTML" hx-trigger="change, input delay:300ms from:input[type=search]">
+    <input type="hidden" name="tab" value="assets">
+    <select name="status" class="hj-select" aria-label="Status">
+      <option value="all"{% if status == 'all' %} selected{% endif %}>All</option><option value="assigned"{% if status == 'assigned' %} selected{% endif %}>With someone</option>
+      <option value="available"{% if status == 'available' %} selected{% endif %}>Available</option><option value="retired"{% if status == 'retired' %} selected{% endif %}>Retired</option></select>
+    <div class="hj-input-wrap"><i class="ti ti-search" aria-hidden="true"></i><input type="search" name="search" class="hj-input" placeholder="Search tag, name or serial" value="{{ search }}" style="width:260px"></div>
+  </form>
+  {% if not assets %}{% empty_state title="No assets recorded" hint="Add laptops, phones and ID cards to track who holds them." %}{% else %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Asset</th><th>Type</th><th>Status</th><th>Held by</th><th>Condition</th><th class="right">Cost</th><th></th></tr></thead>
+    <tbody>{% for a in assets %}<tr>
+      <td><div class="hj-sm hj-strong">{{ a.name }}</div><div class="hj-small hj-muted mono">{{ a.tag }}{% if a.serial %}, {{ a.serial }}{% endif %}</div></td>
+      <td>{{ a.type_name|default:"—" }}</td><td>{% badge a.badge.0 a.badge.1 %}</td>
+      <td>{% if a.employee_name %}<div class="hj-sm">{{ a.employee_name }}</div><div class="hj-small hj-muted">since {{ a.assigned_on|bs_date }}</div>{% else %}<span class="hj-muted">—</span>{% endif %}</td>
+      <td style="text-transform:capitalize">{{ a.condition }}</td><td class="right num">{% if a.cost %}{{ a.cost|npr }}{% else %}—{% endif %}</td>
+      <td class="right">{% if a.status == 'assigned' %}<button type="button" class="hj-btn default xs" hx-get="{% url 'lifecycle:asset_return' a.id %}" hx-target="#hj-modal-body">Record return</button>
+        {% elif a.status == 'available' %}<button type="button" class="hj-btn default xs" hx-get="{% url 'lifecycle:asset_assign' a.id %}" hx-target="#hj-modal-body">Hand over</button>{% endif %}</td>
+    </tr>{% endfor %}</tbody></table></div></div>
+  {% endif %}
+</div>

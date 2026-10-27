@@ -1,0 +1,72 @@
+{# ProfileSections.tsx: the full profile, section by section. HR edits directly; the employee asks for a change. #}
+<div id="profile-sections" class="hj-stack hj-gap-md" hx-get="{% url 'people:sections' employee_id %}?mode={{ mode }}{% if reveal %}&reveal=1{% endif %}"
+     hx-trigger="hj:refresh-profile-sections from:body" hx-swap="outerHTML">
+  {% if mode == 'hr' %}
+  <div class="hj-row hj-between hj-gap-sm">
+    <div class="hj-row nowrap hj-gap-xs hj-sm hj-muted"><i class="ti ti-lock" aria-hidden="true"></i>PAN, bank and ID numbers are encrypted and shown masked. Revealing them is logged.</div>
+    {% if not reveal %}
+    <button type="button" class="hj-btn default xs" hx-get="{% url 'people:sections' employee_id %}?mode=hr&reveal=1" hx-target="#profile-sections" hx-swap="outerHTML"><i class="ti ti-eye" aria-hidden="true"></i>Reveal numbers</button>
+    {% else %}
+    <button type="button" class="hj-btn subtle xs" hx-get="{% url 'people:sections' employee_id %}?mode=hr" hx-target="#profile-sections" hx-swap="outerHTML">Hide numbers</button>
+    {% endif %}
+  </div>
+  {% endif %}
+  <div class="hj-grid" style="--cols:2">
+    {% for s in sections %}
+    <div class="hj-card p-lg">
+      <div class="hj-row nowrap hj-between hj-mb">
+        <div class="hj-row hj-gap-xs"><span class="hj-strong">{{ s.label }}</span>{% if s.pending %}<span class="hj-badge sm hj-tone-warn">Change waiting for approval</span>{% endif %}</div>
+        <button type="button" class="hj-btn subtle sm" hx-get="{% url 'people:section_edit' employee_id s.key %}?mode={{ mode }}" hx-target="#hj-drawer-body"
+                {% if mode == 'self' and s.pending %}disabled{% endif %}>
+          <i class="ti {% if mode == 'hr' %}ti-pencil{% else %}ti-send{% endif %}" aria-hidden="true"></i>{% if mode == 'hr' %}Edit{% else %}Request a change{% endif %}</button>
+      </div>
+      {% with d=s.data %}
+      {% if s.key == 'personal' %}
+        <div class="hj-fields hj-grid" style="--cols:3">
+          {% field "Gender" gender %}{% field "Date of birth" d.dob|bs_date %}{% field "Marital status" marital %}
+          {% field "Blood group" d.bloodGroup %}{% field "Nationality" d.nationality %}
+        </div>
+      {% elif s.key == 'contact' %}
+        <div class="hj-fields hj-grid" style="--cols:3">
+          {% field "Personal email" d.personalEmail %}{% field "Personal phone" d.personalPhone %}{% field "Work phone" d.workPhone %}
+          {% field "Permanent address" perm_addr %}{% field "Temporary address" temp_addr %}
+        </div>
+      {% elif s.key == 'bank' %}
+        <div class="hj-fields hj-grid" style="--cols:3">{% field "Bank" d.bankCode %}{% field "Branch" d.bankBranch %}{% field "Account number" d.bankAccount mono=True %}</div>
+      {% elif s.key == 'ids' %}
+        <div class="hj-fields hj-grid" style="--cols:3">
+          {% field "PAN" d.pan mono=True %}{% field "Citizenship number" d.citizenshipNo mono=True %}
+          <div><div class="hj-field-label">Issued in</div><div class="hj-field-value">{% if d.citizenshipDistrict or d.citizenshipIssuedOn %}{{ d.citizenshipDistrict|default:"" }}{% if d.citizenshipDistrict and d.citizenshipIssuedOn %}, {% endif %}{{ d.citizenshipIssuedOn|bs_date }}{% else %}—{% endif %}</div></div>
+          <div><div class="hj-field-label">Passport</div><div class="hj-field-value">{% if d.passportNo %}{{ d.passportNo }}{% if d.passportExpiry %}, expires {{ d.passportExpiry|bs_date }}{% endif %}{% else %}—{% endif %}</div></div>
+          <div><div class="hj-field-label">Driving licence</div><div class="hj-field-value">{% if d.licenceNo %}{{ d.licenceNo }}{% if d.licenceExpiry %}, expires {{ d.licenceExpiry|bs_date }}{% endif %}{% else %}—{% endif %}</div></div>
+          {% field "SSF ID" d.ssfId %}{% field "CIT ID" d.citId %}{% field "PF number" d.pfId %}
+        </div>
+      {% elif s.key == 'emergency' %}
+        {% if d.contacts %}<div class="hj-stack hj-gap-xs">{% for c in d.contacts %}
+          <div class="hj-row hj-between hj-gap-xs"><span class="hj-sm hj-strong">{{ c.name }} <span class="hj-muted" style="font-weight:400">({{ c.relation }})</span></span>
+            <span class="hj-sm num">{{ c.phone }}{% if c.altPhone %}, {{ c.altPhone }}{% endif %}</span></div>{% endfor %}</div>
+        {% else %}<p class="hj-sm hj-muted" style="margin:0">No emergency contact yet. Add at least one.</p>{% endif %}
+      {% elif s.key == 'family' %}
+        {% if d.members %}<div class="hj-stack hj-gap-xs">{% for m in d.members %}
+          <div class="hj-row hj-between hj-gap-xs"><span class="hj-sm hj-strong">{{ m.name }} <span class="hj-muted" style="font-weight:400">({{ relations|get_item:m.relation|default:m.relation }}{% if m.dob %}, born {{ m.dob|bs_date }}{% endif %})</span></span>
+            <span class="hj-row hj-gap-xs">{% if m.isDependent %}<span class="hj-badge sm hj-tone-idle">Dependent</span>{% endif %}{% if m.isNominee %}<span class="hj-badge sm hj-tone-accent">Nominee {{ m.nomineeShare }}%</span>{% endif %}</span></div>{% endfor %}</div>
+        {% else %}<p class="hj-sm hj-muted" style="margin:0">No family members recorded. Nominees for SSF and gratuity are chosen here.</p>{% endif %}
+      {% elif s.key == 'education' %}
+        {% if d.items %}<div class="hj-stack hj-gap-xs">{% for e in d.items %}
+          <div><div class="hj-sm hj-strong">{{ levels|get_item:e.level|default:e.level }}{% if e.degree %}, {{ e.degree }}{% endif %}{% if e.field %}, {{ e.field }}{% endif %}</div>
+            <div class="hj-small hj-muted">{{ e.institution }}{% if e.board %} · {{ e.board }}{% endif %}{% if e.startYear or e.endYear %} · {{ e.startYear|default:"" }}{% if e.startYear and e.endYear %}–{% endif %}{{ e.endYear|default:"" }}{% endif %}{% if e.result %} · {{ e.result }}{% endif %}</div></div>{% endfor %}</div>
+        {% else %}<p class="hj-sm hj-muted" style="margin:0">No education recorded.</p>{% endif %}
+      {% elif s.key == 'experience' %}
+        {% if d.items %}<div class="hj-stack hj-gap-xs">{% for e in d.items %}
+          <div><div class="hj-sm hj-strong">{% if e.designation %}{{ e.designation }} at {% endif %}{{ e.organisation }}</div>
+            <div class="hj-small hj-muted">{% if e.fromDate %}{{ e.fromDate|bs_date }}{% endif %}{% if e.fromDate and e.toDate %} to {% endif %}{% if e.toDate %}{{ e.toDate|bs_date }}{% endif %}{% if e.reasonForLeaving %} · Left: {{ e.reasonForLeaving }}{% endif %}</div></div>{% endfor %}</div>
+        {% else %}<p class="hj-sm hj-muted" style="margin:0">No previous employment recorded.</p>{% endif %}
+      {% elif s.key == 'skills' %}
+        {% if d.skills or d.languages %}<div class="hj-row hj-gap-xs">{% for x in d.skills %}<span class="hj-badge hj-tone-accent">{{ x }}</span>{% endfor %}{% for x in d.languages %}<span class="hj-badge hj-tone-idle">{{ x }}</span>{% endfor %}</div>
+        {% else %}<p class="hj-sm hj-muted" style="margin:0">No skills or languages listed.</p>{% endif %}
+      {% endif %}
+      {% endwith %}
+    </div>
+    {% endfor %}
+  </div>
+</div>

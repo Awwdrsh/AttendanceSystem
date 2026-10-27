@@ -1,0 +1,131 @@
+{# SectionForm of ProfileSections.tsx, in the shared drawer. Secret numbers start empty: leaving one blank keeps the stored value. #}
+<form class="hj-form" data-modal-title="{{ title }}" data-modal-size="lg" hx-post="{% url 'people:section_edit' employee_id section %}" hx-swap="none"
+      x-data="{ shown: {{ shown }}, removed: {}, nom: {{ nom|json_attr }}, share: {{ share|json_attr }},
+                live(i) { return i < this.shown && !this.removed[i]; },
+                nominees() { return Object.keys(this.nom).filter((k) => this.nom[k] && this.live(Number(k))); },
+                total() { return this.nominees().reduce((a, k) => a + (Number(this.share[k]) || 0), 0); } }">
+  <input type="hidden" name="mode" value="{{ mode }}">
+  {% if mode == 'self' %}{% alert "info" %}HR reviews every change before it is saved. Attach proof (for example a new citizenship or bank letter) to speed things up.{% endalert %}{% endif %}
+
+  {% if section == 'personal' %}
+    <div class="hj-fieldset"><label class="hj-label" for="f-gender">Gender</label>
+      <select id="f-gender" name="gender" class="hj-select"><option value=""></option>{% for k, l in gender %}<option value="{{ k }}"{% if v.gender == k %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+    {% bs_date_input "dob" value=v.dob label="Date of birth" %}
+    <div class="hj-fieldset"><label class="hj-label" for="f-marital">Marital status</label><div class="hj-help">Used for the income tax slab (married couples file jointly).</div>
+      <select id="f-marital" name="maritalStatus" class="hj-select"><option value=""></option>{% for k, l in marital %}<option value="{{ k }}"{% if v.maritalStatus == k %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+    <div class="hj-fieldset"><label class="hj-label" for="f-blood">Blood group</label>
+      <select id="f-blood" name="bloodGroup" class="hj-select"><option value=""></option>{% for b in blood %}<option{% if v.bloodGroup == b %} selected{% endif %}>{{ b }}</option>{% endfor %}</select></div>
+    <div class="hj-fieldset"><label class="hj-label" for="f-nat">Nationality</label><input id="f-nat" name="nationality" class="hj-input" maxlength="60" value="{{ v.nationality|default:'' }}"></div>
+
+  {% elif section == 'contact' %}
+    <div class="hj-fieldset"><label class="hj-label" for="f-pe">Personal email</label><input id="f-pe" type="email" name="personalEmail" class="hj-input" value="{{ v.personalEmail|default:'' }}"></div>
+    <div class="hj-form-row">
+      <div class="hj-fieldset"><label class="hj-label" for="f-pp">Personal phone</label><input id="f-pp" name="personalPhone" class="hj-input" placeholder="98XXXXXXXX" value="{{ v.personalPhone|default:'' }}"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="f-wp">Work phone</label><input id="f-wp" name="workPhone" class="hj-input" value="{{ v.workPhone|default:'' }}"></div>
+    </div>
+    {% include "people/partials/address_fields.html" with pre="perm" title="Permanent address" a=perm %}
+    {% include "people/partials/address_fields.html" with pre="temp" title="Temporary (current) address" a=temp %}
+
+  {% elif section == 'bank' %}
+    <div class="hj-fieldset"><label class="hj-label" for="f-bc">Bank</label><input id="f-bc" name="bankCode" class="hj-input" placeholder="e.g. NABIL" maxlength="20" value="{{ v.bankCode|default:'' }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="f-bb">Branch</label><input id="f-bb" name="bankBranch" class="hj-input" maxlength="80" value="{{ v.bankBranch|default:'' }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="f-ba">Account number</label>{% if masked.bankAccount %}<div class="hj-help">Leave blank to keep {{ masked.bankAccount }}</div>{% endif %}
+      <input id="f-ba" name="bankAccount" class="hj-input mono" autocomplete="off" maxlength="40"></div>
+
+  {% elif section == 'ids' %}
+    <div class="hj-fieldset"><label class="hj-label" for="f-pan">PAN</label>{% if masked.pan %}<div class="hj-help">Leave blank to keep {{ masked.pan }}</div>{% endif %}
+      <input id="f-pan" name="pan" class="hj-input mono" maxlength="9" inputmode="numeric" autocomplete="off"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="f-cz">Citizenship number</label>{% if masked.citizenshipNo %}<div class="hj-help">Leave blank to keep {{ masked.citizenshipNo }}</div>{% endif %}
+      <input id="f-cz" name="citizenshipNo" class="hj-input mono" autocomplete="off"></div>
+    <div class="hj-form-row">
+      <div class="hj-fieldset"><label class="hj-label" for="f-czd">Issue district</label><input id="f-czd" name="citizenshipDistrict" class="hj-input" value="{{ v.citizenshipDistrict|default:'' }}"></div>
+      {% bs_date_input "citizenshipIssuedOn" value=v.citizenshipIssuedOn label="Issue date" %}
+    </div>
+    <div class="hj-form-row">
+      <div class="hj-fieldset"><label class="hj-label" for="f-pp">Passport number</label>{% if masked.passportNo %}<div class="hj-help">Leave blank to keep {{ masked.passportNo }}</div>{% endif %}
+        <input id="f-pp" name="passportNo" class="hj-input mono" autocomplete="off"></div>
+      {% bs_date_input "passportExpiry" value=v.passportExpiry label="Passport expiry" %}
+    </div>
+    <div class="hj-form-row">
+      <div class="hj-fieldset"><label class="hj-label" for="f-dl">Driving licence number</label>{% if masked.licenceNo %}<div class="hj-help">Leave blank to keep {{ masked.licenceNo }}</div>{% endif %}
+        <input id="f-dl" name="licenceNo" class="hj-input mono" autocomplete="off"></div>
+      {% bs_date_input "licenceExpiry" value=v.licenceExpiry label="Licence expiry" %}
+    </div>
+    <div class="hj-form-row" style="--cols:3">
+      <div class="hj-fieldset"><label class="hj-label" for="f-ssf">SSF ID</label><input id="f-ssf" name="ssfId" class="hj-input" value="{{ v.ssfId|default:'' }}"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="f-cit">CIT ID</label><input id="f-cit" name="citId" class="hj-input" value="{{ v.citId|default:'' }}"></div>
+      <div class="hj-fieldset"><label class="hj-label" for="f-pf">PF number</label><input id="f-pf" name="pfId" class="hj-input" value="{{ v.pfId|default:'' }}"></div>
+    </div>
+
+  {% elif section == 'skills' %}
+    <div class="hj-fieldset"><label class="hj-label" for="f-sk">Skills</label><div class="hj-help">Separate them with commas.</div>
+      <input id="f-sk" name="skills" class="hj-input" value="{{ skills_text }}"></div>
+    <div class="hj-fieldset"><label class="hj-label" for="f-lang">Languages</label><div class="hj-help">For example {{ languages|join:", " }}.</div>
+      <input id="f-lang" name="languages" class="hj-input" value="{{ languages_text }}" list="hj-languages">
+      <datalist id="hj-languages">{% for l in languages %}<option value="{{ l }}">{% endfor %}</datalist></div>
+
+  {% else %}
+    <div class="hj-stack hj-gap-sm">
+    {% for s in slots %}{% with r=s.r i=s.i %}
+      <fieldset class="hj-card p-sm" x-show="{{ i }} < shown && !removed[{{ i }}]" {% if i >= shown %}x-cloak{% endif %} :disabled="{{ i }} >= shown || removed[{{ i }}]" style="border:1px solid var(--hj-line)">
+        <div class="hj-row hj-end"><button type="button" class="hj-iconbtn" @click="removed[{{ i }}] = true" aria-label="Remove"><i class="ti ti-trash" aria-hidden="true"></i></button></div>
+        {% if section == 'emergency' %}
+          <div class="hj-form-row">
+            <div class="hj-fieldset"><label class="hj-label">Name<span class="req">*</span></label><input name="c-{{ i }}-name" class="hj-input" value="{{ r.name|default:'' }}"></div>
+            <div class="hj-fieldset"><label class="hj-label">Relation<span class="req">*</span></label><input name="c-{{ i }}-relation" class="hj-input" value="{{ r.relation|default:'' }}"></div>
+            <div class="hj-fieldset"><label class="hj-label">Phone<span class="req">*</span></label><input name="c-{{ i }}-phone" class="hj-input" value="{{ r.phone|default:'' }}"></div>
+            <div class="hj-fieldset"><label class="hj-label">Other phone</label><input name="c-{{ i }}-altPhone" class="hj-input" value="{{ r.altPhone|default:'' }}"></div>
+          </div>
+          <div class="hj-fieldset"><label class="hj-label">Address</label><input name="c-{{ i }}-address" class="hj-input" value="{{ r.address|default:'' }}"></div>
+        {% elif section == 'family' %}
+          <div class="hj-form-row">
+            <div class="hj-fieldset"><label class="hj-label">Name<span class="req">*</span></label><input name="m-{{ i }}-name" class="hj-input" value="{{ r.name|default:'' }}"></div>
+            <div class="hj-fieldset"><label class="hj-label">Relation</label><select name="m-{{ i }}-relation" class="hj-select">{% for k, l in relations %}<option value="{{ k }}"{% if r.relation == k %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+            {% bs_date_input s.p|add:"-dob" value=r.dob label="Date of birth" id="f-"|add:s.p %}
+            <div class="hj-fieldset"><label class="hj-label">Occupation</label><input name="m-{{ i }}-occupation" class="hj-input" value="{{ r.occupation|default:'' }}"></div>
+          </div>
+          <div class="hj-row hj-gap-lg">
+            <label class="hj-row hj-gap-xs hj-sm"><input type="checkbox" class="hj-check" name="m-{{ i }}-isDependent"{% if r.isDependent %} checked{% endif %}>Dependent</label>
+            <label class="hj-row hj-gap-xs hj-sm"><input type="checkbox" class="hj-check" name="m-{{ i }}-isNominee" x-model="nom[{{ i }}]" @change="if (!nom[{{ i }}]) share[{{ i }}] = ''"{% if r.isNominee %} checked{% endif %}>Nominee</label>
+            <div class="hj-fieldset" x-show="nom[{{ i }}]" style="width:110px"><label class="hj-label">Share %</label><input type="number" min="1" max="100" step="0.01" name="m-{{ i }}-nomineeShare" class="hj-input" x-model="share[{{ i }}]" value="{{ r.nomineeShare|default:'' }}"></div>
+          </div>
+        {% elif section == 'education' %}
+          <div class="hj-form-row">
+            <div class="hj-fieldset"><label class="hj-label">Level</label><select name="e-{{ i }}-level" class="hj-select">{% for k, l in levels %}<option value="{{ k }}"{% if r.level == k %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+            <div class="hj-fieldset"><label class="hj-label">Degree</label><input name="e-{{ i }}-degree" class="hj-input" placeholder="e.g. BE Computer" value="{{ r.degree|default:'' }}"></div>
+            <div class="hj-fieldset"><label class="hj-label">Institution<span class="req">*</span></label><input name="e-{{ i }}-institution" class="hj-input" value="{{ r.institution|default:'' }}"></div>
+            <div class="hj-fieldset"><label class="hj-label">Board or university</label><input name="e-{{ i }}-board" class="hj-input" value="{{ r.board|default:'' }}"></div>
+            <div class="hj-fieldset"><label class="hj-label">Start year</label><input type="number" min="1950" max="2200" name="e-{{ i }}-startYear" class="hj-input" value="{{ r.startYear|default:'' }}"></div>
+            <div class="hj-fieldset"><label class="hj-label">End year</label><input type="number" min="1950" max="2200" name="e-{{ i }}-endYear" class="hj-input" value="{{ r.endYear|default:'' }}"></div>
+            <div class="hj-fieldset"><label class="hj-label">Field</label><input name="e-{{ i }}-field" class="hj-input" value="{{ r.field|default:'' }}"></div>
+            <div class="hj-fieldset"><label class="hj-label">Result</label><input name="e-{{ i }}-result" class="hj-input" placeholder="GPA or division" value="{{ r.result|default:'' }}"></div>
+          </div>
+        {% elif section == 'experience' %}
+          <div class="hj-form-row">
+            <div class="hj-fieldset"><label class="hj-label">Organisation<span class="req">*</span></label><input name="x-{{ i }}-organisation" class="hj-input" value="{{ r.organisation|default:'' }}"></div>
+            <div class="hj-fieldset"><label class="hj-label">Designation</label><input name="x-{{ i }}-designation" class="hj-input" value="{{ r.designation|default:'' }}"></div>
+            {% bs_date_input s.p|add:"-fromDate" value=r.fromDate label="From" id="f-from-"|add:s.p %}
+            {% bs_date_input s.p|add:"-toDate" value=r.toDate label="To" id="f-to-"|add:s.p %}
+          </div>
+          <div class="hj-fieldset"><label class="hj-label">Responsibilities</label><textarea name="x-{{ i }}-responsibilities" class="hj-input" rows="2">{{ r.responsibilities|default:'' }}</textarea></div>
+          <div class="hj-fieldset"><label class="hj-label">Reason for leaving</label><input name="x-{{ i }}-reasonForLeaving" class="hj-input" value="{{ r.reasonForLeaving|default:'' }}"></div>
+        {% endif %}
+      </fieldset>
+    {% endwith %}{% endfor %}
+      <button type="button" class="hj-btn default xs" style="align-self:flex-start" x-show="shown < {{ slots|length }}" @click="shown++"><i class="ti ti-plus" aria-hidden="true"></i>{{ add_label }}</button>
+      {% if section == 'family' %}
+      <p class="hj-small" style="margin:0" x-show="nominees().length" x-cloak :class="Math.abs(total() - 100) < 0.01 ? 'hj-muted' : 'hj-bad-text'">Nominee shares add up to <span x-text="total()"></span>%<span x-text="Math.abs(total() - 100) < 0.01 ? '.' : '; they must total 100%.'"></span></p>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% if mode == 'self' %}
+    <hr class="hj-divider">
+    <div class="hj-fieldset"><label class="hj-label" for="f-reason">Note for HR</label><textarea id="f-reason" name="reason" class="hj-input" rows="2" maxlength="500" placeholder="Why is this changing?"></textarea></div>
+    {% file_upload "proofFileId" "profile_change" label="Attach proof (PDF or photo)" %}
+  {% endif %}
+  <div class="hj-modal-foot">
+    <button type="button" class="hj-btn default" data-modal-close>Cancel</button>
+    <button type="submit" class="hj-btn">{% if mode == 'hr' %}Save{% else %}Send to HR{% endif %}</button>
+  </div>
+</form>

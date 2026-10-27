@@ -1,0 +1,11 @@
+<div class="hj-row hj-gap-lg" style="align-items:center">
+  <svg class="hj-chart" viewBox="0 0 160 160" width="{{ c.size }}" height="{{ c.size }}" role="img" aria-label="{{ c.aria_label }}" style="flex:none">
+    <circle cx="80" cy="80" r="{{ c.r }}" fill="none" stroke="var(--hj-line-soft)" stroke-width="{{ c.stroke }}"/>
+    {% for s in c.segments %}<circle class="mark" cx="80" cy="80" r="{{ c.r }}" fill="none" stroke="{{ s.color }}" stroke-width="{{ c.stroke }}" stroke-dasharray="{{ s.dash }}" stroke-dashoffset="{{ s.offset }}" transform="rotate(-90 80 80)" data-tip="{{ s.title }}"/>{% endfor %}
+    <text x="80" y="78" text-anchor="middle" style="font-size:22px;font-weight:700;fill:var(--hj-text)">{{ c.total }}</text>
+    <text x="80" y="96" text-anchor="middle">{{ c.center_label }}</text>
+  </svg>
+  <div class="hj-stack hj-gap-xs hj-grow" style="min-width:140px">
+    {% for l in c.legend %}<div class="hj-row nowrap hj-sm"><span style="width:10px;height:10px;border-radius:3px;background:{{ l.color }};flex:none" aria-hidden="true"></span><span class="hj-grow">{{ l.label }}</span><span class="hj-strong num">{{ l.count }}</span><span class="hj-small hj-muted num" style="width:36px;text-align:right">{{ l.pct }}</span></div>{% endfor %}
+  </div>
+</div>

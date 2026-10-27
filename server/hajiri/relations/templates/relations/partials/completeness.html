@@ -1,0 +1,23 @@
+<section class="hj-section" id="kye-completeness">
+  <div class="hj-section-title">
+    <div><h3>Record completeness</h3>{% if avg is not None %}<p>Average record {{ avg }}% complete. Previous employment is optional and not counted.</p>{% endif %}</div>
+    <div class="hj-actions"><nav class="hj-pills" aria-label="Show">
+      <a class="hj-pill" href="?view=incomplete" hx-get="?view=incomplete" hx-target="#kye-completeness" hx-swap="outerHTML" hx-push-url="true"{% if view == 'incomplete' %} aria-current="page"{% endif %}>Incomplete</a>
+      <a class="hj-pill" href="?view=all" hx-get="?view=all" hx-target="#kye-completeness" hx-swap="outerHTML" hx-push-url="true"{% if view == 'all' %} aria-current="page"{% endif %}>All</a></nav></div>
+  </div>
+  {% if completeness %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Employee</th><th>Complete</th><th>Missing</th></tr></thead>
+    <tbody>
+    {% for r in completeness %}
+      <tr data-href="/employees/{{ r.employeeId }}" class="clickable">
+        <td><div class="hj-sm">{{ r.name }}</div><div class="hj-small hj-muted">{{ r.empCode }}</div></td>
+        <td><div class="hj-row nowrap hj-gap-xs"><div class="hj-progress {{ r.tone }}" style="width:80px"><span style="width:{{ r.percent }}%"></span></div><span class="hj-small">{{ r.percent }}%</span></div></td>
+        <td><div class="hj-row hj-gap-xs">{% for m in r.missing_labels %}<span class="hj-badge sm hj-tone-idle">{{ m }}</span>{% endfor %}</div></td>
+      </tr>
+    {% endfor %}
+    </tbody></table></div></div>
+  {% else %}
+    {% empty_state title="Every record is complete" %}
+  {% endif %}
+</section>
