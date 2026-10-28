@@ -1,0 +1,105 @@
+:root {
+  --hj-canvas: #f3f5f7;
+  --hj-surface: #ffffff;
+  --hj-raised: #fbfcfd;
+  --hj-line: #0b0f1721;
+  --hj-line-soft: #0b0f1714;
+  --hj-line-strong: #0b0f1738;
+  --hj-muted: #5b6472;
+  --hj-ok: #12773a;
+  --hj-warn: #b45309;
+  --hj-bad: #dc2626;
+  --hj-info: #0369a1;
+  --hj-idle: #868d9a;
+  --hj-hydro: #12773a;
+  --hj-hydro-soft: rgba(21, 128, 61, 0.08);
+  --hj-on-hydro: #ffffff;
+  --hj-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+[data-mantine-color-scheme='dark'] {
+  --hj-canvas: #05080d;
+  --hj-surface: #0b0f17;
+  --hj-raised: #11161f;
+  --hj-line: #e8ecef1f;
+  --hj-line-soft: #e8ecef12;
+  --hj-line-strong: #e8ecef33;
+  --hj-muted: #868d9a;
+  --hj-ok: #4ade80;
+  --hj-warn: #fbbf24;
+  --hj-bad: #f87171;
+  --hj-info: #38bdf8;
+  --hj-idle: #778090;
+  --hj-hydro: #4ade80;
+  --hj-hydro-soft: rgba(74, 222, 128, 0.1);
+  --hj-on-hydro: #05080d;
+}
+
+body { background: var(--hj-canvas); color: var(--mantine-color-text); -webkit-font-smoothing: antialiased; }
+h1, h2, h3, .mantine-Title-root { letter-spacing: -0.02em; }
+.mono, kbd, code { font-family: var(--hj-mono); }
+.num, td, .mantine-Badge-label { font-variant-numeric: tabular-nums; }
+
+/* Tables: quiet headers, hairline rows. */
+.mantine-Table-th { font-family: var(--hj-mono); font-weight: 500; color: var(--hj-muted); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; background: var(--hj-raised); white-space: nowrap; }
+.mantine-Table-thead { border-bottom: 1px solid var(--hj-line); }
+.mantine-Table-tr { border-color: var(--hj-line-soft) !important; }
+
+/* Panels sit on the canvas with a hairline instead of a shadow. */
+.mantine-Paper-root[data-with-border] { border-color: var(--hj-line); }
+
+/* Sidebar */
+.hj-nav { background: var(--hj-canvas); border-right: 1px solid var(--hj-line) !important; }
+.hj-nav-section { font-family: var(--hj-mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--hj-muted); font-weight: 500; padding: 16px 10px 6px; }
+.hj-nav-link { border-radius: 4px; padding: 5px 10px; font-size: 13.5px; color: inherit; height: 32px; }
+.hj-nav-link .mantine-NavLink-section[data-position='left'] { margin-inline-end: 10px; color: var(--hj-muted); }
+.hj-nav-link:hover { background: var(--hj-line-soft); }
+.hj-nav-link[data-active] { background: var(--hj-hydro-soft); color: var(--hj-hydro); font-weight: 650; box-shadow: inset 2px 0 0 var(--hj-hydro); }
+.hj-nav-link[data-active] .mantine-NavLink-section[data-position='left'] { color: var(--hj-hydro); }
+.hj-nav-link[data-active]:hover { background: var(--hj-hydro-soft); }
+.hj-search { width: 100%; height: 32px; border: 1px solid var(--hj-line); background: var(--hj-surface); border-radius: 6px; padding: 0 8px 0 10px; color: var(--hj-muted); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.hj-search:hover { border-color: var(--mantine-color-gray-4); }
+.hj-kbd { font-family: var(--hj-mono); font-size: 10.5px; border: 1px solid var(--hj-line); border-radius: 4px; padding: 0 5px; line-height: 18px; color: var(--hj-muted); margin-left: auto; }
+
+.hj-main { background: var(--hj-canvas); }
+.hj-page { max-width: 1240px; margin: 0 auto; padding: 28px 32px 64px; }
+@media (max-width: 48em) { .hj-page { padding: 18px 16px 48px; } }
+
+/* Stat strip: one panel split into cells, not a row of cards. */
+.hj-stats { display: grid; grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr)); border: 1px solid var(--hj-line); border-radius: 8px; overflow: hidden; background: var(--hj-surface); }
+.hj-stat { padding: 16px 18px; border-left: 1px solid var(--hj-line); min-width: 0; }
+.hj-stat:first-child { border-left: 0; }
+.hj-stat-value { font-size: 28px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.1; margin-top: 6px; font-variant-numeric: tabular-nums; }
+@media (max-width: 62em) {
+  .hj-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hj-stat { border-left: 0; border-top: 1px solid var(--hj-line); }
+  .hj-stat:nth-child(-n + 2) { border-top: 0; }
+  .hj-stat:nth-child(2n) { border-left: 1px solid var(--hj-line); }
+}
+
+.hj-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* Command palette */
+.mantine-Spotlight-action[data-selected] { background: var(--mantine-color-brand-light); color: inherit; }
+.mantine-Spotlight-action[data-selected] .mantine-Spotlight-actionDescription { color: var(--hj-muted); }
+.mantine-Spotlight-action mark { background: transparent; color: var(--hj-hydro); font-weight: 700; }
+.mantine-Spotlight-actionSection[data-position='left'] { color: var(--hj-muted); }
+
+/* Tabs inside a hub tab render as quiet pills so the two levels read differently. */
+.hj-embedded .mantine-Tabs-list { gap: 4px; flex-wrap: wrap; }
+.hj-embedded .mantine-Tabs-list::before { display: none; }
+.hj-embedded .mantine-Tabs-tab { border: 0; border-radius: 6px; padding: 6px 12px; font-size: 13.5px; color: var(--hj-muted); }
+.hj-embedded .mantine-Tabs-tab:hover { background: var(--hj-line-soft); }
+.hj-embedded .mantine-Tabs-tab[data-active] { background: var(--hj-line-soft); color: inherit; font-weight: 500; }
+
+/* CoreValley details: mono eyebrows, faint dot grid on the canvas, panels as white sheets. */
+.hj-eyebrow { font-family: var(--hj-mono); font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--hj-hydro); }
+.hj-stat-label { font-family: var(--hj-mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; }
+.mantine-Paper-root[data-with-border] { background: var(--hj-surface); }
+.mantine-Tabs-tab { font-weight: 600; }
+.mantine-Tabs-tab[data-active] { color: var(--hj-hydro); }
+.mantine-Badge-root { letter-spacing: 0.01em; }
+.hj-main { background-image: radial-gradient(rgba(11, 15, 23, 0.06) 1px, transparent 1px); background-size: 22px 22px; }
+[data-mantine-color-scheme='dark'] .hj-main { background-image: radial-gradient(rgba(232, 236, 239, 0.05) 1px, transparent 1px); }
+.hj-row-hover:hover { background: var(--hj-line-soft); }

@@ -1,0 +1,639 @@
+import {
+  Avatar,
+  Badge,
+  Button,
+  Divider,
+  Group,
+  Modal,
+  Paper,
+  SegmentedControl,
+  Skeleton,
+  Stack,
+  Text,
+  Textarea,
+  Timeline,
+} from '@mantine/core';
+import { IconCheck, IconChecks, IconCircleCheck, IconX } from '@tabler/icons-react';
+import { Fragment, useState } from 'react';
+import { workflow as wfApi } from '../../api';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { EmptyState } from '../../components/EmptyState';
+import { DelegateApprovals } from '../../components/DelegateApprovals';
+import { PageHeader } from '../../components/PageHeader';
+import { bsMonthLabel, fmtDateShort, fmtMoney, fmtTime, minutesToHm, relativeTime } from '../../lib/format';
+import { toast } from '../../lib/toast';
+import { useQuery } from '../../lib/useQuery';
+import { EXPENSE_TYPE_COLOR, EXPENSE_TYPE_LABEL, expenseSummary } from '../expenses/approvalSummary';
+import { ProfileChangeSummary } from '../../components/people/ProfileChangeSummary';
+
+const TYPE_LABEL = {
+  leave_request: 'Leave',
+  regularisation_request: 'Attendance correction',
+  ot_request: 'Overtime',
+  payroll_run: 'Payroll run',
+  timesheet: 'Timesheet',
+  shift_swap: 'Shift swap',
+  letter_request: 'Letter request',
+  probation_review: 'Probation',
+  resignation: 'Resignation',
+  job_requisition: 'Hiring request',
+  job_offer: 'Job offer',
+  profile_change: 'Profile change',
+  training_nomination: 'Training',
+  tax_declaration: 'Tax savings',
+  ...EXPENSE_TYPE_LABEL,
+};
+const TYPE_COLOR = {
+  leave_request: 'blue',
+  regularisation_request: 'orange',
+  ot_request: 'grape',
+  payroll_run: 'brand',
+  timesheet: 'teal',
+  shift_swap: 'cyan',
+  letter_request: 'indigo',
+  probation_review: 'violet',
+  resignation: 'red',
+  job_requisition: 'pink',
+  job_offer: 'green',
+  profile_change: 'cyan',
+  training_nomination: 'lime',
+  tax_declaration: 'yellow',
+  ...EXPENSE_TYPE_COLOR,
+};
+
+function initials(name) {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
+}
+
+function dateRange(from, to) {
+  const f = String(from);
+  const t = String(to);
+  return t && t !== 'undefined' && t !== f ? `${fmtDateShort(f)} to ${fmtDateShort(t)}` : fmtDateShort(f);
+}
+
+/** One readable line of what is being asked, plus an optional muted line of context. */
+function Summary({ item }) {
+  const s = item.summary;
+  let main;
+  const extra = [];
+  switch (item.objectType) {
+    case 'leave_request': {
+      const days = Number(s.days);
+      main = s.fromTime ? (
+        <>
+          {String(s.leaveTypeName ?? s.leaveType)}, {dateRange(s.from, s.to)}, {String(s.fromTime)}–{String(s.toTime)}{' '}
+          <Text span c="dimmed">
+            ({String(s.hours)} h, {String(s.days)} of a day)
+          </Text>
+        </>
+      ) : (
+        <>
+          {String(s.leaveTypeName ?? s.leaveType)}, {dateRange(s.from, s.to)}
+          {s.halfDay ? ' (half day)' : ''}{' '}
+          <Text span c="dimmed">
+            ({String(s.days)} {days === 1 ? 'day' : 'days'})
+          </Text>
+        </>
+      );
+      extra.push(
+        <Text key="bal" size="xs" c="dimmed">
+          Balance {Number(s.balanceNow ?? 0).toFixed(1)} to {Number(s.balanceAfter ?? 0).toFixed(1)}
+        </Text>,
+      );
+      if (Array.isArray(s.teamOverlap) && s.teamOverlap.length)
+        extra.push(
+          <Text key="ov" c="orange.7" size="xs">
+            Also off: {s.teamOverlap.join(', ')}
+          </Text>,
+        );
+      if (s.reason)
+        extra.push(
+          <Text key="r" size="xs" c="dimmed">
+            “{String(s.reason)}”
+          </Text>,
+        );
+      break;
+    }
+    case 'regularisation_request': {
+      const KIND = {
+        wfh: 'Working from home',
+        missed_punch: 'Missed punch',
+        on_duty: 'On duty elsewhere',
+        half_day: 'Half day',
+        shift_change: 'Shift change',
+      };
+      const kind = KIND[String(s.kind)] ?? String(s.kind).replace(/_/g, ' ');
+      main = (
+        <>
+          {kind.charAt(0).toUpperCase() + kind.slice(1)} on {fmtDateShort(String(s.local_date))}
+          {s.punch_time
+            ? `, ${String(s.punch_direction ?? '').toLowerCase() === 'in' ? 'clock-in' : 'clock-out'} at ${fmtTime(String(s.punch_time))}`
+            : ''}
+        </>
+      );
+      if (s.reason)
+        extra.push(
+          <Text key="r" size="xs" c="dimmed">
+            “{String(s.reason)}”
+          </Text>,
+        );
+      break;
+    }
+    case 'ot_request':
+      main = (
+        <>
+          {minutesToHm(Number(s.requested_min))} overtime on {fmtDateShort(String(s.local_date))}
+        </>
+      );
+      if (s.reason)
+        extra.push(
+          <Text key="r" size="xs" c="dimmed">
+            “{String(s.reason)}”
+          </Text>,
+        );
+      break;
+    case 'payroll_run':
+      main = (
+        <>
+          {String(s.run_type).charAt(0).toUpperCase() + String(s.run_type).slice(1)} run for{' '}
+          {bsMonthLabel(Number(s.bs_year), Number(s.bs_month))}
+        </>
+      );
+      extra.push(
+        <Text key="p" size="xs" c="dimmed">
+          {String(s.payslips)} payslips
+        </Text>,
+        <Text key="n" size="xs" c="dimmed">
+          Net {fmtMoney(String(s.total_net))}
+        </Text>,
+      );
+      break;
+    case 'timesheet':
+      main = (
+        <>
+          {minutesToHm(Number(s.totalMin))} logged, {dateRange(s.weekStart, s.weekEnd)}
+        </>
+      );
+      extra.push(
+        <Text key="a" size="xs" c="dimmed">
+          Attended {minutesToHm(Number(s.attendanceMin ?? 0))}
+        </Text>,
+      );
+      if (Array.isArray(s.projects) && s.projects.length)
+        extra.push(
+          <Text key="p" size="xs" c="dimmed">
+            {s.projects.map((x) => `${x.name} ${minutesToHm(x.min)}`).join(' · ')}
+          </Text>,
+        );
+      if (s.note)
+        extra.push(
+          <Text key="r" size="xs" c="dimmed">
+            “{String(s.note)}”
+          </Text>,
+        );
+      break;
+    case 'shift_swap':
+      main = (
+        <>
+          Swap shifts with {String(s.colleague_name)} on {fmtDateShort(String(s.local_date))}{' '}
+          <Text span c="dimmed">
+            ({String(s.requester_shift_code ?? 'Off')} ⇄ {String(s.colleague_shift_code ?? 'Off')})
+          </Text>
+        </>
+      );
+      if (s.reason)
+        extra.push(
+          <Text key="r" size="xs" c="dimmed">
+            “{String(s.reason)}”
+          </Text>,
+        );
+      if (s.colleague_note)
+        extra.push(
+          <Text key="n" size="xs" c="dimmed">
+            {String(s.colleague_name)}: “{String(s.colleague_note)}”
+          </Text>,
+        );
+      break;
+    case 'letter_request':
+      main = <>{String(s.letter ?? 'Letter')} requested</>;
+      if (s.purpose)
+        extra.push(
+          <Text key="p" size="xs" c="dimmed">
+            For {String(s.purpose)}
+          </Text>,
+        );
+      if (s.addressed_to)
+        extra.push(
+          <Text key="a" size="xs" c="dimmed">
+            To {String(s.addressed_to)}
+          </Text>,
+        );
+      break;
+    case 'job_requisition':
+      main = (
+        <>
+          Hire {String(s.headcount ?? 1)} × {String(s.title ?? '')}
+          {s.department ? ` for ${String(s.department)}` : ''}
+        </>
+      );
+      if (s.salary_min || s.salary_max)
+        extra.push(
+          <Text key="b" size="xs" c="dimmed">
+            Budget NPR{' '}
+            {[s.salary_min, s.salary_max]
+              .filter(Boolean)
+              .map((x) => fmtMoney(String(x), { decimals: 0 }))
+              .join(' – ')}
+          </Text>,
+        );
+      if (s.justification)
+        extra.push(
+          <Text key="r" size="xs" c="dimmed">
+            “{String(s.justification)}”
+          </Text>,
+        );
+      break;
+    case 'job_offer':
+      main = (
+        <>
+          Offer to {String(s.candidate ?? '')} as {String(s.designation ?? '')}
+        </>
+      );
+      extra.push(
+        <Text key="p" size="xs" c="dimmed">
+          NPR {fmtMoney(String(s.salary ?? 0))} a month
+        </Text>,
+        <Text key="j" size="xs" c="dimmed">
+          Joins {fmtDateShort(String(s.join_date))}
+        </Text>,
+      );
+      break;
+    case 'profile_change':
+      main = <ProfileChangeSummary summary={s} />;
+      break;
+    case 'training_nomination':
+      main = (
+        <>
+          Join {String(s.course_title)}
+          {s.starts_at ? ` on ${fmtDateShort(String(s.starts_at).slice(0, 10))}` : ''}
+        </>
+      );
+      if (Number(s.cost) > 0)
+        extra.push(
+          <Text key="c" size="xs" c="dimmed">
+            Cost {fmtMoney(String(s.cost))}
+          </Text>,
+        );
+      if (s.reason)
+        extra.push(
+          <Text key="r" size="xs" c="dimmed">
+            “{String(s.reason)}”
+          </Text>,
+        );
+      break;
+    case 'tax_declaration': {
+      const fy = Number(s.fiscalYearStart);
+      const parts = [
+        ['Life insurance', s.lifePremium],
+        ['Health insurance', s.healthPremium],
+        ['CIT a month', s.citMonthly],
+        ['Other retirement', s.otherRetirementAnnual],
+        ['Medical', s.medicalCost],
+        ['Donations', s.donation],
+      ];
+      main = (
+        <>
+          Tax savings for FY {fy}/{String(fy + 1).slice(-2)}:{' '}
+          {parts
+            .filter(([, v]) => Number(v) > 0)
+            .map(([k, v]) => `${k} ${fmtMoney(String(v))}`)
+            .join(', ') || 'nothing declared'}
+        </>
+      );
+      extra.push(
+        <Text key="p" size="xs" c="dimmed">
+          {Number(s.proofs ?? 0)} proof file(s)
+        </Text>,
+      );
+      if (s.note)
+        extra.push(
+          <Text key="n" size="xs" c="dimmed">
+            “{String(s.note)}”
+          </Text>,
+        );
+      extra.push(
+        <Text key="h" size="xs" c="dimmed">
+          Check the receipts under Payroll, Tax declarations
+        </Text>,
+      );
+      break;
+    }
+    default: {
+      const x = expenseSummary(item.objectType, item.objectId, s);
+      if (x) {
+        main = x.main;
+        extra.push(...x.extra);
+        break;
+      }
+      main = (
+        <Text span c="dimmed">
+          {JSON.stringify(s)}
+        </Text>
+      );
+    }
+  }
+  if (item.routing?.length)
+    extra.push(
+      <Text key="route" size="xs" c="orange">
+        {item.routing.join('. ')}
+      </Text>,
+    );
+  return (
+    <>
+      <Text size="sm">{main}</Text>
+      {extra.length ? (
+        <Group gap="md" wrap="wrap">
+          {extra}
+        </Group>
+      ) : null}
+    </>
+  );
+}
+
+export default function ApprovalsPage() {
+  const q = useQuery(() => wfApi.inbox(), []);
+  const [reject, setReject] = useState(null);
+  const [reason, setReason] = useState('');
+  const [detail, setDetail] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const [confirmBulk, setConfirmBulk] = useState(false);
+  const [kind, setKind] = useState('all');
+  const items = q.data?.items ?? [];
+  const kinds = [...new Set(items.map((i) => i.objectType))];
+  const shown = kind === 'all' ? items : items.filter((i) => i.objectType === kind);
+
+  const approve = async (it) => {
+    setBusy(it.instanceId);
+    try {
+      await wfApi.approve(it.instanceId);
+      toast.ok('Approved.');
+      await q.reload();
+    } catch (e) {
+      toast.err(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const doReject = async () => {
+    if (!reject) return;
+    setBusy(reject.instanceId);
+    try {
+      await wfApi.reject(reject.instanceId, reason);
+      toast.ok('Rejected.');
+      setReject(null);
+      setReason('');
+      await q.reload();
+    } catch (e) {
+      toast.err(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const bulk = async () => {
+    setBusy('bulk');
+    try {
+      const r = await wfApi.bulkApprove(items.map((i) => i.instanceId));
+      const ok = r.results.filter((x) => x.state).length;
+      toast.ok(`${ok} approved${r.results.length - ok ? `, ${r.results.length - ok} failed` : ''}.`);
+      await q.reload();
+    } catch (e) {
+      toast.err(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Stack gap="md">
+      <PageHeader
+        title="Approvals"
+        subtitle={
+          items.length
+            ? `${items.length} ${items.length === 1 ? 'request is' : 'requests are'} waiting for your decision.`
+            : 'Leave, attendance correction and overtime requests that need your decision.'
+        }
+        actions={
+          <>
+            <DelegateApprovals />
+            {items.length > 1 ? (
+              <Button
+                variant="default"
+                leftSection={<IconChecks size={16} stroke={1.6} />}
+                loading={busy === 'bulk'}
+                onClick={() => setConfirmBulk(true)}
+              >
+                Approve all ({items.length})
+              </Button>
+            ) : null}
+          </>
+        }
+      />
+
+      {kinds.length > 1 ? (
+        <SegmentedControl
+          value={kind}
+          onChange={setKind}
+          style={{ alignSelf: 'flex-start' }}
+          data={[
+            { value: 'all', label: `All (${items.length})` },
+            ...kinds.map((k) => ({ value: k, label: `${TYPE_LABEL[k] ?? k} (${items.filter((i) => i.objectType === k).length})` })),
+          ]}
+        />
+      ) : null}
+
+      {q.error ? <EmptyState title="Could not load the inbox" hint={`${q.error}. Refresh the page to try again.`} /> : null}
+      {q.loading && items.length === 0 ? (
+        <Paper withBorder p="md">
+          <Stack>
+            {[0, 1, 2].map((i) => (
+              <Skeleton key={i} h={48} />
+            ))}
+          </Stack>
+        </Paper>
+      ) : null}
+      {!q.loading && !q.error && items.length === 0 ? (
+        <EmptyState
+          title="You're all caught up"
+          hint="New leave, attendance correction and overtime requests from your team will show up here."
+          icon={<IconCircleCheck size={20} stroke={1.6} />}
+        />
+      ) : null}
+
+      {shown.length ? (
+        <Paper withBorder style={{ overflow: 'hidden' }}>
+          {shown.map((it, idx) => {
+            const name = it.employee?.nameEn ?? 'Unknown employee';
+            return (
+              <Fragment key={it.instanceId}>
+                {idx > 0 ? <Divider color="var(--hj-line-soft)" /> : null}
+                <Group px="md" py="sm" gap="md" wrap="wrap" align="flex-start">
+                  <Avatar radius="xl" size={36} color="brand" variant="light">
+                    {initials(name)}
+                  </Avatar>
+                  <Stack gap={3} style={{ flex: 1, minWidth: 220 }}>
+                    <Group gap={8} wrap="wrap">
+                      <Text size="sm" fw={500}>
+                        {name}
+                      </Text>
+                      {it.employee ? (
+                        <Text size="xs" c="dimmed">
+                          {it.employee.empCode}
+                        </Text>
+                      ) : null}
+                      {it.summary?.kind === 'wfh' ? (
+                        <Badge variant="light" color="blue" size="sm">
+                          Work from home
+                        </Badge>
+                      ) : (
+                        <Badge variant="light" color={TYPE_COLOR[it.objectType] ?? 'gray'} size="sm">
+                          {TYPE_LABEL[it.objectType] ?? it.objectType}
+                        </Badge>
+                      )}
+                    </Group>
+                    <Summary item={it} />
+                  </Stack>
+                  <Stack gap={8} align="flex-end" style={{ marginLeft: 'auto' }}>
+                    <Text size="xs" c="dimmed" ta="right" title={new Date(it.createdAt).toLocaleString('en-GB')}>
+                      {relativeTime(it.createdAt)}
+                      {it.totalSteps > 1 ? `, step ${it.step + 1} of ${it.totalSteps}` : ''}
+                    </Text>
+                    <Group gap={6} wrap="nowrap">
+                      <Button
+                        variant="subtle"
+                        color="gray"
+                        size="xs"
+                        onClick={async () => {
+                          try {
+                            setDetail(await wfApi.detail(it.instanceId));
+                          } catch (e) {
+                            toast.err(e);
+                          }
+                        }}
+                      >
+                        Details
+                      </Button>
+                      <Button
+                        variant="default"
+                        size="xs"
+                        leftSection={<IconX size={14} stroke={1.8} />}
+                        disabled={busy === it.instanceId}
+                        onClick={() => setReject(it)}
+                      >
+                        Reject
+                      </Button>
+                      <Button
+                        size="xs"
+                        leftSection={<IconCheck size={14} stroke={1.8} />}
+                        loading={busy === it.instanceId}
+                        onClick={() => approve(it)}
+                      >
+                        Approve
+                      </Button>
+                    </Group>
+                  </Stack>
+                </Group>
+              </Fragment>
+            );
+          })}
+        </Paper>
+      ) : null}
+
+      <Modal opened={!!reject} onClose={() => setReject(null)} title="Reject request" centered>
+        <Stack>
+          {reject ? (
+            <Text size="sm" c="dimmed">
+              {reject.employee?.nameEn ?? 'This employee'} will see your reason.
+            </Text>
+          ) : null}
+          <Textarea
+            label="Reason"
+            description="At least 3 characters."
+            value={reason}
+            onChange={(e) => setReason(e.currentTarget.value)}
+            autosize
+            minRows={2}
+            required
+            data-autofocus
+          />
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setReject(null)}>
+              Cancel
+            </Button>
+            <Button
+              color="red"
+              leftSection={<IconX size={16} stroke={1.6} />}
+              loading={!!reject && busy === reject.instanceId}
+              disabled={reason.trim().length < 3}
+              onClick={doReject}
+            >
+              Reject request
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      <ConfirmDialog
+        opened={confirmBulk}
+        onClose={() => setConfirmBulk(false)}
+        color="brand"
+        title="Approve all requests?"
+        confirmLabel={`Approve ${items.length}`}
+        message={`${items.length} requests will be approved in one go. Reject any that need it first.`}
+        onConfirm={bulk}
+      />
+
+      <Modal opened={!!detail} onClose={() => setDetail(null)} title="Approval history" centered>
+        {detail ? (
+          <Stack>
+            <Group gap="xs">
+              <Text size="sm" c="dimmed">
+                Approval chain:
+              </Text>
+              <Text size="sm">{detail.instance.steps.map((s) => s.role).join(', then ')}</Text>
+            </Group>
+            <Group gap="xs">
+              <Text size="sm" c="dimmed">
+                State:
+              </Text>
+              <Text size="sm">{detail.instance.state.charAt(0).toUpperCase() + detail.instance.state.slice(1)}</Text>
+            </Group>
+            <Timeline bulletSize={16} lineWidth={2} active={detail.actions.length} mt="xs">
+              <Timeline.Item title="Submitted">
+                <Text size="xs" c="dimmed">
+                  {fmtDateShort(detail.instance.created_at)} at {fmtTime(detail.instance.created_at)}
+                </Text>
+              </Timeline.Item>
+              {detail.actions.map((a, i) => (
+                <Timeline.Item key={i} title={`${a.decision.charAt(0).toUpperCase() + a.decision.slice(1)} by ${a.actor_name}`}>
+                  <Text size="xs" c="dimmed">
+                    {fmtDateShort(a.acted_at)} at {fmtTime(a.acted_at)}
+                  </Text>
+                  {a.reason ? <Text size="xs">“{a.reason}”</Text> : null}
+                  <Text size="xs" c="dimmed" ff="monospace">
+                    Signature {a.signature.slice(0, 16)}…
+                  </Text>
+                </Timeline.Item>
+              ))}
+            </Timeline>
+          </Stack>
+        ) : null}
+      </Modal>
+    </Stack>
+  );
+}
