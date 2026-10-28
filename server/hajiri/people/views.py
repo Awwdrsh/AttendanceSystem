@@ -12,16 +12,19 @@ from django.shortcuts import render
 from django.urls import reverse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from django.db.models import BooleanField, ExpressionWrapper, Q
+
 from hajiri.core.auth import company_id_of, has_role
 from hajiri.core.clock import npt_today
-from hajiri.core.db import one, rows
 from hajiri.core.errors import BadRequestError, ForbiddenError, HttpError, NotFoundError
+from hajiri.db.models import BiometricTemplate, Employee, WorkflowInstance
 from hajiri.web.decorators import login_required, require_role
 from hajiri.web.htmx import close_modal, is_htmx, refresh, toast
 from hajiri.web.nav import url_of
 
 from . import service as svc
-from .career import CAREER_LABEL
+from .career import CAREER_LABEL  # noqa: F401
+from .forms import CareerForm, DirectoryForm, PolicyForm, RejectForm, SectionForm, StructureForm
 from .profile import SECTION_LABEL, SENSITIVE_SECTIONS
 
 ORDER = ['personal', 'contact', 'emergency', 'family', 'ids', 'bank', 'education', 'experience', 'skills']
@@ -79,8 +82,24 @@ def failed(request, exc: HttpError, title: str) -> HttpResponse:
     return toast(request, resp, msg, tone='err', title=title)
 
 
-def _blank(v):
-    return None if v is None or (isinstance(v, str) and v.strip() == '') else v
+def square_photo(upload):
+    """A profile photo the page script did not shrink becomes a 320 px square JPEG (Pillow); anything Pillow cannot
+    read goes to the file store as sent, which checks the type itself."""
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    from hajiri.core.images import image_size, square_jpeg
+    if upload is None:
+        return None
+    data = upload.read()
+    upload.seek(0)
+    try:
+        if image_size(data) == (320, 320) and (upload.content_type or '') == 'image/jpeg':
+            return upload
+        small = square_jpeg(data)
+    except BadRequestError:
+        return upload
+    name = (upload.name or 'photo').rsplit('.', 1)[0] + '.jpg'
+    return SimpleUploadedFile(name, small, content_type='image/jpeg')
 
 
 def _label(opts, v) -> str:
@@ -93,8 +112,7 @@ def _label(opts, v) -> str:
 @login_required
 def directory(request):
     user = request.hajiri_user
-    q = {'search': (request.GET.get('search') or '').strip()[:100] or None, 'orgUnitId': _blank(request.GET.get('unit')),
-         'branchId': _blank(request.GET.get('branch'))}
+    q = DirectoryForm(request.GET).query()
     people = svc.directory(user, {k: v for k, v in q.items() if v})
     filtered = any(q.values())
     ctx = {'people': people, 'filtered': filtered, 'q': q}
@@ -167,12 +185,14 @@ def _avatar_change(request, employee_id: str, self_: bool) -> HttpResponse:
         if not self_ and not has_role(user, 'hr'):
             raise ForbiddenError('requires role hr')
         try:
-            f = upload_file(user, 'avatar', request.FILES.get('file'))
+            f = upload_file(user, 'avatar', square_photo(request.FILES.get('file')))
             svc.set_my_avatar(user, {'fileId': f['id']}) if self_ else svc.set_employee_avatar(user, employee_id, {'fileId': f['id']})
         except HttpError as exc:
             return failed(request, exc, 'Photo not saved')
         msg = 'Photo updated.'
-    e = one('SELECT id, name_en, avatar_file_id IS NOT NULL AS has_avatar FROM employee WHERE id = %s', [employee_id])
+    e = (Employee.objects.for_company(company_id_of(user)).filter(pk=employee_id)
+         .annotate(has_avatar=ExpressionWrapper(Q(avatar_file__isnull=False), output_field=BooleanField()))
+         .values('id', 'name_en', 'has_avatar').get())
     resp = render(request, 'people/partials/avatar_editor.html', {'p': {'id': str(e['id']), 'name_en': e['name_en'], 'has_avatar': e['has_avatar']},
                                                                     'own': self_, 'v': str(int(time.time()))})
     return toast(request, resp, msg)
@@ -236,81 +256,6 @@ def sections(request, id):
     return render(request, 'people/partials/sections.html', ctx)
 
 
-def _list_from_post(post, prefix: str, fields: list[str], bools: tuple[str, ...] = (), nums: tuple[str, ...] = ()) -> list[dict]:
-    """Repeated rows posted as <prefix>-<i>-<field>; blank rows are dropped, blank fields become null."""
-    idx = sorted({int(k.split('-')[1]) for k in post if k.startswith(prefix + '-') and k.split('-')[1].isdigit()})
-    out = []
-    for i in idx:
-        row = {}
-        for f in fields:
-            v = post.get(f'{prefix}-{i}-{f}')
-            if f in bools:
-                row[f] = v in ('on', 'true', '1')
-            elif f in nums:
-                v = _blank(v)
-                try:
-                    row[f] = None if v is None else (int(v) if str(v).lstrip('-').isdigit() else float(v))
-                except ValueError:
-                    row[f] = v
-            else:
-                row[f] = _blank(v)
-        if any(row[f] not in (None, False) for f in fields if f not in bools):
-            out.append(row)
-    return out
-
-
-def _address(post, prefix: str):
-    a = {k: _blank(post.get(f'{prefix}_{k}')) for k in ('province', 'district', 'municipality', 'street')}
-    ward = _blank(post.get(f'{prefix}_ward'))
-    if ward is not None:
-        a['ward'] = int(ward) if ward.isdigit() else ward
-    a = {k: v for k, v in a.items() if v is not None}
-    return a or None
-
-
-def section_value(section: str, post) -> dict:
-    """The TS toPayload of ProfileSections.tsx: empty secrets are left out (the stored one is kept), empty text clears."""
-    g = lambda k: _blank(post.get(k))  # noqa: E731
-    if section == 'personal':
-        return {k: g(k) for k in ('gender', 'dob', 'maritalStatus', 'bloodGroup', 'nationality')}
-    if section == 'contact':
-        return {'personalEmail': g('personalEmail'), 'personalPhone': g('personalPhone'), 'workPhone': g('workPhone'),
-                'permanentAddress': _address(post, 'perm'), 'temporaryAddress': _address(post, 'temp')}
-    if section == 'bank':
-        out = {'bankCode': (g('bankCode') or '').upper() or None, 'bankBranch': g('bankBranch')}
-        acct = (post.get('bankAccount') or '').replace(' ', '').strip()
-        if acct:
-            out['bankAccount'] = acct
-        return out
-    if section == 'ids':
-        out = {}
-        for k in ('citizenshipDistrict', 'citizenshipIssuedOn', 'passportExpiry', 'licenceExpiry', 'ssfId', 'citId', 'pfId'):
-            out[k] = g(k)
-        for k in ('pan', 'citizenshipNo', 'passportNo', 'licenceNo'):
-            v = (post.get(k) or '').strip()
-            if v:
-                out[k] = v.upper() if k == 'passportNo' else v
-        return out
-    if section == 'emergency':
-        return {'contacts': _list_from_post(post, 'c', ['name', 'relation', 'phone', 'altPhone', 'address'])}
-    if section == 'family':
-        members = _list_from_post(post, 'm', ['name', 'relation', 'dob', 'occupation', 'phone', 'isDependent', 'isNominee', 'nomineeShare'],
-                                  bools=('isDependent', 'isNominee'), nums=('nomineeShare',))
-        for m in members:
-            if not m['isNominee']:
-                m['nomineeShare'] = None
-        return {'members': members}
-    if section == 'education':
-        return {'items': _list_from_post(post, 'e', ['level', 'degree', 'field', 'institution', 'board', 'startYear', 'endYear', 'result'],
-                                         nums=('startYear', 'endYear'))}
-    if section == 'experience':
-        return {'items': _list_from_post(post, 'x', ['organisation', 'designation', 'fromDate', 'toDate', 'responsibilities', 'reasonForLeaving'])}
-    if section == 'skills':
-        split = lambda s: [x.strip() for x in (s or '').replace('\n', ',').split(',') if x.strip()]  # noqa: E731
-        return {'skills': split(post.get('skills')), 'languages': split(post.get('languages'))}
-    raise NotFoundError(f'unknown profile section {section}')
-
-
 @require_http_methods(['GET', 'POST'])
 @login_required
 def section_edit(request, id, section):
@@ -324,20 +269,16 @@ def section_edit(request, id, section):
     if mode == 'self' and user.employee_id != id:
         raise ForbiddenError('only employees have a profile to change')
     if request.method == 'POST':
-        value = section_value(section, request.POST)
+        form = SectionForm(section, request.POST)
         if mode == 'hr':
+            value = form.value()
             r = svc.save_section(user, id, section, value)
             if r['pending']:
                 return _ok(request, 'Saved for approval. A different HR person must approve this change before it applies.', 'profile-sections',
                            tone='info', title='Waiting for a second approval')
             n = len(r['changes'])
             return _ok(request, f"{n} {'change' if n == 1 else 'changes'} saved." if n else 'Nothing changed.', 'profile-sections', 'field-history')
-        body = {'section': section, 'value': value}
-        if (request.POST.get('reason') or '').strip():
-            body['reason'] = request.POST['reason'].strip()
-        if _blank(request.POST.get('proofFileId')):
-            body['proofFileId'] = request.POST['proofFileId']
-        svc.request_change(user, body)
+        svc.request_change(user, form.change_request())
         return _ok(request, 'HR will review your change. You will be notified when it is decided.', 'profile-sections', 'my-requests',
                    title='Change requested')
     data = svc.profile(user, id)
@@ -402,38 +343,9 @@ def career(request, id):
 def career_new(request, id):
     user = request.hajiri_user
     id = str(id)
+    svc.employee_in(company_id_of(user), id)        # another company's id is not found, even for the empty form
     if request.method == 'POST':
-        kind = request.POST.get('kind') or 'note'
-        p = request.POST
-        details: dict = {}
-        if kind in ('promotion', 'designation_change') and _blank(p.get('designationId')):
-            details['designationId'] = p['designationId']
-        if kind in ('promotion', 'grade_change') and _blank(p.get('grade')):
-            details['grade'] = p['grade'].strip()
-        if kind == 'transfer':
-            if _blank(p.get('branchId')):
-                details['branchId'] = p['branchId']
-            if _blank(p.get('orgUnitId')):
-                details['orgUnitId'] = p['orgUnitId']
-            if _blank(p.get('managerId')):
-                details['managerId'] = p['managerId']
-        if kind == 'manager_change' and _blank(p.get('managerId')):
-            # Left empty, the TS form sends no managerId and the service answers 'choose the new manager'.
-            details['managerId'] = p['managerId']
-        if kind == 'employment_type_change' and _blank(p.get('employmentType')):
-            details['employmentType'] = p['employmentType']
-        if kind == 'salary_revision' and _blank(p.get('revisionPercent')):
-            try:
-                details['revisionPercent'] = float(p['revisionPercent'])
-            except ValueError:
-                raise BadRequestError('details.revisionPercent: Expected number, received string')
-        if kind == 'separation' and _blank(p.get('separationType')):
-            details['separationType'] = p['separationType']
-        if kind != 'note' and _blank(p.get('reason')):
-            details['reason'] = p['reason'].strip()
-        body = {'kind': kind, 'effectiveDate': p.get('effectiveDate') or '', 'details': details}
-        if _blank(p.get('note')):
-            body['note'] = p['note'].strip()
+        body = CareerForm(request.POST).body()
         ev = svc.record_career(user, id, body)
         from hajiri.web.format import fmt_date
         msg = (f"Scheduled for {fmt_date(body['effectiveDate'])}. It applies automatically on that day." if ev['status'] == 'scheduled'
@@ -469,7 +381,8 @@ def my_profile(request):
     e = None
     person = None
     if user.employee_id:
-        e = one('SELECT emp_code, designation, join_date, regime, bank_code, bank_account_last4 FROM employee WHERE id = %s', [user.employee_id])
+        e = (Employee.objects.for_company(company_id_of(user)).filter(pk=user.employee_id)
+             .values('emp_code', 'designation', 'join_date', 'regime', 'bank_code', 'bank_account_last4').first())
         person = svc.card(user, user.employee_id)['person']
     return render(request, 'people/my_profile.html', {
         'e': e, 'person': person, 'roles': ', '.join(ROLE.get(r, r) for r in user.roles) or '—',
@@ -527,8 +440,7 @@ def my_data(request):
             p['method'] = cap(p['verify_mode'])
     templates = 0
     if user.employee_id:
-        r = one('SELECT count(*)::int AS n FROM biometric_template WHERE employee_id = %s AND shredded_at IS NULL', [user.employee_id])
-        templates = r['n'] if r else 0
+        templates = BiometricTemplate.objects.filter(employee_id=user.employee_id, shredded_at__isnull=True).count()
     return render(request, 'people/my_data.html', {
         'tab': tab, 'punches': punches, 'active_templates': templates,
         'transparency_url': url_of('devices:transparency'), 'consents_url': url_of('devices:consents'), 'dsar_url': url_of('devices:dsar'),
@@ -581,11 +493,12 @@ def request_proof(request, id):
 
 
 def _instance_of(user, request_id: str) -> str:
-    r = one("SELECT w.id FROM workflow_instance w JOIN profile_change_request p ON p.id = w.object_id WHERE w.object_type = 'profile_change' "
-            'AND w.object_id = %s AND p.company_id = %s', [request_id, company_id_of(user)])
-    if not r:
+    from .change_requests import PROFILE_CHANGE
+    wid = (WorkflowInstance.objects.for_company(company_id_of(user)).filter(object_type=PROFILE_CHANGE, object_id=request_id)
+           .values_list('id', flat=True).first())
+    if not wid:
         raise NotFoundError('change request not found')
-    return str(r['id'])
+    return str(wid)
 
 
 @require_POST
@@ -598,8 +511,8 @@ def request_approve(request, id):
         decide(user, _instance_of(user, str(id)), 'approve')
     except HttpError as exc:
         return failed(request, exc, 'Not approved')
-    emp = one('SELECT name_en FROM employee WHERE id = %s', [r['employee_id']])
-    return _ok(request, f"{SECTION_LABEL[r['section']]} updated for {emp['name_en']}.", 'change-requests', close=False)
+    name = Employee.objects.filter(pk=r['employee_id']).values_list('name_en', flat=True).first()
+    return _ok(request, f"{SECTION_LABEL[r['section']]} updated for {name}.", 'change-requests', close=False)
 
 
 @require_http_methods(['GET', 'POST'])
@@ -609,9 +522,7 @@ def request_reject(request, id):
     user = request.hajiri_user
     svc.load_request(user, str(id))
     if request.method == 'POST':
-        reason = (request.POST.get('reason') or '').strip()
-        if not reason:
-            raise BadRequestError('reason: Required')
+        reason = RejectForm(request.POST).reason_text()
         decide(user, _instance_of(user, str(id)), 'reject', reason=reason)
         return _ok(request, 'Request declined. The employee has been told why.', 'change-requests')
     return render(request, 'people/partials/request_reject.html', {'id': str(id)})
@@ -653,26 +564,6 @@ def structure(request):
     return render(request, 'people/structure.html', ctx)
 
 
-def _structure_body(kind: str, post) -> dict:
-    g = lambda k: _blank(post.get(k))  # noqa: E731
-    # Empty optional text becomes null so it clears; required text is sent as typed.
-    body = {'code': (post.get('code') or '').strip().upper(), 'nameEn': (post.get('nameEn') or '').strip()}
-    if kind == 'unit':
-        body.update({'kind': post.get('kind') or 'department', 'parentId': g('parentId'), 'branchId': g('branchId'),
-                     'headEmployeeId': g('headEmployeeId'), 'description': g('description')})
-    elif kind == 'branch':
-        body.update({'address': g('address'), 'phone': g('phone'), 'headEmployeeId': g('headEmployeeId')})
-    else:
-        lvl = g('jobLevel')
-        try:
-            lvl = None if lvl is None else int(lvl)
-        except ValueError:
-            pass
-        body.update({'grade': g('grade'), 'jobLevel': lvl, 'orgUnitId': g('orgUnitId'), 'description': g('description'),
-                     'active': post.get('active') in ('on', 'true', '1')})
-    return body
-
-
 _KINDS = {'unit', 'branch', 'designation'}
 
 
@@ -683,7 +574,7 @@ def structure_edit(request, kind, id=None):
     if kind not in _KINDS:
         raise NotFoundError('not found')
     if request.method == 'POST':
-        body = _structure_body(kind, request.POST)
+        body = StructureForm(kind, request.POST).body()
         fn = {('unit', False): svc.create_unit, ('branch', False): svc.create_branch, ('designation', False): svc.create_designation}
         if id:
             {'unit': svc.update_unit, 'branch': svc.update_branch, 'designation': svc.update_designation}[kind](user, str(id), body)
@@ -728,7 +619,6 @@ def structure_delete(request, kind, id):
 @require_POST
 @require_role('hr')
 def policy(request):
-    on = request.POST.get('makerChecker') in ('on', 'true', '1')
-    svc.set_policy(request.hajiri_user, {'makerChecker': on})
+    on = svc.set_policy(request.hajiri_user, PolicyForm(request.POST).body())['makerChecker']
     return _ok(request, 'Second approval turned on.' if on else 'Second approval turned off.', close=False)
 

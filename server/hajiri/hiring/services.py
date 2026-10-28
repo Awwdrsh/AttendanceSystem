@@ -4,149 +4,126 @@ through the workflow engine, job openings with screening questions and a transpa
 interviews and scorecards, offers approved by a second HR user, hire-into-employee, reports, the retention policy
 and the nightly purge of candidates who were not selected.
 
-Bodies use the TS camelCase shape and are validated with hajiri.core.schema, so API-style error messages match.
-Views build those bodies from the forms. Every function takes the signed-in AuthUser and scopes by its company.
+Bodies use the TS camelCase shape and are validated with the serializers in hajiri.hiring.serializers, so error
+messages match the TS API. Every function takes the signed-in AuthUser and works in its ACTIVE company: rows of
+another company are simply not found. People who can sit on a panel, own a candidate or hear about applications are
+the people of the company (home accounts, members of the group with access and group-role holders).
 """
 from __future__ import annotations
 
-import json
-import math
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from django.db.backends.postgresql.psycopg_any import DateRange
+from django.db.models import (
+    Aggregate, Avg, BooleanField, Case, Count, DecimalField, Exists, ExpressionWrapper, F, FloatField, Func, IntegerField,
+    OuterRef, Q, Subquery, TextField, Value, When,
+)
+from django.db.models.fields.json import KT
+from django.db.models.functions import Coalesce, Extract, Greatest, Lower, Now
 
 from hajiri.core.audit import audit
 from hajiri.core.auth import AuthUser, company_id_of, has_module, has_role
 from hajiri.core.bsdate import bs_label
-from hajiri.core.clock import NPT
-from hajiri.core.db import execute, one, rows
+from hajiri.core.clock import NPT, npt_today
+from hajiri.core.collation import collate_key
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
-from hajiri.core.schema import (MISSING, Arr, Bool, Enum, Hhmm, IsoDate, Money, Num, Obj, Record, S, Str, Uuid, _fail, _Issue,
-                                _Issues, parse, parse_uuid)
+from hajiri.core.settings_store import add_setting_if_missing, get_setting, put_setting
+from hajiri.core.users import company_users, user_ids_with_role
+from hajiri.core.validation import parse_uuid, plain, validate
+from hajiri.db.models import (
+    AppUser, Branch, Company, Employee, EmployeeAssignment, HiringApplication, HiringCandidate, HiringEvent, HiringInterview,
+    HiringJob, HiringOffer, HiringRequisition, HiringScorecard, NotificationOutbox, OrgUnit, Shift, ShiftAssignment,
+)
 from hajiri.files.store import attach_file, delete_file, read_file
 from hajiri.integrations.hooks import HireEvent, on_candidate_hired, run_hire_hooks  # noqa: F401  (re-exported)
-from hajiri.notifications.service import notify, user_id_for_employee, user_ids_with_role
-from hajiri.workflow.service import (DecisionContext, cancel_workflow, npt_today, register_handler,
-                                     register_summariser, start_workflow)
+from hajiri.notifications.service import notify, user_id_for_employee
+from hajiri.workflow.service import DecisionContext, cancel_workflow, register_handler, register_summariser, start_workflow
 
+from . import serializers as S
 from .offer_letter import render_offer_letter
+from .serializers import DEFAULT_STAGES, EMPLOYMENT_TYPES, RECOMMENDATIONS, SOURCES, WORK_MODES  # noqa: F401 (public names)
 
-# ---------------------------------------------------------------- types and validation
-
-DEFAULT_STAGES = ['Applied', 'Screening', 'Interview', 'Offer', 'Hired']
-SOURCES = ('careers', 'referral', 'manual', 'job_board', 'other')
-WORK_MODES = ('onsite', 'remote', 'hybrid')
-EMPLOYMENT_TYPES = ('full_time', 'part_time', 'contract', 'internship', 'temporary')
-RECOMMENDATIONS = ('strong_no', 'no', 'yes', 'strong_yes')
-OPEN_OFFER = ('pending_approval', 'approved', 'accepted')
-
-RULE = Obj({'equals': Enum(('yes', 'no'), optional=True), 'min': Num(min=0, max=1_000_000, optional=True)}, strict=True)
-
-QUESTION = Obj({
-    'id': Str(regex=r'^q[0-9a-z]{1,12}$', regex_message='question id like q1'),
-    'kind': Enum(('yes_no', 'number', 'text')),
-    'label': Str(trim=True, min=3, max=200),
-    'required': Bool(default=True),
-    'knockout': RULE.__class__(RULE.fields, strict=True, optional=True),
-    'preferred': RULE.__class__(RULE.fields, strict=True, optional=True),
-})
+App, Job, Offer, Req, Iv = HiringApplication, HiringJob, HiringOffer, HiringRequisition, HiringInterview
+OPEN_OFFER = (Offer.Status.PENDING_APPROVAL, Offer.Status.APPROVED, Offer.Status.ACCEPTED)
+CLOSED_APP = (App.Status.REJECTED, App.Status.WITHDRAWN)
+POLICY_KEY = 'hiring.policy'
+DEFAULT_POLICY = {'retentionDays': 180, 'careersEnabled': True}
 
 
-class _Stages(Arr):
-    """z.array(...).min(2).max(10) with the three refinements of stagesSchema (each failing one is an issue)."""
+# ---------------------------------------------------------------- small query helpers
 
-    def __init__(self, **kw):
-        super().__init__(Str(trim=True, min=2, max=40), min=2, max=10, **kw)
-
-    def check(self, v, path):
-        s = super().check(v, path)
-        issues = []
-        if len({x.lower() for x in s}) != len(s):
-            issues.append(_Issue(path, 'stage names must be different'))
-        if s[0] != 'Applied':
-            issues.append(_Issue(path, 'the first stage must be "Applied"'))
-        if s[-1] != 'Hired':
-            issues.append(_Issue(path, 'the last stage must be "Hired"'))
-        if issues:
-            raise _Issues(issues)
-        return s
+def _values(qs, **cols) -> list[dict]:
+    """The rows of `qs` as dicts with exactly these keys; each value is a field path ('candidate__name') or an
+    expression. (values() cannot name a key after a model field, e.g. 'job' for the job title.)"""
+    ann = {f'v_{k}': (F(v) if isinstance(v, str) else v) for k, v in cols.items()}
+    return [{k: r[f'v_{k}'] for k in cols} for r in qs.annotate(**ann).values(*ann)]
 
 
-def _opt_text(mx: int) -> Str:
-    return Str(trim=True, max=mx, nullish=True)
+def _columns(model) -> dict[str, str]:
+    """Every column of a table as {column name: attribute}, the keys of SELECT * (created_by, not created_by_id)."""
+    return {f.column: f.attname for f in model._meta.concrete_fields}
 
 
-JOB_FIELDS: dict[str, S] = {
-    'requisitionId': Uuid(nullish=True),
-    'title': Str(trim=True, min=2, max=120),
-    'description': Str(max=10_000, default=''),
-    'requirements': Str(max=10_000, default=''),
-    'category': _opt_text(60),
-    'location': _opt_text(120),
-    'workMode': Enum(WORK_MODES, default='onsite'),
-    'employmentType': Enum(EMPLOYMENT_TYPES, default='full_time'),
-    'experienceMin': Num(min=0, max=60, nullish=True),
-    'experienceMax': Num(min=0, max=60, nullish=True),
-    'salaryMin': Money(nullish=True),
-    'salaryMax': Money(nullish=True),
-    'showSalary': Bool(default=False),
-    'openings': Num(int_=True, min=1, max=500, default=1),
-    'deadline': IsoDate(nullish=True),
-    'orgUnitId': Uuid(nullish=True),
-    'branchId': Uuid(nullish=True),
-    'hiringManagerId': Uuid(nullish=True),
-    'stages': _Stages(optional=True),
-    'questions': Arr(QUESTION, max=15, optional=True),
-}
-JOB_BODY = Obj(JOB_FIELDS)
+def count_of(qs) -> Coalesce:
+    """A correlated `(SELECT count(*) ...)` for an annotation (no GROUP BY on the outer query)."""
+    return Coalesce(Subquery(qs.order_by().annotate(n=Func(F('pk'), function='COUNT', output_field=IntegerField()))
+                             .values('n')[:1]), 0)
 
 
-def _partial(fields: dict[str, S]) -> Obj:
-    """jobBody.partial(): every field optional; zod still applies a field's default when the key is missing, so the
-    caller keeps only the keys that were sent."""
-    out = {}
-    for k, s in fields.items():
-        c = object.__new__(s.__class__)
-        c.__dict__.update(s.__dict__)
-        c.optional = True
-        out[k] = c
-    return Obj(out)
+def _flag(q: Q) -> ExpressionWrapper:
+    return ExpressionWrapper(q, output_field=BooleanField())
 
 
-JOB_PATCH = _partial(JOB_FIELDS)
+class Median(Aggregate):
+    """percentile_cont(0.5) WITHIN GROUP (ORDER BY ...): PostgreSQL's median, which Django has no aggregate for."""
+    function = 'percentile_cont'
+    template = '%(function)s(0.5) WITHIN GROUP (ORDER BY %(expressions)s)'
+    output_field = FloatField()
 
 
-def js_num(v) -> str:
-    """String(Number(v)) as JavaScript prints it: 3 not 3.0, 2.5 as 2.5."""
-    f = float(v)
-    return str(int(f)) if f.is_integer() else repr(f)
+def _s(v) -> str | None:
+    return None if v is None else str(v)
 
 
-def _js_round(x: float) -> int:
-    return math.floor(x + 0.5)
+def _num_text(v) -> str:
+    """3 not 3.0, 2.5 as 2.5 (how the TS API printed numbers in notes)."""
+    return format(Decimal(str(v)).normalize(), 'f')
 
 
-def _js_number(a) -> float:
-    """Number(a) in JavaScript."""
-    if a is None or a is MISSING:
-        return math.nan
-    if isinstance(a, bool):
-        return 1.0 if a else 0.0
-    if isinstance(a, (int, float, Decimal)):
-        return float(a)
-    s = str(a).strip()
-    if s == '':
-        return 0.0
-    try:
-        return float(s)
-    except ValueError:
-        return math.nan
+def _half_up(x) -> int:
+    """Math.round for the non-negative values here: halves go up."""
+    return int(Decimal(str(x)).quantize(Decimal(1), ROUND_HALF_UP))
 
 
-def _norm_num(n: float):
-    return int(n) if float(n).is_integer() else n
+def _iso(at: datetime) -> str:
+    """An instant as JSON shows it: UTC with milliseconds."""
+    return at.astimezone(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
+def npt_instant(d: str, t: str) -> datetime:
+    """A Nepal wall-clock date and time as an instant."""
+    return datetime.fromisoformat(f'{d}T{t}:00').replace(tzinfo=NPT)
+
+
+def _npt_day_start(d: str) -> datetime:
+    return datetime.combine(datetime.fromisoformat(d).date(), time(0), tzinfo=NPT)
+
+
+def _checked(serializer, body) -> dict:
+    return plain(validate(serializer, body if body is not None else {}))
+
+
+# ---------------------------------------------------------------- screening score
+
+class _Missing:
+    def __repr__(self):
+        return 'MISSING'
+
+
+MISSING = _Missing()
 
 
 def _as_yes_no(a) -> str | None:
@@ -157,12 +134,30 @@ def _as_yes_no(a) -> str | None:
     return None
 
 
+def _as_number(a) -> float | None:
+    """A numeric answer as a float: numbers as they are, true/false as 1/0, numeric text parsed (blank text is 0, as
+    the TS form's Number('') was); None when it is not a finite number."""
+    if a is None or a is MISSING:
+        return None
+    if isinstance(a, bool):
+        return 1.0 if a else 0.0
+    if isinstance(a, (int, float, Decimal)):
+        n = float(a)
+    else:
+        s = str(a).strip()
+        try:
+            n = float(s) if s else 0.0
+        except ValueError:
+            return None
+    return n if n == n and abs(n) != float('inf') else None
+
+
 def _meets(rule: dict, a) -> bool:
     if rule.get('equals'):
         return _as_yes_no(a) == rule['equals']
     if rule.get('min') is not None:
-        n = a if isinstance(a, (int, float)) and not isinstance(a, bool) else _js_number(a)
-        return math.isfinite(n) and n >= rule['min']
+        n = _as_number(a)
+        return n is not None and n >= rule['min']
     return a is not None and a is not MISSING and str(a).strip() != ''
 
 
@@ -182,14 +177,14 @@ def score_application(job: dict, experience_years, answers: dict) -> dict:
         if y is None:
             note = 'Experience not given'
         elif mn is not None and y < mn:
-            points = _js_round(40 * y / mn) if mn > 0 else 40
-            note = f'{js_num(y)} years, below the {js_num(mn)} years asked for'
+            points = _half_up(40 * y / mn) if mn > 0 else 40
+            note = f'{_num_text(y)} years, below the {_num_text(mn)} years asked for'
         elif mx is not None and y > mx:
             points = 30
-            note = f'{js_num(y)} years, more than the {js_num(mx)} years in the range'
+            note = f'{_num_text(y)} years, more than the {_num_text(mx)} years in the range'
         else:
             points = 40
-            note = f'{js_num(y)} years, within the range'
+            note = f'{_num_text(y)} years, within the range'
         detail.append({'label': 'Experience', 'points': points, 'max': 40, 'note': note})
     for q in job.get('questions') or []:
         a = answers.get(q['id'], MISSING)
@@ -205,14 +200,14 @@ def score_application(job: dict, experience_years, answers: dict) -> dict:
                            'note': 'Preferred answer' if ok else 'Not the preferred answer'})
     total = sum(d['max'] for d in detail)
     earned = sum(d['points'] for d in detail)
-    return {'score': _js_round(100 * earned / total) if total > 0 else None, 'knockedOut': knocked_out, 'detail': detail}
+    return {'score': _half_up(100 * earned / total) if total > 0 else None, 'knockedOut': knocked_out, 'detail': detail}
 
 
-def _js_string(v) -> str:
+def _answer_text(v) -> str:
     if isinstance(v, bool):
         return 'true' if v else 'false'
     if isinstance(v, float):
-        return js_num(v)
+        return _num_text(v)
     return str(v)
 
 
@@ -222,8 +217,7 @@ def clean_answers(questions: list[dict], raw: dict | None) -> dict:
     src = raw or {}
     for q in questions:
         v = src.get(q['id'])
-        empty = v is None or (isinstance(v, str) and v.strip() == '')
-        if empty:
+        if v is None or (isinstance(v, str) and v.strip() == ''):
             if q.get('required', True):
                 raise BadRequestError('Please answer every required question.')
             continue
@@ -233,12 +227,12 @@ def clean_answers(questions: list[dict], raw: dict | None) -> dict:
                 raise BadRequestError('Answer the yes or no questions with yes or no.')
             out[q['id']] = yn
         elif q['kind'] == 'number':
-            n = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else _js_number(v)
-            if not math.isfinite(n) or n < 0 or n > 1_000_000:
+            n = _as_number(v)
+            if n is None or n < 0 or n > 1_000_000:
                 raise BadRequestError('Number answers must be a number.')
-            out[q['id']] = _norm_num(n)
+            out[q['id']] = int(n) if n.is_integer() else n
         else:
-            out[q['id']] = _js_string(v).strip()[:1000]
+            out[q['id']] = _answer_text(v).strip()[:1000]
     return out
 
 
@@ -246,8 +240,8 @@ def clean_answers(questions: list[dict], raw: dict | None) -> dict:
 
 def add_event(*, company_id: str, application_id: str, actor_id: str | None, kind: str, body: str | None = None,
               data: dict | None = None) -> None:
-    execute('INSERT INTO hiring_event (company_id, application_id, actor_id, kind, body, data) VALUES (%s, %s, %s, %s, %s, %s)',
-            [company_id, application_id, actor_id, kind, body, json.dumps(data or {}, default=str)])
+    HiringEvent.objects.create(company_id=company_id, application_id=application_id, actor_id=actor_id, kind=kind, body=body,
+                               data=plain(data or {}))
 
 
 def email_candidate(*, company_id: str, application_id: str, to: str | None, template: str, title: str, body: str,
@@ -255,21 +249,22 @@ def email_candidate(*, company_id: str, application_id: str, to: str | None, tem
     """Queue an e-mail to a candidate through the outbox (they are not users, so the address rides on the row) and log it."""
     if not to:
         return False
-    execute("""INSERT INTO notification_outbox (company_id, user_id, employee_id, channel, template, title, body, payload, status, to_email)
-               VALUES (%s, NULL, NULL, 'email', %s, %s, %s, %s, 'queued', %s)""",
-            [company_id, template, title, body, json.dumps({'applicationId': str(application_id)}), to])
+    NotificationOutbox.objects.create(
+        company_id=company_id, user_id=None, employee_id=None, channel=NotificationOutbox.Channel.EMAIL, template=template,
+        title=title, body=body, payload={'applicationId': str(application_id)}, status=NotificationOutbox.Status.QUEUED,
+        to_email=to)
     add_event(company_id=company_id, application_id=application_id, actor_id=actor_id, kind='email', body=title,
               data={'template': template})
     return True
 
 
 def company_name(company_id: str) -> str:
-    r = one('SELECT name_en FROM company WHERE id = %s', [company_id])
-    return r['name_en'] if r else 'our company'
+    return Company.objects.for_company(company_id).values_list('name_en', flat=True).first() or 'our company'
 
 
 def job_watchers(company_id: str, hiring_manager_id: str | None) -> list[str]:
-    """HR plus the job's hiring manager: who hears about new applications."""
+    """HR of the company (members of the group with HR access too) plus the job's hiring manager: who hears about
+    new applications."""
     ids = list(dict.fromkeys(user_ids_with_role(company_id, 'hr')))
     if hiring_manager_id:
         u = user_id_for_employee(str(hiring_manager_id))
@@ -281,8 +276,7 @@ def job_watchers(company_id: str, hiring_manager_id: str | None) -> list[str]:
 # ---------------------------------------------------------------- policy
 
 def hiring_policy(company_id: str) -> dict:
-    r = one("SELECT value FROM company_setting WHERE company_id = %s AND key = 'hiring.policy'", [company_id])
-    v = (r and r['value']) or {}
+    v = get_setting(company_id, POLICY_KEY, {})
     if not isinstance(v, dict):
         v = {}
     rd = v.get('retentionDays')
@@ -290,66 +284,64 @@ def hiring_policy(company_id: str) -> dict:
             'careersEnabled': v.get('careersEnabled') is not False}
 
 
-POLICY_BODY = Obj({'retentionDays': Num(int_=True, min=30, max=1095), 'careersEnabled': Bool()})
+def seed_policy(company_id: str) -> bool:
+    """The default policy for a new company (180 days' retention, careers page on); True when this call added it."""
+    return add_setting_if_missing(company_id, POLICY_KEY, dict(DEFAULT_POLICY))
 
 
 def set_policy(user: AuthUser, body: dict) -> dict:
     _need_module(user)
     company_id = company_id_of(user)
-    b = parse(POLICY_BODY, body)
+    b = _checked(S.PolicyIn, body)
     with transaction.atomic():
-        execute("""INSERT INTO company_setting (company_id, key, value, updated_by) VALUES (%s, 'hiring.policy', %s, %s)
-                   ON CONFLICT (company_id, key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()""",
-                [company_id, json.dumps(b), user.id])
-        audit('update', 'company_setting', actor_id=user.id, row_id=None, after={'key': 'hiring.policy', **b})
+        put_setting(company_id, POLICY_KEY, b, updated_by=user.id)
+        audit('update', 'company_setting', actor_id=user.id, row_id=None, after={'key': POLICY_KEY, **b})
     return b
 
 
 # ---------------------------------------------------------------- workflow handlers
 
 def _decide_requisition(object_id: str, state: str, ctx: DecisionContext) -> None:
-    q = one('SELECT company_id, raised_by, title, status FROM hiring_requisition WHERE id = %s FOR UPDATE', [object_id])
-    if not q or q['status'] != 'pending':
+    q = Req.objects.select_for_update().filter(pk=object_id).first()
+    if not q or q.status != Req.Status.PENDING:
         return
-    if state == 'approved' and str(ctx.actor_id) == str(q['raised_by']):
+    if state == 'approved' and str(ctx.actor_id) == str(q.raised_by_id):
         raise ForbiddenError('you raised this hiring request; someone else must approve it')
-    execute('UPDATE hiring_requisition SET status = %s, decided_at = now(), decision_reason = %s WHERE id = %s',
-            [state, ctx.reason, object_id])
-    notify(company_id=str(q['company_id']), user_id=str(q['raised_by']), template=f'job_requisition.{state}',
+    Req.objects.filter(pk=q.pk).update(status=state, decided_at=Now(), decision_reason=ctx.reason)
+    notify(company_id=str(q.company_id), user_id=str(q.raised_by_id), template=f'job_requisition.{state}',
            title='Hiring request approved' if state == 'approved' else 'Hiring request rejected',
-           body=f'Your request to hire "{q["title"]}" was {state}{f": {ctx.reason}" if ctx.reason else ""}.',
+           body=f'Your request to hire "{q.title}" was {state}{f": {ctx.reason}" if ctx.reason else ""}.',
            payload={'requisitionId': str(object_id)})
 
 
 def _decide_offer(object_id: str, state: str, ctx: DecisionContext) -> None:
-    o = one("""SELECT o.company_id, o.created_by, o.status, o.application_id, c.name FROM hiring_offer o
-                 JOIN hiring_application a ON a.id = o.application_id JOIN hiring_candidate c ON c.id = a.candidate_id
-                WHERE o.id = %s FOR UPDATE OF o""", [object_id])
-    if not o or o['status'] != 'pending_approval':
+    o = Offer.objects.select_for_update(of=('self',)).select_related('application__candidate').filter(pk=object_id).first()
+    if not o or o.status != Offer.Status.PENDING_APPROVAL:
         return
-    if state == 'approved' and o['created_by'] is not None and str(ctx.actor_id) == str(o['created_by']):
+    if state == 'approved' and o.created_by_id is not None and str(ctx.actor_id) == str(o.created_by_id):
         raise ForbiddenError('you drafted this offer; someone else must approve it')
-    execute('UPDATE hiring_offer SET status = %s, decided_at = now() WHERE id = %s', [state, object_id])
+    Offer.objects.filter(pk=o.pk).update(status=state, decided_at=Now())
     reason = f': {ctx.reason}' if ctx.reason else ''
-    add_event(company_id=str(o['company_id']), application_id=str(o['application_id']), actor_id=ctx.actor_id, kind='offer',
+    add_event(company_id=str(o.company_id), application_id=str(o.application_id), actor_id=ctx.actor_id, kind='offer',
               body=f'Offer {state}{reason}')
-    if o['created_by']:
-        notify(company_id=str(o['company_id']), user_id=str(o['created_by']), template=f'job_offer.{state}',
+    if o.created_by_id:
+        notify(company_id=str(o.company_id), user_id=str(o.created_by_id), template=f'job_offer.{state}',
                title='Offer approved' if state == 'approved' else 'Offer rejected',
-               body=f'The offer for {o["name"]} was {state}{reason}.',
-               payload={'offerId': str(object_id), 'applicationId': str(o['application_id'])})
+               body=f'The offer for {o.application.candidate.name} was {state}{reason}.',
+               payload={'offerId': str(object_id), 'applicationId': str(o.application_id)})
 
 
 def _summarise_requisition(inst: dict) -> dict:
-    return one("""SELECT q.title, q.designation, q.headcount, q.kind, q.salary_min, q.salary_max, q.justification, ou.name_en AS department
-                    FROM hiring_requisition q LEFT JOIN org_unit ou ON ou.id = q.org_unit_id WHERE q.id = %s""",
-               [inst['object_id']]) or {}
+    found = _values(Req.objects.filter(pk=inst['object_id']), title='title', designation='designation', headcount='headcount',
+                    kind='kind', salary_min='salary_min', salary_max='salary_max', justification='justification',
+                    department='org_unit__name_en')
+    return found[0] if found else {}
 
 
 def _summarise_offer(inst: dict) -> dict:
-    return one("""SELECT o.designation, o.salary, o.join_date, c.name AS candidate, j.title AS job
-                    FROM hiring_offer o JOIN hiring_application a ON a.id = o.application_id JOIN hiring_candidate c ON c.id = a.candidate_id
-                    JOIN hiring_job j ON j.id = a.job_id WHERE o.id = %s""", [inst['object_id']]) or {}
+    found = _values(Offer.objects.filter(pk=inst['object_id']), designation='designation', salary='salary',
+                    join_date='join_date', candidate='application__candidate__name', job='application__job__title')
+    return found[0] if found else {}
 
 
 def register_workflow() -> None:
@@ -364,50 +356,59 @@ register_workflow()
 
 # ---------------------------------------------------------------- retention
 
+def _purge_due(company_id: str, cutoff: datetime):
+    """Candidates of a company whose every application closed (rejected or withdrawn) before `cutoff`."""
+    apps = App.objects.filter(candidate=OuterRef('pk'))
+    still_held = apps.annotate(last=Coalesce('closed_at', 'created_at')).filter(~Q(status__in=CLOSED_APP) | Q(last__gt=cutoff))
+    return (HiringCandidate.objects.for_company(company_id).filter(purged_at=None)
+            .filter(Exists(apps)).exclude(Exists(still_held)).values_list('id', flat=True))
+
+
 def purge_rejected_candidates(now: datetime | None = None) -> int:
     """
     Daily: once a candidate has had no open application for the retention period (rejected or withdrawn), their name,
     contact details, CVs, cover notes, answers and notes are removed. Counts and stage history stay for reports.
+    Each company keeps candidates for its own retention period.
     """
     now = now or datetime.now(timezone.utc)
-    due = rows("""SELECT c.id, c.company_id FROM hiring_candidate c
-                    LEFT JOIN company_setting s ON s.company_id = c.company_id AND s.key = 'hiring.policy'
-                   WHERE c.purged_at IS NULL
-                     AND EXISTS (SELECT 1 FROM hiring_application a WHERE a.candidate_id = c.id)
-                     AND NOT EXISTS (SELECT 1 FROM hiring_application a WHERE a.candidate_id = c.id
-                                      AND (a.status NOT IN ('rejected', 'withdrawn')
-                                           OR coalesce(a.closed_at, a.created_at) > %s::timestamptz - make_interval(days => coalesce((s.value->>'retentionDays')::int, 180))))""",
-               [now])
     n = 0
-    for c in due:
-        cid, co = str(c['id']), str(c['company_id'])
-        with transaction.atomic():
-            files = rows('SELECT id, cv_file_id FROM hiring_application WHERE candidate_id = %s', [cid])
-            for f in files:
-                if f['cv_file_id']:
-                    delete_file(co, str(f['cv_file_id']))
-            execute("UPDATE hiring_candidate SET name = 'Removed candidate', email = NULL, phone = NULL, purged_at = %s WHERE id = %s",
-                    [now, cid])
-            execute("""UPDATE hiring_application SET cv_file_id = NULL, cover_note = NULL, answers = '{}', current_employer = NULL,
-                              tags = '{}', score_detail = '[]' WHERE candidate_id = %s""", [cid])
-            app_ids = [str(f['id']) for f in files]
-            execute("""UPDATE hiring_event SET body = NULL WHERE application_id = ANY(%s::uuid[])
-                         AND kind IN ('note', 'email', 'rejected', 'applied')""", [app_ids])
-            execute("""UPDATE hiring_scorecard SET notes = NULL WHERE interview_id IN
-                         (SELECT id FROM hiring_interview WHERE application_id = ANY(%s::uuid[]))""", [app_ids])
-            execute("""UPDATE notification_outbox SET to_email = NULL, body = ''
-                        WHERE channel = 'email' AND payload->>'applicationId' = ANY(%s::text[])""", [app_ids])
-        n += 1
+    companies = HiringCandidate.objects.filter(purged_at=None).order_by().values_list('company_id', flat=True).distinct()
+    for co in [str(c) for c in companies]:
+        cutoff = now - timedelta(days=int(hiring_policy(co)['retentionDays']))
+        for cand_id in [str(c) for c in _purge_due(co, cutoff)]:
+            with transaction.atomic():
+                apps = App.objects.for_company(co).filter(candidate_id=cand_id)
+                files = list(apps.values_list('id', 'cv_file_id'))
+                for _, file_id in files:
+                    if file_id:
+                        delete_file(co, str(file_id))
+                HiringCandidate.objects.filter(pk=cand_id).update(name='Removed candidate', email=None, phone=None, purged_at=now)
+                apps.update(cv_file=None, cover_note=None, answers={}, current_employer=None, tags=[], score_detail=[])
+                app_ids = [a for a, _ in files]
+                (HiringEvent.objects.for_company(co).filter(application_id__in=app_ids, kind__in=('note', 'email', 'rejected', 'applied'))
+                 .update(body=None))
+                HiringScorecard.objects.filter(interview__application_id__in=app_ids).update(notes=None)
+                (NotificationOutbox.objects.for_company(co).filter(channel=NotificationOutbox.Channel.EMAIL)
+                 .alias(app=KT('payload__applicationId')).filter(app__in=[str(a) for a in app_ids])
+                 .update(to_email=None, body=''))
+            n += 1
     return n
 
 
 def upsert_candidate(company_id: str, name: str, email: str, phone: str | None) -> str:
     """Find the candidate by e-mail (case-insensitive) or create them; existing details are kept and gaps filled."""
-    r = one("""INSERT INTO hiring_candidate (company_id, name, email, phone) VALUES (%s, %s, lower(%s), %s)
-               ON CONFLICT (company_id, lower(email)) WHERE email IS NOT NULL
-               DO UPDATE SET phone = coalesce(hiring_candidate.phone, EXCLUDED.phone) RETURNING id""",
-            [company_id, name, email, phone])
-    return str(r['id'])
+    email = email.lower()
+    same = HiringCandidate.objects.for_company(company_id).alias(e=Lower('email')).filter(e=email)
+    cand_id = same.values_list('id', flat=True).first()
+    if cand_id is None:
+        try:
+            with transaction.atomic():   # a savepoint: a parallel application with the same address may win the insert
+                return str(HiringCandidate.objects.create(company_id=company_id, name=name, email=email, phone=phone).id)
+        except IntegrityError:
+            cand_id = same.values_list('id', flat=True).get()
+    if phone:
+        HiringCandidate.objects.filter(pk=cand_id, phone=None).update(phone=phone)
+    return str(cand_id)
 
 
 # ---------------------------------------------------------------- access
@@ -422,15 +423,14 @@ def _need_module(user: AuthUser) -> None:
         raise ForbiddenError('requires role hr or recruiter')
 
 
-def _s(v) -> str | None:
-    return None if v is None else str(v)
-
-
-def manager_unit(employee_id: str | None) -> str | None:
+def manager_unit(employee_id: str | None, company_id: str | None = None) -> str | None:
+    """The department of an employee today (their current assignment)."""
     if not employee_id:
         return None
-    r = one('SELECT org_unit_id FROM employee_assignment WHERE employee_id = %s AND valid @> (now() AT TIME ZONE \'Asia/Kathmandu\')::date', [employee_id])
-    return _s(r and r['org_unit_id'])
+    qs = EmployeeAssignment.objects.filter(employee_id=employee_id, valid__contains=npt_today())
+    if company_id:
+        qs = qs.for_company(company_id)
+    return _s(qs.values_list('org_unit_id', flat=True).first())
 
 
 def can_see_job(user: AuthUser, job: dict) -> bool:
@@ -443,15 +443,31 @@ def can_see_job(user: AuthUser, job: dict) -> bool:
         return True
     if user.employee_id and _s(job.get('hiring_manager_id')) == str(user.employee_id):
         return True
-    unit = manager_unit(user.employee_id)
+    unit = manager_unit(user.employee_id, user.company_id)
     return bool(unit) and _s(job.get('org_unit_id')) == unit
 
 
+def _in_scope(user: AuthUser, *, created_by: str, org_unit: str, hiring_manager: str | None = None) -> Q | None:
+    """The rows a manager may see: theirs, their department's, or (jobs) the ones they manage. None for HR, who sees
+    everything."""
+    if has_module(user, 'hiring'):
+        return None
+    q = Q(**{created_by: user.id})
+    if hiring_manager and user.employee_id:
+        q |= Q(**{hiring_manager: user.employee_id})
+    unit = manager_unit(user.employee_id, user.company_id)
+    if unit:
+        q |= Q(**{org_unit: unit})
+    return q
+
+
+REF_MODELS = {'org_unit': OrgUnit, 'branch': Branch, 'employee': Employee, 'shift': Shift}
+
+
 def _check_refs(company_id: str, refs) -> None:
+    """Ids from the body must be rows of the active company."""
     for table, ref_id, label in refs:
-        if not ref_id:
-            continue
-        if not one(f'SELECT 1 AS x FROM {table} WHERE id = %s AND company_id = %s', [ref_id, company_id]):
+        if ref_id and not REF_MODELS[table].objects.for_company(company_id).filter(pk=ref_id).exists():
             raise BadRequestError(f'{label} does not exist in your company')
 
 
@@ -464,94 +480,106 @@ def _job_row(r: dict) -> dict:
     return r
 
 
+def _job_rows(qs, **extra) -> list[dict]:
+    return [_job_row(r) for r in _values(qs, **_columns(Job), **extra)]
+
+
 def load_job(user: AuthUser, job_id: str) -> dict:
     job_id = parse_uuid(job_id)
-    r = one('SELECT * FROM hiring_job WHERE id = %s AND company_id = %s', [job_id, company_id_of(user)])
-    if not r or not can_see_job(user, _job_row(r)):
+    found = _job_rows(Job.objects.for_company(company_id_of(user)).filter(pk=job_id))
+    if not found or not can_see_job(user, found[0]):
         raise NotFoundError('job not found')
-    return r
+    return found[0]
+
+
+def _company_user_ids(company_id: str) -> set[str]:
+    return {str(u['id']) for u in company_users(company_id)}
 
 
 def load_app(user: AuthUser, app_id: str, *, allow_panel: bool = False, lock: bool = False) -> tuple[dict, dict, str]:
     """An application with its job; HR and managers in scope get 'full' access, interview panel members 'panel'."""
     app_id = parse_uuid(app_id)
-    a = one(f"""SELECT a.id, a.company_id, a.job_id, a.candidate_id, a.stage, a.status, a.cv_file_id, a.furthest_stage, a.created_at,
-                       c.name, c.email, c.phone
-                  FROM hiring_application a JOIN hiring_candidate c ON c.id = a.candidate_id
-                 WHERE a.id = %s AND a.company_id = %s{' FOR UPDATE OF a' if lock else ''}""", [app_id, company_id_of(user)])
-    if not a:
+    qs = App.objects.for_company(company_id_of(user)).filter(pk=app_id)
+    if lock:
+        qs = qs.select_for_update(of=('self',))
+    found = _values(qs, id='id', company_id='company_id', job_id='job_id', candidate_id='candidate_id', stage='stage',
+                    status='status', cv_file_id='cv_file_id', furthest_stage='furthest_stage', created_at='created_at',
+                    name='candidate__name', email='candidate__email', phone='candidate__phone')
+    if not found:
         raise NotFoundError('application not found')
+    a = found[0]
     for k in ('id', 'company_id', 'job_id', 'candidate_id', 'cv_file_id'):
         a[k] = _s(a[k])
-    job = _job_row(one('SELECT * FROM hiring_job WHERE id = %s', [a['job_id']]))
+    job = _job_rows(Job.objects.for_company(a['company_id']).filter(pk=a['job_id']))[0]
     if can_see_job(user, job):
         return a, job, 'full'
-    if allow_panel and one('SELECT 1 AS x FROM hiring_interview WHERE application_id = %s AND %s = ANY(panel) LIMIT 1', [app_id, user.id]):
+    if allow_panel and Iv.objects.filter(application_id=app_id, panel__contains=[user.id]).exists():
         return a, job, 'panel'
     raise NotFoundError('application not found')
 
 
+def _set_stage(app: dict, stage: str, idx: int, actor_id: str) -> None:
+    App.objects.filter(pk=app['id']).update(stage=stage, furthest_stage=Greatest('furthest_stage', Value(idx)),
+                                            stage_changed_at=Now())
+    add_event(company_id=app['company_id'], application_id=app['id'], actor_id=actor_id, kind='stage',
+              body=f"{app['stage']} → {stage}", data={'from': app['stage'], 'to': stage})
+
+
 def _move_to(app: dict, job: dict, stage: str, actor_id: str) -> None:
+    """Move forward to a stage when the job has it and the candidate is not past it already."""
     stages = job['stages']
     idx = stages.index(stage) if stage in stages else -1
     cur = stages.index(app['stage']) if app['stage'] in stages else -1
     if idx <= 0 or cur >= idx:
         return
-    execute("""UPDATE hiring_application SET stage = %s, furthest_stage = greatest(furthest_stage, %s), stage_changed_at = now()
-                WHERE id = %s""", [stage, idx, app['id']])
-    add_event(company_id=app['company_id'], application_id=app['id'], actor_id=actor_id, kind='stage',
-              body=f"{app['stage']} → {stage}", data={'from': app['stage'], 'to': stage})
+    _set_stage(app, stage, idx, actor_id)
 
 
 # ---------------------------------------------------------------- requisitions
 
-REQUISITION_BODY = Obj({
-    'title': Str(trim=True, min=2, max=120), 'designation': _opt_text(120), 'orgUnitId': Uuid(nullish=True),
-    'branchId': Uuid(nullish=True), 'headcount': Num(int_=True, min=1, max=500, default=1),
-    'salaryMin': Money(nullish=True), 'salaryMax': Money(nullish=True), 'kind': Enum(('new', 'replacement'), default='new'),
-    'replacingEmployeeId': Uuid(nullish=True), 'justification': Str(trim=True, min=10, max=4000),
-})
+def _requisitions(user: AuthUser):
+    _need_staff(user)
+    qs = Req.objects.for_company(company_id_of(user))
+    scope = _in_scope(user, created_by='raised_by_id', org_unit='org_unit_id')
+    return (qs if scope is None else qs.filter(scope)).order_by('-created_at')
+
+
+def _requisition_rows(qs) -> list[dict]:
+    return _values(qs, **_columns(Req), department='org_unit__name_en', branch='branch__name_en', raised_by_name='raised_by__name',
+                   replacing_name='replacing_employee__name_en',
+                   jobs=count_of(Job.objects.filter(requisition=OuterRef('pk'))))
 
 
 def list_requisitions(user: AuthUser) -> list[dict]:
-    _need_staff(user)
-    company_id = company_id_of(user)
-    hr = has_module(user, 'hiring')
-    unit = None if hr else manager_unit(user.employee_id)
-    return rows("""SELECT q.*, ou.name_en AS department, b.name_en AS branch, u.name AS raised_by_name, re.name_en AS replacing_name,
-                          (SELECT count(*)::int FROM hiring_job j WHERE j.requisition_id = q.id) AS jobs
-                     FROM hiring_requisition q LEFT JOIN org_unit ou ON ou.id = q.org_unit_id LEFT JOIN branch b ON b.id = q.branch_id
-                     LEFT JOIN app_user u ON u.id = q.raised_by LEFT JOIN employee re ON re.id = q.replacing_employee_id
-                    WHERE q.company_id = %s AND (%s OR q.raised_by = %s OR (q.org_unit_id IS NOT NULL AND q.org_unit_id = %s::uuid))
-                    ORDER BY q.created_at DESC LIMIT 500""", [company_id, hr, user.id, unit])
+    return _requisition_rows(_requisitions(user)[:500])
 
 
 def get_requisition(user: AuthUser, req_id: str) -> dict:
     req_id = parse_uuid(req_id)
-    for r in list_requisitions(user):
-        if str(r['id']) == req_id:
-            return r
-    raise NotFoundError('request not found')
+    found = _requisition_rows(_requisitions(user).filter(pk=req_id))
+    if not found:
+        raise NotFoundError('request not found')
+    return found[0]
 
 
 def create_requisition(user: AuthUser, body: dict) -> str:
     _need_staff(user)
     company_id = company_id_of(user)
-    b = parse(REQUISITION_BODY, body)
+    b = _checked(S.RequisitionIn, body)
     if b.get('salaryMin') and b.get('salaryMax') and Decimal(b['salaryMax']) < Decimal(b['salaryMin']):
         raise BadRequestError('the highest salary cannot be below the lowest')
-    if b['kind'] == 'replacement' and not b.get('replacingEmployeeId'):
+    if b['kind'] == Req.Kind.REPLACEMENT and not b.get('replacingEmployeeId'):
         raise BadRequestError('choose the employee being replaced')
     _check_refs(company_id, [('org_unit', b.get('orgUnitId'), 'department'), ('branch', b.get('branchId'), 'branch'),
                              ('employee', b.get('replacingEmployeeId'), 'employee')])
     with transaction.atomic():
-        r = one("""INSERT INTO hiring_requisition (company_id, raised_by, raised_by_employee_id, title, designation, org_unit_id, branch_id,
-                          headcount, salary_min, salary_max, kind, replacing_employee_id, justification)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                [company_id, user.id, user.employee_id, b['title'], b.get('designation'), b.get('orgUnitId'), b.get('branchId'),
-                 b['headcount'], b.get('salaryMin'), b.get('salaryMax'), b['kind'],
-                 b.get('replacingEmployeeId') if b['kind'] == 'replacement' else None, b['justification']])
-        req_id = str(r['id'])
+        r = Req.objects.create(
+            company_id=company_id, raised_by_id=user.id, raised_by_employee_id=user.employee_id, title=b['title'],
+            designation=b.get('designation'), org_unit_id=b.get('orgUnitId'), branch_id=b.get('branchId'),
+            headcount=b['headcount'], salary_min=b.get('salaryMin'), salary_max=b.get('salaryMax'), kind=b['kind'],
+            replacing_employee_id=b.get('replacingEmployeeId') if b['kind'] == Req.Kind.REPLACEMENT else None,
+            justification=b['justification'])
+        req_id = str(r.id)
         start_workflow(company_id=company_id, object_type='job_requisition', object_id=req_id, employee_id=user.employee_id,
                        title='Hiring request', body=f"{user.name} asks to hire {b['headcount']} × {b['title']}.")
         audit('create', 'hiring_requisition', actor_id=user.id, row_id=req_id, after=b)
@@ -562,25 +590,19 @@ def cancel_requisition(user: AuthUser, req_id: str) -> None:
     _need_staff(user)
     req_id = parse_uuid(req_id)
     with transaction.atomic():
-        q = one('SELECT raised_by, status FROM hiring_requisition WHERE id = %s AND company_id = %s FOR UPDATE',
-                [req_id, company_id_of(user)])
-        if not q:
+        q = Req.objects.for_company(company_id_of(user)).select_for_update().filter(pk=req_id).first()
+        if not q or (str(q.raised_by_id) != user.id and not has_module(user, 'hiring')):
             raise NotFoundError('request not found')
-        if str(q['raised_by']) != user.id and not has_module(user, 'hiring'):
-            raise NotFoundError('request not found')
-        if q['status'] not in ('pending', 'approved'):
-            raise ConflictError(f"this request is already {q['status']}")
-        execute("UPDATE hiring_requisition SET status = 'cancelled', decided_at = coalesce(decided_at, now()) WHERE id = %s", [req_id])
+        if q.status not in (Req.Status.PENDING, Req.Status.APPROVED):
+            raise ConflictError(f'this request is already {q.status}')
+        Req.objects.filter(pk=q.pk).update(status=Req.Status.CANCELLED, decided_at=Coalesce('decided_at', Now()))
         cancel_workflow('job_requisition', req_id)
         audit('cancel', 'hiring_requisition', actor_id=user.id, row_id=req_id)
 
 
 # ---------------------------------------------------------------- jobs
 
-JOB_COLS = """j.id, j.company_id, j.requisition_id, j.title, j.description, j.requirements, j.category, j.location, j.work_mode, j.employment_type,
-  j.experience_min, j.experience_max, j.salary_min, j.salary_max, j.show_salary, j.openings, j.deadline, j.org_unit_id, j.branch_id, j.hiring_manager_id,
-  j.stages, j.questions, j.status, j.published_at, j.closed_at, j.created_by, j.created_at, j.updated_at,
-  ou.name_en AS department, hm.name_en AS hiring_manager_name"""
+JOB_NAMES = {'department': 'org_unit__name_en', 'hiring_manager_name': 'hiring_manager__name_en'}
 
 
 def _validate_job(b: dict) -> None:
@@ -606,50 +628,53 @@ def _validate_job(b: dict) -> None:
                     raise BadRequestError(f'"{q["label"]}": a number rule needs a minimum')
 
 
-def list_jobs(user: AuthUser, status: str | None = None) -> dict:
+def jobs_queryset(user: AuthUser, status: str | None = None):
+    """The jobs this person may see in the active company, open ones first, newest first."""
     _need_staff(user)
+    q = _checked(S.JobsQueryIn, {'status': status} if status else {})
+    qs = Job.objects.for_company(company_id_of(user))
+    scope = _in_scope(user, created_by='created_by_id', hiring_manager='hiring_manager_id', org_unit='org_unit_id')
+    if scope is not None:
+        qs = qs.filter(scope)
+    if q.get('status'):
+        qs = qs.filter(status=q['status'])
+    return qs.order_by(Case(When(status=Job.Status.OPEN, then=0), default=1), '-created_at')
+
+
+def list_jobs(user: AuthUser, status: str | None = None) -> dict:
     company_id = company_id_of(user)
-    q = parse(Obj({'status': Enum(('draft', 'open', 'closed'), optional=True)}), {'status': status} if status else {})
-    hr = has_module(user, 'hiring')
-    unit = None if hr else manager_unit(user.employee_id)
-    jobs = rows(f"""SELECT {JOB_COLS},
-                           (SELECT count(*)::int FROM hiring_application a WHERE a.job_id = j.id) AS applications,
-                           (SELECT count(*)::int FROM hiring_application a WHERE a.job_id = j.id AND a.status = 'active') AS active,
-                           (SELECT count(*)::int FROM hiring_application a WHERE a.job_id = j.id AND a.created_at > now() - interval '7 days') AS new_this_week,
-                           (SELECT count(*)::int FROM hiring_application a WHERE a.job_id = j.id AND a.status = 'hired') AS hired
-                      FROM hiring_job j LEFT JOIN org_unit ou ON ou.id = j.org_unit_id LEFT JOIN employee hm ON hm.id = j.hiring_manager_id
-                     WHERE j.company_id = %s AND (%s::text IS NULL OR j.status = %s)
-                       AND (%s OR j.created_by = %s OR j.hiring_manager_id = %s::uuid OR (j.org_unit_id IS NOT NULL AND j.org_unit_id = %s::uuid))
-                     ORDER BY (j.status = 'open') DESC, j.created_at DESC LIMIT 500""",
-                [company_id, q.get('status'), q.get('status'), hr, user.id, user.employee_id, unit])
-    code = one('SELECT code FROM company WHERE id = %s', [company_id])
-    return {'jobs': [_job_row(j) for j in jobs], 'companyCode': code and code['code']}
+    apps = App.objects.filter(job=OuterRef('pk'))
+    jobs = _job_rows(jobs_queryset(user, status)[:500], **JOB_NAMES,
+                     applications=count_of(apps), active=count_of(apps.filter(status=App.Status.ACTIVE)),
+                     new_this_week=count_of(apps.filter(created_at__gt=Now() - timedelta(days=7))),
+                     hired=count_of(apps.filter(status=App.Status.HIRED)))
+    code = Company.objects.for_company(company_id).values_list('code', flat=True).first()
+    return {'jobs': jobs, 'companyCode': code}
 
 
 def create_job(user: AuthUser, body: dict) -> str:
     _need_module(user)
     company_id = company_id_of(user)
-    b = parse(JOB_BODY, body)
+    b = _checked(S.JobIn, body)
     _validate_job(b)
     _check_refs(company_id, [('org_unit', b.get('orgUnitId'), 'department'), ('branch', b.get('branchId'), 'branch'),
                              ('employee', b.get('hiringManagerId'), 'hiring manager')])
     if b.get('requisitionId'):
-        q = one('SELECT status FROM hiring_requisition WHERE id = %s AND company_id = %s', [b['requisitionId'], company_id])
-        if not q:
+        status = Req.objects.for_company(company_id).filter(pk=b['requisitionId']).values_list('status', flat=True).first()
+        if status is None:
             raise BadRequestError('hiring request does not exist in your company')
-        if q['status'] != 'approved':
+        if status != Req.Status.APPROVED:
             raise BadRequestError('only an approved hiring request can be turned into a job')
     with transaction.atomic():
-        r = one("""INSERT INTO hiring_job (company_id, requisition_id, title, description, requirements, category, location, work_mode,
-                          employment_type, experience_min, experience_max, salary_min, salary_max, show_salary, openings, deadline,
-                          org_unit_id, branch_id, hiring_manager_id, stages, questions, created_by)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                [company_id, b.get('requisitionId'), b['title'], b['description'], b['requirements'], b.get('category'),
-                 b.get('location'), b['workMode'], b['employmentType'], b.get('experienceMin'), b.get('experienceMax'),
-                 b.get('salaryMin'), b.get('salaryMax'), b['showSalary'], b['openings'], b.get('deadline'), b.get('orgUnitId'),
-                 b.get('branchId'), b.get('hiringManagerId'), json.dumps(b.get('stages') or DEFAULT_STAGES),
-                 json.dumps(b.get('questions') or []), user.id])
-        job_id = str(r['id'])
+        job = Job.objects.create(
+            company_id=company_id, requisition_id=b.get('requisitionId'), title=b['title'], description=b['description'],
+            requirements=b['requirements'], category=b.get('category'), location=b.get('location'), work_mode=b['workMode'],
+            employment_type=b['employmentType'], experience_min=b.get('experienceMin'), experience_max=b.get('experienceMax'),
+            salary_min=b.get('salaryMin'), salary_max=b.get('salaryMax'), show_salary=b['showSalary'], openings=b['openings'],
+            deadline=b.get('deadline'), org_unit_id=b.get('orgUnitId'), branch_id=b.get('branchId'),
+            hiring_manager_id=b.get('hiringManagerId'), stages=b.get('stages') or DEFAULT_STAGES,
+            questions=b.get('questions') or [], created_by_id=user.id)
+        job_id = str(job.id)
         audit('create', 'hiring_job', actor_id=user.id, row_id=job_id, after={'title': b['title']})
     return job_id
 
@@ -657,17 +682,18 @@ def create_job(user: AuthUser, body: dict) -> str:
 def get_job(user: AuthUser, job_id: str) -> dict:
     _need_staff(user)
     job = load_job(user, job_id)
-    full = one(f"""SELECT {JOB_COLS} FROM hiring_job j LEFT JOIN org_unit ou ON ou.id = j.org_unit_id
-                     LEFT JOIN employee hm ON hm.id = j.hiring_manager_id WHERE j.id = %s""", [job['id']])
-    counts = rows("SELECT stage, count(*)::int AS n FROM hiring_application WHERE job_id = %s AND status = 'active' GROUP BY stage", [job['id']])
-    return {'job': _job_row(full), 'stageCounts': {c['stage']: c['n'] for c in counts}}
+    full = _job_rows(Job.objects.for_company(job['company_id']).filter(pk=job['id']), **JOB_NAMES)[0]
+    counts = (App.objects.for_company(job['company_id']).filter(job_id=job['id'], status=App.Status.ACTIVE)
+              .values('stage').annotate(n=Count('id')).values_list('stage', 'n'))
+    return {'job': full, 'stageCounts': dict(counts)}
 
 
-_JOB_COL = {
+_JOB_FIELD = {
     'title': 'title', 'description': 'description', 'requirements': 'requirements', 'category': 'category', 'location': 'location',
     'workMode': 'work_mode', 'employmentType': 'employment_type', 'experienceMin': 'experience_min', 'experienceMax': 'experience_max',
     'salaryMin': 'salary_min', 'salaryMax': 'salary_max', 'showSalary': 'show_salary', 'openings': 'openings', 'deadline': 'deadline',
-    'orgUnitId': 'org_unit_id', 'branchId': 'branch_id', 'hiringManagerId': 'hiring_manager_id', 'stages': 'stages', 'questions': 'questions',
+    'orgUnitId': 'org_unit_id', 'branchId': 'branch_id', 'hiringManagerId': 'hiring_manager_id', 'stages': 'stages',
+    'questions': 'questions',
 }
 
 
@@ -675,9 +701,8 @@ def update_job(user: AuthUser, job_id: str, body: dict) -> None:
     _need_module(user)
     company_id = company_id_of(user)
     job_id = parse_uuid(job_id)
-    raw = parse(JOB_PATCH, body)
-    # Only fields actually sent are changed (defaults must not overwrite stored values).
-    b = {k: v for k, v in raw.items() if k in (body or {})}
+    # Only fields actually sent are changed (the patch serializer has no defaults).
+    b = _checked(S.JobPatchIn, body)
     job = load_job(user, job_id)
     _validate_job({'experienceMin': None if job['experience_min'] is None else float(job['experience_min']),
                    'experienceMax': None if job['experience_max'] is None else float(job['experience_max']), **b})
@@ -686,20 +711,14 @@ def update_job(user: AuthUser, job_id: str, body: dict) -> None:
     if 'requisitionId' in b:
         raise BadRequestError('the hiring request of a job cannot be changed')
     if b.get('stages'):
-        used = [r['stage'] for r in rows('SELECT DISTINCT stage FROM hiring_application WHERE job_id = %s', [job_id])]
+        used = App.objects.for_company(company_id).filter(job_id=job_id).order_by('stage').values_list('stage', flat=True).distinct()
         missing = [s for s in used if s not in b['stages']]
         if missing:
             raise ConflictError(f"candidates are in: {', '.join(missing)}. Move them before removing the stage.")
-    sets, vals = [], []
-    for k, v in b.items():
-        col = _JOB_COL.get(k)
-        if not col:
-            continue
-        vals.append(json.dumps(v) if k in ('stages', 'questions') else v)
-        sets.append(f'{col} = %s')
-    if sets:
+    changes = {_JOB_FIELD[k]: v for k, v in b.items() if k in _JOB_FIELD}
+    if changes:
         with transaction.atomic():
-            execute(f"UPDATE hiring_job SET {', '.join(sets)}, updated_at = now() WHERE id = %s", [*vals, job_id])
+            Job.objects.filter(pk=job_id).update(**changes, updated_at=Now())
             audit('update', 'hiring_job', actor_id=user.id, row_id=job_id, after=b)
 
 
@@ -707,15 +726,15 @@ def publish_job(user: AuthUser, job_id: str) -> None:
     _need_module(user)
     job_id = parse_uuid(job_id)
     job = load_job(user, job_id)
-    if job['status'] == 'open':
+    if job['status'] == Job.Status.OPEN:
         return
-    if job['deadline'] and job['deadline'].isoformat() < npt_today():
+    if job['deadline'] and job['deadline'] < npt_today():
         raise BadRequestError('the application deadline has passed; set a new deadline first')
     if len((job['description'] or '').strip()) < 20:
         raise BadRequestError('add a job description (at least 20 characters) before publishing')
     with transaction.atomic():
-        execute("""UPDATE hiring_job SET status = 'open', published_at = coalesce(published_at, now()), closed_at = NULL, updated_at = now()
-                    WHERE id = %s""", [job_id])
+        Job.objects.filter(pk=job_id).update(status=Job.Status.OPEN, published_at=Coalesce('published_at', Now()), closed_at=None,
+                                             updated_at=Now())
         audit('publish', 'hiring_job', actor_id=user.id, row_id=job_id)
 
 
@@ -724,7 +743,7 @@ def close_job(user: AuthUser, job_id: str) -> None:
     job_id = parse_uuid(job_id)
     load_job(user, job_id)
     with transaction.atomic():
-        execute("UPDATE hiring_job SET status = 'closed', closed_at = now(), updated_at = now() WHERE id = %s", [job_id])
+        Job.objects.filter(pk=job_id).update(status=Job.Status.CLOSED, closed_at=Now(), updated_at=Now())
         audit('close', 'hiring_job', actor_id=user.id, row_id=job_id)
 
 
@@ -733,89 +752,103 @@ def close_job(user: AuthUser, job_id: str) -> None:
 def board(user: AuthUser, job_id: str, include: str = 'active') -> dict:
     _need_staff(user)
     job = load_job(user, job_id)
-    q = parse(Obj({'include': Enum(('active', 'all'), default='active')}), {'include': include} if include else {})
-    apps = rows("""SELECT a.id, a.stage, a.status, a.source, a.score, a.knocked_out, a.rating, a.tags, a.experience_years, a.current_employer,
-                          a.created_at, a.stage_changed_at, a.rejected_reason, a.owner_user_id, ou.name AS owner_name, c.id AS candidate_id,
-                          c.name, c.email, c.phone, (a.cv_file_id IS NOT NULL) AS has_cv,
-                          (SELECT count(*)::int FROM hiring_application o WHERE o.candidate_id = a.candidate_id AND o.id <> a.id) AS other_applications,
-                          (SELECT min(i.starts_at) FROM hiring_interview i WHERE i.application_id = a.id AND i.status = 'scheduled'
-                              AND i.starts_at > now()) AS next_interview
-                     FROM hiring_application a JOIN hiring_candidate c ON c.id = a.candidate_id LEFT JOIN app_user ou ON ou.id = a.owner_user_id
-                    WHERE a.job_id = %s AND (%s = 'all' OR a.status = 'active')
-                    ORDER BY a.knocked_out, a.score DESC NULLS LAST, a.created_at""", [job['id'], q['include']])
+    q = _checked(S.BoardQueryIn, {'include': include} if include else {})
+    qs = App.objects.for_company(job['company_id']).filter(job_id=job['id'])
+    if q['include'] != 'all':
+        qs = qs.filter(status=App.Status.ACTIVE)
+    qs = qs.order_by('knocked_out', F('score').desc(nulls_last=True), 'created_at')
+    upcoming = Iv.objects.filter(application=OuterRef('pk'), status=Iv.Status.SCHEDULED, starts_at__gt=Now()).order_by('starts_at')
+    apps = _values(
+        qs, id='id', stage='stage', status='status', source='source', score='score', knocked_out='knocked_out', rating='rating',
+        tags='tags', experience_years='experience_years', current_employer='current_employer', created_at='created_at',
+        stage_changed_at='stage_changed_at', rejected_reason='rejected_reason', owner_user_id='owner_user_id',
+        owner_name='owner_user__name', candidate_id='candidate_id', name='candidate__name', email='candidate__email',
+        phone='candidate__phone', has_cv=_flag(Q(cv_file__isnull=False)),
+        other_applications=count_of(App.objects.filter(candidate=OuterRef('candidate_id')).exclude(pk=OuterRef('pk'))),
+        next_interview=Subquery(upcoming.values('starts_at')[:1]))
     for a in apps:
         a['id'] = str(a['id'])
         a['tags'] = a['tags'] or []
     return {'applications': apps, 'stages': job['stages'], 'job': job}
 
 
-ADD_CANDIDATE_BODY = Obj({
-    'name': Str(trim=True, min=2, max=120), 'email': Str(email=True, max=200),
-    'phone': Str(trim=True, regex=r'^[0-9+\- ()]{6,30}$', regex_message='phone number', nullish=True),
-    'source': Enum(SOURCES, default='manual'), 'cvFileId': Uuid(nullish=True), 'coverNote': _opt_text(4000),
-    'experienceYears': Num(min=0, max=60, nullish=True), 'currentEmployer': _opt_text(120),
-    'answers': Record(S(), optional=True),
-})
+def _decimal(v) -> Decimal | None:
+    return None if v is None else Decimal(str(v))
 
 
 def add_candidate(user: AuthUser, job_id: str, body: dict) -> str:
     _need_module(user)
     company_id = company_id_of(user)
     job = load_job(user, job_id)
-    b = parse(ADD_CANDIDATE_BODY, body)
+    b = _checked(S.AddCandidateIn, body)
     answers = clean_answers(job['questions'], b.get('answers'))
     with transaction.atomic():
         cand = upsert_candidate(company_id, b['name'], b['email'], b.get('phone'))
-        if one('SELECT 1 AS x FROM hiring_application WHERE job_id = %s AND candidate_id = %s', [job['id'], cand]):
+        if App.objects.filter(job_id=job['id'], candidate_id=cand).exists():
             raise ConflictError('this candidate has already applied for this job')
         score = score_application(job, b.get('experienceYears'), answers)
-        r = one("""INSERT INTO hiring_application (company_id, job_id, candidate_id, stage, source, cover_note, answers, experience_years,
-                          current_employer, score, score_detail, knocked_out, owner_user_id)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                [company_id, job['id'], cand, job['stages'][0], b['source'], b.get('coverNote'), json.dumps(answers),
-                 b.get('experienceYears'), b.get('currentEmployer'), score['score'], json.dumps(score['detail']),
-                 score['knockedOut'], user.id])
-        app_id = str(r['id'])
+        app = App.objects.create(
+            company_id=company_id, job_id=job['id'], candidate_id=cand, stage=job['stages'][0], source=b['source'],
+            cover_note=b.get('coverNote'), answers=answers, experience_years=_decimal(b.get('experienceYears')),
+            current_employer=b.get('currentEmployer'), score=score['score'], score_detail=score['detail'],
+            knocked_out=score['knockedOut'], owner_user_id=user.id)
+        app_id = str(app.id)
         if b.get('cvFileId'):
             attach_file(company_id=company_id, file_id=b['cvFileId'], user_id=user.id, purpose='hiring_cv',
                         attached_to=f'hiring_application:{app_id}')
-            execute('UPDATE hiring_application SET cv_file_id = %s WHERE id = %s', [b['cvFileId'], app_id])
+            App.objects.filter(pk=app_id).update(cv_file_id=b['cvFileId'])
         add_event(company_id=company_id, application_id=app_id, actor_id=user.id, kind='applied',
                   body=f"Added by {user.name} ({b['source'].replace('_', ' ', 1)})")
     return app_id
 
 
+def _panel_names(interviews: list[dict]) -> None:
+    """Each interview's panel as names in name order (None when nobody on it still exists)."""
+    ids = {p for i in interviews for p in i['panel']}
+    names = {str(k): v for k, v in AppUser.objects.filter(pk__in=ids).values_list('id', 'name')} if ids else {}
+    for i in interviews:
+        got = sorted((names[p] for p in i['panel'] if p in names), key=collate_key)
+        i['panel_names'] = got or None
+
+
 def application_detail(user: AuthUser, app_id: str) -> dict:
     app, job, access = load_app(user, app_id, allow_panel=True)
-    full = one("""SELECT a.id, a.job_id, a.candidate_id, a.stage, a.status, a.source, a.cover_note, a.answers, a.experience_years,
-                         a.current_employer, a.score, a.score_detail, a.knocked_out, a.rating, a.tags, a.owner_user_id, a.rejected_reason,
-                         a.closed_at, a.hired_employee_id, a.consent_at, a.stage_changed_at, a.created_at,
-                         (a.cv_file_id IS NOT NULL) AS has_cv, c.name, c.email, c.phone, c.purged_at, ou.name AS owner_name
-                    FROM hiring_application a JOIN hiring_candidate c ON c.id = a.candidate_id LEFT JOIN app_user ou ON ou.id = a.owner_user_id
-                   WHERE a.id = %s""", [app['id']])
+    cid = app['company_id']
+    full = _values(
+        App.objects.filter(pk=app['id']), id='id', job_id='job_id', candidate_id='candidate_id', stage='stage', status='status',
+        source='source', cover_note='cover_note', answers='answers', experience_years='experience_years',
+        current_employer='current_employer', score='score', score_detail='score_detail', knocked_out='knocked_out',
+        rating='rating', tags='tags', owner_user_id='owner_user_id', rejected_reason='rejected_reason', closed_at='closed_at',
+        hired_employee_id='hired_employee_id', consent_at='consent_at', stage_changed_at='stage_changed_at',
+        created_at='created_at', has_cv=_flag(Q(cv_file__isnull=False)), name='candidate__name', email='candidate__email',
+        phone='candidate__phone', purged_at='candidate__purged_at', owner_name='owner_user__name')[0]
     full['id'] = str(full['id'])
     full['tags'] = full['tags'] or []
     full['answers'] = full['answers'] or {}
     full['score_detail'] = full['score_detail'] or []
     is_full = access == 'full'
-    others = rows("""SELECT a.id, a.stage, a.status, a.created_at, j.title FROM hiring_application a JOIN hiring_job j ON j.id = a.job_id
-                      WHERE a.candidate_id = %s AND a.id <> %s ORDER BY a.created_at DESC""", [app['candidate_id'], app['id']]) if is_full else []
-    events = rows("""SELECT e.id, e.kind, e.body, e.data, e.created_at, u.name AS actor FROM hiring_event e LEFT JOIN app_user u ON u.id = e.actor_id
-                      WHERE e.application_id = %s ORDER BY e.created_at DESC LIMIT 300""", [app['id']]) if is_full else []
-    interviews = rows("""SELECT i.id, i.title, i.starts_at, i.duration_min, i.mode, i.location, i.panel, i.status,
-                                (SELECT array_agg(u.name ORDER BY u.name) FROM app_user u WHERE u.id = ANY(i.panel)) AS panel_names
-                           FROM hiring_interview i WHERE i.application_id = %s ORDER BY i.starts_at""", [app['id']])
+    others = _values(App.objects.for_company(cid).filter(candidate_id=app['candidate_id']).exclude(pk=app['id'])
+                     .order_by('-created_at'), id='id', stage='stage', status='status', created_at='created_at',
+                     title='job__title') if is_full else []
+    events = _values(HiringEvent.objects.for_company(cid).filter(application_id=app['id']).order_by('-created_at')[:300],
+                     id='id', kind='kind', body='body', data='data', created_at='created_at', actor='actor__name') if is_full else []
+    interviews = _values(Iv.objects.for_company(cid).filter(application_id=app['id']).order_by('starts_at'), id='id',
+                         title='title', starts_at='starts_at', duration_min='duration_min', mode='mode', location='location',
+                         panel='panel', status='status')
     for i in interviews:
         i['id'] = str(i['id'])
         i['panel'] = [str(p) for p in (i['panel'] or [])]
-    cards = rows("""SELECT s.id, s.interview_id, s.reviewer_id, s.ratings, s.recommendation, s.notes, s.submitted_at, u.name AS reviewer
-                      FROM hiring_scorecard s JOIN app_user u ON u.id = s.reviewer_id WHERE s.interview_id = ANY(%s::uuid[])
-                     ORDER BY s.submitted_at""", [[i['id'] for i in interviews]])
+    _panel_names(interviews)
+    cards = _values(HiringScorecard.objects.filter(interview_id__in=[i['id'] for i in interviews]).order_by('submitted_at'),
+                    id='id', interview_id='interview_id', reviewer_id='reviewer_id', ratings='ratings',
+                    recommendation='recommendation', notes='notes', submitted_at='submitted_at', reviewer='reviewer__name')
     for c in cards:
         c['interview_id'], c['reviewer_id'] = str(c['interview_id']), str(c['reviewer_id'])
     scorecards = cards if is_full else [c for c in cards if c['reviewer_id'] == user.id]
-    offers = rows("""SELECT id, designation, salary, join_date, expires_on, notes, status, created_at, decided_at, responded_at
-                       FROM hiring_offer WHERE application_id = %s ORDER BY created_at DESC""", [app['id']]) if is_full else []
+    offers = _values(Offer.objects.for_company(cid).filter(application_id=app['id']).order_by('-created_at'), id='id',
+                     designation='designation', salary='salary', join_date='join_date', expires_on='expires_on', notes='notes',
+                     status='status', created_at='created_at', decided_at='decided_at',
+                     responded_at='responded_at') if is_full else []
     for o in offers:
         o['id'] = str(o['id'])
     return {'application': full, 'access': access, 'otherApplications': others, 'events': events, 'interviews': interviews,
@@ -831,36 +864,30 @@ def cv_file(user: AuthUser, app_id: str) -> dict:
     return read_file(app['company_id'], app['cv_file_id'])
 
 
-UPDATE_APP_BODY = Obj({
-    'rating': Num(int_=True, min=1, max=5, nullish=True), 'tags': Arr(Str(trim=True, min=1, max=30), max=10, optional=True),
-    'ownerUserId': Uuid(nullish=True),
-})
-
-
 def update_application(user: AuthUser, app_id: str, body: dict) -> None:
     _need_staff(user)
-    b = parse(UPDATE_APP_BODY, body)
+    b = _checked(S.UpdateApplicationIn, body)
     app, _, _ = load_app(user, app_id)
-    if b.get('ownerUserId'):
-        if not one("SELECT 1 AS x FROM app_user WHERE id = %s AND company_id = %s AND status = 'active'", [b['ownerUserId'], app['company_id']]):
-            raise BadRequestError('owner must be an active user in your company')
+    if b.get('ownerUserId') and b['ownerUserId'] not in _company_user_ids(app['company_id']):
+        raise BadRequestError('owner must be an active user in your company')
+    one_app = App.objects.filter(pk=app['id'])
     with transaction.atomic():
         if 'rating' in b:
-            execute('UPDATE hiring_application SET rating = %s WHERE id = %s', [b['rating'], app['id']])
+            one_app.update(rating=b['rating'])
             add_event(company_id=app['company_id'], application_id=app['id'], actor_id=user.id, kind='rating',
                       body=f"Rated {b['rating']} of 5" if b['rating'] else 'Rating cleared')
         if 'tags' in b:
-            execute('UPDATE hiring_application SET tags = %s WHERE id = %s', [list(dict.fromkeys(b['tags'])), app['id']])
+            one_app.update(tags=list(dict.fromkeys(b['tags'])))
         if 'ownerUserId' in b:
-            execute('UPDATE hiring_application SET owner_user_id = %s WHERE id = %s', [b['ownerUserId'], app['id']])
+            one_app.update(owner_user_id=b['ownerUserId'])
 
 
 def move_application(user: AuthUser, app_id: str, body: dict) -> None:
     _need_staff(user)
-    stage = parse(Obj({'stage': Str(trim=True, min=1, max=40)}), body)['stage']
+    stage = _checked(S.MoveIn, body)['stage']
     with transaction.atomic():
         app, job, _ = load_app(user, app_id, lock=True)
-        if app['status'] != 'active':
+        if app['status'] != App.Status.ACTIVE:
             raise ConflictError(f"this application is {app['status']}")
         stages = job['stages']
         idx = stages.index(stage) if stage in stages else -1
@@ -870,29 +897,23 @@ def move_application(user: AuthUser, app_id: str, body: dict) -> None:
             raise BadRequestError('use "Hire" to move a candidate to Hired once they accept an offer')
         if stage == app['stage']:
             return
-        execute("""UPDATE hiring_application SET stage = %s, furthest_stage = greatest(furthest_stage, %s), stage_changed_at = now()
-                    WHERE id = %s""", [stage, idx, app['id']])
-        add_event(company_id=app['company_id'], application_id=app['id'], actor_id=user.id, kind='stage',
-                  body=f"{app['stage']} → {stage}", data={'from': app['stage'], 'to': stage})
-
-
-REJECT_BODY = Obj({'reason': Str(trim=True, min=3, max=500), 'notifyCandidate': Bool(default=True)})
+        _set_stage(app, stage, idx, user.id)
 
 
 def reject_application(user: AuthUser, app_id: str, body: dict) -> bool:
     _need_staff(user)
-    b = parse(REJECT_BODY, body)
+    b = _checked(S.RejectIn, body)
     with transaction.atomic():
         app, job, _ = load_app(user, app_id, lock=True)
-        if app['status'] != 'active':
+        if app['status'] != App.Status.ACTIVE:
             raise ConflictError(f"this application is already {app['status']}")
-        execute("UPDATE hiring_application SET status = 'rejected', rejected_reason = %s, closed_at = now() WHERE id = %s",
-                [b['reason'], app['id']])
+        App.objects.filter(pk=app['id']).update(status=App.Status.REJECTED, rejected_reason=b['reason'], closed_at=Now())
         add_event(company_id=app['company_id'], application_id=app['id'], actor_id=user.id, kind='rejected', body=b['reason'])
-        opened = rows("""UPDATE hiring_offer SET status = 'withdrawn' WHERE application_id = %s
-                          AND status IN ('pending_approval', 'approved', 'accepted') RETURNING id""", [app['id']])
-        for o in opened:
-            cancel_workflow('job_offer', str(o['id']))
+        open_offers = Offer.objects.filter(application_id=app['id'], status__in=OPEN_OFFER).select_for_update()
+        ids = [str(i) for i in open_offers.values_list('id', flat=True)]
+        Offer.objects.filter(pk__in=ids).update(status=Offer.Status.WITHDRAWN)
+        for offer_id in ids:
+            cancel_workflow('job_offer', offer_id)
         if not b['notifyCandidate']:
             return False
         company = company_name(app['company_id'])
@@ -908,18 +929,17 @@ def reopen_application(user: AuthUser, app_id: str) -> None:
     _need_module(user)
     with transaction.atomic():
         app, _, _ = load_app(user, app_id, lock=True)
-        if app['status'] not in ('rejected', 'withdrawn'):
+        if app['status'] not in CLOSED_APP:
             raise ConflictError(f"this application is {app['status']}")
-        c = one('SELECT purged_at FROM hiring_candidate WHERE id = %s', [app['candidate_id']])
-        if c and c['purged_at']:
+        if HiringCandidate.objects.filter(pk=app['candidate_id'], purged_at__isnull=False).exists():
             raise ConflictError("this candidate's data has been removed")
-        execute("UPDATE hiring_application SET status = 'active', rejected_reason = NULL, closed_at = NULL WHERE id = %s", [app['id']])
+        App.objects.filter(pk=app['id']).update(status=App.Status.ACTIVE, rejected_reason=None, closed_at=None)
         add_event(company_id=app['company_id'], application_id=app['id'], actor_id=user.id, kind='reopened', body='Application reopened')
 
 
 def add_note(user: AuthUser, app_id: str, body: dict) -> None:
     _need_staff(user)
-    text = parse(Obj({'body': Str(trim=True, min=1, max=4000)}), body)['body']
+    text = _checked(S.NoteIn, body)['body']
     app, _, _ = load_app(user, app_id)
     add_event(company_id=app['company_id'], application_id=app['id'], actor_id=user.id, kind='note', body=text)
 
@@ -928,15 +948,21 @@ def export_candidate(user: AuthUser, app_id: str) -> dict:
     """Everything held about a candidate, for a data access request. HR only, audited."""
     _need_module(user)
     app, _, _ = load_app(user, app_id)
-    cand = one('SELECT id, name, email, phone, created_at, purged_at FROM hiring_candidate WHERE id = %s', [app['candidate_id']])
-    apps = rows("""SELECT a.id, j.title AS job, a.stage, a.status, a.source, a.cover_note, a.answers, a.experience_years, a.current_employer,
-                          a.score, a.score_detail, a.rating, a.tags, a.rejected_reason, a.created_at, a.closed_at, a.consent_at
-                     FROM hiring_application a JOIN hiring_job j ON j.id = a.job_id WHERE a.candidate_id = %s ORDER BY a.created_at""",
-                [app['candidate_id']])
-    ids = [str(a['id']) for a in apps]
-    events = rows('SELECT application_id, kind, body, created_at FROM hiring_event WHERE application_id = ANY(%s::uuid[]) ORDER BY created_at', [ids])
-    interviews = rows('SELECT application_id, title, starts_at, mode, status FROM hiring_interview WHERE application_id = ANY(%s::uuid[])', [ids])
-    offers = rows('SELECT application_id, designation, salary, join_date, status, created_at FROM hiring_offer WHERE application_id = ANY(%s::uuid[])', [ids])
+    cid = app['company_id']
+    cand = _values(HiringCandidate.objects.filter(pk=app['candidate_id']), id='id', name='name', email='email', phone='phone',
+                   created_at='created_at', purged_at='purged_at')[0]
+    apps = _values(App.objects.for_company(cid).filter(candidate_id=app['candidate_id']).order_by('created_at'), id='id',
+                   job='job__title', stage='stage', status='status', source='source', cover_note='cover_note', answers='answers',
+                   experience_years='experience_years', current_employer='current_employer', score='score',
+                   score_detail='score_detail', rating='rating', tags='tags', rejected_reason='rejected_reason',
+                   created_at='created_at', closed_at='closed_at', consent_at='consent_at')
+    ids = [a['id'] for a in apps]
+    events = _values(HiringEvent.objects.filter(application_id__in=ids).order_by('created_at'), application_id='application_id',
+                     kind='kind', body='body', created_at='created_at')
+    interviews = _values(Iv.objects.filter(application_id__in=ids), application_id='application_id', title='title',
+                         starts_at='starts_at', mode='mode', status='status')
+    offers = _values(Offer.objects.filter(application_id__in=ids), application_id='application_id', designation='designation',
+                     salary='salary', join_date='join_date', status='status', created_at='created_at')
     audit('export', 'hiring_candidate', actor_id=user.id, row_id=app['candidate_id'])
     return {'exportedAt': datetime.now(timezone.utc), 'candidate': cand, 'applications': apps, 'events': events,
             'interviews': interviews, 'offers': offers, '_candidate_id': app['candidate_id']}
@@ -944,45 +970,30 @@ def export_candidate(user: AuthUser, app_id: str) -> dict:
 
 # ---------------------------------------------------------------- interviews
 
-INTERVIEW_BODY = Obj({
-    'title': Str(trim=True, min=2, max=80, default='Interview'), 'date': IsoDate(), 'time': Hhmm(),
-    'durationMin': Num(int_=True, min=10, max=480, default=45), 'mode': Enum(('in_person', 'phone', 'video')),
-    'location': _opt_text(300), 'panel': Arr(Uuid(), min=1, max=10), 'notifyCandidate': Bool(default=True),
-})
-
-
-def npt_instant(d: str, t: str) -> datetime:
-    """A Nepal wall-clock date and time as an instant."""
-    return datetime.fromisoformat(f'{d}T{t}:00').replace(tzinfo=NPT)
-
-
 def _check_panel(company_id: str, panel: list[str]) -> list[str]:
+    """Panel members must be people of the company (members of the group with access count)."""
     ids = list(dict.fromkeys(panel))
-    found = rows("SELECT id FROM app_user WHERE id = ANY(%s::uuid[]) AND company_id = %s AND status = 'active'", [ids, company_id])
-    if len(found) != len(ids):
+    if not set(ids) <= _company_user_ids(company_id):
         raise BadRequestError('every panel member must be an active user in your company')
     return ids
 
 
-MODE_HOW = {'video': 'by video', 'phone': 'by phone'}
-
-
 def schedule_interview(user: AuthUser, app_id: str, body: dict) -> str:
     _need_staff(user)
-    b = parse(INTERVIEW_BODY, body)
+    b = _checked(S.InterviewIn, body)
     starts_at = npt_instant(b['date'], b['time'])
     if starts_at < datetime.now(timezone.utc) - timedelta(hours=1):
         raise BadRequestError('the interview time is in the past')
     with transaction.atomic():
         app, job, _ = load_app(user, app_id, lock=True)
-        if app['status'] != 'active':
+        if app['status'] != App.Status.ACTIVE:
             raise ConflictError(f"this application is {app['status']}")
         panel = _check_panel(app['company_id'], b['panel'])
-        r = one("""INSERT INTO hiring_interview (company_id, application_id, title, starts_at, duration_min, mode, location, panel, created_by)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s::uuid[], %s) RETURNING id""",
-                [app['company_id'], app['id'], b['title'], starts_at, b['durationMin'], b['mode'], b.get('location'), panel, user.id])
-        interview_id = str(r['id'])
-        starts_iso = _iso_z(starts_at)
+        iv = Iv.objects.create(company_id=app['company_id'], application_id=app['id'], title=b['title'], starts_at=starts_at,
+                               duration_min=b['durationMin'], mode=b['mode'], location=b.get('location'), panel=panel,
+                               created_by_id=user.id)
+        interview_id = str(iv.id)
+        starts_iso = _iso(starts_at)
         add_event(company_id=app['company_id'], application_id=app['id'], actor_id=user.id, kind='interview',
                   body=f"{b['title']} scheduled", data={'interviewId': interview_id, 'startsAt': starts_iso})
         _move_to(app, job, 'Interview', user.id)
@@ -993,9 +1004,9 @@ def schedule_interview(user: AuthUser, app_id: str, body: dict) -> str:
         if b['notifyCandidate']:
             company = company_name(app['company_id'])
             loc = b.get('location')
-            if b['mode'] == 'video':
+            if b['mode'] == Iv.Mode.VIDEO:
                 how = f"by video{f' ({loc})' if loc else ''}"
-            elif b['mode'] == 'phone':
+            elif b['mode'] == Iv.Mode.PHONE:
                 how = 'by phone'
             else:
                 how = f"in person{f' at {loc}' if loc else ''}"
@@ -1008,169 +1019,121 @@ def schedule_interview(user: AuthUser, app_id: str, body: dict) -> str:
     return interview_id
 
 
-def _iso_z(d: datetime) -> str:
-    """Date.toISOString(): UTC with milliseconds."""
-    d = d.astimezone(timezone.utc)
-    return d.strftime('%Y-%m-%dT%H:%M:%S.') + f'{d.microsecond // 1000:03d}Z'
-
-
-INTERVIEWS_QUERY = Obj({'scope': Enum(('mine', 'all'), default='mine'), 'from': IsoDate(optional=True), 'to': IsoDate(optional=True)})
-
-
 def list_interviews(user: AuthUser, query: dict) -> list[dict]:
     company_id = company_id_of(user)
-    q = parse(INTERVIEWS_QUERY, {k: v for k, v in (query or {}).items() if v not in (None, '')})
+    q = _checked(S.InterviewsQueryIn, {k: v for k, v in (query or {}).items() if v not in (None, '')})
     if q['scope'] == 'all' and not has_role(user, 'manager', 'hr', 'recruiter'):
         raise ForbiddenError('only managers and HR can see all interviews')
-    hr = has_module(user, 'hiring')
-    unit = None if hr else manager_unit(user.employee_id)
-    out = rows("""SELECT i.id, i.application_id, i.title, i.starts_at, i.duration_min, i.mode, i.location, i.status, i.panel,
-                         (SELECT array_agg(u.name ORDER BY u.name) FROM app_user u WHERE u.id = ANY(i.panel)) AS panel_names,
-                         c.name AS candidate, j.title AS job, j.id AS job_id, (%(me)s = ANY(i.panel)) AS on_panel,
-                         EXISTS (SELECT 1 FROM hiring_scorecard s WHERE s.interview_id = i.id AND s.reviewer_id = %(me)s) AS my_scorecard,
-                         (SELECT count(*)::int FROM hiring_scorecard s WHERE s.interview_id = i.id) AS scorecards
-                    FROM hiring_interview i JOIN hiring_application a ON a.id = i.application_id JOIN hiring_candidate c ON c.id = a.candidate_id
-                    JOIN hiring_job j ON j.id = a.job_id
-                   WHERE i.company_id = %(co)s
-                     AND (%(from)s::date IS NULL OR i.starts_at >= (%(from)s::date)::timestamp AT TIME ZONE 'Asia/Kathmandu')
-                     AND (%(to)s::date IS NULL OR i.starts_at < (%(to)s::date + 1)::timestamp AT TIME ZONE 'Asia/Kathmandu')
-                     AND (CASE WHEN %(scope)s = 'mine' THEN %(me)s = ANY(i.panel)
-                               ELSE (%(hr)s OR %(me)s = ANY(i.panel) OR j.created_by = %(me)s OR j.hiring_manager_id = %(emp)s::uuid
-                                     OR (j.org_unit_id IS NOT NULL AND j.org_unit_id = %(unit)s::uuid)) END)
-                   ORDER BY i.starts_at LIMIT 500""",
-               {'co': company_id, 'me': user.id, 'from': q.get('from'), 'to': q.get('to'), 'scope': q['scope'], 'hr': hr,
-                'emp': user.employee_id, 'unit': unit})
+    qs = Iv.objects.for_company(company_id)
+    if q.get('from'):
+        qs = qs.filter(starts_at__gte=_npt_day_start(q['from']))
+    if q.get('to'):
+        qs = qs.filter(starts_at__lt=_npt_day_start(q['to']) + timedelta(days=1))
+    mine = Q(panel__contains=[user.id])
+    if q['scope'] == 'mine':
+        qs = qs.filter(mine)
+    else:
+        scope = _in_scope(user, created_by='application__job__created_by_id', hiring_manager='application__job__hiring_manager_id',
+                          org_unit='application__job__org_unit_id')
+        if scope is not None:
+            qs = qs.filter(mine | scope)
+    cards = HiringScorecard.objects.filter(interview=OuterRef('pk'))
+    out = _values(qs.order_by('starts_at')[:500], id='id', application_id='application_id', title='title', starts_at='starts_at',
+                  duration_min='duration_min', mode='mode', location='location', status='status', panel='panel',
+                  candidate='application__candidate__name', job='application__job__title', job_id='application__job_id',
+                  on_panel=_flag(mine), my_scorecard=Exists(cards.filter(reviewer_id=user.id)), scorecards=count_of(cards))
     for i in out:
         i['id'], i['application_id'] = str(i['id']), str(i['application_id'])
         i['panel'] = [str(p) for p in (i['panel'] or [])]
+    _panel_names(out)
     return out
-
-
-INTERVIEW_PATCH = Obj({
-    'status': Enum(('scheduled', 'completed', 'cancelled'), optional=True), 'date': IsoDate(optional=True), 'time': Hhmm(optional=True),
-    'location': _opt_text(300), 'panel': Arr(Uuid(), min=1, max=10, optional=True),
-})
 
 
 def update_interview(user: AuthUser, interview_id: str, body: dict) -> None:
     _need_staff(user)
-    b = parse(INTERVIEW_PATCH, body)
+    b = _checked(S.InterviewPatchIn, body)
     interview_id = parse_uuid(interview_id)
     with transaction.atomic():
-        i = one('SELECT application_id, starts_at FROM hiring_interview WHERE id = %s AND company_id = %s FOR UPDATE',
-                [interview_id, company_id_of(user)])
+        i = Iv.objects.for_company(company_id_of(user)).select_for_update().filter(pk=interview_id).first()
         if not i:
             raise NotFoundError('interview not found')
-        app, _, _ = load_app(user, str(i['application_id']))
-        sets, vals = [], []
+        app, _, _ = load_app(user, str(i.application_id))
+        changes: dict[str, Any] = {}
         if b.get('status'):
-            sets.append('status = %s')
-            vals.append(b['status'])
+            changes['status'] = b['status']
         if b.get('date') or b.get('time'):
-            cur = i['starts_at'].astimezone(NPT)
-            sets.append('starts_at = %s')
-            vals.append(npt_instant(b.get('date') or cur.date().isoformat(), b.get('time') or cur.strftime('%H:%M')))
+            cur = i.starts_at.astimezone(NPT)
+            changes['starts_at'] = npt_instant(b.get('date') or cur.date().isoformat(), b.get('time') or cur.strftime('%H:%M'))
         if 'location' in b:
-            sets.append('location = %s')
-            vals.append(b['location'])
+            changes['location'] = b['location']
         if b.get('panel'):
-            sets.append('panel = %s::uuid[]')
-            vals.append(_check_panel(app['company_id'], b['panel']))
-        if not sets:
+            changes['panel'] = _check_panel(app['company_id'], b['panel'])
+        if not changes:
             return
-        execute(f"UPDATE hiring_interview SET {', '.join(sets)} WHERE id = %s", [*vals, interview_id])
+        Iv.objects.filter(pk=interview_id).update(**changes)
         add_event(company_id=app['company_id'], application_id=app['id'], actor_id=user.id, kind='interview',
                   data={'interviewId': interview_id},
-                  body='Interview cancelled' if b.get('status') == 'cancelled' else 'Interview completed'
-                  if b.get('status') == 'completed' else 'Interview updated')
+                  body='Interview cancelled' if b.get('status') == Iv.Status.CANCELLED else 'Interview completed'
+                  if b.get('status') == Iv.Status.COMPLETED else 'Interview updated')
 
 
-class _Ratings(Record):
-    def check(self, v, path):
-        out = super().check(v, path)
-        if not (1 <= len(out) <= 10):
-            _fail(path, 'rate between 1 and 10 criteria')
-        return out
-
-
-SCORECARD_BODY = Obj({
-    'ratings': _Ratings(Num(int_=True, min=1, max=5)),
-    'recommendation': Enum(RECOMMENDATIONS), 'notes': _opt_text(4000),
-})
-
-
-def _check_rating_keys(ratings: dict) -> None:
-    from hajiri.core.errors import ValidationError
-    bad = [k for k in ratings if not (2 <= len(k.strip()) <= 40)]
-    if bad:
-        raise ValidationError([{'path': f'ratings.{bad[0]}', 'message': 'Invalid key in record'}])
+def _my_interview(user: AuthUser, interview_id: str):
+    """An interview of the active company this person sits on, else 'interview not found'."""
+    interview_id = parse_uuid(interview_id)
+    i = (Iv.objects.for_company(company_id_of(user)).filter(pk=interview_id, panel__contains=[user.id])
+         .select_related('application__candidate').first())
+    if not i:
+        raise NotFoundError('interview not found')
+    return i
 
 
 def submit_scorecard(user: AuthUser, interview_id: str, body: dict) -> None:
     """Panel members score the interview they sat on; one scorecard each, editable until the candidate is hired."""
-    b = parse(SCORECARD_BODY, body)
-    _check_rating_keys(b['ratings'])
-    ratings = {k.strip(): v for k, v in b['ratings'].items()}
-    interview_id = parse_uuid(interview_id)
-    company_id = company_id_of(user)
+    b = _checked(S.ScorecardIn, body)
     with transaction.atomic():
-        i = one('SELECT application_id, panel, status FROM hiring_interview WHERE id = %s AND company_id = %s', [interview_id, company_id])
-        if not i or user.id not in [str(p) for p in (i['panel'] or [])]:
-            raise NotFoundError('interview not found')
-        if i['status'] == 'cancelled':
+        i = _my_interview(user, interview_id)
+        if i.status == Iv.Status.CANCELLED:
             raise ConflictError('this interview was cancelled')
-        st = one('SELECT status FROM hiring_application WHERE id = %s', [i['application_id']])
-        if st and st['status'] == 'hired':
+        if i.application.status == App.Status.HIRED:
             raise ConflictError('this candidate has already been hired')
-        execute("""INSERT INTO hiring_scorecard (interview_id, reviewer_id, ratings, recommendation, notes) VALUES (%s, %s, %s, %s, %s)
-                   ON CONFLICT (interview_id, reviewer_id) DO UPDATE SET ratings = EXCLUDED.ratings, recommendation = EXCLUDED.recommendation,
-                          notes = EXCLUDED.notes, submitted_at = now()""",
-                [interview_id, user.id, json.dumps(ratings), b['recommendation'], b.get('notes')])
-        add_event(company_id=company_id, application_id=str(i['application_id']), actor_id=user.id, kind='scorecard',
-                  body=f"Scorecard: {b['recommendation'].replace('_', ' ', 1)}", data={'interviewId': interview_id})
+        HiringScorecard.objects.bulk_create(
+            [HiringScorecard(interview_id=i.id, reviewer_id=user.id, ratings=b['ratings'], recommendation=b['recommendation'],
+                             notes=b.get('notes'), submitted_at=datetime.now(timezone.utc))],
+            update_conflicts=True, unique_fields=['interview', 'reviewer'],
+            update_fields=['ratings', 'recommendation', 'notes', 'submitted_at'])
+        add_event(company_id=str(i.company_id), application_id=str(i.application_id), actor_id=user.id, kind='scorecard',
+                  body=f"Scorecard: {b['recommendation'].replace('_', ' ', 1)}", data={'interviewId': str(i.id)})
 
 
 def interview_for_scorecard(user: AuthUser, interview_id: str) -> dict:
     """The interview a panel member is about to score, with their saved scorecard if any."""
-    interview_id = parse_uuid(interview_id)
-    i = one("""SELECT i.id, i.title, i.panel, i.status, i.application_id, c.name AS candidate FROM hiring_interview i
-                 JOIN hiring_application a ON a.id = i.application_id JOIN hiring_candidate c ON c.id = a.candidate_id
-                WHERE i.id = %s AND i.company_id = %s""", [interview_id, company_id_of(user)])
-    if not i or user.id not in [str(p) for p in (i['panel'] or [])]:
-        raise NotFoundError('interview not found')
-    mine = one('SELECT ratings, recommendation, notes FROM hiring_scorecard WHERE interview_id = %s AND reviewer_id = %s',
-               [interview_id, user.id])
-    return {**i, 'id': str(i['id']), 'mine': mine}
+    i = _my_interview(user, interview_id)
+    mine = (HiringScorecard.objects.filter(interview_id=i.id, reviewer_id=user.id)
+            .values('ratings', 'recommendation', 'notes').first())
+    return {'id': str(i.id), 'title': i.title, 'panel': list(i.panel), 'status': i.status, 'application_id': i.application_id,
+            'candidate': i.application.candidate.name, 'mine': mine}
 
 
 # ---------------------------------------------------------------- offers
 
-OFFER_BODY = Obj({
-    'designation': Str(trim=True, min=2, max=120),
-    'salary': Money(refine=(lambda s: Decimal(s) > 0, 'salary must be above zero')),
-    'joinDate': IsoDate(), 'expiresOn': IsoDate(nullish=True), 'notes': _opt_text(4000),
-})
-
-
 def create_offer(user: AuthUser, app_id: str, body: dict) -> str:
     _need_module(user)
-    b = parse(OFFER_BODY, body)
-    if b['joinDate'] < npt_today():
+    b = _checked(S.OfferIn, body)
+    if b['joinDate'] < npt_today().isoformat():
         raise BadRequestError('the joining date is in the past')
     if b.get('expiresOn') and b['expiresOn'] > b['joinDate']:
         raise BadRequestError('the offer should expire on or before the joining date')
     with transaction.atomic():
         app, job, _ = load_app(user, app_id, lock=True)
-        if app['status'] != 'active':
+        if app['status'] != App.Status.ACTIVE:
             raise ConflictError(f"this application is {app['status']}")
-        if one("SELECT 1 AS x FROM hiring_offer WHERE application_id = %s AND status IN ('pending_approval', 'approved', 'accepted')", [app['id']]):
+        if Offer.objects.filter(application_id=app['id'], status__in=OPEN_OFFER).exists():
             raise ConflictError('this candidate already has an open offer; withdraw it first')
-        r = one("""INSERT INTO hiring_offer (company_id, application_id, designation, salary, join_date, expires_on, notes, created_by,
-                          created_by_employee_id)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                [app['company_id'], app['id'], b['designation'], b['salary'], b['joinDate'], b.get('expiresOn'), b.get('notes'),
-                 user.id, user.employee_id])
-        offer_id = str(r['id'])
+        offer = Offer.objects.create(
+            company_id=app['company_id'], application_id=app['id'], designation=b['designation'], salary=b['salary'],
+            join_date=b['joinDate'], expires_on=b.get('expiresOn'), notes=b.get('notes'), created_by_id=user.id,
+            created_by_employee_id=user.employee_id)
+        offer_id = str(offer.id)
         # Recording the drafter as the subject means a drafter who is also an employee cannot approve their own offer.
         start_workflow(company_id=app['company_id'], object_type='job_offer', object_id=offer_id, employee_id=user.employee_id,
                        title='Offer needs approval', body=f"Offer for {app['name']} as {b['designation']} ({job['title']}).")
@@ -1183,9 +1146,13 @@ def create_offer(user: AuthUser, app_id: str, body: dict) -> str:
 
 def _load_offer(user: AuthUser, offer_id: str, lock: bool = False) -> tuple[dict, dict, dict]:
     offer_id = parse_uuid(offer_id)
-    o = one(f"SELECT * FROM hiring_offer WHERE id = %s AND company_id = %s{' FOR UPDATE' if lock else ''}", [offer_id, company_id_of(user)])
-    if not o:
+    qs = Offer.objects.for_company(company_id_of(user)).filter(pk=offer_id)
+    if lock:
+        qs = qs.select_for_update()
+    found = _values(qs, **_columns(Offer))
+    if not found:
         raise NotFoundError('offer not found')
+    o = found[0]
     o['id'] = str(o['id'])
     app, job, _ = load_app(user, str(o['application_id']))
     return o, app, job
@@ -1194,24 +1161,26 @@ def _load_offer(user: AuthUser, offer_id: str, lock: bool = False) -> tuple[dict
 def offer_letter(user: AuthUser, offer_id: str) -> str:
     _need_staff(user)
     o, app, job = _load_offer(user, offer_id)
-    extra = one("""SELECT ou.name_en AS department, j.location, j.employment_type, co.code, co.name_en FROM hiring_job j
-                     LEFT JOIN org_unit ou ON ou.id = j.org_unit_id JOIN company co ON co.id = j.company_id WHERE j.id = %s""", [job['id']])
+    extra = _values(Job.objects.filter(pk=job['id']), department='org_unit__name_en', location='location',
+                    employment_type='employment_type', code='company__code', name_en='company__name_en')[0]
     return render_offer_letter(
         company=extra['name_en'], candidate=app['name'], designation=o['designation'], department=extra['department'],
         location=extra['location'], employment_type=extra['employment_type'], salary=o['salary'], join_date=o['join_date'],
         expires_on=o['expires_on'], notes=o['notes'], issued_on=o['created_at'].astimezone(NPT).date().isoformat(),
-        reference=f"{extra['code']}/HR/OFFER/{o['id'][-6:].upper()}", draft=o['status'] not in ('approved', 'accepted'))
+        reference=f"{extra['code']}/HR/OFFER/{o['id'][-6:].upper()}",
+        draft=o['status'] not in (Offer.Status.APPROVED, Offer.Status.ACCEPTED))
 
 
 def respond_offer(user: AuthUser, offer_id: str, body: dict) -> None:
     _need_module(user)
-    response = parse(Obj({'response': Enum(('accepted', 'declined'))}), body)['response']
+    response = _checked(S.RespondIn, body)['response']
     with transaction.atomic():
         o, app, _ = _load_offer(user, offer_id, lock=True)
-        if o['status'] != 'approved':
-            raise ConflictError('the offer must be approved before the candidate can respond' if o['status'] == 'pending_approval'
+        if o['status'] != Offer.Status.APPROVED:
+            raise ConflictError('the offer must be approved before the candidate can respond'
+                                if o['status'] == Offer.Status.PENDING_APPROVAL
                                 else f"this offer is {o['status'].replace('_', ' ', 1)}")
-        execute('UPDATE hiring_offer SET status = %s, responded_at = now() WHERE id = %s', [response, o['id']])
+        Offer.objects.filter(pk=o['id']).update(status=response, responded_at=Now())
         add_event(company_id=app['company_id'], application_id=app['id'], actor_id=user.id, kind='offer',
                   body=f'Offer {response} by the candidate', data={'offerId': o['id']})
         audit(response, 'hiring_offer', actor_id=user.id, row_id=o['id'])
@@ -1223,9 +1192,9 @@ def withdraw_offer(user: AuthUser, offer_id: str) -> None:
         o, app, _ = _load_offer(user, offer_id, lock=True)
         if o['status'] not in OPEN_OFFER:
             raise ConflictError(f"this offer is {o['status'].replace('_', ' ', 1)}")
-        if app['status'] == 'hired':
+        if app['status'] == App.Status.HIRED:
             raise ConflictError('the candidate has already been hired')
-        execute("UPDATE hiring_offer SET status = 'withdrawn' WHERE id = %s", [o['id']])
+        Offer.objects.filter(pk=o['id']).update(status=Offer.Status.WITHDRAWN)
         cancel_workflow('job_offer', o['id'])
         add_event(company_id=app['company_id'], application_id=app['id'], actor_id=user.id, kind='offer', body='Offer withdrawn',
                   data={'offerId': o['id']})
@@ -1234,60 +1203,51 @@ def withdraw_offer(user: AuthUser, offer_id: str) -> None:
 
 # ---------------------------------------------------------------- hire
 
-HIRE_BODY = Obj({
-    'empCode': Str(trim=True, min=1, max=32), 'joinDate': IsoDate(optional=True), 'designation': Str(trim=True, max=120, optional=True),
-    'branchId': Uuid(optional=True), 'orgUnitId': Uuid(nullish=True), 'managerId': Uuid(nullish=True), 'shiftId': Uuid(optional=True),
-    'employmentType': Enum(('regular', 'work_based', 'time_based', 'casual', 'part_time'), default='regular'),
-    'gender': Enum(('male', 'female', 'other'), optional=True), 'probationEnd': IsoDate(nullish=True),
-})
-
-
 def hire(user: AuthUser, app_id: str, body: dict) -> str:
     """
-    Turn a candidate who accepted an offer into an employee; the CV stays linked through the application. The employee
-    row, its assignment and shift are written with SQL exactly as the TS route does (no people service is involved);
-    the career-timeline and onboarding steps run through hajiri.integrations.hooks.run_hire_hooks.
+    Turn a candidate who accepted an offer into an employee of the active company; the CV stays linked through the
+    application. The employee row, its assignment and shift are written here exactly as the TS route does (no people
+    service is involved); the career-timeline and onboarding steps run through hajiri.integrations.hooks.run_hire_hooks.
     """
     if not has_role(user, 'hr'):
         raise ForbiddenError('requires role hr')
-    b = parse(HIRE_BODY, body)
+    b = _checked(S.HireIn, body)
     company_id = company_id_of(user)
     _check_refs(company_id, [('branch', b.get('branchId'), 'branch'), ('org_unit', b.get('orgUnitId'), 'department'),
                              ('employee', b.get('managerId'), 'manager'), ('shift', b.get('shiftId'), 'shift')])
     with transaction.atomic():
         app, job, _ = load_app(user, app_id, lock=True)
-        if app['status'] != 'active':
+        if app['status'] != App.Status.ACTIVE:
             raise ConflictError(f"this application is {app['status']}")
-        offer = one("""SELECT id, designation, join_date FROM hiring_offer WHERE application_id = %s AND status = 'accepted'
-                        ORDER BY created_at DESC LIMIT 1""", [app['id']])
+        offer = (Offer.objects.filter(application_id=app['id'], status=Offer.Status.ACCEPTED).order_by('-created_at')
+                 .values('designation', 'join_date').first())
         if not offer:
             raise ConflictError('the candidate must accept an approved offer before they can be hired')
-        if one('SELECT 1 AS x FROM employee WHERE company_id = %s AND emp_code = %s', [company_id, b['empCode']]):
+        if Employee.objects.for_company(company_id).filter(emp_code=b['empCode']).exists():
             raise ConflictError('this employee code is already in use')
         join_date = b.get('joinDate') or offer['join_date'].isoformat()
         if b.get('probationEnd') and b['probationEnd'] < join_date:
             raise BadRequestError('probation end cannot be before join date')
-        emp = one("""INSERT INTO employee (company_id, emp_code, name_en, gender, join_date, designation, phone, email, probation_end,
-                            weekly_off_days, regime)
-                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, '{6}', 'ssf') RETURNING id""",
-                  [company_id, b['empCode'], app['name'], b.get('gender'), join_date, b.get('designation') or offer['designation'],
-                   app['phone'], app['email'], b.get('probationEnd')])
-        emp_id = str(emp['id'])
-        refs = one('SELECT branch_id FROM hiring_job WHERE id = %s', [job['id']])
-        execute("""INSERT INTO employee_assignment (employee_id, valid, branch_id, org_unit_id, manager_id, employment_type)
-                   VALUES (%s, daterange(%s, NULL), %s, %s, %s, %s)""",
-                [emp_id, join_date, b.get('branchId') or (refs and refs['branch_id']),
-                 b['orgUnitId'] if 'orgUnitId' in b else job['org_unit_id'],
-                 b['managerId'] if 'managerId' in b else job['hiring_manager_id'], b['employmentType']])
+        emp = Employee.objects.create(
+            company_id=company_id, emp_code=b['empCode'], name_en=app['name'], gender=b.get('gender'), join_date=join_date,
+            designation=b.get('designation') or offer['designation'], phone=app['phone'], email=app['email'],
+            probation_end=b.get('probationEnd'), weekly_off_days=[6], regime=Employee.Regime.SSF)
+        emp_id = str(emp.id)
+        EmployeeAssignment.objects.create(
+            employee_id=emp_id, valid=DateRange(date.fromisoformat(join_date), None), branch_id=b.get('branchId') or job['branch_id'],
+            org_unit_id=b['orgUnitId'] if 'orgUnitId' in b else job['org_unit_id'],
+            manager_id=b['managerId'] if 'managerId' in b else job['hiring_manager_id'], employment_type=b['employmentType'])
         if b.get('shiftId'):
-            execute('INSERT INTO shift_assignment (employee_id, shift_id, valid) VALUES (%s, %s, daterange(%s, NULL))',
-                    [emp_id, b['shiftId'], join_date])
+            ShiftAssignment.objects.create(employee_id=emp_id, shift_id=b['shiftId'], valid=DateRange(date.fromisoformat(join_date), None))
         stages = job['stages']
-        execute("""UPDATE hiring_application SET status = 'hired', stage = %s, furthest_stage = %s, hired_employee_id = %s, closed_at = now(),
-                          stage_changed_at = now() WHERE id = %s""", [stages[-1], len(stages) - 1, emp_id, app['id']])
+        App.objects.filter(pk=app['id']).update(status=App.Status.HIRED, stage=stages[-1], furthest_stage=len(stages) - 1,
+                                                hired_employee_id=emp_id, closed_at=Now(), stage_changed_at=Now())
         if job['requisition_id']:
-            execute("""UPDATE hiring_requisition SET filled = filled + 1,
-                              status = CASE WHEN filled + 1 >= headcount THEN 'filled' ELSE status END WHERE id = %s""", [job['requisition_id']])
+            # F() reads the row as it was before this UPDATE, like the SQL CASE in SET.
+            Req.objects.filter(pk=job['requisition_id']).update(
+                filled=F('filled') + 1,
+                status=Case(When(filled__gte=F('headcount') - 1, then=Value(Req.Status.FILLED)), default=F('status'),
+                            output_field=TextField()))
         add_event(company_id=company_id, application_id=app['id'], actor_id=user.id, kind='hired', body=f"Hired as {b['empCode']}",
                   data={'employeeId': emp_id})
         audit('hire', 'employee', actor_id=user.id, row_id=emp_id,
@@ -1300,50 +1260,55 @@ def hire(user: AuthUser, app_id: str, body: dict) -> str:
 # ---------------------------------------------------------------- lookups, reports
 
 def lookups(user: AuthUser) -> dict:
-    """Names for the hiring forms: users who can sit on a panel or own a candidate, departments, branches and shifts."""
+    """Names for the hiring forms: people who can sit on a panel or own a candidate, departments, branches and shifts."""
     _need_staff(user)
     company_id = company_id_of(user)
     return {
-        'users': rows("SELECT id, name, roles FROM app_user WHERE company_id = %s AND status = 'active' ORDER BY name", [company_id]),
-        'orgUnits': rows('SELECT id, name_en, kind FROM org_unit WHERE company_id = %s ORDER BY name_en', [company_id]),
-        'branches': rows('SELECT id, name_en FROM branch WHERE company_id = %s ORDER BY name_en', [company_id]),
-        'shifts': rows('SELECT id, code, name_en FROM shift WHERE company_id = %s ORDER BY name_en', [company_id]),
+        'users': [{'id': u['id'], 'name': u['name'], 'roles': u['roles']} for u in company_users(company_id)],
+        'orgUnits': list(OrgUnit.objects.for_company(company_id).order_by('name_en').values('id', 'name_en', 'kind')),
+        'branches': list(Branch.objects.for_company(company_id).order_by('name_en').values('id', 'name_en')),
+        'shifts': list(Shift.objects.for_company(company_id).order_by('name_en').values('id', 'code', 'name_en')),
     }
+
+
+def _one_decimal(v) -> int | float | None:
+    if v is None:
+        return None
+    f = float(Decimal(str(v)).quantize(Decimal('0.1'), ROUND_HALF_UP))
+    return int(f) if f.is_integer() else f
 
 
 def reports(user: AuthUser, query: dict | None = None) -> dict:
     _need_module(user)
     company_id = company_id_of(user)
-    q = parse(Obj({'from': IsoDate(optional=True), 'to': IsoDate(optional=True)}),
-              {k: v for k, v in (query or {}).items() if v not in (None, '')})
-    p = {'co': company_id, 'from': q.get('from'), 'to': q.get('to')}
-    window = """a.company_id = %(co)s AND (%(from)s::date IS NULL OR a.created_at >= (%(from)s::date)::timestamp AT TIME ZONE 'Asia/Kathmandu')
-                AND (%(to)s::date IS NULL OR a.created_at < (%(to)s::date + 1)::timestamp AT TIME ZONE 'Asia/Kathmandu')"""
-    jobs = rows(f"""SELECT j.id, j.title, j.status, j.stages FROM hiring_job j WHERE j.company_id = %(co)s
-                     AND EXISTS (SELECT 1 FROM hiring_application a WHERE a.job_id = j.id AND {window}) ORDER BY j.created_at DESC""", p)
-    reached = rows(f'SELECT a.job_id, a.furthest_stage, a.status FROM hiring_application a WHERE {window}', p)
+    q = _checked(S.ReportsQueryIn, {k: v for k, v in (query or {}).items() if v not in (None, '')})
+    window = App.objects.for_company(company_id)
+    if q.get('from'):
+        window = window.filter(created_at__gte=_npt_day_start(q['from']))
+    if q.get('to'):
+        window = window.filter(created_at__lt=_npt_day_start(q['to']) + timedelta(days=1))
+    jobs = (Job.objects.for_company(company_id).filter(Exists(window.filter(job=OuterRef('pk')))).order_by('-created_at')
+            .values('id', 'title', 'status', 'stages'))
+    reached = list(window.values('job_id', 'furthest_stage', 'status'))
     funnel = []
     for j in jobs:
         apps = [x for x in reached if x['job_id'] == j['id']]
         funnel.append({'jobId': str(j['id']), 'title': j['title'], 'status': j['status'], 'total': len(apps),
-                       'rejected': sum(1 for a in apps if a['status'] == 'rejected'),
+                       'rejected': sum(1 for a in apps if a['status'] == App.Status.REJECTED),
                        'stages': [{'stage': s, 'reached': sum(1 for a in apps if a['furthest_stage'] >= i)}
                                   for i, s in enumerate(j['stages'] or [])]})
-    tth = one(f"""SELECT round(avg(extract(epoch FROM a.closed_at - a.created_at) / 86400)::numeric, 1)::text AS avg,
-                         round((percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM a.closed_at - a.created_at) / 86400))::numeric, 1)::text AS median,
-                         count(*)::int AS hires
-                    FROM hiring_application a WHERE {window} AND a.status = 'hired'""", p)
-    sources = rows(f"""SELECT a.source, count(*)::int AS applications, count(*) FILTER (WHERE a.status = 'hired')::int AS hired
-                         FROM hiring_application a WHERE {window} GROUP BY a.source ORDER BY 2 DESC""", p)
-    totals = one(f"""SELECT count(*)::int AS applications, count(*) FILTER (WHERE a.status = 'active')::int AS active,
-                            count(*) FILTER (WHERE a.status = 'hired')::int AS hired, count(*) FILTER (WHERE a.status = 'rejected')::int AS rejected
-                       FROM hiring_application a WHERE {window}""", p)
-
-    def num(v):
-        return None if v is None else _norm_num(float(v))
+    days = ExpressionWrapper(Extract(F('closed_at') - F('created_at'), 'epoch') / 86400, output_field=DecimalField())
+    tth = window.filter(status=App.Status.HIRED).aggregate(avg=Avg(days, output_field=DecimalField()), median=Median(days),
+                                                          hires=Count('id'))
+    sources = list(window.order_by().values('source')
+                   .annotate(applications=Count('id'), hired=Count('id', filter=Q(status=App.Status.HIRED)))
+                   .order_by('-applications').values('source', 'applications', 'hired'))
+    totals = window.aggregate(applications=Count('id'), active=Count('id', filter=Q(status=App.Status.ACTIVE)),
+                              hired=Count('id', filter=Q(status=App.Status.HIRED)),
+                              rejected=Count('id', filter=Q(status=App.Status.REJECTED)))
     return {'totals': totals, 'funnel': funnel, 'sources': sources,
-            'timeToHire': {'averageDays': num(tth and tth['avg']), 'medianDays': num(tth and tth['median']),
-                           'hires': (tth and tth['hires']) or 0}}
+            'timeToHire': {'averageDays': _one_decimal(tth['avg']), 'medianDays': _one_decimal(tth['median']),
+                           'hires': tth['hires'] or 0}}
 
 
 def policy(user: AuthUser) -> dict:
@@ -1352,8 +1317,11 @@ def policy(user: AuthUser) -> dict:
 
 
 def careers_url(request_base: str, job_id: str | None = None, code: str | None = None) -> str:
-    from urllib.parse import quote
-    base = f"{request_base}/careers{f'/{job_id}' if job_id else ''}"
-    return f'{base}?company={quote(code, safe="")}' if code else base
-
-
+    """The public careers page of a company (/careers/<code>) or of one of its jobs (/careers/<code>/<job id>): the
+    company code in the path keeps the link right when several companies share one Hajiri."""
+    from django.urls import reverse
+    if code:
+        path = reverse('careers:company_job', args=[code, job_id]) if job_id else reverse('careers:detail', args=[code])
+    else:
+        path = reverse('careers:detail', args=[job_id]) if job_id else reverse('careers:list')
+    return f'{request_base}{path}'

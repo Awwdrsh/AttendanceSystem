@@ -1,7 +1,7 @@
 """Employees hub pages through django.test.Client, and the two-step gate of security-selfservice.test.ts."""
 from django.test import Client
 
-from hajiri.core.db import one
+from tests.support.sql import one
 from tests.people.conftest import build_world
 from tests.web.factories import htmx, hx_triggers, make_user, require_two_factor_for, sign_in, toasts
 

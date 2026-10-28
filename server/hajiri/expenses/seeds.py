@@ -1,7 +1,8 @@
 """Per-company expense and travel defaults (port of apps/api/src/modules/expenses/seed.ts)."""
 from __future__ import annotations
 
-from hajiri.core.db import execute, one
+from hajiri.core.settings_store import add_setting_if_missing
+from hajiri.db.models import ExpenseCategory, TadaRate, WorkflowDefinition
 from hajiri.worker.registry import company_seeder
 
 # code, name, kind, receipt required above (None = never), sort order
@@ -19,25 +20,26 @@ DEFAULT_CATEGORIES = (
 DEFAULT_TADA = (('valley', '1000', '2500'), ('city', '1500', '3000'), ('rural', '1200', '2000'), ('international', '50', '100'))
 
 
+DEFAULT_POLICY = {'mileageRatePerKm': '15', 'limitMode': 'block', 'claimWindowDays': 90}
+# Claims, trips and settlements are approved by the manager, then HR.
+DEFAULT_CHAIN = [{'role': 'manager'}, {'role': 'hr'}]
+
+
 def seed_expense_defaults(company_id: str) -> dict[str, int]:
-    """Idempotent: categories, TADA rates, the manager -> HR approval chain for claims, trips and settlements, the policy."""
+    """Idempotent: categories, TADA rates, the manager -> HR approval chain for claims, trips and settlements, the policy.
+    Rows the company already has (by their unique keys) are left alone."""
     company_id = str(company_id)
-    n = 0
-    for code, name, kind, receipt, sort in DEFAULT_CATEGORIES:
-        r = one("""INSERT INTO expense_category (company_id, code, name, kind, receipt_required_above, sort_order)
-                   VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (company_id, code) DO NOTHING RETURNING id""",
-                [company_id, code, name, kind, receipt, sort])
-        n += 1 if r else 0
-    for dest, da, lodging in DEFAULT_TADA:
-        execute("""INSERT INTO tada_rate (company_id, grade, destination, da_rate, lodging_rate) VALUES (%s, '*', %s, %s, %s)
-                   ON CONFLICT (company_id, grade, destination) DO NOTHING""", [company_id, dest, da, lodging])
-    for t in ('expense_claim', 'travel_request', 'travel_settlement'):
-        execute("""INSERT INTO workflow_definition (company_id, object_type, steps) VALUES (%s, %s, '[{"role":"manager"},{"role":"hr"}]')
-                   ON CONFLICT (company_id, object_type) DO NOTHING""", [company_id, t])
-    execute("""INSERT INTO company_setting (company_id, key, value)
-               VALUES (%s, 'expense.policy', '{"mileageRatePerKm": "15", "limitMode": "block", "claimWindowDays": 90}') ON CONFLICT DO NOTHING""",
-            [company_id])
-    return {'expenseCategories': n}
+    have = set(ExpenseCategory.objects.for_company(company_id).values_list('code', flat=True))
+    missing = [ExpenseCategory(company_id=company_id, code=code, name=name, kind=kind, receipt_required_above=receipt, sort_order=sort)
+               for code, name, kind, receipt, sort in DEFAULT_CATEGORIES if code not in have]
+    ExpenseCategory.objects.bulk_create(missing, ignore_conflicts=True)
+    TadaRate.objects.bulk_create([TadaRate(company_id=company_id, grade='*', destination=dest, da_rate=da, lodging_rate=lodging)
+                                  for dest, da, lodging in DEFAULT_TADA], ignore_conflicts=True)
+    WorkflowDefinition.objects.bulk_create([WorkflowDefinition(company_id=company_id, object_type=t, steps=DEFAULT_CHAIN)
+                                            for t in ('expense_claim', 'travel_request', 'travel_settlement')],
+                                           ignore_conflicts=True)
+    add_setting_if_missing(company_id, 'expense.policy', dict(DEFAULT_POLICY))
+    return {'expenseCategories': len(missing)}
 
 
 @company_seeder('expenses', order=40)

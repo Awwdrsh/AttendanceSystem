@@ -1,7 +1,7 @@
 """
 Leave and attendance extras (port of apps/api/src/modules/attendance-tools: policy.ts, block.ts, penalties.ts,
 issues.ts, upload.ts, whosout.ts and routes.ts): blocking late clock-ins, the late-arrival penalty, attendance issues and
-nudges, the manual CSV upload and who's out.
+nudges, the manual CSV upload and who's out. Every query is scoped to the caller's ACTIVE company.
 
 Public interface:
 - extras_policy(company_id) -> dict (blockLateClockIn, blockAfterMin, whosOutScope, latePenalty{enabled, lateCount,
@@ -13,75 +13,83 @@ Public interface:
 - attendance_issues(company_id, from, to, manager_employee_id) -> [IssueRow], summarise(rows).
 - check_upload(company_id, csv, self_employee_id=None) -> {'rows', 'errors'}, import_upload(...), UPLOAD_TEMPLATE.
 - scope_employee_ids(user, scope), whos_out(company_id, ids, from, to).
+- paid_leave_types(company_id) -> [{id, code, name_en}] (the penalty rule's leave picker).
 - One function per TS route taking (user, body_or_query) in the TS camelCase shape: get_policy, put_policy, penalties,
-  my_penalties, apply, reverse, issues, issue_summary, nudge, upload_template, upload_check, upload_import, uploads,
-  whos_out_for.
+  my_penalties, apply, reverse, issues, issue_summary, nudge, upload_check, upload_import, uploads, whos_out_for.
 """
 from __future__ import annotations
 
-import json
+import csv as csv_module
+import io
 import math
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 
-from django.db import transaction
+from django.contrib.postgres.aggregates import ArrayAgg
+from django.db import IntegrityError, transaction
+from django.db.models import Case, Count, Exists, F, OuterRef, Q, Subquery, Sum, Value, When
+from django.db.models.functions import Coalesce, Now
 
 from engines.attendance import MIN_MS, local_date_of, local_time_ms
 from engines.bs_calendar import BsRangeError, ad_to_bs, bs_month_bounds, bs_to_ad, parse_bs, weekday_of
 
-from hajiri.attendance.repo import resolve_shift
+from hajiri.attendance.repo import latest_days, resolve_shift
 from hajiri.attendance.service import date_range, is_attendance_locked, recompute_for_punch
 from hajiri.core.audit import audit
-from hajiri.core.auth import MODULE_ROLES, AuthUser, company_id_of, has_module, has_role
+from hajiri.core.auth import MODULE_ROLES, AuthUser, company_id_of, has_module, has_role, manages
 from hajiri.core.bsdate import bs_month_name, bs_range
 from hajiri.core.clock import now as _now
+from hajiri.core.clock import npt_today as _npt_today
+from hajiri.core.collation import collate_key
 from hajiri.core.crypto import sha256_hex
-from hajiri.core.db import execute, one, rows
-from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
-from hajiri.core.schema import (Arr, Bool, Enum, Int, IsoDate, Num, Obj, Str, Union, Uuid, parse, parse_uuid, safe_parse)
+from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError, ValidationError
+from hajiri.core.scoping import exists_in_company
+from hajiri.core.settings_store import get_setting, put_setting
+from hajiri.core.validation import parse_uuid, plain, validate
+from hajiri.db.models import (
+    AppUser, AttendanceDay, AttendanceNudge, AttendanceUpload, Employee, EmployeeAssignment, FieldVisit, Holiday,
+    LatePenalty, LeaveLedger, LeaveRequest, LeaveType, PayrollRun, PunchEvent, RegularisationRequest, TravelRequest,
+    WorkflowInstance,
+)
 from hajiri.notifications.service import notify, user_id_for_employee
-from hajiri.workflow.service import approvers_for, assert_manages as wf_assert_manages, get_instance, npt_today
+from hajiri.punch.services import is_duplicate
+from hajiri.workflow.service import approvers_for, assert_manages as wf_assert_manages, get_instance
+
+from .serializers import (
+    ApplyPenaltiesIn, AttendanceUploadIn, ExtrasPolicyIn, ImportIn, IssueRangeIn, MonthIn, MonthPartialIn, ReverseIn,
+    WhosOutIn, nudge_body,
+)
 
 NIL_UUID = '00000000-0000-0000-0000-000000000000'
+Day = AttendanceDay
+Reg = RegularisationRequest
+
+
+def npt_today() -> str:
+    """Today's Nepal date as 'YYYY-MM-DD'."""
+    return _npt_today().isoformat()
+
 
 # ================================================================ policy.ts
 
 EXTRAS_KEY = 'attendance.extras'
 
 
-def _multiple_of_quarter(v) -> bool:
-    return abs(v * 4 - round(v * 4)) < 1e-9
-
-
-LATE_PENALTY = Obj({
-    'enabled': Bool(default=False),
-    'lateCount': Int(min=1, max=31, default=3),
-    'minLateMinutes': Int(min=1, max=240, default=1),
-    'penaltyDays': Num(min=0.25, max=5, default=0.5, refine=(_multiple_of_quarter, 'Invalid number: must be a multiple of 0.25')),
-    'leaveTypeIds': Arr(Uuid(), max=5, default=list),
-})
-EXTRAS_POLICY = Obj({
-    'blockLateClockIn': Bool(default=False),
-    'blockAfterMin': Int(min=0, max=240, default=0),
-    'whosOutScope': Enum(('team', 'department', 'company'), default='team'),
-    'latePenalty': Obj(LATE_PENALTY.fields, default=lambda: parse(LATE_PENALTY, {})),
-})
-
-
 def default_extras() -> dict:
-    return parse(EXTRAS_POLICY, {})
+    return validate(ExtrasPolicyIn, {})
 
 
 def extras_policy(company_id: str) -> dict:
-    r = one('SELECT value FROM company_setting WHERE company_id = %s AND key = %s', [str(company_id), EXTRAS_KEY])
-    ok, v = safe_parse(EXTRAS_POLICY, (r or {}).get('value') or {})
-    return v if ok else default_extras()
+    """The company's rules; a stored value that no longer validates falls back to the defaults."""
+    try:
+        return plain(validate(ExtrasPolicyIn, get_setting(company_id, EXTRAS_KEY) or {}))
+    except ValidationError:
+        return default_extras()
 
 
 def save_extras_policy(company_id: str, value: dict, user_id: str) -> None:
-    execute("""INSERT INTO company_setting (company_id, key, value, updated_by) VALUES (%s, %s, %s, %s)
-               ON CONFLICT (company_id, key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()""",
-            [str(company_id), EXTRAS_KEY, json.dumps(value), user_id])
+    put_setting(company_id, EXTRAS_KEY, value, updated_by=user_id)
 
 
 # ================================================================ block.ts
@@ -91,37 +99,46 @@ def _npt_local_time(ms: int) -> str:
     return npt_local_time(ms)
 
 
+def _plus_minutes(hhmm: str, minutes: int) -> time:
+    """'HH:MM' + minutes as a time of day (wrapping at midnight, like time + interval in SQL)."""
+    h, m = (int(x) for x in hhmm.split(':')[:2])
+    return (datetime(2000, 1, 1, h, m) + timedelta(minutes=minutes)).time()
+
+
 def assert_clock_in_allowed(*, company_id: str, employee_id: str, at_ms: int, direction: str) -> None:
     """
     Optional rule (off by default): the first clock-in of a working day later than shift start + grace (+ the extra
     minutes HR allows) is refused. Clock-outs, second clock-ins, holidays, weekly offs and days with approved first-half
     or hourly leave at the start are never blocked.
     """
-    if direction != 'in':
+    if direction != PunchEvent.Direction.IN:
         return
     policy = extras_policy(company_id)
     if not policy['blockLateClockIn']:
         return
     local_date = local_date_of(at_ms)
-    if rows("SELECT 1 AS x FROM punch_event WHERE employee_id = %s AND local_date = %s AND direction = 'in' LIMIT 1", [employee_id, local_date]):
+    day = date.fromisoformat(local_date)
+    if PunchEvent.objects.filter(employee_id=employee_id, local_date=day, direction=PunchEvent.Direction.IN).exists():
         return
-    e = one("""SELECT e.weekly_off_days, e.gender, a.branch_id FROM employee e
-                 LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> %s::date WHERE e.id = %s""",
-            [local_date, employee_id])
+    e = (Employee.objects.filter(pk=employee_id)
+         .annotate(branch_id=Subquery(EmployeeAssignment.objects.filter(employee_id=OuterRef('pk'), valid__contains=day)
+                                      .values('branch_id')[:1]))
+         .values('weekly_off_days', 'gender', 'branch_id').first())
     if not e:
         return
     if weekday_of(local_date) in (e['weekly_off_days'] or []):
         return
-    if rows("""SELECT 1 AS x FROM holiday WHERE company_id = %s AND local_date = %s AND (branch_id IS NULL OR branch_id = %s) AND NOT optional
-                AND (gender_scope = 'all' OR gender_scope = %s) LIMIT 1""", [company_id, local_date, e['branch_id'], e['gender']]):
+    for_everyone = Q(gender_scope=Holiday.GenderScope.ALL)
+    if (Holiday.objects.for_company(company_id).filter(Q(branch__isnull=True) | Q(branch_id=e['branch_id']), local_date=day, optional=False)
+            .filter(for_everyone | Q(gender_scope=e['gender']) if e['gender'] else for_everyone).exists()):
         return
     shift = resolve_shift(employee_id, local_date)
     if not shift:
         return
-    if rows("""SELECT 1 AS x FROM leave_request WHERE employee_id = %s AND status = 'approved' AND %s::date BETWEEN from_date AND to_date
-                AND ((half_day IS NULL AND from_time IS NULL) OR half_day = 'first_half'
-                     OR (from_time IS NOT NULL AND from_time <= %s::time + make_interval(mins => %s::int))) LIMIT 1""",
-            [employee_id, local_date, shift.start, shift.grace_in_min]):
+    leave_at_start = (Q(half_day__isnull=True, from_time__isnull=True) | Q(half_day=LeaveRequest.HalfDay.FIRST_HALF)
+                      | Q(from_time__lte=_plus_minutes(shift.start, shift.grace_in_min)))
+    if LeaveRequest.objects.filter(leave_at_start, employee_id=employee_id, status=LeaveRequest.Status.APPROVED,
+                                   from_date__lte=day, to_date__gte=day).exists():
         return
     limit = local_time_ms(local_date, shift.start) + (shift.grace_in_min + policy['blockAfterMin']) * MIN_MS
     if at_ms <= limit:
@@ -143,7 +160,8 @@ def penalty_for(late_days: int, rule: dict) -> float:
 
 
 def _round2(x: float) -> float:
-    return math.floor(x * 100 + 0.5) / 100
+    """Two decimals, halves up (the values are differences of quarter days, never negative here)."""
+    return float(Decimal(repr(x)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 
 def allocate_penalty(days: float, available: list[dict]) -> dict:
@@ -162,9 +180,8 @@ def allocate_penalty(days: float, available: list[dict]) -> dict:
 
 
 def month_locked(company_id: str, bs_year: int, bs_month: int) -> bool:
-    return bool(rows("""SELECT 1 AS x FROM payroll_run r JOIN payroll_period p ON p.id = r.period_id
-                         WHERE p.company_id = %s AND p.bs_year = %s AND p.bs_month = %s AND r.run_type = 'regular'
-                           AND r.locked_at IS NOT NULL LIMIT 1""", [str(company_id), bs_year, bs_month]))
+    return PayrollRun.objects.filter(period__company_id=company_id, period__bs_year=bs_year, period__bs_month=bs_month,
+                                     run_type=PayrollRun.RunType.REGULAR, locked_at__isnull=False).exists()
 
 
 def _iso_ms(d: datetime) -> str:
@@ -177,49 +194,79 @@ def _num(v) -> float:
     return int(f) if f.is_integer() else f
 
 
+def _team(manager_employee_id: str | None, employee_field: str = 'employee_id') -> Q:
+    """Everyone (None) or the people the manager manages today."""
+    if manager_employee_id is None:
+        return Q()
+    return Q(manages(manager_employee_id, F(employee_field)))
+
+
 def penalty_preview(company_id: str, bs_year: int, bs_month: int, rule: dict, *, employee_id: str | None = None,
                     manager_employee_id: str | None = None) -> list[dict]:
     """Late days per employee in the month (one employee, a manager's team or the whole company)."""
-    from hajiri.leave.services import ledger_balance, pending_days
     b = bs_month_bounds(bs_year, bs_month)
-    found = rows("""
-        SELECT e.id AS employee_id, e.emp_code, e.name_en,
-               count(v.local_date) FILTER (WHERE v.late_min >= %(min)s)::int AS late_days,
-               coalesce(sum(v.late_min) FILTER (WHERE v.late_min >= %(min)s), 0)::int AS late_minutes,
-               coalesce(array_agg(v.local_date::text ORDER BY v.local_date) FILTER (WHERE v.late_min >= %(min)s), '{}') AS late_dates
-          FROM employee e
-          JOIN v_attendance_latest v ON v.employee_id = e.id AND v.local_date BETWEEN %(s)s AND %(e)s
-          LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date
-         WHERE e.company_id = %(c)s AND (%(emp)s::uuid IS NULL OR e.id = %(emp)s::uuid)
-           AND (%(mgr)s::uuid IS NULL OR hj_manages(%(mgr)s::uuid, e.id, (now() AT TIME ZONE 'Asia/Kathmandu')::date))
-         GROUP BY e.id, e.emp_code, e.name_en
-        HAVING count(v.local_date) FILTER (WHERE v.late_min >= %(min)s) > 0
-         ORDER BY late_days DESC, e.emp_code""",
-                 {'c': str(company_id), 's': b['startAd'], 'e': b['endAd'], 'min': rule['minLateMinutes'], 'emp': employee_id,
-                  'mgr': manager_employee_id})
-    applied = rows("""SELECT id, employee_id, penalty_days, leave_days, unpaid_days, applied_at FROM late_penalty
-                       WHERE company_id = %s AND bs_year = %s AND bs_month = %s AND status = 'applied'""",
-                   [str(company_id), bs_year, bs_month])
-    types = rows('SELECT id, code FROM leave_type WHERE company_id = %s AND id = ANY(%s::uuid[])',
-                 [str(company_id), rule['leaveTypeIds']]) if rule['leaveTypeIds'] else []
-    by_id = {str(t['id']): t for t in types}
-    ordered = [by_id[i] for i in rule['leaveTypeIds'] if i in by_id]
+    late = (latest_days().for_company(company_id)
+            .filter(_team(manager_employee_id), local_date__range=(b['startAd'], b['endAd']), late_min__gte=rule['minLateMinutes']))
+    if employee_id:
+        late = late.filter(employee_id=employee_id)
+    found = (late.values('employee_id', emp_code=F('employee__emp_code'), name_en=F('employee__name_en'))
+             .annotate(late_days=Count('local_date'), late_minutes=Coalesce(Sum('late_min'), 0),
+                       late_dates=ArrayAgg('local_date', order_by='local_date'))
+             .order_by('-late_days', 'emp_code'))
+    applied = {str(p['employee_id']): p for p in LatePenalty.objects.for_company(company_id)
+               .filter(bs_year=bs_year, bs_month=bs_month, status=LatePenalty.Status.APPLIED)
+               .values('id', 'employee_id', 'penalty_days', 'leave_days', 'unpaid_days', 'applied_at')}
+    types = {str(t['id']): t for t in LeaveType.objects.for_company(company_id).filter(pk__in=rule['leaveTypeIds'])
+             .values('id', 'code')} if rule['leaveTypeIds'] else {}
+    ordered = [types[i] for i in rule['leaveTypeIds'] if i in types]
+    found = list(found)
+    available = _available_days([str(r['employee_id']) for r in found], [str(t['id']) for t in ordered])
     out = []
     for r in found:
         emp = str(r['employee_id'])
         penalty_days = penalty_for(r['late_days'], rule)
-        avail = [{'leaveTypeId': str(t['id']), 'code': t['code'],
-                  'available': ledger_balance(emp, str(t['id'])) - pending_days(emp, str(t['id']))} for t in ordered]
+        avail = [{'leaveTypeId': str(t['id']), 'code': t['code'], 'available': available[(emp, str(t['id']))]} for t in ordered]
         a = allocate_penalty(penalty_days, avail)
-        ap = next((x for x in applied if str(x['employee_id']) == emp), None)
+        ap = applied.get(emp)
         out.append({
             'employeeId': emp, 'empCode': r['emp_code'], 'name': r['name_en'], 'lateDays': r['late_days'],
-            'lateMinutes': r['late_minutes'], 'lateDates': list(r['late_dates'] or []), 'penaltyDays': _num(penalty_days),
-            'allocations': a['allocations'], 'unpaidDays': _num(a['unpaid']),
+            'lateMinutes': r['late_minutes'], 'lateDates': [d.isoformat() for d in r['late_dates'] or []],
+            'penaltyDays': _num(penalty_days), 'allocations': a['allocations'], 'unpaidDays': _num(a['unpaid']),
             'applied': {'id': str(ap['id']), 'penaltyDays': _num(ap['penalty_days']), 'leaveDays': _num(ap['leave_days']),
                         'unpaidDays': _num(ap['unpaid_days']), 'appliedAt': _iso_ms(ap['applied_at'])} if ap else None,
         })
     return out
+
+
+def _available_days(employee_ids: list[str], type_ids: list[str]) -> dict[tuple[str, str], float]:
+    """hajiri.leave's ledger_balance - pending_days for every (employee, leave type) pair, in two queries."""
+    if not employee_ids or not type_ids:
+        return {}
+    ledger = {(str(r['employee_id']), str(r['leave_type_id'])): r['days'] for r in (
+        LeaveLedger.objects.filter(employee_id__in=employee_ids, leave_type_id__in=type_ids)
+        .values('employee_id', 'leave_type_id').annotate(days=Sum('delta_days')).order_by())}
+    held: dict[tuple[str, str], Decimal] = {}
+    for emp, lt, days, bridge_type, bridge_days in (
+            LeaveRequest.objects.filter(Q(leave_type_id__in=type_ids) | Q(bridge_type_id__in=type_ids), employee_id__in=employee_ids,
+                                        status=LeaveRequest.Status.PENDING)
+            .values_list('employee_id', 'leave_type_id', 'days_requested', 'bridge_type_id', 'bridge_days')):
+        # a request holds its own days on its type and the bridged non-working days on the type that pays for them
+        for t, d in ((lt, days), (bridge_type, bridge_days)):
+            if t is not None and str(t) in type_ids:
+                k = (str(emp), str(t))
+                held[k] = held.get(k, Decimal(0)) + (d or 0)
+    return {(e, t): float(ledger.get((e, t)) or 0) - float(held.get((e, t)) or 0) for e in employee_ids for t in type_ids}
+
+
+def _new_penalty(**fields) -> LatePenalty | None:
+    """The month's penalty row, or None when one is already there (one per employee and month)."""
+    try:
+        with transaction.atomic():
+            return LatePenalty.objects.create(**fields)
+    except IntegrityError as e:
+        if is_duplicate(e):
+            return None
+        raise
 
 
 def apply_penalties(company_id: str, bs_year: int, bs_month: int, rule: dict, employee_ids: list[str] | None, actor_id: str) -> dict:
@@ -228,38 +275,35 @@ def apply_penalties(company_id: str, bs_year: int, bs_month: int, rule: dict, em
         raise ConflictError(f'{bs_month_name(bs_year, bs_month)} payroll is locked; penalties can no longer change')
     end_ad = bs_month_bounds(bs_year, bs_month)['endAd']
     label = bs_month_name(bs_year, bs_month)
-    lines = penalty_preview(company_id, bs_year, bs_month, rule)
     applied = skipped = 0
-    for ln in lines:
+    for ln in penalty_preview(company_id, bs_year, bs_month, rule):
         if employee_ids is not None and ln['employeeId'] not in employee_ids:
             continue
         if ln['applied'] or ln['penaltyDays'] <= 0:
             skipped += 1
             continue
         leave_days = _num(sum(a['days'] for a in ln['allocations']))
-        ins = one("""INSERT INTO late_penalty (company_id, employee_id, bs_year, bs_month, late_days, late_minutes, penalty_days, leave_days,
-                       leave_type_id, unpaid_days, rule, applied_by)
-                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING id""",
-                  [str(company_id), ln['employeeId'], bs_year, bs_month, ln['lateDays'], ln['lateMinutes'], ln['penaltyDays'], leave_days,
-                   ln['allocations'][0]['leaveTypeId'] if ln['allocations'] else None, ln['unpaidDays'],
-                   json.dumps({**rule, 'allocations': ln['allocations'], 'lateDates': ln['lateDates']}), actor_id])
-        if not ins:
+        p = _new_penalty(company_id=company_id, employee_id=ln['employeeId'], bs_year=bs_year, bs_month=bs_month,
+                         late_days=ln['lateDays'], late_minutes=ln['lateMinutes'], penalty_days=ln['penaltyDays'],
+                         leave_days=leave_days, leave_type_id=ln['allocations'][0]['leaveTypeId'] if ln['allocations'] else None,
+                         unpaid_days=ln['unpaidDays'], rule={**rule, 'allocations': ln['allocations'], 'lateDates': ln['lateDates']},
+                         applied_by_id=actor_id)
+        if p is None:
             skipped += 1
             continue
-        pid = str(ins['id'])
-        for a in ln['allocations']:
-            execute("""INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, ref_id, note, posted_by)
-                       VALUES (%s, %s, %s, %s, 'adjustment', 'late_penalty', %s, %s, %s)""",
-                    [ln['employeeId'], a['leaveTypeId'], end_ad, -a['days'], pid,
-                     f"Late-arrival penalty, {label} ({ln['lateDays']} late days)", actor_id])
+        pid = str(p.id)
+        LeaveLedger.objects.bulk_create([
+            LeaveLedger(employee_id=ln['employeeId'], leave_type_id=a['leaveTypeId'], effective_date=end_ad, delta_days=-a['days'],
+                        reason=LeaveLedger.Reason.ADJUSTMENT, ref_type='late_penalty', ref_id=pid,
+                        note=f"Late-arrival penalty, {label} ({ln['lateDays']} late days)", posted_by_id=actor_id)
+            for a in ln['allocations']])
         audit('apply_late_penalty', 'late_penalty', actor_id=actor_id, row_id=pid,
               after={'employeeId': ln['employeeId'], 'bsYear': bs_year, 'bsMonth': bs_month, 'lateDays': ln['lateDays'],
                      'penaltyDays': ln['penaltyDays'], 'leaveDays': leave_days, 'unpaidDays': ln['unpaidDays']})
-        user_id = user_id_for_employee(ln['employeeId'])
         parts = ' and '.join(x for x in [f'{leave_days} day(s) from leave' if leave_days else '',
                                          f"{ln['unpaidDays']} unpaid day(s)" if ln['unpaidDays'] else ''] if x)
-        notify(company_id=str(company_id), user_id=user_id, employee_id=ln['employeeId'], template='attendance.late_penalty',
-               title='Late-arrival penalty',
+        notify(company_id=company_id, user_id=user_id_for_employee(ln['employeeId']), employee_id=ln['employeeId'],
+               template='attendance.late_penalty', title='Late-arrival penalty',
                body=f"You arrived late on {ln['lateDays']} day(s) in {label}. Under the company rule this counts as "
                     f"{ln['penaltyDays']} day(s): {parts}.", payload={'penaltyId': pid})
         applied += 1
@@ -267,99 +311,111 @@ def apply_penalties(company_id: str, bs_year: int, bs_month: int, rule: dict, em
 
 
 def reverse_penalty(company_id: str, penalty_id: str, reason: str, actor_id: str, actor_employee_id: str | None = None) -> None:
-    p = one('SELECT employee_id, bs_year, bs_month, status, rule FROM late_penalty WHERE id = %s AND company_id = %s FOR UPDATE',
-            [penalty_id, str(company_id)])
+    p = LatePenalty.objects.for_company(company_id).select_for_update().filter(pk=penalty_id).first()
     if not p:
         raise NotFoundError('penalty not found')
-    if actor_employee_id and str(p['employee_id']) == str(actor_employee_id):
+    if actor_employee_id and str(p.employee_id) == str(actor_employee_id):
         raise ForbiddenError('someone else must reverse your own late penalty')
-    if p['status'] != 'applied':
+    if p.status != LatePenalty.Status.APPLIED:
         raise ConflictError('this penalty is already reversed')
-    if month_locked(company_id, p['bs_year'], p['bs_month']):
+    if month_locked(company_id, p.bs_year, p.bs_month):
         raise ConflictError('the payroll for this month is locked; the penalty can no longer be reversed')
-    end_ad = bs_month_bounds(p['bs_year'], p['bs_month'])['endAd']
-    for a in (p['rule'] or {}).get('allocations') or []:
-        execute("""INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, ref_id, note, posted_by)
-                   VALUES (%s, %s, %s, %s, 'adjustment', 'late_penalty_reversed', %s, %s, %s)""",
-                [str(p['employee_id']), a['leaveTypeId'], end_ad, a['days'], penalty_id, f'Late-arrival penalty reversed: {reason}', actor_id])
-    execute("UPDATE late_penalty SET status = 'reversed', reversed_by = %s, reversed_at = now(), reverse_reason = %s WHERE id = %s",
-            [actor_id, reason, penalty_id])
+    end_ad = bs_month_bounds(p.bs_year, p.bs_month)['endAd']
+    LeaveLedger.objects.bulk_create([
+        LeaveLedger(employee_id=p.employee_id, leave_type_id=a['leaveTypeId'], effective_date=end_ad, delta_days=a['days'],
+                    reason=LeaveLedger.Reason.ADJUSTMENT, ref_type='late_penalty_reversed', ref_id=penalty_id,
+                    note=f'Late-arrival penalty reversed: {reason}', posted_by_id=actor_id)
+        for a in (p.rule or {}).get('allocations') or []])
+    LatePenalty.objects.filter(pk=p.pk).update(status=LatePenalty.Status.REVERSED, reversed_by_id=actor_id, reversed_at=Now(),
+                                               reverse_reason=reason)
     audit('reverse_late_penalty', 'late_penalty', actor_id=actor_id, row_id=penalty_id, after={'reason': reason})
+
+
+def penalty(user: AuthUser, penalty_id: str) -> dict:
+    """One applied or reversed penalty of the active company (HR)."""
+    _require_module(user, 'attendance')
+    p = (LatePenalty.objects.for_company(company_id_of(user)).filter(pk=parse_uuid(penalty_id))
+         .values('id', 'employee_id', 'bs_year', 'bs_month', 'status').first())
+    if not p:
+        raise NotFoundError('penalty not found')
+    return plain(p)
 
 
 def penalty_unpaid_days(employee_id: str, bs_year: int, bs_month: int) -> float:
     """Unpaid penalty days for payroll's loss of pay in a BS month (applied penalties only)."""
-    r = one("""SELECT coalesce(sum(unpaid_days), 0)::text AS d FROM late_penalty WHERE employee_id = %s AND bs_year = %s AND bs_month = %s
-                AND status = 'applied'""", [str(employee_id), bs_year, bs_month])
-    return _num(r['d'])
+    total = (LatePenalty.objects.filter(employee_id=employee_id, bs_year=bs_year, bs_month=bs_month,
+                                        status=LatePenalty.Status.APPLIED).aggregate(d=Sum('unpaid_days'))['d'])
+    return _num(total or 0)
 
 
 # ================================================================ issues.ts
 
-def _sort_key_code(s: str):
-    return (s.casefold(), s)
+def _flagged(kind: str) -> Q:
+    return Q(flags__contains=[{'kind': kind}])
 
 
 def attendance_issues(company_id: str, from_: str, to: str, manager_employee_id: str | None) -> list[dict]:
     """Missing punches, absences nobody asked to cover, and leave and time requests still waiting (with who they wait on).
     HR sees the company, a manager their team (manager_employee_id)."""
-    p = {'c': str(company_id), 'f': from_, 't': to, 'm': manager_employee_id}
-    team = '(%(m)s::uuid IS NULL OR hj_manages(%(m)s::uuid, e.id, (now() AT TIME ZONE \'Asia/Kathmandu\')::date))'
-    days = rows(f"""
-        SELECT e.id AS employee_id, e.emp_code, e.name_en, v.local_date::text AS local_date, v.status,
-               CASE WHEN v.status = 'Incomplete' OR v.flags @> '[{{"kind":"MissingOut"}}]' OR v.flags @> '[{{"kind":"UnpairedPunch"}}]'
-                    THEN 'missing' ELSE 'absent' END AS issue
-          FROM v_attendance_latest v JOIN employee e ON e.id = v.employee_id
-         WHERE e.company_id = %(c)s AND e.status = 'active' AND v.local_date BETWEEN %(f)s AND %(t)s AND {team}
-           AND v.local_date < (now() AT TIME ZONE 'Asia/Kathmandu')::date
-           AND (v.status = 'Incomplete' OR v.flags @> '[{{"kind":"MissingOut"}}]' OR v.flags @> '[{{"kind":"UnpairedPunch"}}]'
-                OR (v.status = 'Absent' AND NOT v.flags @> '[{{"kind":"HalfDayLeave"}}]'))
-           AND NOT EXISTS (SELECT 1 FROM leave_request lr WHERE lr.employee_id = e.id AND lr.status = 'pending'
-                            AND v.local_date BETWEEN lr.from_date AND lr.to_date)
-           AND NOT EXISTS (SELECT 1 FROM regularisation_request rr WHERE rr.employee_id = e.id AND rr.status = 'pending'
-                            AND rr.local_date = v.local_date)
-         ORDER BY e.emp_code, v.local_date""", p)
-    pend = rows(f"""
-        SELECT wi.id AS instance_id, wi.object_type, wi.object_id, e.id AS employee_id, e.emp_code, e.name_en, wi.steps, wi.current_step,
-               wi.created_at, coalesce(lr.from_date, rr.local_date)::text AS from_date, coalesce(lr.to_date, rr.local_date)::text AS to_date,
-               CASE WHEN lr.id IS NOT NULL THEN lt.name_en ELSE replace(initcap(rr.kind), '_', ' ') END AS label
-          FROM workflow_instance wi JOIN employee e ON e.id = wi.employee_id
-          LEFT JOIN leave_request lr ON wi.object_type = 'leave_request' AND lr.id = wi.object_id
-          LEFT JOIN leave_type lt ON lt.id = lr.leave_type_id
-          LEFT JOIN regularisation_request rr ON wi.object_type = 'regularisation_request' AND rr.id = wi.object_id
-         WHERE wi.company_id = %(c)s AND wi.state = 'pending' AND wi.object_type IN ('leave_request', 'regularisation_request') AND {team}
-           AND coalesce(lr.to_date, rr.local_date) >= %(f)s AND coalesce(lr.from_date, rr.local_date) <= %(t)s
-         ORDER BY wi.created_at""", p)
+    missing = Q(status=Day.Status.INCOMPLETE) | _flagged('MissingOut') | _flagged('UnpairedPunch')
+    pending_leave = LeaveRequest.objects.filter(employee_id=OuterRef('employee_id'), status=LeaveRequest.Status.PENDING,
+                                                from_date__lte=OuterRef('local_date'), to_date__gte=OuterRef('local_date'))
+    pending_time = Reg.objects.filter(employee_id=OuterRef('employee_id'), status=Reg.Status.PENDING,
+                                      local_date=OuterRef('local_date'))
+    days = (latest_days().for_company(company_id)
+            .filter(_team(manager_employee_id), employee__status=Employee.Status.ACTIVE, local_date__range=(from_, to),
+                    local_date__lt=_npt_today())
+            .filter(missing | (Q(status=Day.Status.ABSENT) & ~_flagged('HalfDayLeave')))
+            .exclude(Exists(pending_leave)).exclude(Exists(pending_time))
+            .annotate(issue=Case(When(missing, then=Value('missing')), default=Value('absent')))
+            .order_by('employee__emp_code', 'local_date')
+            .values('employee_id', 'local_date', 'issue', emp_code=F('employee__emp_code'), name_en=F('employee__name_en')))
+
+    def leave(field):
+        return Subquery(LeaveRequest.objects.filter(pk=OuterRef('object_id')).values(field)[:1])
+
+    def time_request(field):
+        return Subquery(Reg.objects.filter(pk=OuterRef('object_id')).values(field)[:1])
+    is_leave = Q(object_type='leave_request')
+    pend = (WorkflowInstance.objects.for_company(company_id)
+            .filter(_team(manager_employee_id), state=WorkflowInstance.State.PENDING,
+                    object_type__in=('leave_request', 'regularisation_request'))
+            .annotate(from_date=Case(When(is_leave, then=leave('from_date')), default=time_request('local_date')),
+                      to_date=Case(When(is_leave, then=leave('to_date')), default=time_request('local_date')),
+                      leave_name=Case(When(is_leave, then=leave('leave_type__name_en'))),
+                      reg_kind=Case(When(~is_leave, then=time_request('kind'))))
+            .filter(to_date__gte=from_, from_date__lte=to)
+            .order_by('created_at')
+            .values('id', 'object_type', 'object_id', 'employee_id', 'steps', 'current_step', 'created_at', 'from_date', 'to_date',
+                    'leave_name', 'reg_kind', emp_code=F('employee__emp_code'), name_en=F('employee__name_en')))
     cache: dict = {}
     names: dict[str, str] = {}
     by_emp: dict[str, dict] = {}
 
     def row(i, code, name):
-        r = by_emp.get(i)
-        if not r:
-            r = {'employeeId': i, 'empCode': code, 'name': name, 'missing': [], 'absent': [], 'pending': []}
-            by_emp[i] = r
-        return r
+        return by_emp.setdefault(i, {'employeeId': i, 'empCode': code, 'name': name, 'missing': [], 'absent': [], 'pending': []})
 
     for d in days:
-        row(str(d['employee_id']), d['emp_code'], d['name_en'])[d['issue']].append(d['local_date'])
+        row(str(d['employee_id']), d['emp_code'], d['name_en'])[d['issue']].append(d['local_date'].isoformat())
     now = _now()
+    waiting = []
     for x in pend:
         steps = x['steps'] or []
         step = steps[x['current_step']] if 0 <= x['current_step'] < len(steps) else None
-        ids = approvers_for(str(company_id), str(x['employee_id']), step.get('role') if isinstance(step, dict) and step.get('role') else step,
-                            cache) if step else []
-        missing = [i for i in ids if i not in names]
-        if missing:
-            for u in rows('SELECT id, name FROM app_user WHERE id = ANY(%s::uuid[])', [missing]):
-                names[str(u['id'])] = u['name']
+        waiting.append(approvers_for(company_id, str(x['employee_id']),
+                                     step.get('role') if isinstance(step, dict) and step.get('role') else step, cache) if step else [])
+    every = {i for ids in waiting for i in ids}
+    if every:
+        names.update({str(u['id']): u['name'] for u in AppUser.objects.filter(pk__in=every).values('id', 'name')})
+    for x, ids in zip(pend, waiting):          # pend is evaluated once: the loop above filled its cache
+        label = x['leave_name'] if x['object_type'] == 'leave_request' else (x['reg_kind'] or '').replace('_', ' ').title()
         row(str(x['employee_id']), x['emp_code'], x['name_en'])['pending'].append({
-            'instanceId': str(x['instance_id']), 'type': 'leave' if x['object_type'] == 'leave_request' else 'time',
-            'requestId': str(x['object_id']), 'from': x['from_date'], 'to': x['to_date'], 'label': x['label'],
+            'instanceId': str(x['id']), 'type': 'leave' if x['object_type'] == 'leave_request' else 'time',
+            'requestId': str(x['object_id']), 'from': x['from_date'].isoformat(), 'to': x['to_date'].isoformat(), 'label': label,
             'createdAt': _iso_ms(x['created_at']), 'ageDays': math.floor((now - x['created_at']).total_seconds() / 86400),
             'waitingOn': [{'userId': i, 'name': names.get(i, 'Approver')} for i in ids],
         })
-    return sorted(by_emp.values(), key=lambda r: _sort_key_code(r['empCode']))
+    return sorted(by_emp.values(), key=lambda r: collate_key(r['empCode']))
 
 
 def summarise(issue_rows: list[dict]) -> dict:
@@ -387,25 +443,24 @@ def _norm(t: str) -> str | None:
 
 
 def _valid_ad(s: str) -> bool:
+    """A real AD date written YYYY-MM-DD (2026-02-30 is refused: it cannot be stored or computed)."""
     if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', s):
         return False
     try:
-        y, m, d = (int(x) for x in s.split('-'))
-        # Date.parse rolls invalid days within 1..31 over; it only fails for month > 12 or day > 31.
-        return 1 <= m <= 12 and 1 <= d <= 31
+        date.fromisoformat(s)
     except ValueError:
         return False
+    return True
 
 
-def _ad_value(s: str) -> str:
-    """The ISO date Date.parse would read (2026-02-30 -> 2026-03-02), as the TS kept the cell text when it parsed."""
-    return s
+def read_csv(text: str) -> list[list[str]]:
+    """RFC 4180 CSV (quotes, escaped quotes, CRLF, a leading byte-order mark); rows of nothing but blanks are dropped."""
+    return [r for r in csv_module.reader(io.StringIO(text.removeprefix('﻿'), newline='')) if any(f.strip() for f in r)]
 
 
 def check_upload(company_id: str, csv: str, self_employee_id: str | None = None) -> dict:
     """Read and check every row: the file's columns first, then each row's employee, date, times and lock."""
-    from hajiri.employees.services import parse_csv
-    table = parse_csv(re.sub(r'^﻿', '', csv))
+    table = read_csv(csv)
     if not table:
         return {'rows': [], 'errors': ['The file is empty.']}
     header = [re.sub(r'\s+', '_', h.strip().lower()) for h in table[0]]
@@ -432,9 +487,8 @@ def check_upload(company_id: str, csv: str, self_employee_id: str | None = None)
     def cell_of(r, k):
         return (r[k] if k < len(r) and r[k] is not None else '').strip() if k >= 0 else ''
     codes = list(dict.fromkeys(c for c in (cell_of(r, i_code) for r in body) if c))
-    emps = rows("""SELECT id, emp_code, name_en, status, join_date::text AS join_date, exit_date::text AS exit_date FROM employee
-                    WHERE company_id = %s AND emp_code = ANY(%s::text[])""", [str(company_id), codes])
-    by_code = {e['emp_code']: e for e in emps}
+    by_code = {e['emp_code']: e for e in Employee.objects.for_company(company_id).filter(emp_code__in=codes)
+               .values('id', 'emp_code', 'name_en', 'status', 'join_date', 'exit_date')}
     today = npt_today()
     seen: set[str] = set()
     out = []
@@ -448,7 +502,7 @@ def check_upload(company_id: str, csv: str, self_employee_id: str | None = None)
             row['errors'].append('Employee code is missing.')
         elif not e:
             row['errors'].append(f"No employee with code {row['empCode']}.")
-        elif e['status'] != 'active':
+        elif e['status'] != Employee.Status.ACTIVE:
             row['errors'].append(f"{e['name_en']} is not active.")
         elif self_employee_id and str(e['id']) == str(self_employee_id):
             row['errors'].append('You cannot upload your own attendance; ask another HR person.')
@@ -465,11 +519,13 @@ def check_upload(company_id: str, csv: str, self_employee_id: str | None = None)
                 row['errors'].append('The date is missing or not YYYY-MM-DD.')
         except (BsRangeError, ValueError, KeyError):
             row['errors'].append(f'{cell(i_bs)} is not a valid BS date.')
+        joined = e['join_date'].isoformat() if e and e['join_date'] else None
+        left = e['exit_date'].isoformat() if e and e['exit_date'] else None
         if row['date'] and row['date'] > today:
             row['errors'].append('The date is in the future.')
-        if row['date'] and e and e['join_date'] and row['date'] < e['join_date']:
+        if row['date'] and joined and row['date'] < joined:
             row['errors'].append('The date is before the employee joined.')
-        if row['date'] and e and e['exit_date'] and row['date'] > e['exit_date']:
+        if row['date'] and left and row['date'] > left:
             row['errors'].append('The date is after the employee left.')
         raw_in, raw_out = cell(i_in), cell(i_out)
         row['inTime'] = _norm(raw_in) if raw_in else None
@@ -498,18 +554,16 @@ def check_upload(company_id: str, csv: str, self_employee_id: str | None = None)
 def _upload_punch(*, company_id, employee_id, emp_code, local_date, time, day_offset, direction, reason, actor_id) -> dict | None:
     """One manual punch with the same idempotency key as POST /punch/manual; None for a duplicate."""
     from hajiri.attendance.repo import from_ms
-    from hajiri.punch.services import ensure_pseudo_device, npt_local_time
+    from hajiri.punch.services import ensure_pseudo_device, insert_punch, npt_local_time
     device = ensure_pseudo_device(company_id, 'MANUAL')
     at = local_time_ms(local_date, time, day_offset)
     punch_date = local_date_of(at)
-    key = sha256_hex(f'manual|{employee_id}|{punch_date}|{time}|{direction}')
-    ins = one("""INSERT INTO punch_event (device_id, device_sn, vendor, device_user_pin, employee_id, punched_at, device_local_time,
-                   local_date, direction, verify_mode, source, raw, idempotency_key)
-                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'manual', 'manual', %s, %s)
-                 ON CONFLICT (idempotency_key, punched_at) DO NOTHING RETURNING id""",
-              [device['id'], device['serialNo'], device['vendor'], emp_code, employee_id, from_ms(at), npt_local_time(at), punch_date,
-               direction, json.dumps({'reason': reason, 'enteredBy': actor_id, 'upload': True}), key])
-    return {'id': str(ins['id']), 'at': at} if ins else None
+    p = insert_punch(device_id=device['id'], device_sn=device['serialNo'], vendor=device['vendor'], device_user_pin=emp_code,
+                     employee_id=employee_id, punched_at=from_ms(at), device_local_time=npt_local_time(at), local_date=punch_date,
+                     direction=direction, verify_mode='manual', source='manual',
+                     raw={'reason': reason, 'enteredBy': actor_id, 'upload': True},
+                     idempotency_key=sha256_hex(f'manual|{employee_id}|{punch_date}|{time}|{direction}'))
+    return {'id': str(p.id), 'at': at} if p else None
 
 
 def import_upload(company_id: str, upload_rows: list[dict], reason: str, actor_id: str) -> dict:
@@ -520,11 +574,11 @@ def import_upload(company_id: str, upload_rows: list[dict], reason: str, actor_i
         note = f" ({r['note']})" if r['note'] else ''
         why = f'CSV upload: {reason}{note}'
         last = None
-        for direction, time, offset in (('in', r['inTime'], 0), ('out', r['outTime'], 1 if r['overnight'] else 0)):
-            if not time:
+        for direction, time_, offset in (('in', r['inTime'], 0), ('out', r['outTime'], 1 if r['overnight'] else 0)):
+            if not time_:
                 continue
             p = _upload_punch(company_id=str(company_id), employee_id=r['employeeId'], emp_code=r['empCode'], local_date=r['date'],
-                              time=time, day_offset=offset, direction=direction, reason=why, actor_id=actor_id)
+                              time=time_, day_offset=offset, direction=direction, reason=why, actor_id=actor_id)
             if p:
                 punches += 1
                 last = p
@@ -543,41 +597,42 @@ OUT_TONE = {'leave': 'info', 'travel': 'accent', 'wfh': 'ok', 'field': 'warn'}
 
 
 def scope_employee_ids(user: AuthUser, scope: str) -> list[str] | None:
+    """Whose absences the person sees: None for everyone, else the ids of their department or team (and themselves)."""
     if scope == 'company':
         return None
-    if not user.employee_id:
+    me = user.employee_id
+    if not me:
         return None if has_role(user, 'hr') else []
+    current = EmployeeAssignment.objects.for_company(user.company_id).filter(valid__contains=_npt_today())
+    mine = current.filter(employee_id=me).values('manager_id', 'org_unit_id').first()
     if scope == 'department':
-        r = rows("""SELECT a.employee_id AS id FROM employee_assignment a
-                      JOIN employee_assignment me ON me.employee_id = %s AND me.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date
-                     WHERE a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date AND me.org_unit_id IS NOT NULL AND a.org_unit_id = me.org_unit_id""", [user.employee_id])
-        return [str(x['id']) for x in r] if r else [user.employee_id]
-    r = rows("""SELECT a.employee_id AS id FROM employee_assignment a WHERE a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date AND a.manager_id = %(e)s
-                UNION SELECT a.employee_id FROM employee_assignment a JOIN employee_assignment me ON me.employee_id = %(e)s AND me.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date
-                 WHERE a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date AND me.manager_id IS NOT NULL AND (a.manager_id = me.manager_id OR a.employee_id = me.manager_id)
-                UNION SELECT %(e)s::uuid""", {'e': user.employee_id})
-    return [str(x['id']) for x in r]
+        unit = mine and mine['org_unit_id']
+        ids = [str(i) for i in current.filter(org_unit_id=unit).values_list('employee_id', flat=True)] if unit else []
+        return ids or [me]
+    team = Q(manager_id=me)
+    if mine and mine['manager_id']:
+        team |= Q(manager_id=mine['manager_id']) | Q(employee_id=mine['manager_id'])
+    return list(dict.fromkeys([*(str(i) for i in current.filter(team).values_list('employee_id', flat=True)), me]))
+
+
+PERSON = {'emp': F('employee_id'), 'name_en': F('employee__name_en'), 'designation': F('employee__designation')}
 
 
 def whos_out(company_id: str, ids: list[str] | None, from_: str, to: str) -> list[dict]:
-    p = {'c': str(company_id), 'f': from_, 't': to, 'ids': ids}
-    in_scope = "e.company_id = %(c)s AND e.status = 'active' AND (%(ids)s::uuid[] IS NULL OR e.id = ANY(%(ids)s::uuid[]))"
-    leave = rows(f"""SELECT e.id AS employee_id, e.name_en, e.designation, lr.from_date::text AS from_date, lr.to_date::text AS to_date,
-                            lr.half_day, lr.hours::text AS hours
-                       FROM leave_request lr JOIN employee e ON e.id = lr.employee_id
-                      WHERE {in_scope} AND lr.status = 'approved' AND lr.to_date >= %(f)s AND lr.from_date <= %(t)s""", p)
-    travel = rows(f"""SELECT e.id AS employee_id, e.name_en, e.designation, t.from_date::text AS from_date, t.to_date::text AS to_date, t.destination
-                        FROM travel_request t JOIN employee e ON e.id = t.employee_id
-                       WHERE {in_scope} AND t.status IN ('approved', 'settling', 'settled') AND t.to_date >= %(f)s AND t.from_date <= %(t)s""", p)
-    wfh = rows(f"""SELECT DISTINCT e.id AS employee_id, e.name_en, e.designation, x.local_date::text AS local_date FROM employee e
-                     JOIN (SELECT employee_id, local_date FROM regularisation_request WHERE kind = 'wfh' AND status = 'approved'
-                             AND local_date BETWEEN %(f)s AND %(t)s
-                           UNION SELECT employee_id, local_date FROM punch_event WHERE local_date BETWEEN %(f)s AND %(t)s
-                             AND raw->'flags' ? 'Remote') x ON x.employee_id = e.id
-                    WHERE {in_scope}""", p)
-    field = rows(f"""SELECT DISTINCT ON (e.id, v.local_date) e.id AS employee_id, e.name_en, e.designation, v.local_date::text AS local_date, v.place
-                       FROM field_visit v JOIN employee e ON e.id = v.employee_id
-                      WHERE {in_scope} AND v.local_date BETWEEN %(f)s AND %(t)s ORDER BY e.id, v.local_date, v.started_at DESC""", p)
+    def in_scope(model):
+        qs = model.objects.for_company(company_id).filter(employee__status=Employee.Status.ACTIVE)
+        return qs.filter(employee_id__in=ids) if ids is not None else qs
+    leave = (in_scope(LeaveRequest).filter(status=LeaveRequest.Status.APPROVED, to_date__gte=from_, from_date__lte=to)
+             .values('from_date', 'to_date', 'half_day', 'hours', **PERSON))
+    travel = (in_scope(TravelRequest).filter(status__in=(TravelRequest.Status.APPROVED, TravelRequest.Status.SETTLING,
+                                                         TravelRequest.Status.SETTLED), to_date__gte=from_, from_date__lte=to)
+              .values('from_date', 'to_date', 'destination', **PERSON))
+    wfh_days = (in_scope(Reg).filter(kind=Reg.Kind.WFH, status=Reg.Status.APPROVED, local_date__range=(from_, to))
+                .values_list('local_date', 'employee_id', 'employee__name_en', 'employee__designation')
+                .union(in_scope(PunchEvent).filter(local_date__range=(from_, to), raw__flags__has_key='Remote')
+                       .values_list('local_date', 'employee_id', 'employee__name_en', 'employee__designation')))
+    field = (in_scope(FieldVisit).filter(local_date__range=(from_, to)).order_by('employee_id', 'local_date', '-started_at')
+             .distinct('employee_id', 'local_date').values('local_date', 'place', **PERSON))
     days = [{'date': d, 'people': []} for d in date_range(from_, to)]
     by_date = {d['date']: d for d in days}
 
@@ -587,41 +642,28 @@ def whos_out(company_id: str, ids: list[str] | None, from_: str, to: str) -> lis
             day['people'].append(x)
 
     def person(r, kind, detail):
-        return {'employeeId': str(r['employee_id']), 'name': r['name_en'], 'designation': r['designation'], 'kind': kind, 'detail': detail}
+        return {'employeeId': str(r['emp']), 'name': r['name_en'], 'designation': r['designation'], 'kind': kind, 'detail': detail}
+
+    def span(r):
+        return date_range(max(r['from_date'].isoformat(), from_), min(r['to_date'].isoformat(), to))
     for lv in leave:
         detail = (f"{_num(lv['hours'])} h" if lv['hours'] else
-                  ('First half' if lv['half_day'] == 'first_half' else 'Second half') if lv['half_day'] else None)
-        for d in date_range(max(lv['from_date'], from_), min(lv['to_date'], to)):
+                  ('First half' if lv['half_day'] == LeaveRequest.HalfDay.FIRST_HALF else 'Second half') if lv['half_day'] else None)
+        for d in span(lv):
             add(d, person(lv, 'leave', detail))
     for t in travel:
-        for d in date_range(max(t['from_date'], from_), min(t['to_date'], to)):
+        for d in span(t):
             add(d, person(t, 'travel', t['destination']))
-    for w in wfh:
-        add(w['local_date'], person(w, 'wfh', None))
+    for local_date, emp, name, designation in wfh_days:
+        add(local_date.isoformat(), person({'emp': emp, 'name_en': name, 'designation': designation}, 'wfh', None))
     for f in field:
-        add(f['local_date'], person(f, 'field', f['place']))
+        add(f['local_date'].isoformat(), person(f, 'field', f['place']))
     for d in days:
-        d['people'].sort(key=lambda x: (x['name'].casefold(), x['name']))
+        d['people'].sort(key=lambda x: collate_key(x['name']))
     return days
 
 
 # ================================================================ routes.ts
-
-MONTH = Obj({'bsYear': Int(min=2000, max=2100, coerce=True), 'bsMonth': Int(min=1, max=12, coerce=True)})
-MONTH_PARTIAL = Obj({'bsYear': Int(min=2000, max=2100, coerce=True, optional=True),
-                     'bsMonth': Int(min=1, max=12, coerce=True, optional=True)})
-
-
-def _range(query: dict) -> dict:
-    q = parse(Obj({'from': IsoDate(), 'to': IsoDate()}), query)
-    if q['from'] > q['to']:
-        from hajiri.core.errors import ValidationError
-        raise ValidationError([{'path': '', 'message': 'from must be on or before to'}])
-    if (date.fromisoformat(q['to']) - date.fromisoformat(q['from'])).days > 92:
-        from hajiri.core.errors import ValidationError
-        raise ValidationError([{'path': '', 'message': 'pick at most 92 days'}])
-    return q
-
 
 def self_of(user: AuthUser) -> str | None:
     """The acting person's own employee id, so nobody but an administrator edits their own attendance or penalties."""
@@ -641,6 +683,18 @@ def _staff(user: AuthUser) -> None:
     _require(user, *MODULE_ROLES['attendance'], 'manager')
 
 
+def _manager_scope(user: AuthUser) -> str | None:
+    """None for HR (everyone), else the manager's own employee id (NIL_UUID: a manager without one sees nobody)."""
+    return None if has_module(user, 'attendance') else (user.employee_id or NIL_UUID)
+
+
+def paid_leave_types(company_id: str) -> list[dict]:
+    """Paid leave types with a balance a penalty may be taken from (not the event leaves)."""
+    return plain(list(LeaveType.objects.for_company(company_id).filter(paid=True)
+                      .exclude(code__in=('MATERNITY', 'PATERNITY', 'MOURNING')).order_by('sort_order', 'code')
+                      .values('id', 'code', 'name_en')))
+
+
 def get_policy(user: AuthUser) -> dict:
     return {'policy': extras_policy(company_id_of(user))}
 
@@ -648,10 +702,10 @@ def get_policy(user: AuthUser) -> dict:
 def put_policy(user: AuthUser, body: dict) -> dict:
     _require_module(user, 'attendance')
     company_id = company_id_of(user)
-    b = parse(EXTRAS_POLICY, body)
+    b = plain(validate(ExtrasPolicyIn, body))
     ids = b['latePenalty']['leaveTypeIds']
     if ids:
-        t = rows('SELECT id, paid, event_days FROM leave_type WHERE company_id = %s AND id = ANY(%s::uuid[])', [company_id, ids])
+        t = list(LeaveType.objects.for_company(company_id).filter(pk__in=ids).values('paid', 'event_days'))
         if len(t) != len(set(ids)):
             raise BadRequestError('a chosen leave type does not exist')
         if any(not x['paid'] or x['event_days'] is not None for x in t):
@@ -666,10 +720,9 @@ def put_policy(user: AuthUser, body: dict) -> dict:
 def penalties(user: AuthUser, query: dict) -> dict:
     _staff(user)
     company_id = company_id_of(user)
-    q = parse(MONTH, query)
+    q = validate(MonthIn, query)
     policy = extras_policy(company_id)
-    mgr = None if has_module(user, 'attendance') else (user.employee_id or NIL_UUID)
-    lines = penalty_preview(company_id, q['bsYear'], q['bsMonth'], policy['latePenalty'], manager_employee_id=mgr)
+    lines = penalty_preview(company_id, q['bsYear'], q['bsMonth'], policy['latePenalty'], manager_employee_id=_manager_scope(user))
     return {'rule': policy['latePenalty'], 'locked': month_locked(company_id, q['bsYear'], q['bsMonth']), 'lines': lines}
 
 
@@ -678,10 +731,9 @@ def my_penalties(user: AuthUser, query: dict) -> dict:
     if not user.employee_id:
         raise BadRequestError('your account is not linked to an employee')
     t = ad_to_bs(npt_today())
-    q = parse(MONTH_PARTIAL, query)
+    q = validate(MonthPartialIn, query)
     y, m = q.get('bsYear') or t.year, q.get('bsMonth') or t.month
-    policy = extras_policy(company_id)
-    lp = policy['latePenalty']
+    lp = extras_policy(company_id)['latePenalty']
     lines = penalty_preview(company_id, y, m, lp, employee_id=user.employee_id)
     line = lines[0] if lines else None
     return {'bsYear': y, 'bsMonth': m, 'enabled': lp['enabled'],
@@ -693,7 +745,7 @@ def my_penalties(user: AuthUser, query: dict) -> dict:
 def apply(user: AuthUser, body: dict) -> dict:
     _require_module(user, 'attendance')
     company_id = company_id_of(user)
-    b = parse(MONTH.extend({'employeeIds': Arr(Uuid(), max=2000, optional=True)}), body)
+    b = plain(validate(ApplyPenaltiesIn, body))
     policy = extras_policy(company_id)
     if not policy['latePenalty']['enabled']:
         raise ConflictError('turn the late-arrival penalty on first')
@@ -707,7 +759,7 @@ def apply(user: AuthUser, body: dict) -> dict:
 def reverse(user: AuthUser, penalty_id: str, body: dict) -> dict:
     _require_module(user, 'attendance')
     pid = parse_uuid(penalty_id)
-    b = parse(Obj({'reason': Str(trim=True, min=3, max=300)}), body)
+    b = validate(ReverseIn, body)
     with transaction.atomic():
         reverse_penalty(company_id_of(user), pid, b['reason'], user.id, self_of(user))
     return {'ok': True}
@@ -715,34 +767,34 @@ def reverse(user: AuthUser, penalty_id: str, body: dict) -> dict:
 
 def issues(user: AuthUser, query: dict) -> dict:
     _staff(user)
-    q = _range(query)
-    mgr = None if has_module(user, 'attendance') else (user.employee_id or NIL_UUID)
-    found = attendance_issues(company_id_of(user), q['from'], q['to'], mgr)
+    q = validate(IssueRangeIn, query)
+    found = attendance_issues(company_id_of(user), q['from'], q['to'], _manager_scope(user))
     return {'summary': summarise(found), 'rows': found}
 
 
 def issue_summary(user: AuthUser, query: dict) -> dict:
     """Pre-payroll check: the open issues of a BS month in numbers (the payroll pre-flight links here)."""
     _require_module(user, 'attendance')
-    q = parse(MONTH, query)
+    q = validate(MonthIn, query)
     b = bs_month_bounds(q['bsYear'], q['bsMonth'])
     found = attendance_issues(company_id_of(user), b['startAd'], b['endAd'], None)
     return {'bsYear': q['bsYear'], 'bsMonth': q['bsMonth'], 'from': b['startAd'], 'to': b['endAd'], **summarise(found)}
 
 
-NUDGE = Union(
-    Obj({'target': Enum(('employee',)), 'employeeId': Uuid(), 'from': IsoDate(), 'to': IsoDate()}),
-    Obj({'target': Enum(('approver',)), 'instanceId': Uuid()}),
-)
+def _nudge_once(company_id: str, user_id: str, kind: str, ref: str, today: str, actor_id: str) -> bool:
+    """Record today's reminder; False when this one was already sent today."""
+    _, created = AttendanceNudge.objects.get_or_create(target_user_id=user_id, kind=kind, ref=ref, local_date=today,
+                                                       defaults={'company_id': company_id, 'nudged_by_id': actor_id})
+    return created
 
 
 def nudge(user: AuthUser, body: dict) -> dict:
     _staff(user)
     company_id = company_id_of(user)
-    b = parse(NUDGE, body)
+    b = plain(nudge_body(body))
     today = npt_today()
     if b['target'] == 'employee':
-        if not one('SELECT id FROM employee WHERE id = %s AND company_id = %s', [b['employeeId'], company_id]):
+        if not exists_in_company(Employee, company_id, pk=b['employeeId']):
             raise NotFoundError('employee not found')
         wf_assert_manages(user, b['employeeId'])
         if b['employeeId'] == user.employee_id:
@@ -754,10 +806,7 @@ def nudge(user: AuthUser, body: dict) -> dict:
         if not user_id:
             raise ConflictError('this employee has no sign-in to notify')
         with transaction.atomic():
-            ins = one("""INSERT INTO attendance_nudge (company_id, target_user_id, kind, ref, local_date, nudged_by)
-                         VALUES (%s, %s, 'employee', %s, %s, %s) ON CONFLICT DO NOTHING RETURNING id""",
-                      [company_id, user_id, f"{b['from']}:{b['to']}", today, user.id])
-            if not ins:
+            if not _nudge_once(company_id, user_id, AttendanceNudge.Kind.EMPLOYEE, f"{b['from']}:{b['to']}", today, user.id):
                 return {'sent': 0, 'already': True}
             parts = ' and '.join(x for x in [f"{len(r['missing'])} day(s) with a missing punch" if r['missing'] else '',
                                              f"{len(r['absent'])} absent day(s) with no leave or time request" if r['absent'] else ''] if x)
@@ -769,7 +818,7 @@ def nudge(user: AuthUser, body: dict) -> dict:
     inst = get_instance(b['instanceId'])
     if not inst or inst['company_id'] != company_id or inst['object_type'] not in ('leave_request', 'regularisation_request'):
         raise NotFoundError('request not found')
-    if inst['state'] != 'pending':
+    if inst['state'] != WorkflowInstance.State.PENDING:
         raise ConflictError('this request is no longer waiting')
     if inst['employee_id']:
         wf_assert_manages(user, inst['employee_id'])
@@ -781,31 +830,26 @@ def nudge(user: AuthUser, body: dict) -> dict:
         ids = [i for i in dict.fromkeys(approvers_for(company_id, inst['employee_id'], role)) if i != user.id]
     if not ids:
         raise ConflictError('there is nobody else to remind about this request')
-    emp = one('SELECT name_en FROM employee WHERE id = %s', [inst['employee_id']]) if inst['employee_id'] else None
+    emp_name = (Employee.objects.for_company(company_id).filter(pk=inst['employee_id']).values_list('name_en', flat=True).first()
+                if inst['employee_id'] else None)
     created = inst['created_at'].astimezone(timezone.utc).date().isoformat()
+    kind = 'leave' if inst['object_type'] == 'leave_request' else 'time'
     sent = 0
     with transaction.atomic():
         for i in ids:
-            ins = one("""INSERT INTO attendance_nudge (company_id, target_user_id, kind, ref, local_date, nudged_by)
-                         VALUES (%s, %s, 'approver', %s, %s, %s) ON CONFLICT DO NOTHING RETURNING id""",
-                      [company_id, i, inst['id'], today, user.id])
-            if not ins:
+            if not _nudge_once(company_id, i, AttendanceNudge.Kind.APPROVER, inst['id'], today, user.id):
                 continue
-            kind = 'leave' if inst['object_type'] == 'leave_request' else 'time'
             notify(company_id=company_id, user_id=i, template='attendance.nudge_approver', title='A request is waiting for you',
-                   body=f"{emp['name_en'] if emp else 'An employee'}'s {kind} request has been waiting since {bs_range(created, created)}. "
+                   body=f"{emp_name or 'An employee'}'s {kind} request has been waiting since {bs_range(created, created)}. "
                         'Please decide it before payroll.',
                    payload={'instanceId': inst['id']}, channels=['push'])
             sent += 1
     return {'sent': sent, 'already': sent == 0}
 
 
-UPLOAD_BODY = Obj({'csv': Str(min=1, max=1_000_000), 'filename': Str(max=200, optional=True)})
-
-
 def upload_check(user: AuthUser, body: dict) -> dict:
     _require_module(user, 'attendance')
-    b = parse(UPLOAD_BODY, body)
+    b = validate(AttendanceUploadIn, body)
     out = check_upload(company_id_of(user), b['csv'], self_of(user))
     return {'errors': out['errors'], 'rows': out['rows'], 'valid': sum(1 for x in out['rows'] if not x['errors']),
             'invalid': sum(1 for x in out['rows'] if x['errors'])}
@@ -814,7 +858,7 @@ def upload_check(user: AuthUser, body: dict) -> dict:
 def upload_import(user: AuthUser, body: dict) -> dict:
     _require_module(user, 'attendance')
     company_id = company_id_of(user)
-    b = parse(UPLOAD_BODY.extend({'reason': Str(trim=True, min=5, max=300)}), body)
+    b = validate(ImportIn, body)
     checked = check_upload(company_id, b['csv'], self_of(user))
     if checked['errors']:
         raise BadRequestError(' '.join(checked['errors']))
@@ -826,27 +870,25 @@ def upload_import(user: AuthUser, body: dict) -> dict:
         raise BadRequestError('there are no rows to import')
     out = import_upload(company_id, checked['rows'], b['reason'], user.id)
     with transaction.atomic():
-        ins = one("""INSERT INTO attendance_upload (company_id, filename, reason, rows_total, punches, duplicates, uploaded_by)
-                     VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                  [company_id, b.get('filename'), b['reason'], len(checked['rows']), out['punches'], out['duplicates'], user.id])
-        audit('attendance_upload', 'attendance_upload', actor_id=user.id, row_id=str(ins['id']),
+        up = AttendanceUpload.objects.create(company_id=company_id, filename=b.get('filename') or None, reason=b['reason'],
+                                             rows_total=len(checked['rows']), punches=out['punches'],
+                                             duplicates=out['duplicates'], uploaded_by_id=user.id)
+        audit('attendance_upload', 'attendance_upload', actor_id=user.id, row_id=str(up.id),
               after={'rows': len(checked['rows']), **out, 'reason': b['reason']})
-    return {'id': str(ins['id']), 'rows': len(checked['rows']), **out}
+    return {'id': str(up.id), 'rows': len(checked['rows']), **out}
 
 
 def uploads(user: AuthUser) -> dict:
     _require_module(user, 'attendance')
-    found = rows("""SELECT u.id, u.filename, u.reason, u.rows_total, u.punches, u.duplicates, u.created_at, a.name AS uploaded_by_name
-                      FROM attendance_upload u LEFT JOIN app_user a ON a.id = u.uploaded_by WHERE u.company_id = %s
-                     ORDER BY u.created_at DESC LIMIT 50""", [company_id_of(user)])
-    for r in found:
-        r['id'] = str(r['id'])
-    return {'uploads': found}
+    found = (AttendanceUpload.objects.for_company(company_id_of(user)).order_by('-created_at')
+             .values('id', 'filename', 'reason', 'rows_total', 'punches', 'duplicates', 'created_at',
+                     uploaded_by_name=F('uploaded_by__name'))[:50])
+    return {'uploads': plain(list(found))}
 
 
 def whos_out_for(user: AuthUser, query: dict) -> dict:
     company_id = company_id_of(user)
-    q = parse(Obj({'days': Int(min=1, max=14, coerce=True, default=7)}), query)
+    q = validate(WhosOutIn, query)
     policy = extras_policy(company_id)
     ids = scope_employee_ids(user, policy['whosOutScope'])
     if ids is not None and not ids:

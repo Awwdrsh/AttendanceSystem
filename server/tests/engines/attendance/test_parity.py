@@ -1,6 +1,6 @@
-"""Parity with the TS engine: every input dumped by packages/attendance-engine/src/dump-parity.ts must give the same
-output, byte for byte once serialised, including inputs_hash. Regenerate the fixtures with
-  cd packages/attendance-engine && ../../apps/api/node_modules/.bin/tsx src/dump-parity.ts ../../server/tests/parity/fixtures
+"""Parity with the TS engine: every input recorded from it (packages/attendance-engine/src/dump-parity.ts, removed with
+the TypeScript stack; see commit 1bbe88b) must give the same output, byte for byte once serialised, including
+inputs_hash. The fixtures are a fixed record: never regenerate them from the Python engine.
 """
 import json
 from pathlib import Path

@@ -1,0 +1,17 @@
+# Used by BuildKit for infra/docker/Dockerfile (instead of the root .dockerignore).
+**/.env
+**/.env.*
+**/gateway.env
+!**/.env.example
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.hypothesis
+**/data
+**/logs
+**/.run
+server/staticfiles
+.admin-credentials
+.git
+infra/pgdata

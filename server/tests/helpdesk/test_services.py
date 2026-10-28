@@ -4,7 +4,7 @@ from datetime import timedelta
 import pytest
 
 from hajiri.core.clock import now
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.core.errors import ValidationError
 from hajiri.helpdesk import services as hd
 from hajiri.worker.registry import daily_jobs

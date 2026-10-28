@@ -12,6 +12,7 @@ from hajiri.web.htmx import htmx_target
 from hajiri.web.nav import area
 
 from . import services
+from .forms import FromHomeFilterForm
 
 
 def _dir_label(d: str) -> str:
@@ -22,13 +23,9 @@ def _dir_label(d: str) -> str:
 @require_role('manager', *area('attendance'))
 def from_home(request):
     today = services.local_date_of(services.to_ms(services._now()))
-    try:
-        to = date.fromisoformat(request.GET.get('date') or today).isoformat()
-    except ValueError:
-        to = today
-    to = min(to, today)
-    span = 'week' if request.GET.get('span') == 'week' else 'day'
-    direction = 'all' if request.GET.get('dir') == 'all' else 'in'
+    f = FromHomeFilterForm(request.GET, initial={'date': today}).values()
+    to = min(str(f['date']), today)
+    span, direction = f['span'], f['dir']
     from_ = (date.fromisoformat(to) - timedelta(days=6)).isoformat() if span == 'week' else to
     everything = services.remote(request.hajiri_user, {'from': from_, 'to': to})['punches']
     shown = [p for p in everything if p['direction'] == 'in'] if direction == 'in' else everything

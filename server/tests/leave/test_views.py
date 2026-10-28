@@ -2,7 +2,7 @@
 import pytest
 from django.test import Client
 
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.leave.service import ledger_balance
 from tests.core.fixtures import PW
 from tests.web.factories import hx_triggers, htmx, sign_in, toasts

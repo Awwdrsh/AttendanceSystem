@@ -4,7 +4,7 @@ requisition cancelling, interview changes, scorecard and offer edge cases, rejec
 """
 import pytest
 
-from hajiri.core.db import one, rows
+from tests.support.sql import one, rows
 from hajiri.core.errors import HttpError
 from hajiri.hiring import services as hiring
 from hajiri.workflow import service as workflow

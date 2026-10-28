@@ -3,7 +3,10 @@ Shifts, holidays, geofence locations, the UI calendar, rosters and shift assignm
 apps/api/src/modules/shifts/routes.ts). Every function takes the signed-in user and a body or query in the TS (camelCase)
 shape, checks roles, company and manager scope as the TS route did, and returns what the route answered.
 
-Pages and HTMX views call these; other slices may too:
+Every query is scoped to the ACTIVE company (`Model.objects.for_company(user.company_id)`): ids of another company
+are simply not found. Bodies are validated with the serializers in serializers.py (the zod schemas).
+
+Pages, HTMX views, the JSON API (api.py) and other slices call these:
 
 - list_shifts(company_id) / shifts(user)       every signed-in user (GET /shifts)
 - holidays(user, query)                        GET /shifts/holidays
@@ -14,18 +17,33 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from django.contrib.postgres.fields import DateRangeField
 from django.db import transaction
+from django.db.backends.postgresql.psycopg_any import DateRange
+from django.db.models import BooleanField, Count, Exists, ExpressionWrapper, F, Func, OuterRef, Q, TextField, Value
+from django.db.models.functions import Cast
 
 from engines.bs_calendar import weekday_of
 from hajiri.attendance.service import date_range, enqueue_recompute
 from hajiri.core.audit import audit
-from hajiri.core.auth import MODULE_ROLES, AuthUser, assert_manages, has_module, has_role
+from hajiri.core.auth import MODULE_ROLES, AuthUser, assert_manages, has_module, has_role, manages
 from hajiri.core.bsdate import bs_range
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute, one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
-from hajiri.core.schema import Arr, Bool, Enum, Hhmm, Int, IsoDate, Num, Obj, Str, Uuid, parse, parse_uuid
+from hajiri.core.validation import parse_uuid, plain, validate
+from hajiri.db.models import (
+    AttendanceDay, Branch, BsCalendar, Company, Employee, EmployeeAssignment, Holiday, Location, Roster, Shift,
+    ShiftAssignment, ShiftSwap,
+)
 from hajiri.notifications.service import notify, user_id_for_employee
+
+from .filters import HolidayFilter
+from .serializers import (
+    AssignIn, CalendarQueryIn, CopyWeekIn, HolidayIn, HolidayQueryIn, ImportDefaultIn, LocationIn, PublishIn,
+    RosterDeleteIn, RosterPutIn, RosterQueryIn, ShiftIn,
+)
+
+ACTIVE = Employee.Status.ACTIVE
 
 # ---------------------------------------------------------------- access helpers
 
@@ -49,91 +67,39 @@ def _iso(v) -> str:
     return v.isoformat() if isinstance(v, date) else str(v)[:10]
 
 
+def _day(v) -> date:
+    return v if isinstance(v, date) else date.fromisoformat(str(v)[:10])
+
+
 def _today() -> str:
     return npt_today().isoformat()
 
 
 def _assert_branch(company_id: str | None, branch_id: str | None) -> None:
     """A branch id from the body must belong to the caller's company."""
-    if not branch_id:
-        return
-    if not one('SELECT 1 AS x FROM branch WHERE id = %s AND company_id = %s', [branch_id, company_id]):
+    if branch_id and not Branch.objects.for_company(company_id).filter(pk=branch_id).exists():
         raise NotFoundError('branch not found')
 
 
 def _active_employee_ids(company_id: str) -> list[str]:
-    return [str(r['id']) for r in rows("SELECT id FROM employee WHERE company_id = %s AND status = 'active'", [company_id])]
+    return [str(i) for i in Employee.objects.for_company(company_id).filter(status=ACTIVE).values_list('id', flat=True)]
 
 
-def _provided(parsed: dict, body: dict) -> dict:
-    """Keys actually present in the request body: PATCH must not apply schema defaults to untouched fields."""
-    keys = set(body.keys()) if isinstance(body, dict) else set()
-    return {k: v for k, v in parsed.items() if k in keys}
+def _lock_company(company_id: str) -> None:
+    """Serialise duplicate checks of one company's holidays (a NULL branch_id never conflicts in the UNIQUE
+    constraint) without blocking inserts that reference the company row."""
+    Company.objects.select_for_update(no_key=True).filter(pk=company_id).first()
 
 
-def _partial(schema: Obj) -> Obj:
-    """zod .partial(): every field optional, defaults not applied."""
-    out = {}
-    for k, s in schema.fields.items():
-        import copy
-        c = copy.copy(s)
-        c.optional = True
-        c.default = _MISSING
-        out[k] = c
-    return Obj(out)
+def _changes(b: dict, columns: list[tuple[str, str]], nullable: tuple[str, ...] = ()) -> dict:
+    """PATCH: the columns of the keys that were sent with a value (null keeps the column, as coalesce() did), plus
+    the `nullable` keys, which are written whenever they are present (null clears them)."""
+    out = {col: b[k] for k, col in columns if b.get(k) is not None}
+    out.update({col: b[k] for k, col in columns if k in nullable and k in b})
+    return out
 
 
-from hajiri.core.schema import MISSING as _MISSING  # noqa: E402
-
-# ---------------------------------------------------------------- schemas
-
-SHIFT_BODY = Obj({
-    'code': Str(min=1, max=20),
-    'nameEn': Str(min=1, max=80),
-    'nameNe': Str(max=80, optional=True),
-    'start': Hhmm(),
-    'end': Hhmm(),
-    'graceInMin': Int(min=0, max=240, default=0),
-    'graceOutMin': Int(min=0, max=240, default=0),
-    'earlyInWindowMin': Int(min=0, max=720, default=60),
-    'lateOutWindowMin': Int(min=0, max=720, default=360),
-    'breakMinutes': Int(min=0, max=240, default=0),
-    'halfDayThresholdMin': Int(min=0, max=720, default=240),
-    'absentThresholdMin': Int(min=0, max=720, default=120),
-    'pairingMode': Enum(['alternating', 'strict_log_type', 'first_last'], default='alternating'),
-    'roundingMin': Int(min=0, max=60, default=0),
-    'roundingDirection': Enum(['nearest', 'down', 'up'], default='nearest'),
-})
-SHIFT_PATCH = _partial(SHIFT_BODY)
-
-HOLIDAY_BODY = Obj({
-    'localDate': IsoDate(),
-    'nameEn': Str(min=1, max=120),
-    'nameNe': Str(max=120, optional=True),
-    'branchId': Uuid(nullable=True, optional=True),
-    'genderScope': Enum(['all', 'female'], default='all'),
-    'optional': Bool(default=False),
-})
-HOLIDAY_PATCH = _partial(HOLIDAY_BODY)
-HOLIDAY_QUERY = Obj({'from': IsoDate(optional=True), 'to': IsoDate(optional=True), 'branchId': Uuid(optional=True)})
-
-LOCATION_BODY = Obj({
-    'name': Str(min=1, max=80),
-    'branchId': Uuid(nullable=True, optional=True),
-    'lat': Num(min=-90, max=90),
-    'lng': Num(min=-180, max=180),
-    'radiusM': Int(min=20, max=5000, default=150),
-})
-LOCATION_PATCH = _partial(LOCATION_BODY)
-
-CALENDAR_QUERY = Obj({'from': IsoDate(), 'to': IsoDate(), 'employeeId': Uuid(optional=True)})
-ROSTER_QUERY = Obj({'from': IsoDate(), 'to': IsoDate(), 'branchId': Uuid(optional=True)})
-ROSTER_PUT = Obj({'rows': Arr(Obj({'employeeId': Uuid(), 'localDate': IsoDate(), 'shiftId': Uuid(nullable=True)}), min=1, max=5000)})
-ROSTER_DELETE = Obj({'employeeId': Uuid(), 'localDate': IsoDate()})
-COPY_WEEK = Obj({'weekStart': IsoDate()})
-PUBLISH = Obj({'from': IsoDate(), 'to': IsoDate()})
-ASSIGN = Obj({'employeeId': Uuid(), 'shiftId': Uuid(), 'from': IsoDate()})
-IMPORT_DEFAULT = Obj({'bsYear': Int()})
+# ---------------------------------------------------------------- the default holiday list
 
 # Public holidays for BS 2083 (14 Apr 2026 to 13 Apr 2027), checked in October 2026 against the published lists on
 # hamropatro.com and katigate.com. Community or region-specific days (Eid, Lhosars, Indra Jatra, Holi by region) are
@@ -184,25 +150,27 @@ HOLIDAYS_2083: list[tuple[str, str, str, bool]] = [
 ]
 
 
-def _bs_of(ad: str) -> str | None:
-    r = one('SELECT bs_date FROM bs_calendar WHERE ad_date = %s', [ad])
-    return r['bs_date'] if r else None
+def _bs_of(ad) -> str | None:
+    return BsCalendar.objects.filter(ad_date=ad).values_list('bs_date', flat=True).first()
 
 
 # ---------------------------------------------------------------- holidays (plan §5.7)
 
+HOLIDAY_VALUES = ('id', 'branch_id', 'local_date', 'bs_date', 'name_en', 'name_ne', 'gender_scope', 'optional')
+_HOLIDAY_COLUMNS = [('localDate', 'local_date'), ('nameEn', 'name_en'), ('nameNe', 'name_ne'), ('branchId', 'branch_id'),
+                    ('genderScope', 'gender_scope'), ('optional', 'optional')]
+
+
 def holidays(user: AuthUser, query: dict | None = None) -> list[dict]:
-    q = parse(HOLIDAY_QUERY, query or {})
-    return rows("""SELECT h.id, h.branch_id, h.local_date, h.bs_date, h.name_en, h.name_ne, h.gender_scope, h.optional FROM holiday h
-                    WHERE h.company_id = %s AND (%s::date IS NULL OR h.local_date >= %s::date) AND (%s::date IS NULL OR h.local_date <= %s::date)
-                      AND (%s::uuid IS NULL OR h.branch_id IS NULL OR h.branch_id = %s::uuid) ORDER BY h.local_date""",
-                [user.company_id, q.get('from'), q.get('from'), q.get('to'), q.get('to'), q.get('branchId'), q.get('branchId')])
+    q = plain(validate(HolidayQueryIn, query or {}))
+    f = HolidayFilter({'date_from': q.get('from'), 'date_to': q.get('to'), 'branch': q.get('branchId')},
+                      queryset=Holiday.objects.for_company(user.company_id))
+    return list(f.qs.order_by('local_date', 'id').values(*HOLIDAY_VALUES))
 
 
 def get_holiday(user: AuthUser, holiday_id: str) -> dict:
     hid = parse_uuid(holiday_id)
-    r = one("""SELECT id, branch_id, local_date, bs_date, name_en, name_ne, gender_scope, optional FROM holiday
-                WHERE id = %s AND company_id = %s""", [hid, user.company_id])
+    r = Holiday.objects.for_company(user.company_id).filter(pk=hid).values(*HOLIDAY_VALUES).first()
     if not r:
         raise NotFoundError('holiday not found')
     return r
@@ -210,39 +178,38 @@ def get_holiday(user: AuthUser, holiday_id: str) -> dict:
 
 def create_holiday(user: AuthUser, body: dict) -> dict:
     _require_module(user, 'attendance')
-    b = parse(HOLIDAY_BODY, body)
+    b = plain(validate(HolidayIn, body))
+    cid = user.company_id
     with transaction.atomic():
-        _assert_branch(user.company_id, b.get('branchId'))
+        _assert_branch(cid, b.get('branchId'))
+        _lock_company(cid)
         # The UNIQUE constraint treats NULL branch_id as distinct, so company-wide duplicates must be refused explicitly.
-        if one("""SELECT 1 AS x FROM holiday WHERE company_id = %s AND branch_id IS NOT DISTINCT FROM %s::uuid AND local_date = %s
-                  AND name_en = %s""", [user.company_id, b.get('branchId'), b['localDate'], b['nameEn']]):
+        if Holiday.objects.for_company(cid).filter(branch_id=b.get('branchId'), local_date=b['localDate'], name_en=b['nameEn']).exists():
             raise ConflictError('this holiday already exists for that date')
-        ins = one("""INSERT INTO holiday (company_id, branch_id, local_date, bs_date, name_en, name_ne, gender_scope, optional)
-                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                  [user.company_id, b.get('branchId'), b['localDate'], _bs_of(b['localDate']), b['nameEn'], b.get('nameNe'),
-                   b['genderScope'], b['optional']])
+        h = Holiday.objects.create(company_id=cid, branch_id=b.get('branchId'), local_date=b['localDate'], bs_date=_bs_of(b['localDate']),
+                                   name_en=b['nameEn'], name_ne=b.get('nameNe'), gender_scope=b['genderScope'], optional=b['optional'])
         ids = _active_employee_ids(_company_of(user))
         enqueue_recompute([(e, b['localDate']) for e in ids], 'holiday_added')
-        audit('create', 'holiday', actor_id=user.id, row_id=ins['id'], after=b)
-    return {'id': str(ins['id']), 'recomputeQueued': len(ids)}
+        audit('create', 'holiday', actor_id=user.id, row_id=h.id, after=b)
+    return {'id': str(h.id), 'recomputeQueued': len(ids)}
 
 
 def update_holiday(user: AuthUser, holiday_id: str, body: dict) -> dict:
     _require_module(user, 'attendance')
     hid = parse_uuid(holiday_id)
-    b = _provided(parse(HOLIDAY_PATCH, body), body)
+    b = plain(validate(HolidayIn, body, partial=True))
+    cid = user.company_id
     with transaction.atomic():
-        _assert_branch(user.company_id, b.get('branchId'))
-        before = one('SELECT local_date FROM holiday WHERE id = %s AND company_id = %s', [hid, user.company_id])
+        _assert_branch(cid, b.get('branchId'))
+        before = Holiday.objects.for_company(cid).select_for_update().filter(pk=hid).values('local_date').first()
         if not before:
             raise NotFoundError('holiday not found')
+        changes = _changes(b, _HOLIDAY_COLUMNS, nullable=('branchId',))
         bs = _bs_of(b['localDate']) if b.get('localDate') else None
-        execute("""UPDATE holiday SET local_date = coalesce(%s::date, local_date), bs_date = coalesce(%s, bs_date),
-                          name_en = coalesce(%s, name_en), name_ne = coalesce(%s, name_ne),
-                          branch_id = CASE WHEN %s THEN %s::uuid ELSE branch_id END, gender_scope = coalesce(%s, gender_scope),
-                          optional = coalesce(%s, optional) WHERE id = %s""",
-                [b.get('localDate'), bs, b.get('nameEn'), b.get('nameNe'), 'branchId' in b, b.get('branchId'),
-                 b.get('genderScope'), b.get('optional'), hid])
+        if bs is not None:
+            changes['bs_date'] = bs
+        if changes:
+            Holiday.objects.filter(pk=hid).update(**changes)
         ids = _active_employee_ids(_company_of(user))
         dates = list(dict.fromkeys([_iso(before['local_date'])] + ([b['localDate']] if b.get('localDate') else [])))
         enqueue_recompute([(e, d) for e in ids for d in dates], 'holiday_changed')
@@ -254,32 +221,35 @@ def delete_holiday(user: AuthUser, holiday_id: str) -> dict:
     _require_module(user, 'attendance')
     hid = parse_uuid(holiday_id)
     with transaction.atomic():
-        d = one('DELETE FROM holiday WHERE id = %s AND company_id = %s RETURNING local_date', [hid, user.company_id])
-        if not d:
+        found = Holiday.objects.for_company(user.company_id).select_for_update().filter(pk=hid).values('local_date').first()
+        if not found:
             raise NotFoundError('holiday not found')
+        Holiday.objects.filter(pk=hid).delete()
+        day = _iso(found['local_date'])
         ids = _active_employee_ids(_company_of(user))
-        enqueue_recompute([(e, _iso(d['local_date'])) for e in ids], 'holiday_removed')
-        audit('delete', 'holiday', actor_id=user.id, row_id=hid, before={'local_date': _iso(d['local_date'])})
+        enqueue_recompute([(e, day) for e in ids], 'holiday_removed')
+        audit('delete', 'holiday', actor_id=user.id, row_id=hid, before={'local_date': day})
     return {'ok': True}
 
 
 def import_default_holidays(user: AuthUser, body: dict) -> dict:
     """Load the default MoHA-style list for a BS year (only 2083 shipped; plan §16.7 SOP updates it each Chaitra)."""
     _require_module(user, 'attendance')
-    b = parse(IMPORT_DEFAULT, body)
+    b = validate(ImportDefaultIn, body)
     if b['bsYear'] != 2083:
         raise BadRequestError('default list available for BS 2083 only; add others via POST /shifts/holidays')
-    inserted_dates: list[str] = []
+    cid = user.company_id
+    days = [date.fromisoformat(ad) for ad, *_ in HOLIDAYS_2083]
     with transaction.atomic():
-        for ad, en, scope, optional in HOLIDAYS_2083:
-            # UNIQUE with a NULL branch_id never conflicts in SQL, so idempotency is an explicit existence check.
-            n = execute("""INSERT INTO holiday (company_id, branch_id, local_date, bs_date, name_en, gender_scope, optional)
-                           SELECT %s, NULL, %s::date, (SELECT bs_date FROM bs_calendar WHERE ad_date = %s::date), %s, %s, %s
-                            WHERE NOT EXISTS (SELECT 1 FROM holiday WHERE company_id = %s AND branch_id IS NULL AND local_date = %s::date
-                                              AND name_en = %s)""",
-                        [user.company_id, ad, ad, en, scope, optional, user.company_id, ad, en])
-            if n > 0:
-                inserted_dates.append(ad)
+        _lock_company(cid)
+        # UNIQUE with a NULL branch_id never conflicts in SQL, so idempotency is an explicit existence check.
+        existing = set(Holiday.objects.for_company(cid).filter(branch__isnull=True, local_date__in=days)
+                       .values_list('local_date', 'name_en'))
+        bs = dict(BsCalendar.objects.filter(ad_date__in=days).values_list('ad_date', 'bs_date'))
+        new = [Holiday(company_id=cid, branch=None, local_date=d, bs_date=bs.get(d), name_en=en, gender_scope=scope, optional=optional)
+               for d, (_ad, en, scope, optional) in zip(days, HOLIDAYS_2083) if (d, en) not in existing]
+        Holiday.objects.bulk_create(new)
+        inserted_dates = [h.local_date.isoformat() for h in new]
         if inserted_dates:
             ids = _active_employee_ids(_company_of(user))
             enqueue_recompute([(e, ad) for e in ids for ad in inserted_dates], 'holiday_import')
@@ -289,32 +259,34 @@ def import_default_holidays(user: AuthUser, body: dict) -> dict:
 
 # ---------------------------------------------------------------- locations (mobile geofence, plan §5.2)
 
+_LOCATION_COLUMNS = [('name', 'name'), ('lat', 'lat'), ('lng', 'lng'), ('radiusM', 'radius_m'), ('branchId', 'branch_id')]
+
+
 def locations(user: AuthUser) -> list[dict]:
-    return rows('SELECT id, branch_id, name, lat, lng, radius_m FROM location WHERE company_id = %s ORDER BY name', [user.company_id])
+    return list(Location.objects.for_company(user.company_id).order_by('name', 'id')
+                .values('id', 'branch_id', 'name', 'lat', 'lng', 'radius_m'))
 
 
 def create_location(user: AuthUser, body: dict) -> dict:
     _require_module(user, 'attendance')
-    b = parse(LOCATION_BODY, body)
+    b = plain(validate(LocationIn, body))
     with transaction.atomic():
         _assert_branch(user.company_id, b.get('branchId'))
-        ins = one('INSERT INTO location (company_id, branch_id, name, lat, lng, radius_m) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id',
-                  [user.company_id, b.get('branchId'), b['name'], b['lat'], b['lng'], b['radiusM']])
-        audit('create', 'location', actor_id=user.id, row_id=ins['id'], after=b)
-    return {'id': str(ins['id'])}
+        loc = Location.objects.create(company_id=user.company_id, branch_id=b.get('branchId'), name=b['name'], lat=b['lat'],
+                                      lng=b['lng'], radius_m=b['radiusM'])
+        audit('create', 'location', actor_id=user.id, row_id=loc.id, after=b)
+    return {'id': str(loc.id)}
 
 
 def update_location(user: AuthUser, location_id: str, body: dict) -> dict:
     _require_module(user, 'attendance')
     lid = parse_uuid(location_id)
-    b = _provided(parse(LOCATION_PATCH, body), body)
+    b = plain(validate(LocationIn, body, partial=True))
     with transaction.atomic():
         _assert_branch(user.company_id, b.get('branchId'))
-        n = execute("""UPDATE location SET name = coalesce(%s, name), lat = coalesce(%s, lat), lng = coalesce(%s, lng),
-                              radius_m = coalesce(%s, radius_m), branch_id = CASE WHEN %s THEN %s::uuid ELSE branch_id END
-                        WHERE id = %s AND company_id = %s""",
-                    [b.get('name'), b.get('lat'), b.get('lng'), b.get('radiusM'), 'branchId' in b, b.get('branchId'), lid, user.company_id])
-        if not n:
+        found = Location.objects.for_company(user.company_id).filter(pk=lid)
+        changes = _changes(b, _LOCATION_COLUMNS, nullable=('branchId',))
+        if not (found.update(**changes) if changes else found.exists()):
             raise NotFoundError('location not found')
         audit('update', 'location', actor_id=user.id, row_id=lid, after=b)
     return {'ok': True}
@@ -324,7 +296,8 @@ def delete_location(user: AuthUser, location_id: str) -> dict:
     _require_module(user, 'attendance')
     lid = parse_uuid(location_id)
     with transaction.atomic():
-        if not execute('DELETE FROM location WHERE id = %s AND company_id = %s', [lid, user.company_id]):
+        deleted, _ = Location.objects.for_company(user.company_id).filter(pk=lid).delete()
+        if not deleted:
             raise NotFoundError('location not found')
         audit('delete', 'location', actor_id=user.id, row_id=lid)
     return {'ok': True}
@@ -334,21 +307,20 @@ def delete_location(user: AuthUser, location_id: str) -> dict:
 
 def calendar(user: AuthUser, query: dict) -> dict:
     """{'days': [{date, bsDate, weekday, weeklyOff, holidays: [{local_date, name_en, name_ne, gender_scope, optional, branch_id}]}]}"""
-    q = parse(CALENDAR_QUERY, query)
+    q = plain(validate(CalendarQueryIn, query))
     if q['to'] < q['from'] or (date.fromisoformat(q['to']) - date.fromisoformat(q['from'])).days >= 400:
         raise BadRequestError('range must be 1 to 400 days')
     dates = date_range(q['from'], q['to'])
     weekly_off = [6]
     if q.get('employeeId'):
-        emp = one('SELECT weekly_off_days FROM employee WHERE id = %s AND company_id = %s', [q['employeeId'], user.company_id])
+        emp = Employee.objects.for_company(user.company_id).filter(pk=q['employeeId']).values('weekly_off_days').first()
         if not emp:
             raise NotFoundError('employee not found')
         assert_manages(user, q['employeeId'], 'attendance')  # self, their manager or HR only
         weekly_off = list(emp['weekly_off_days'] or [])
-    hol = rows("""SELECT local_date, name_en, name_ne, gender_scope, optional, branch_id FROM holiday
-                   WHERE company_id = %s AND local_date BETWEEN %s AND %s ORDER BY local_date""", [user.company_id, q['from'], q['to']])
-    bs = {_iso(r['ad_date']): r['bs_date'] for r in rows('SELECT ad_date, bs_date FROM bs_calendar WHERE ad_date BETWEEN %s AND %s',
-                                                          [q['from'], q['to']])}
+    hol = (Holiday.objects.for_company(user.company_id).filter(local_date__range=(q['from'], q['to'])).order_by('local_date', 'id')
+           .values('local_date', 'name_en', 'name_ne', 'gender_scope', 'optional', 'branch_id'))
+    bs = {_iso(ad): b for ad, b in BsCalendar.objects.filter(ad_date__range=(q['from'], q['to'])).values_list('ad_date', 'bs_date')}
     by_day: dict[str, list[dict]] = {}
     for h in hol:
         h = {**h, 'local_date': _iso(h['local_date'])}
@@ -363,23 +335,63 @@ def _roster_roles(user: AuthUser) -> None:
     _require(user, *MODULE_ROLES['attendance'], 'manager')
 
 
+def _manageable(user: AuthUser, employee_ids: set[str]) -> set[str]:
+    """Which of these employees (already known to be in the active company) the user may roster: assert_manages
+    without an area, for many people in one query. HR and admin every one, anyone themselves, a manager the people
+    they manage today."""
+    if has_role(user, 'hr'):
+        return set(employee_ids)
+    mine = {user.employee_id} & employee_ids if user.employee_id else set()
+    if has_role(user, 'manager') and user.employee_id and employee_ids - mine:
+        mine |= {str(i) for i in Employee.objects.filter(pk__in=employee_ids - mine)
+                 .filter(manages(user.employee_id)).values_list('id', flat=True)}
+    return mine
+
+
+def _team_rosters(user: AuthUser, *, include_self: bool = False):
+    """Roster cells of the active company; for a line manager (no attendance module) only the people they manage
+    today (and, with include_self, their own row)."""
+    qs = Roster.objects.for_company(user.company_id)
+    if has_module(user, 'attendance'):
+        return qs
+    mine = manages(user.employee_id, F('employee_id'))
+    return qs.filter(mine | Q(employee_id=user.employee_id) if include_self else mine)
+
+
+def _locked_days(company_id: str, pairs) -> set[tuple[str, str]]:
+    """The (employee_id, 'YYYY-MM-DD') pairs of the company whose newest attendance version is locked by payroll
+    (v_attendance_latest with locked_at set), in one query."""
+    pairs = {(str(e), _iso(d)) for e, d in pairs}
+    if not pairs:
+        return set()
+    newer = AttendanceDay.objects.filter(employee_id=OuterRef('employee_id'), local_date=OuterRef('local_date'), version__gt=OuterRef('version'))
+    locked = (AttendanceDay.objects.for_company(company_id).filter(employee_id__in={e for e, _ in pairs}, local_date__in={d for _, d in pairs}, locked_at__isnull=False)
+              .exclude(Exists(newer)).values_list('employee_id', 'local_date'))
+    return {(str(e), _iso(d)) for e, d in locked} & pairs
+
+
+def _upsert_cells(cells: dict[tuple[str, str], str | None]) -> None:
+    """INSERT ... ON CONFLICT (employee_id, local_date) DO UPDATE SET shift_id = EXCLUDED.shift_id."""
+    Roster.objects.bulk_create([Roster(employee_id=e, local_date=d, shift_id=s) for (e, d), s in cells.items()],
+                               update_conflicts=True, unique_fields=['employee', 'local_date'], update_fields=['shift'])
+
+
 def roster(user: AuthUser, query: dict) -> dict:
     """Line managers roster their own reports only (and themselves); HR sees the company."""
     _roster_roles(user)
-    q = parse(ROSTER_QUERY, query)
-    team_only = not has_module(user, 'attendance')
-    emps = rows("""SELECT e.id, e.emp_code, e.name_en, e.name_ne, e.weekly_off_days,
-                          (SELECT s.shift_id FROM shift_assignment s WHERE s.employee_id = e.id AND s.valid @> %s::date) AS default_shift_id
-                     FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date
-                    WHERE e.company_id = %s AND e.status = 'active' AND (%s::uuid IS NULL OR a.branch_id = %s::uuid)
-                      AND (NOT %s OR hj_manages(%s::uuid, e.id, (now() AT TIME ZONE 'Asia/Kathmandu')::date) OR e.id = %s::uuid) ORDER BY e.emp_code""",
-                [q['from'], user.company_id, q.get('branchId'), q.get('branchId'), team_only, user.employee_id, user.employee_id])
-    cells = rows("""SELECT r.employee_id, r.local_date, r.shift_id FROM roster r JOIN employee e ON e.id = r.employee_id
-                     LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date
-                     WHERE e.company_id = %s AND r.local_date BETWEEN %s AND %s
-                       AND (NOT %s OR hj_manages(%s::uuid, e.id, (now() AT TIME ZONE 'Asia/Kathmandu')::date) OR e.id = %s::uuid)""",
-                 [user.company_id, q['from'], q['to'], team_only, user.employee_id, user.employee_id])
-    for e in emps:
+    q = plain(validate(RosterQueryIn, query))
+    today = npt_today()
+    emps = Employee.objects.for_company(user.company_id).filter(status=ACTIVE)
+    if q.get('branchId'):
+        emps = emps.filter(Exists(EmployeeAssignment.objects.filter(employee=OuterRef('pk'), valid__contains=today, branch_id=q['branchId'])))
+    if not has_module(user, 'attendance'):
+        emps = emps.filter(manages(user.employee_id) | Q(pk=user.employee_id))
+    default_shift = ShiftAssignment.objects.filter(employee=OuterRef('pk'), valid__contains=_day(q['from'])).values('shift_id')[:1]
+    employees = list(emps.annotate(default_shift_id=default_shift).order_by('emp_code', 'id')
+                     .values('id', 'emp_code', 'name_en', 'name_ne', 'weekly_off_days', 'default_shift_id'))
+    cells = list(_team_rosters(user, include_self=True).filter(local_date__range=(q['from'], q['to']))
+                 .values('employee_id', 'local_date', 'shift_id'))
+    for e in employees:
         e['id'] = str(e['id'])
         e['default_shift_id'] = str(e['default_shift_id']) if e['default_shift_id'] else None
         e['weekly_off_days'] = list(e['weekly_off_days'] or [])
@@ -387,49 +399,46 @@ def roster(user: AuthUser, query: dict) -> dict:
         c['employee_id'] = str(c['employee_id'])
         c['local_date'] = _iso(c['local_date'])
         c['shift_id'] = str(c['shift_id']) if c['shift_id'] else None
-    return {'employees': emps, 'roster': cells}
-
-
-def _locked(employee_id: str, local_date: str) -> bool:
-    return bool(one("""SELECT 1 AS x FROM v_attendance_latest WHERE employee_id = %s AND local_date = %s AND locked_at IS NOT NULL""",
-                    [employee_id, local_date]))
+    return {'employees': employees, 'roster': cells}
 
 
 def save_roster(user: AuthUser, body: dict) -> dict:
     """PUT /shifts/roster: upsert cells (shiftId null = rostered off). All or nothing."""
     _roster_roles(user)
-    b = parse(ROSTER_PUT, body)
+    b = plain(validate(RosterPutIn, body))
+    cid = user.company_id
+    rows = b['rows']
     with transaction.atomic():
-        checked_emps: set[str] = set()
-        checked_shifts: set[str] = set()
-        for row in b['rows']:
-            if row['employeeId'] not in checked_emps:
-                if not one('SELECT 1 AS x FROM employee WHERE id = %s AND company_id = %s', [row['employeeId'], user.company_id]):
-                    raise NotFoundError(f"employee {row['employeeId']} not found")
-                assert_manages(user, row['employeeId'])
-                checked_emps.add(row['employeeId'])
-            if row['shiftId'] and row['shiftId'] not in checked_shifts:
-                if not one('SELECT 1 AS x FROM shift WHERE id = %s AND company_id = %s', [row['shiftId'], user.company_id]):
-                    raise NotFoundError(f"shift {row['shiftId']} not found")
-                checked_shifts.add(row['shiftId'])
-            if _locked(row['employeeId'], row['localDate']):
+        # Three queries for the whole body (not three per employee); the checks still run row by row so the first
+        # problem in body order is the one reported, as before.
+        emp_ids = {r['employeeId'] for r in rows}
+        known_emps = {str(i) for i in Employee.objects.for_company(cid).filter(pk__in=emp_ids).values_list('id', flat=True)}
+        allowed = _manageable(user, known_emps)
+        known_shifts = {str(i) for i in Shift.objects.for_company(cid).filter(pk__in={r['shiftId'] for r in rows if r['shiftId']})
+                        .values_list('id', flat=True)}
+        locked = _locked_days(cid, ((r['employeeId'], r['localDate']) for r in rows))
+        for row in rows:
+            if row['employeeId'] not in known_emps:
+                raise NotFoundError(f"employee {row['employeeId']} not found")
+            if row['employeeId'] not in allowed:
+                raise ForbiddenError('not allowed to access this employee')
+            if row['shiftId'] and row['shiftId'] not in known_shifts:
+                raise NotFoundError(f"shift {row['shiftId']} not found")
+            if (row['employeeId'], row['localDate']) in locked:
                 raise ConflictError(f"attendance for {row['localDate']} is locked by payroll")
-            execute("""INSERT INTO roster (employee_id, local_date, shift_id) VALUES (%s, %s, %s)
-                       ON CONFLICT (employee_id, local_date) DO UPDATE SET shift_id = EXCLUDED.shift_id""",
-                    [row['employeeId'], row['localDate'], row['shiftId']])
-        enqueue_recompute([(x['employeeId'], x['localDate']) for x in b['rows']], 'roster_changed')
-        audit('update', 'roster', actor_id=user.id, after={'rows': len(b['rows'])})
-    return {'upserted': len(b['rows'])}
+        _upsert_cells({(r['employeeId'], r['localDate']): r['shiftId'] for r in rows})   # a repeated cell: the last wins
+        enqueue_recompute([(x['employeeId'], x['localDate']) for x in rows], 'roster_changed')
+        audit('update', 'roster', actor_id=user.id, after={'rows': len(rows)})
+    return {'upserted': len(rows)}
 
 
 def clear_roster(user: AuthUser, body: dict) -> dict:
     """DELETE /shifts/roster: the cell goes back to the person's normal shift."""
     _roster_roles(user)
-    b = parse(ROSTER_DELETE, body)
+    b = plain(validate(RosterDeleteIn, body))
     assert_manages(user, b['employeeId'], 'attendance')
     with transaction.atomic():
-        n = execute("""DELETE FROM roster r USING employee e WHERE e.id = r.employee_id AND r.employee_id = %s AND r.local_date = %s
-                       AND e.company_id = %s""", [b['employeeId'], b['localDate'], user.company_id])
+        n, _ = Roster.objects.for_company(user.company_id).filter(employee_id=b['employeeId'], local_date=b['localDate']).delete()
         if n:
             enqueue_recompute([(b['employeeId'], b['localDate'])], 'roster_removed')
     return {'deleted': n or 0}
@@ -438,25 +447,18 @@ def clear_roster(user: AuthUser, body: dict) -> dict:
 def copy_week(user: AuthUser, body: dict) -> dict:
     """Copy last week's roster rows onto the week starting weekStart (plan §5.3 "copy last week")."""
     _roster_roles(user)
-    b = parse(COPY_WEEK, body)
-    team_only = not has_module(user, 'attendance')
+    b = plain(validate(CopyWeekIn, body))
+    start = date.fromisoformat(b['weekStart'])
     with transaction.atomic():
-        src = rows("""SELECT r.employee_id, r.local_date, r.shift_id FROM roster r JOIN employee e ON e.id = r.employee_id
-                       LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date
-                       WHERE e.company_id = %s AND r.local_date >= %s::date - 7 AND r.local_date < %s::date
-                         AND (NOT %s OR hj_manages(%s::uuid, e.id, (now() AT TIME ZONE 'Asia/Kathmandu')::date))""",
-                   [user.company_id, b['weekStart'], b['weekStart'], team_only, user.employee_id])
-        items: list[tuple[str, str]] = []
-        skipped = 0
-        for row in src:
-            target = (date.fromisoformat(_iso(row['local_date'])) + timedelta(days=7)).isoformat()
-            if _locked(row['employee_id'], target):
-                skipped += 1
-                continue
-            execute("""INSERT INTO roster (employee_id, local_date, shift_id) VALUES (%s, %s, %s)
-                       ON CONFLICT (employee_id, local_date) DO UPDATE SET shift_id = EXCLUDED.shift_id""",
-                    [row['employee_id'], target, row['shift_id']])
-            items.append((str(row['employee_id']), target))
+        src = list(_team_rosters(user).filter(local_date__gte=start - timedelta(days=7), local_date__lt=start)
+                   .values_list('employee_id', 'local_date', 'shift_id'))
+        targets = [(str(e), (d + timedelta(days=7)).isoformat(), s) for e, d, s in src]
+        locked = _locked_days(user.company_id, ((e, d) for e, d, _ in targets))
+        copy = {(e, d): s for e, d, s in targets if (e, d) not in locked}
+        skipped = len(targets) - len(copy)
+        if copy:
+            _upsert_cells(copy)
+        items = list(copy)
         enqueue_recompute(items, 'roster_copied')
         audit('copy_week', 'roster', actor_id=user.id, after={'weekStart': b['weekStart'], 'copied': len(items), 'skippedLocked': skipped})
     return {'copied': len(items), 'skippedLocked': skipped}
@@ -465,14 +467,10 @@ def copy_week(user: AuthUser, body: dict) -> dict:
 def publish_roster(user: AuthUser, body: dict) -> dict:
     """Publish: tell each rostered employee their shifts for the range. A line manager publishes only their own team."""
     _roster_roles(user)
-    b = parse(PUBLISH, body)
-    team_only = not has_module(user, 'attendance')
+    b = plain(validate(PublishIn, body))
     with transaction.atomic():
-        per = rows("""SELECT r.employee_id, count(*)::text AS n FROM roster r JOIN employee e ON e.id = r.employee_id
-                       LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date
-                       WHERE e.company_id = %s AND r.local_date BETWEEN %s AND %s AND (NOT %s OR hj_manages(%s::uuid, e.id, (now() AT TIME ZONE 'Asia/Kathmandu')::date))
-                       GROUP BY r.employee_id""",
-                   [user.company_id, b['from'], b['to'], team_only, user.employee_id])
+        per = list(_team_rosters(user).filter(local_date__range=(b['from'], b['to']))
+                   .values('employee_id').annotate(n=Count('local_date')).order_by('employee_id'))
         for row in per:
             emp = str(row['employee_id'])
             notify(company_id=user.company_id, user_id=user_id_for_employee(emp), employee_id=emp, template='roster.published',
@@ -487,17 +485,19 @@ def publish_roster(user: AuthUser, body: dict) -> dict:
 def assign_shift(user: AuthUser, body: dict) -> dict:
     """Effective-dated: the person's shift from `from` onwards; later assignments are replaced."""
     _require_module(user, 'attendance')
-    b = parse(ASSIGN, body)
-    if not one("""SELECT 1 AS x FROM employee e JOIN shift s ON s.company_id = e.company_id WHERE e.id = %s AND s.id = %s
-                  AND e.company_id = %s""", [b['employeeId'], b['shiftId'], user.company_id]):
+    b = plain(validate(AssignIn, body))
+    cid = user.company_id
+    if not (Employee.objects.for_company(cid).filter(pk=b['employeeId']).exists()
+            and Shift.objects.for_company(cid).filter(pk=b['shiftId']).exists()):
         raise NotFoundError('employee or shift not found')
+    frm = date.fromisoformat(b['from'])
     with transaction.atomic():
-        execute('DELETE FROM shift_assignment WHERE employee_id = %s AND lower(valid) >= %s::date', [b['employeeId'], b['from']])
-        execute("""UPDATE shift_assignment SET valid = daterange(lower(valid), %s::date)
-                    WHERE employee_id = %s AND valid @> %s::date AND lower(valid) < %s::date""",
-                [b['from'], b['employeeId'], b['from'], b['from']])
-        execute('INSERT INTO shift_assignment (employee_id, shift_id, valid) VALUES (%s, %s, daterange(%s::date, NULL))',
-                [b['employeeId'], b['shiftId'], b['from']])
+        mine = ShiftAssignment.objects.for_company(cid).filter(employee_id=b['employeeId'])
+        mine.filter(valid__startswith__gte=frm).delete()
+        # The assignment running on `from` now ends the day before: daterange(lower(valid), from).
+        mine.filter(valid__contains=frm, valid__startswith__lt=frm).update(
+            valid=Func(Func(F('valid'), function='lower'), Value(frm), function='daterange', output_field=DateRangeField()))
+        ShiftAssignment.objects.create(employee_id=b['employeeId'], shift_id=b['shiftId'], valid=DateRange(frm, None))
         audit('assign', 'shift_assignment', actor_id=user.id, row_id=b['employeeId'], after=b)
     today = _today()
     if b['from'] <= today:
@@ -508,10 +508,9 @@ def assign_shift(user: AuthUser, body: dict) -> dict:
 
 # ---------------------------------------------------------------- shift CRUD
 
-SHIFT_COLS = """s.id, s.code, s.name_en, s.name_ne, s.start_time::text AS start, s.end_time::text AS "end", s.grace_in_min,
-  s.grace_out_min, s.early_in_window_min, s.late_out_window_min, s.break_minutes, s.half_day_threshold_min, s.absent_threshold_min,
-  s.pairing_mode, s.rounding_min, s.rounding_direction, (s.end_time <= s.start_time) AS crosses_midnight,
-  (SELECT count(*) FROM shift_assignment a WHERE a.shift_id = s.id AND a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date)::int AS assigned_employees"""
+SHIFT_VALUES = ('id', 'code', 'name_en', 'name_ne', 'start', 'end', 'grace_in_min', 'grace_out_min', 'early_in_window_min',
+                'late_out_window_min', 'break_minutes', 'half_day_threshold_min', 'absent_threshold_min', 'pairing_mode',
+                'rounding_min', 'rounding_direction', 'crosses_midnight', 'assigned_employees')
 
 _COLUMN_OF = [('code', 'code'), ('nameEn', 'name_en'), ('nameNe', 'name_ne'), ('start', 'start_time'), ('end', 'end_time'),
               ('graceInMin', 'grace_in_min'), ('graceOutMin', 'grace_out_min'), ('earlyInWindowMin', 'early_in_window_min'),
@@ -520,13 +519,23 @@ _COLUMN_OF = [('code', 'code'), ('nameEn', 'name_en'), ('nameNe', 'name_ne'), ('
               ('pairingMode', 'pairing_mode'), ('roundingMin', 'rounding_min'), ('roundingDirection', 'rounding_direction')]
 
 
+def _shift_rows(company_id: str | None):
+    """The company's shifts in the TS row shape: start/end as 'HH:MM:SS' text, whether the shift runs past midnight
+    and how many people are on it today."""
+    return (Shift.objects.for_company(company_id)
+            .annotate(start=Cast('start_time', TextField()), end=Cast('end_time', TextField()),
+                      crosses_midnight=ExpressionWrapper(Q(end_time__lte=F('start_time')), output_field=BooleanField()),
+                      assigned_employees=Count('shift_assignments', filter=Q(shift_assignments__valid__contains=npt_today())))
+            .values(*SHIFT_VALUES))
+
+
 def _shift_row(r: dict) -> dict:
     r['id'] = str(r['id'])
     return r
 
 
 def list_shifts(company_id: str | None) -> list[dict]:
-    return [_shift_row(r) for r in rows(f'SELECT {SHIFT_COLS} FROM shift s WHERE s.company_id = %s ORDER BY s.code', [company_id])]
+    return [_shift_row(r) for r in _shift_rows(company_id).order_by('code')]
 
 
 def shifts(user: AuthUser) -> list[dict]:
@@ -536,7 +545,7 @@ def shifts(user: AuthUser) -> list[dict]:
 
 def get_shift(user: AuthUser, shift_id: str) -> dict:
     sid = parse_uuid(shift_id)
-    r = one(f'SELECT {SHIFT_COLS} FROM shift s WHERE s.id = %s AND s.company_id = %s', [sid, user.company_id])
+    r = _shift_rows(user.company_id).filter(pk=sid).first()
     if not r:
         raise NotFoundError('shift not found')
     return _shift_row(r)
@@ -544,39 +553,30 @@ def get_shift(user: AuthUser, shift_id: str) -> dict:
 
 def create_shift(user: AuthUser, body: dict) -> dict:
     _require_module(user, 'attendance')
-    b = parse(SHIFT_BODY, body)
+    b = plain(validate(ShiftIn, body))
     with transaction.atomic():
-        ins = one("""INSERT INTO shift (company_id, code, name_en, name_ne, start_time, end_time, grace_in_min, grace_out_min,
-                       early_in_window_min, late_out_window_min, break_minutes, half_day_threshold_min, absent_threshold_min,
-                       pairing_mode, rounding_min, rounding_direction)
-                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                  [user.company_id, b['code'], b['nameEn'], b.get('nameNe'), b['start'], b['end'], b['graceInMin'], b['graceOutMin'],
-                   b['earlyInWindowMin'], b['lateOutWindowMin'], b['breakMinutes'], b['halfDayThresholdMin'], b['absentThresholdMin'],
-                   b['pairingMode'], b['roundingMin'], b['roundingDirection']])
-        audit('create', 'shift', actor_id=user.id, row_id=ins['id'], after=b)
-    return {'id': str(ins['id'])}
+        s = Shift.objects.create(company_id=user.company_id, name_ne=b.get('nameNe'),
+                                 **{col: b[k] for k, col in _COLUMN_OF if k != 'nameNe'})
+        audit('create', 'shift', actor_id=user.id, row_id=s.id, after=b)
+    return {'id': str(s.id)}
 
 
 def update_shift(user: AuthUser, shift_id: str, body: dict) -> dict:
     """Rule changes apply going forward: unlocked days of this month are recomputed for the people on the shift."""
     _require_module(user, 'attendance')
     sid = parse_uuid(shift_id)
-    b = _provided(parse(SHIFT_PATCH, body), body)
+    b = plain(validate(ShiftIn, body, partial=True))
     with transaction.atomic():
-        before = one(f'SELECT {SHIFT_COLS} FROM shift s WHERE s.id = %s AND s.company_id = %s', [sid, user.company_id])
+        before = _shift_rows(user.company_id).filter(pk=sid).first()
         if not before:
             raise NotFoundError('shift not found')
-        sets, vals = [], []
-        for k, col in _COLUMN_OF:
-            if b.get(k) is not None:
-                sets.append(f'{col} = %s')
-                vals.append(b[k])
-        if sets:
-            execute(f"UPDATE shift SET {', '.join(sets)} WHERE id = %s", [*vals, sid])
-        emps = rows('SELECT employee_id FROM shift_assignment WHERE shift_id = %s AND valid @> (now() AT TIME ZONE \'Asia/Kathmandu\')::date', [sid])
+        changes = _changes(b, _COLUMN_OF)
+        if changes:
+            Shift.objects.filter(pk=sid).update(**changes)
+        emps = list(ShiftAssignment.objects.for_company(user.company_id).filter(shift_id=sid, valid__contains=npt_today()).values_list('employee_id', flat=True))
         today = _today()
         month_start = f'{today[:8]}01'
-        enqueue_recompute([(e['employee_id'], d) for e in emps for d in date_range(month_start, today)], 'shift_rules_changed')
+        enqueue_recompute([(e, d) for e in emps for d in date_range(month_start, today)], 'shift_rules_changed')
         audit('update', 'shift', actor_id=user.id, row_id=sid, before=_shift_row(before), after=b)
     return {'ok': True, 'recomputeQueued': len(emps)}
 
@@ -585,18 +585,19 @@ def delete_shift(user: AuthUser, shift_id: str) -> dict:
     """Refuse to delete a shift that employees still use; the UI reassigns first (plan §13.8 destructive-action rule)."""
     _require_module(user, 'attendance')
     sid = parse_uuid(shift_id)
+    mine = Shift.objects.for_company(user.company_id).filter(pk=sid)
     with transaction.atomic():
-        if not one('SELECT 1 AS x FROM shift WHERE id = %s AND company_id = %s', [sid, user.company_id]):
+        if not mine.exists():
             raise NotFoundError('shift not found')
-        u = one("""SELECT (SELECT count(*) FROM shift_assignment WHERE shift_id = %s AND upper_inf(valid))::text AS assignments,
-                          (SELECT count(*) FROM roster WHERE shift_id = %s AND local_date >= (now() AT TIME ZONE 'Asia/Kathmandu')::date)::text AS roster""", [sid, sid])
-        if int(u['assignments']) > 0 or int(u['roster']) > 0:
-            raise ConflictError(f"shift is assigned to {u['assignments']} employee(s) and {u['roster']} future roster day(s); reassign first")
-        n = execute("""DELETE FROM shift WHERE id = %s AND company_id = %s AND NOT EXISTS (SELECT 1 FROM shift_assignment WHERE shift_id = %s)
-                       AND NOT EXISTS (SELECT 1 FROM roster WHERE shift_id = %s) AND NOT EXISTS (SELECT 1 FROM attendance_day WHERE shift_id = %s)""",
-                    [sid, user.company_id, sid, sid, sid])
-        if not n:
-            if not one('SELECT 1 AS x FROM shift WHERE id = %s AND company_id = %s', [sid, user.company_id]):
+        assignments = ShiftAssignment.objects.for_company(user.company_id).filter(shift_id=sid, valid__upper_inf=True).count()
+        future = Roster.objects.for_company(user.company_id).filter(shift_id=sid, local_date__gte=npt_today()).count()
+        if assignments > 0 or future > 0:
+            raise ConflictError(f'shift is assigned to {assignments} employee(s) and {future} future roster day(s); reassign first')
+        used = (Exists(ShiftAssignment.objects.filter(shift=OuterRef('pk'))) | Exists(Roster.objects.filter(shift=OuterRef('pk')))
+                | Exists(AttendanceDay.objects.filter(shift=OuterRef('pk'))))
+        deleted, _ = mine.exclude(used).delete()
+        if not deleted:
+            if not mine.exists():
                 raise NotFoundError('shift not found')
             raise ConflictError('shift has historical assignments or attendance; it cannot be deleted')
         audit('delete', 'shift', actor_id=user.id, row_id=sid)
@@ -605,20 +606,25 @@ def delete_shift(user: AuthUser, shift_id: str) -> dict:
 
 # ---------------------------------------------------------------- shift swaps shown on the roster page (read only)
 
-SWAP_SELECT = """SELECT s.id, s.local_date, s.status, s.reason, s.colleague_note, s.created_at, s.decided_at,
-           s.requester_id, r.name_en AS requester_name, r.emp_code AS requester_code, s.colleague_id, c.name_en AS colleague_name,
-           c.emp_code AS colleague_code, rs.code AS requester_shift_code, rs.name_en AS requester_shift_name,
-           cs.code AS colleague_shift_code, cs.name_en AS colleague_shift_name
-      FROM shift_swap s JOIN employee r ON r.id = s.requester_id JOIN employee c ON c.id = s.colleague_id
-      LEFT JOIN shift rs ON rs.id = s.requester_shift_id LEFT JOIN shift cs ON cs.id = s.colleague_shift_id"""
+SWAP_VALUES = dict(
+    requester_name=F('requester__name_en'), requester_code=F('requester__emp_code'), colleague_name=F('colleague__name_en'),
+    colleague_code=F('colleague__emp_code'), requester_shift_code=F('requester_shift__code'),
+    requester_shift_name=F('requester_shift__name_en'), colleague_shift_code=F('colleague_shift__code'),
+    colleague_shift_name=F('colleague_shift__name_en'))
 
 
 def team_swaps(user: AuthUser, from_: str | None, to: str | None) -> list[dict]:
     """The field module's GET /field/swaps?scope=team, for the roster page: HR company-wide, managers their people."""
     if not has_role(user, *MODULE_ROLES['attendance'], 'manager'):
         raise ForbiddenError('only managers and HR see team swaps')
-    return rows(f"""{SWAP_SELECT} WHERE s.company_id = %s AND (%s::date IS NULL OR s.local_date >= %s::date)
-                     AND (%s::date IS NULL OR s.local_date <= %s::date)
-                     AND (%s OR (hj_manages(%s::uuid, s.requester_id, s.local_date) OR hj_manages(%s::uuid, s.colleague_id, s.local_date)))
-                   ORDER BY s.local_date DESC, s.created_at DESC LIMIT 500""",
-                [_company_of(user), from_, from_, to, to, has_module(user, 'attendance'), user.employee_id, user.employee_id])
+    qs = ShiftSwap.objects.for_company(_company_of(user))
+    if from_:
+        qs = qs.filter(local_date__gte=from_)
+    if to:
+        qs = qs.filter(local_date__lte=to)
+    if not has_module(user, 'attendance'):
+        qs = qs.filter(manages(user.employee_id, F('requester_id'), F('local_date'))
+                       | manages(user.employee_id, F('colleague_id'), F('local_date')))
+    return list(qs.order_by('-local_date', '-created_at').values(
+        'id', 'local_date', 'status', 'reason', 'colleague_note', 'created_at', 'decided_at', 'requester_id', 'colleague_id',
+        **SWAP_VALUES)[:500])

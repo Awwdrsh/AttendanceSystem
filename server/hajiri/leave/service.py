@@ -2,21 +2,34 @@
 Leave rules (port of apps/api/src/modules/leave/service.ts): day counting with the sandwich rule, hourly leave,
 event-based statutory leave, the ledger and balances, substitute (comp-off) credits and encashment at separation.
 
-Numbers follow the TS code: ledger sums are read as text and turned into floats (JavaScript Number), and results are
-rounded with Math.round semantics, so explanations and JSON match the TS API digit for digit.
+Numbers follow the TS code: ledger sums are turned into floats (JavaScript Number), and results are rounded with
+Math.round semantics, so explanations and JSON match the TS API digit for digit. The number helpers below exist only
+for that parity (Python has no standard way to print a number the way a JavaScript template literal does).
+
+Dates come in as 'YYYY-MM-DD' strings (the TS shape) and are turned into datetime.date before they reach a query.
 """
 from __future__ import annotations
 
 import math
 from datetime import date, timedelta
+from decimal import ROUND_HALF_UP, Decimal
+
+from django.db.models import (
+    BooleanField, Case, DecimalField, Exists, ExpressionWrapper, F, OuterRef, Q, Sum, Value, When,
+)
 
 from engines.bs_calendar import ad_to_bs, fiscal_year_of, weekday_of
 
 from hajiri.attendance.repo import resolve_shift
 from hajiri.attendance.service import date_range
-from hajiri.core.db import execute, one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, NotFoundError
+from hajiri.db.models import AttendanceDay, Employee, EmployeeAssignment, Holiday, LeaveLedger, LeaveRequest, LeaveType
 from hajiri.web.format import to_fixed
+
+Status = LeaveRequest.Status
+Reason = LeaveLedger.Reason
+HELD = (Status.PENDING, Status.APPROVED)          # requests that hold days
+ZERO = Value(Decimal(0), output_field=DecimalField())
 
 
 # ---------------------------------------------------------------- number helpers (JavaScript semantics)
@@ -59,6 +72,11 @@ def fixed(x: float, digits: int) -> str:
     return to_fixed(x, digits)
 
 
+def dec(x) -> Decimal:
+    """A number for a numeric(…, 2) column, rounded like PostgreSQL rounds a float it stores (half away from zero)."""
+    return Decimal(str(x)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+
 def iso(v) -> str | None:
     if v is None:
         return None
@@ -67,13 +85,26 @@ def iso(v) -> str | None:
     return str(v)[:10]
 
 
+def day(v) -> date:
+    """A date from 'YYYY-MM-DD' (or a date)."""
+    return v if isinstance(v, date) else date.fromisoformat(str(v)[:10])
+
+
 def add_iso(d: str, n: int) -> str:
     return (date.fromisoformat(d) + timedelta(days=n)).isoformat()
+
+
+def hhmm(t) -> str | None:
+    """A time column as 'HH:MM' (to_char(t, 'HH24:MI'))."""
+    if t is None or isinstance(t, str):
+        return t[:5] if t else None
+    return t.strftime('%H:%M')
 
 
 # ---------------------------------------------------------------- rows
 
 def _type(r: dict | None) -> dict | None:
+    """A leave_type row (`.values()`) with its ids as strings."""
     if r is None:
         return None
     t = dict(r)
@@ -83,17 +114,25 @@ def _type(r: dict | None) -> dict | None:
     return t
 
 
-def get_leave_type(type_id: str) -> dict | None:
-    return _type(one('SELECT * FROM leave_type WHERE id = %s', [str(type_id)]))
+def type_rows(qs) -> list[dict]:
+    return [_type(r) for r in qs.values()]
+
+
+def get_leave_type(type_id: str, company_id: str | None = None) -> dict | None:
+    """One leave type; with `company_id`, only if it belongs to that company."""
+    qs = LeaveType.objects.for_company(company_id) if company_id is not None else LeaveType.objects.all()
+    return _type(qs.filter(pk=type_id).values().first())
 
 
 def leave_type_by_code(company_id: str, code: str) -> dict | None:
-    return _type(one('SELECT * FROM leave_type WHERE company_id = %s AND code = %s', [str(company_id), code]))
+    return _type(LeaveType.objects.for_company(company_id).filter(code=code).values().first())
 
 
-def get_employee_lite(employee_id: str) -> dict | None:
-    r = one("""SELECT id, company_id, gender, weekly_off_days, join_date, probation_end, exit_date, status
-                 FROM employee WHERE id = %s""", [str(employee_id)])
+def get_employee_lite(employee_id: str, company_id: str | None = None) -> dict | None:
+    """The employee fields the leave rules need; with `company_id`, only an employee of that company."""
+    qs = Employee.objects.for_company(company_id) if company_id is not None else Employee.objects.all()
+    r = qs.filter(pk=employee_id).values('id', 'company_id', 'gender', 'weekly_off_days', 'join_date', 'probation_end',
+                                         'exit_date', 'status').first()
     if not r:
         return None
     return {'id': str(r['id']), 'company_id': str(r['company_id']), 'gender': r['gender'],
@@ -101,15 +140,27 @@ def get_employee_lite(employee_id: str) -> dict | None:
             'probation_end': iso(r['probation_end']), 'exit_date': iso(r['exit_date']), 'status': r['status']}
 
 
+def latest_days():
+    """attendance_day rows that are the newest computed version of their day (what v_attendance_latest shows)."""
+    newer = AttendanceDay.objects.filter(employee=OuterRef('employee'), local_date=OuterRef('local_date'),
+                                         version__gt=OuterRef('version'))
+    return AttendanceDay.objects.exclude(Exists(newer))
+
+
+def _not(qs, exclude_id):
+    return qs.exclude(pk=exclude_id) if exclude_id else qs
+
+
 # ---------------------------------------------------------------- day counting
 
 def working_days_between(emp: dict, from_: str, to: str) -> tuple[list[str], list[str]]:
     """Dates in [from, to] that are neither weekly offs nor (gender-aware, branch-aware) holidays: (working, non_working)."""
-    branch = one('SELECT branch_id FROM employee_assignment WHERE employee_id = %s AND valid @> %s::date', [emp['id'], from_])
-    hol = rows("""SELECT local_date FROM holiday WHERE company_id = %s AND (branch_id IS NULL OR branch_id = %s)
-                    AND local_date BETWEEN %s AND %s AND NOT optional AND (gender_scope = 'all' OR gender_scope = %s)""",
-               [emp['company_id'], branch['branch_id'] if branch else None, from_, to, emp['gender']])
-    holidays = {iso(h['local_date']) for h in hol}
+    branch = next(iter(EmployeeAssignment.objects.filter(employee_id=emp['id'], valid__contains=day(from_))
+                       .values_list('branch_id', flat=True)[:1]), None)
+    holidays = {iso(d) for d in Holiday.objects.for_company(emp['company_id'])
+                .filter(Q(branch__isnull=True) | Q(branch_id=branch), local_date__range=(day(from_), day(to)), optional=False)
+                .filter(Q(gender_scope=Holiday.GenderScope.ALL) | Q(gender_scope=emp['gender']))
+                .values_list('local_date', flat=True)}
     working: list[str] = []
     non_working: list[str] = []
     offs = emp['weekly_off_days']
@@ -168,7 +219,7 @@ def _to_min(s: str) -> int:
     return int(s[0:2]) * 60 + int(s[3:5])
 
 
-def compute_hourly_leave(emp: dict, t: dict, day: str, from_time: str, to_time: str) -> dict:
+def compute_hourly_leave(emp: dict, t: dict, day_: str, from_time: str, to_time: str) -> dict:
     """
     Hourly (short) leave on one working day: the window must sit inside the day's (daytime) shift, and is deducted as
     minutes / scheduled working minutes of that shift (span minus the fixed break), to 2 decimals.
@@ -177,10 +228,10 @@ def compute_hourly_leave(emp: dict, t: dict, day: str, from_time: str, to_time: 
         raise BadRequestError(f"{t['name_en']} cannot be taken by the hour")
     if not t['paid'] or t['event_days'] is not None:
         raise BadRequestError('only paid leave with a balance can be taken by the hour')
-    working, _ = working_days_between(emp, day, day)
+    working, _ = working_days_between(emp, day_, day_)
     if not working:
         raise BadRequestError('hourly leave must be on a working day')
-    shift = resolve_shift(emp['id'], day)
+    shift = resolve_shift(emp['id'], day_)
     if not shift:
         raise BadRequestError('there is no shift on this day to take hourly leave from')
     start, end = _to_min(shift.start), _to_min(shift.end)
@@ -199,7 +250,7 @@ def compute_hourly_leave(emp: dict, t: dict, day: str, from_time: str, to_time: 
         raise BadRequestError('this covers the whole working day; apply for a full day instead')
     days = max(0.01, round2(minutes / scheduled))
     hours = round2(minutes / 60)
-    return {'days': out(days), 'hours': out(hours), 'minutes': minutes, 'workingDays': [day], 'excludedDays': [],
+    return {'days': out(days), 'hours': out(hours), 'minutes': minutes, 'workingDays': [day_], 'excludedDays': [],
             'sandwichApplied': False,
             'explanation': f'{js(hours)} hour(s) of a {js(round2(scheduled / 60))}-hour working day = {js(days)} day(s) will be deducted'}
 
@@ -207,29 +258,44 @@ def compute_hourly_leave(emp: dict, t: dict, day: str, from_time: str, to_time: 
 EVENT_GAP_DAYS = 30
 
 
+def _sum(qs, expr='delta_days') -> float:
+    return num(qs.aggregate(s=Sum(expr))['s'])
+
+
 def event_days_used(employee_id: str, leave_type_id: str, from_: str, to: str, exclude_id: str | None = None) -> float:
     """Days already requested (pending or approved) for the same event: requests of the type within EVENT_GAP_DAYS."""
-    r = one("""SELECT coalesce(sum(days_requested), 0)::text AS d FROM leave_request
-                WHERE employee_id = %s AND leave_type_id = %s AND status IN ('pending', 'approved') AND (%s::uuid IS NULL OR id <> %s::uuid)
-                  AND to_date >= %s::date - %s::int AND from_date <= %s::date + %s::int""",
-            [str(employee_id), str(leave_type_id), exclude_id, exclude_id, from_, EVENT_GAP_DAYS, to, EVENT_GAP_DAYS])
-    return num(r['d'])
+    gap = timedelta(days=EVENT_GAP_DAYS)
+    qs = LeaveRequest.objects.filter(employee_id=employee_id, leave_type_id=leave_type_id, status__in=HELD,
+                                     to_date__gte=day(from_) - gap, from_date__lte=day(to) + gap)
+    return _sum(_not(qs, exclude_id), 'days_requested')
 
 
 def ledger_balance(employee_id: str, leave_type_id: str, as_of: str | None = None) -> float:
-    r = one("""SELECT coalesce(sum(delta_days), 0)::text AS b FROM leave_ledger WHERE employee_id = %s AND leave_type_id = %s
-                 AND (%s::date IS NULL OR effective_date <= %s::date)""", [str(employee_id), str(leave_type_id), as_of, as_of])
-    return num(r['b'])
+    qs = LeaveLedger.objects.filter(employee_id=employee_id, leave_type_id=leave_type_id)
+    if as_of is not None:
+        qs = qs.filter(effective_date__lte=day(as_of))
+    return _sum(qs)
 
 
 def pending_days(employee_id: str, leave_type_id: str) -> float:
     """Days held by pending requests, including the non-working days a request bridges on the type that pays for them."""
     lt = str(leave_type_id)
-    r = one("""SELECT coalesce(sum(CASE WHEN leave_type_id = %s THEN days_requested ELSE 0 END
-                                 + CASE WHEN bridge_type_id = %s THEN bridge_days ELSE 0 END), 0)::text AS d
-                 FROM leave_request WHERE employee_id = %s AND status = 'pending' AND (leave_type_id = %s OR bridge_type_id = %s)""",
-            [lt, lt, str(employee_id), lt, lt])
-    return num(r['d'])
+    held = (Case(When(leave_type_id=lt, then=F('days_requested')), default=ZERO, output_field=DecimalField())
+            + Case(When(bridge_type_id=lt, then=F('bridge_days')), default=ZERO, output_field=DecimalField()))
+    qs = LeaveRequest.objects.filter(Q(leave_type_id=lt) | Q(bridge_type_id=lt), employee_id=employee_id,
+                                     status=Status.PENDING)
+    return _sum(qs, held)
+
+
+def pending_by_type(employee_id: str) -> dict[str, float]:
+    """pending_days for every type at once (one query): {leave_type_id: days held by pending requests}."""
+    held: dict[str, Decimal] = {}
+    for lt, days, bt, bridge in (LeaveRequest.objects.filter(employee_id=employee_id, status=Status.PENDING)
+                                 .values_list('leave_type_id', 'days_requested', 'bridge_type_id', 'bridge_days')):
+        held[str(lt)] = held.get(str(lt), Decimal(0)) + days
+        if bt is not None:
+            held[str(bt)] = held.get(str(bt), Decimal(0)) + bridge
+    return {k: num(v) for k, v in held.items()}
 
 
 def bridge_across(emp: dict, t: dict, from_: str, to: str, sandwich_policy: bool, exclude_id: str | None = None) -> dict | None:
@@ -241,27 +307,28 @@ def bridge_across(emp: dict, t: dict, from_: str, to: str, sandwich_policy: bool
     """
     if t['event_days'] is not None:
         return None
-    adj = rows("""SELECT id, leave_type_id, from_date::text, to_date::text FROM leave_request
-                   WHERE employee_id = %s AND status IN ('pending', 'approved') AND half_day IS NULL AND from_time IS NULL
-                     AND (%s::uuid IS NULL OR id <> %s::uuid)
-                     AND (to_date BETWEEN %s::date - 15 AND %s::date - 2 OR from_date BETWEEN %s::date + 2 AND %s::date + 15)
-                   ORDER BY (to_date < %s::date) DESC, abs(from_date - %s::date)""",
-               [emp['id'], exclude_id, exclude_id, from_, from_, to, to, from_, from_])
+    f, tt = day(from_), day(to)
+    held = _not(LeaveRequest.objects.filter(employee_id=emp['id'], status__in=HELD), exclude_id)
+    adjacent = (held.filter(half_day__isnull=True, from_time__isnull=True)
+                .filter(Q(to_date__range=(f - timedelta(days=15), f - timedelta(days=2)))
+                        | Q(from_date__range=(tt + timedelta(days=2), tt + timedelta(days=15))))
+                .values('id', 'leave_type_id', 'from_date', 'to_date'))
+    # Leave before this request first, then the nearest.
+    adj = sorted(adjacent, key=lambda a: (not a['to_date'] < f, abs((a['from_date'] - f).days)))
     my_head = group_head(t)
     for a in adj:
-        before = a['to_date'] < from_
-        gap_from = add_iso(a['to_date'], 1) if before else add_iso(to, 1)
-        gap_to = add_iso(from_, -1) if before else add_iso(a['from_date'], -1)
+        a_from, a_to = iso(a['from_date']), iso(a['to_date'])
+        before = a_to < from_
+        gap_from = add_iso(a_to, 1) if before else add_iso(to, 1)
+        gap_to = add_iso(from_, -1) if before else add_iso(a_from, -1)
         if gap_from > gap_to:
             continue
         working, non_working = working_days_between(emp, gap_from, gap_to)
         if working or not non_working:
             continue
-        taken = one("""SELECT 1 AS x FROM leave_request WHERE employee_id = %s AND status IN ('pending', 'approved')
-                         AND (%s::uuid IS NULL OR id <> %s::uuid)
-                         AND ((bridge_days > 0 AND bridge_from <= %s::date AND bridge_to >= %s::date)
-                              OR (from_date <= %s::date AND to_date >= %s::date)) LIMIT 1""",
-                    [emp['id'], exclude_id, exclude_id, gap_to, gap_from, gap_to, gap_from])
+        gf, gt = day(gap_from), day(gap_to)
+        taken = held.filter(Q(bridge_days__gt=0, bridge_from__lte=gt, bridge_to__gte=gf)
+                            | Q(from_date__lte=gt, to_date__gte=gf)).exists()
         if taken:
             continue
         other = get_leave_type(str(a['leave_type_id']))
@@ -291,36 +358,44 @@ def bridge_across(emp: dict, t: dict, from_: str, to: str, sandwich_policy: bool
 def balances(emp: dict, as_of_ad: str) -> list[dict]:
     """Balance explanation per plan §13.5: Opening (1 Shrawan) + accruals - taken - lapsed + carried forward."""
     fy = fiscal_year_of(ad_to_bs(as_of_ad))
-    types = rows("""SELECT * FROM leave_type WHERE company_id = %s AND (gender_scope = 'all' OR gender_scope = %s)
-                     ORDER BY sort_order, code""", [emp['company_id'], emp['gender']])
+    fy_start = day(fy.start_ad)
+    types = type_rows(LeaveType.objects.for_company(emp['company_id'])
+                      .filter(Q(gender_scope=LeaveType.GenderScope.ALL) | Q(gender_scope=emp['gender']))
+                      .order_by('sort_order', 'code'))
+    # Ledger totals per type, reason and side of the fiscal-year start (summed as numbers like the TS code).
+    groups: dict[str, list[dict]] = {}
+    for g in (LeaveLedger.objects.filter(employee_id=emp['id'])
+              .values('leave_type_id', 'reason',
+                      in_fy=ExpressionWrapper(Q(effective_date__gte=fy_start), output_field=BooleanField()))
+              .annotate(total=Sum('delta_days')).order_by()):
+        groups.setdefault(str(g['leave_type_id']), []).append(g)
+    pending_all = pending_by_type(emp['id'])
     result = []
-    for t in map(_type, types):
-        r = rows("""SELECT reason, (effective_date >= %s::date) AS in_fy, coalesce(sum(delta_days), 0)::text AS total FROM leave_ledger
-                     WHERE employee_id = %s AND leave_type_id = %s GROUP BY reason, (effective_date >= %s::date)""",
-                 [fy.start_ad, emp['id'], t['id'], fy.start_ad])
+    for t in types:
+        r = groups.get(t['id'], [])
 
         def s(reason: str, in_fy: bool) -> float:
             return sum((num(x['total']) for x in r if x['reason'] == reason and x['in_fy'] == in_fy), 0.0)
 
         opening = sum((num(x['total']) for x in r if not x['in_fy']), 0.0)
-        accrued = s('accrual', True) + s('allocation', True)
-        taken = -s('usage', True)
-        cancelled = s('cancellation', True)
-        lapsed = -s('expiry', True)
-        carried = s('carry_forward', True)
-        adjustments = s('adjustment', True)
-        comp_off = s('comp_off', True)
-        encashed = -s('encashment', True)
+        accrued = s(Reason.ACCRUAL, True) + s(Reason.ALLOCATION, True)
+        taken = -s(Reason.USAGE, True)
+        cancelled = s(Reason.CANCELLATION, True)
+        lapsed = -s(Reason.EXPIRY, True)
+        carried = s(Reason.CARRY_FORWARD, True)
+        adjustments = s(Reason.ADJUSTMENT, True)
+        comp_off = s(Reason.COMP_OFF, True)
+        encashed = -s(Reason.ENCASHMENT, True)
         balance = sum((num(x['total']) for x in r), 0.0)
-        pending = pending_days(emp['id'], t['id'])
+        pending = pending_all.get(t['id'], 0.0)
         base = {'leaveTypeId': t['id'], 'code': t['code'], 'nameEn': t['name_en'], 'nameNe': t['name_ne'], 'paid': t['paid'],
                 'encashable': t['encashable']}
         if t['event_days'] is not None:
             per_event = num(t['event_days'])
-            ev = one("""SELECT from_date::text, to_date::text FROM leave_request WHERE employee_id = %s AND leave_type_id = %s
-                          AND status IN ('pending', 'approved') AND to_date >= %s::date - %s::int ORDER BY from_date LIMIT 1""",
-                     [emp['id'], t['id'], as_of_ad, EVENT_GAP_DAYS])
-            used = event_days_used(emp['id'], t['id'], ev['from_date'], ev['to_date']) if ev else 0.0
+            ev = (LeaveRequest.objects.filter(employee_id=emp['id'], leave_type_id=t['id'], status__in=HELD,
+                                              to_date__gte=day(as_of_ad) - timedelta(days=EVENT_GAP_DAYS))
+                  .order_by('from_date').values('from_date', 'to_date').first())
+            used = event_days_used(emp['id'], t['id'], iso(ev['from_date']), iso(ev['to_date'])) if ev else 0.0
             left = max(0.0, per_event - used)
             extra = f'; {js(used)} day(s) already requested for the current event, {js(left)} left' if used else ''
             result.append({**base, 'opening': 0, 'accrued': 0, 'taken': out(taken), 'cancelled': out(cancelled), 'lapsed': 0,
@@ -352,10 +427,10 @@ def credit_comp_off(employee_id: str, days: float, expires_on: str, *, ref_type:
     t = leave_type_by_code(emp['company_id'], 'SUBSTITUTE')
     if not t:
         raise NotFoundError('SUBSTITUTE leave type is not configured')
-    r = one("""INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, ref_id, expires_on, note, posted_by)
-               VALUES (%s, %s, %s::date, %s, 'comp_off', %s, %s, %s, %s, %s) RETURNING id""",
-            [str(employee_id), t['id'], npt_today().isoformat(), days, ref_type, str(ref_id), expires_on, note, posted_by])
-    return str(r['id'])
+    row = LeaveLedger.objects.create(employee_id=employee_id, leave_type_id=t['id'], effective_date=npt_today(),
+                                     delta_days=dec(days), reason=Reason.COMP_OFF, ref_type=ref_type, ref_id=str(ref_id),
+                                     expires_on=day(expires_on) if expires_on else None, note=note, posted_by_id=posted_by)
+    return str(row.id)
 
 
 def encashable_balances(employee_id: str) -> list[dict]:
@@ -364,7 +439,8 @@ def encashable_balances(employee_id: str) -> list[dict]:
     if not emp:
         raise NotFoundError('employee not found')
     result = []
-    for t in rows('SELECT id, code FROM leave_type WHERE company_id = %s AND encashable ORDER BY sort_order', [emp['company_id']]):
+    for t in (LeaveType.objects.for_company(emp['company_id']).filter(encashable=True).order_by('sort_order')
+              .values('id', 'code')):
         b = ledger_balance(employee_id, str(t['id']))
         if b > 0:
             result.append({'leaveTypeId': str(t['id']), 'code': t['code'], 'days': out(b)})
@@ -375,20 +451,19 @@ def post_encashment(employee_id: str, leave_type_id: str, days: float, *, ref_ty
                     posted_by: str | None = None) -> None:
     """Post the encashment row (payroll final settlement calls this once the run is locked)."""
     from hajiri.core.clock import npt_today
-    execute("""INSERT INTO leave_ledger (employee_id, leave_type_id, effective_date, delta_days, reason, ref_type, ref_id, posted_by)
-               VALUES (%s, %s, %s::date, %s, 'encashment', %s, %s, %s)""",
-            [str(employee_id), str(leave_type_id), npt_today().isoformat(), -days, ref_type, str(ref_id), posted_by])
+    LeaveLedger.objects.create(employee_id=employee_id, leave_type_id=leave_type_id, effective_date=npt_today(),
+                               delta_days=dec(-days), reason=Reason.ENCASHMENT, ref_type=ref_type, ref_id=str(ref_id),
+                               posted_by_id=posted_by)
 
 
 def assert_no_overlap(employee_id: str, from_: str, to: str, exclude_id: str | None = None) -> None:
-    r = one("""SELECT 1 AS x FROM leave_request WHERE employee_id = %s AND status IN ('pending', 'approved')
-                 AND from_date <= %s::date AND to_date >= %s::date AND (%s::uuid IS NULL OR id <> %s::uuid) LIMIT 1""",
-            [str(employee_id), to, from_, exclude_id, exclude_id])
-    if r:
+    qs = LeaveRequest.objects.filter(employee_id=employee_id, status__in=HELD, from_date__lte=day(to), to_date__gte=day(from_))
+    if _not(qs, exclude_id).exists():
         raise ConflictError('an existing leave request already covers part of this range')
 
 
 def has_locked_day(employee_id: str, from_: str, to: str) -> bool:
     """Any latest attendance day in [from, to] already locked by payroll? Leave decisions never change such days."""
-    return one("""SELECT 1 AS x FROM v_attendance_latest WHERE employee_id = %s AND local_date BETWEEN %s AND %s
-                    AND locked_at IS NOT NULL LIMIT 1""", [str(employee_id), from_, to]) is not None
+    return latest_days().filter(employee_id=employee_id, local_date__range=(day(from_), day(to)),
+                                locked_at__isnull=False).exists()
+

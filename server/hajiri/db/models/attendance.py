@@ -6,15 +6,29 @@ from django.contrib.postgres.fields import ArrayField, DateRangeField
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class AttendanceDay(models.Model):
+    class Status(models.TextChoices):
+        OFF_SHIFT = 'OffShift', 'Off shift'
+        HOLIDAY = 'Holiday', 'Holiday'
+        WEEKLY_OFF = 'WeeklyOff', 'Weekly off'
+        ON_LEAVE = 'OnLeave', 'On leave'
+        PRESENT = 'Present', 'Present'
+        HALF_DAY = 'HalfDay', 'Half day'
+        HALF_DAY_LEAVE = 'HalfDayLeave', 'Half day leave'
+        ABSENT = 'Absent', 'Absent'
+        INCOMPLETE = 'Incomplete', 'Incomplete'
+        WFH = 'WFH', 'Work from home'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey('Employee', models.DO_NOTHING)
+    employee = models.ForeignKey('Employee', models.DO_NOTHING, related_name='attendance_days')
     local_date = models.DateField()
     bs_date = models.TextField(blank=True, null=True)
     version = models.IntegerField()
-    shift = models.ForeignKey('Shift', models.DO_NOTHING, blank=True, null=True)
-    status = models.TextField()
+    shift = models.ForeignKey('Shift', models.DO_NOTHING, related_name='attendance_days', blank=True, null=True)
+    status = models.TextField(choices=Status)
     first_in = models.DateTimeField(blank=True, null=True)
     last_out = models.DateTimeField(blank=True, null=True)
     worked_min = models.IntegerField(db_default=0)
@@ -28,47 +42,69 @@ class AttendanceDay(models.Model):
     inputs_hash = models.TextField()
     computed_at = models.DateTimeField(db_default=Now())
     locked_at = models.DateTimeField(blank=True, null=True)
-    ot_slip = models.ForeignKey('OtSlip', models.DO_NOTHING, blank=True, null=True)
+    ot_slip = models.ForeignKey('OtSlip', models.DO_NOTHING, related_name='attendance_days', blank=True, null=True)
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'attendance_day'
         unique_together = (('employee', 'local_date', 'version'),)
 
+    def __str__(self):
+        return f'AttendanceDay {self.id}'
+
 
 class AttendanceNudge(models.Model):
+    class Kind(models.TextChoices):
+        EMPLOYEE = 'employee', 'Employee'
+        APPROVER = 'approver', 'Approver'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('Company', models.DO_NOTHING)
-    target_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
-    kind = models.TextField()
+    company = models.ForeignKey('Company', models.DO_NOTHING, related_name='attendance_nudges')
+    target_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='attendance_nudges_as_target')
+    kind = models.TextField(choices=Kind)
     ref = models.TextField()
     local_date = models.DateField()
-    nudged_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='nudged_by', related_name='attendancenudge_nudged_by_set', blank=True, null=True)
+    nudged_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='attendance_nudges_as_nudged_by', db_column='nudged_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'attendance_nudge'
         unique_together = (('target_user', 'kind', 'ref', 'local_date'),)
 
+    def __str__(self):
+        return f'AttendanceNudge {self.id}'
+
 
 class AttendanceUpload(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('Company', models.DO_NOTHING)
+    company = models.ForeignKey('Company', models.DO_NOTHING, related_name='attendance_uploads')
     filename = models.TextField(blank=True, null=True)
     reason = models.TextField()
     rows_total = models.IntegerField()
     punches = models.IntegerField()
     duplicates = models.IntegerField(db_default=0)
-    uploaded_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='uploaded_by', blank=True, null=True)
+    uploaded_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='attendance_uploads_as_uploaded_by', db_column='uploaded_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'attendance_upload'
 
+    def __str__(self):
+        return str(self.filename)
+
 
 class FieldVisit(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.OneToOneField('hajiri.Employee', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='field_visits')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='field_visits')
     local_date = models.DateField()
     place = models.TextField()
     purpose = models.TextField(blank=True, null=True)
@@ -81,22 +117,34 @@ class FieldVisit(models.Model):
     end_lng = models.DecimalField(max_digits=9, decimal_places=6, blank=True, null=True)
     end_accuracy_m = models.IntegerField(blank=True, null=True)
     outcome = models.TextField(blank=True, null=True)
-    photo_file = models.ForeignKey('StoredFile', models.DO_NOTHING, blank=True, null=True)
+    photo_file = models.ForeignKey('StoredFile', models.DO_NOTHING, related_name='field_visits', blank=True, null=True)
     punch_id = models.UUIDField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'field_visit'
+        constraints = [models.UniqueConstraint(fields=['employee'], condition=models.Q(ended_at__isnull=True), name='field_visit_open_idx')]
+
+    def __str__(self):
+        return f'FieldVisit {self.id}'
 
 
 class Kiosk(models.Model):
+    class Status(models.TextChoices):
+        PAIRING = 'pairing', 'Pairing'
+        ACTIVE = 'active', 'Active'
+        REVOKED = 'revoked', 'Revoked'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='kiosks')
     name = models.TextField()
-    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, blank=True, null=True)
-    location = models.ForeignKey('Location', models.DO_NOTHING, blank=True, null=True)
+    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, related_name='kiosks', blank=True, null=True)
+    location = models.ForeignKey('Location', models.DO_NOTHING, related_name='kiosks', blank=True, null=True)
     selfie_required = models.BooleanField(db_default=True)
-    status = models.TextField(db_default='pairing')
+    status = models.TextField(choices=Status, db_default='pairing')
     pairing_code_hash = models.TextField(unique=True, blank=True, null=True)
     pairing_expires_at = models.DateTimeField(blank=True, null=True)
     key_hash = models.TextField(unique=True, blank=True, null=True)
@@ -104,67 +152,95 @@ class Kiosk(models.Model):
     last_seen_at = models.DateTimeField(blank=True, null=True)
     failed_attempts = models.IntegerField(db_default=0)
     locked_until = models.DateTimeField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='kiosks_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     revoked_at = models.DateTimeField(blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'kiosk'
 
+    def __str__(self):
+        return str(self.name)
+
 
 class KioskCredential(models.Model):
-    employee = models.OneToOneField('hajiri.Employee', models.DO_NOTHING, primary_key=True)
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    employee = models.OneToOneField('hajiri.Employee', models.DO_NOTHING, related_name='kiosk_credential', primary_key=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='kiosk_credentials')
     pin_hash = models.TextField(blank=True, null=True)
     failed_count = models.IntegerField(db_default=0)
     locked_until = models.DateTimeField(blank=True, null=True)
     qr_version = models.IntegerField(db_default=1)
     updated_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'kiosk_credential'
+
+    def __str__(self):
+        return f'KioskCredential {self.employee_id}'
 
 
 class KioskQrUse(models.Model):
     pk = models.CompositePrimaryKey('employee_id', 'time_window')
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='kiosk_qr_uses')
     time_window = models.BigIntegerField()
-    kiosk = models.ForeignKey(Kiosk, models.DO_NOTHING, blank=True, null=True)
+    kiosk = models.ForeignKey(Kiosk, models.DO_NOTHING, related_name='kiosk_qr_uses', blank=True, null=True)
     used_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'kiosk_qr_use'
 
+    def __str__(self):
+        return f'KioskQrUse {self.pk}'
+
 
 class LatePenalty(models.Model):
+    class Status(models.TextChoices):
+        APPLIED = 'applied', 'Applied'
+        REVERSED = 'reversed', 'Reversed'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='late_penalties')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='late_penalties')
     bs_year = models.SmallIntegerField()
     bs_month = models.SmallIntegerField()
     late_days = models.IntegerField()
     late_minutes = models.IntegerField(db_default=0)
     penalty_days = models.DecimalField(max_digits=5, decimal_places=2)
     leave_days = models.DecimalField(max_digits=5, decimal_places=2, db_default=0)
-    leave_type = models.ForeignKey('LeaveType', models.DO_NOTHING, blank=True, null=True)
+    leave_type = models.ForeignKey('LeaveType', models.DO_NOTHING, related_name='late_penalties', blank=True, null=True)
     unpaid_days = models.DecimalField(max_digits=5, decimal_places=2, db_default=0)
     rule = models.JSONField(db_default={})
-    status = models.TextField(db_default='applied')
-    applied_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='applied_by', blank=True, null=True)
+    status = models.TextField(choices=Status, db_default='applied')
+    applied_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='late_penalties_as_applied_by', db_column='applied_by', blank=True, null=True)
     applied_at = models.DateTimeField(db_default=Now())
-    reversed_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='reversed_by', related_name='latepenalty_reversed_by_set', blank=True, null=True)
+    reversed_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='late_penalties_as_reversed_by', db_column='reversed_by', blank=True, null=True)
     reversed_at = models.DateTimeField(blank=True, null=True)
     reverse_reason = models.TextField(blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'late_penalty'
         unique_together = (('employee', 'bs_year', 'bs_month'),)
 
+    def __str__(self):
+        return f'LatePenalty {self.id}'
+
 
 class Location(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='locations')
+    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, related_name='locations', blank=True, null=True)
     name = models.TextField()
     lat = models.DecimalField(max_digits=9, decimal_places=6)
     lng = models.DecimalField(max_digits=9, decimal_places=6)
@@ -173,71 +249,118 @@ class Location(models.Model):
     active = models.BooleanField(db_default=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'location'
+
+    def __str__(self):
+        return str(self.name)
 
 
 class LocationAssignment(models.Model):
     pk = models.CompositePrimaryKey('location_id', 'employee_id')
-    location = models.ForeignKey(Location, models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    location = models.ForeignKey(Location, models.DO_NOTHING, related_name='location_assignments')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='location_assignments')
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='location_assignments')
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'location_assignment'
 
+    def __str__(self):
+        return f'LocationAssignment {self.pk}'
+
 
 class OtRequest(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='ot_requests')
     local_date = models.DateField()
     requested_min = models.IntegerField()
     approved_min = models.IntegerField(blank=True, null=True)
     reason = models.TextField(blank=True, null=True)
-    status = models.TextField(db_default='pending')
+    status = models.TextField(choices=Status, db_default='pending')
     workflow_instance_id = models.UUIDField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='ot_requests_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     decided_at = models.DateTimeField(blank=True, null=True)
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'ot_request'
 
+    def __str__(self):
+        return f'OtRequest {self.id}'
+
 
 class OtSlip(models.Model):
+    class DayType(models.TextChoices):
+        WORKING = 'working', 'Working'
+        WEEKLY_OFF = 'weekly_off', 'Weekly off'
+        HOLIDAY = 'holiday', 'Holiday'
+
+    class Status(models.TextChoices):
+        DETECTED = 'detected', 'Detected'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        POSTED = 'posted', 'Posted'
+        COMP_OFF = 'comp_off', 'Comp off'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='ot_slips')
     local_date = models.DateField()
-    attendance_day = models.ForeignKey(AttendanceDay, models.DO_NOTHING, blank=True, null=True)
+    attendance_day = models.ForeignKey(AttendanceDay, models.DO_NOTHING, related_name='ot_slips', blank=True, null=True)
     detected_min = models.IntegerField()
     approved_min = models.IntegerField(blank=True, null=True)
     multiplier = models.DecimalField(max_digits=6, decimal_places=3, db_default=1.5)
-    day_type = models.TextField()
-    status = models.TextField(db_default='detected')
+    day_type = models.TextField(choices=DayType)
+    status = models.TextField(choices=Status, db_default='detected')
     posted_payslip_id = models.UUIDField(blank=True, null=True)
-    comp_off_ledger = models.ForeignKey('hajiri.LeaveLedger', models.DO_NOTHING, blank=True, null=True)
-    reviewed_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='reviewed_by', blank=True, null=True)
+    comp_off_ledger = models.ForeignKey('hajiri.LeaveLedger', models.DO_NOTHING, related_name='ot_slips', blank=True, null=True)
+    reviewed_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='ot_slips_as_reviewed_by', db_column='reviewed_by', blank=True, null=True)
     reviewed_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'ot_slip'
         unique_together = (('employee', 'local_date'),)
 
+    def __str__(self):
+        return f'OtSlip {self.id}'
+
 
 class PunchEvent(models.Model):
+    class Direction(models.TextChoices):
+        IN = 'in', 'In'
+        OUT = 'out', 'Out'
+        UNKNOWN = 'unknown', 'Unknown'
+
     pk = models.CompositePrimaryKey('id', 'punched_at')
     id = models.UUIDField(db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    device = models.ForeignKey('hajiri.Device', models.DO_NOTHING, blank=True, null=True)
+    device = models.ForeignKey('hajiri.Device', models.DO_NOTHING, related_name='punch_events', blank=True, null=True)
     device_sn = models.TextField()
     vendor = models.TextField()
     device_user_pin = models.TextField()
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, blank=True, null=True)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='punch_events', blank=True, null=True)
     punched_at = models.DateTimeField()
     device_local_time = models.TextField()
     local_date = models.DateField()
-    direction = models.TextField()
+    direction = models.TextField(choices=Direction)
     verify_mode = models.TextField()
     source = models.TextField()
     raw = models.JSONField(blank=True, null=True)
@@ -246,95 +369,171 @@ class PunchEvent(models.Model):
     ingested_at = models.DateTimeField(db_default=Now())
     supersedes_id = models.UUIDField(blank=True, null=True)
 
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'punch_event'
         unique_together = (('idempotency_key', 'punched_at'),)
 
+    def __str__(self):
+        return f'PunchEvent {self.pk}'
+
 
 class PunchPhoto(models.Model):
+    class Mime(models.TextChoices):
+        IMAGE_JPEG = 'image/jpeg', 'JPEG'
+        IMAGE_PNG = 'image/png', 'PNG'
+        IMAGE_WEBP = 'image/webp', 'WebP'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='punch_photos')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='punch_photos')
     punch_id = models.UUIDField(unique=True)
     punched_at = models.DateTimeField()
     local_date = models.DateField()
     direction = models.TextField()
-    mime = models.TextField()
+    mime = models.TextField(choices=Mime)
     bytes = models.IntegerField()
     image_enc = models.BinaryField(blank=True, null=True)
     purged_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'punch_photo'
+
+    def __str__(self):
+        return f'PunchPhoto {self.id}'
 
 
 class RecomputeQueue(models.Model):
     pk = models.CompositePrimaryKey('employee_id', 'local_date')
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='recompute_queues')
     local_date = models.DateField()
     enqueued_at = models.DateTimeField(db_default=Now())
     reason = models.TextField(blank=True, null=True)
     attempts = models.IntegerField(db_default=0)
     last_error = models.TextField(blank=True, null=True)
 
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'recompute_queue'
 
+    def __str__(self):
+        return f'RecomputeQueue {self.pk}'
+
 
 class RegisteredDevice(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        REVOKED = 'revoked', 'Revoked'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='registered_devices')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='registered_devices')
+    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='registered_devices')
     token_hash = models.TextField(unique=True)
     label = models.TextField()
     user_agent = models.TextField(blank=True, null=True)
-    status = models.TextField(db_default='pending')
+    status = models.TextField(choices=Status, db_default='pending')
     requested_at = models.DateTimeField(db_default=Now())
-    decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='decided_by', related_name='registereddevice_decided_by_set', blank=True, null=True)
+    decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='registered_devices_as_decided_by', db_column='decided_by', blank=True, null=True)
     decided_at = models.DateTimeField(blank=True, null=True)
     last_used_at = models.DateTimeField(blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'registered_device'
 
+    def __str__(self):
+        return str(self.label)
+
 
 class RegularisationRequest(models.Model):
+    class Kind(models.TextChoices):
+        MISSED_PUNCH = 'missed_punch', 'Missed punch'
+        WFH = 'wfh', 'Work from home'
+        ON_DUTY = 'on_duty', 'On duty'
+        HALF_DAY = 'half_day', 'Half day'
+        SHIFT_CHANGE = 'shift_change', 'Shift change'
+
+    class PunchDirection(models.TextChoices):
+        IN = 'in', 'In'
+        OUT = 'out', 'Out'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='regularisation_requests')
     local_date = models.DateField()
-    kind = models.TextField()
+    kind = models.TextField(choices=Kind)
     punch_time = models.DateTimeField(blank=True, null=True)
-    punch_direction = models.TextField(blank=True, null=True)
-    shift = models.ForeignKey('Shift', models.DO_NOTHING, blank=True, null=True)
+    punch_direction = models.TextField(choices=PunchDirection, blank=True, null=True)
+    shift = models.ForeignKey('Shift', models.DO_NOTHING, related_name='regularisation_requests', blank=True, null=True)
     reason = models.TextField()
     attachment_key = models.TextField(blank=True, null=True)
-    status = models.TextField(db_default='pending')
+    status = models.TextField(choices=Status, db_default='pending')
     workflow_instance_id = models.UUIDField(blank=True, null=True)
     resulting_punch_id = models.UUIDField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='regularisation_requests_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     decided_at = models.DateTimeField(blank=True, null=True)
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'regularisation_request'
 
+    def __str__(self):
+        return f'RegularisationRequest {self.id}'
+
 
 class WorkBreak(models.Model):
+    class Kind(models.TextChoices):
+        LUNCH = 'lunch', 'Lunch'
+        TEA = 'tea', 'Tea'
+        PRAYER = 'prayer', 'Prayer'
+        PERSONAL = 'personal', 'Personal'
+
+    class Source(models.TextChoices):
+        WEB = 'web', 'Web'
+        KIOSK = 'kiosk', 'Kiosk'
+        AUTO = 'auto', 'Auto'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.OneToOneField('hajiri.Employee', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='work_breaks')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='work_breaks')
     local_date = models.DateField()
-    kind = models.TextField()
+    kind = models.TextField(choices=Kind)
     paid = models.BooleanField()
     max_min = models.IntegerField()
     started_at = models.DateTimeField()
     ended_at = models.DateTimeField(blank=True, null=True)
     minutes = models.IntegerField(blank=True, null=True)
     over_limit = models.BooleanField(db_default=False)
-    source = models.TextField(db_default='web')
+    source = models.TextField(choices=Source, db_default='web')
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'work_break'
+        constraints = [models.UniqueConstraint(fields=['employee'], condition=models.Q(ended_at__isnull=True), name='work_break_open_idx')]
+
+    def __str__(self):
+        return f'WorkBreak {self.id}'

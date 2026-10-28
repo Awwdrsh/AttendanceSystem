@@ -9,40 +9,47 @@ How a request module uses it (see the package docstring in hajiri/workflow/__ini
     from hajiri.workflow.services import register_handler, start_workflow, cancel_workflow, DecisionContext
 
     def _decided(object_id: str, state: str, ctx: DecisionContext) -> None:   # 'approved' | 'rejected'
-        execute("UPDATE leave_request SET status = %s, decided_at = now() WHERE id = %s", [state, object_id])
+        LeaveRequest.objects.filter(pk=object_id).update(status=state, decided_at=Now())
 
     register_handler('leave_request', _decided)        # at import time (e.g. in your services.py or apps.ready)
 
     with transaction.atomic():
-        lr = one("INSERT INTO leave_request (...) VALUES (...) RETURNING id")
-        inst = start_workflow(company_id=..., object_type='leave_request', object_id=lr['id'], employee_id=emp,
+        lr = LeaveRequest.objects.create(...)
+        inst = start_workflow(company_id=..., object_type='leave_request', object_id=lr.id, employee_id=emp,
                               title='Leave request', body='Sita Sharma asked for 2 days of home leave')
-        execute('UPDATE leave_request SET workflow_instance_id = %s WHERE id = %s', [inst['id'], lr['id']])
+        LeaveRequest.objects.filter(pk=lr.id).update(workflow_instance_id=inst['id'])
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Callable
 
-from django.db import DatabaseError, transaction
+from django.db import transaction
+from django.contrib.postgres.expressions import ArraySubquery
+from django.db.models import (Count, DateTimeField, DecimalField, ExpressionWrapper, F, Func, JSONField, OuterRef, Q, Subquery,
+                              Sum, Value)
+from django.db.models.functions import Coalesce, Now
 
 from hajiri.core.audit import audit
 from hajiri.core.auth import AuthUser, has_module, has_role, is_manager_of
 from hajiri.core.clock import npt_today as _npt_today
-from hajiri.core.db import execute, one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
+from hajiri.core.scoping import as_uuid, is_uuid
+from hajiri.db.models import (ApprovalAction, Employee, LeaveLedger, LeaveRequest, LetterRequest, LrnEnrollment, OtRequest, PayrollRun,
+                              RegularisationRequest, WorkflowInstance)
 from hajiri.notifications.service import notify
 
 from .flows import choose_flow, fell_back_to_hr, kind_of, resolve_step, steps_for_amount, visible_notes
 
 log = logging.getLogger('hajiri.workflow')
 
-STATES = ('pending', 'approved', 'rejected', 'cancelled')
+State = WorkflowInstance.State
+STATES = tuple(State.values)
 
 
 @dataclass(frozen=True)
@@ -91,8 +98,12 @@ def assert_manages(user: AuthUser, employee_id: str, area: str | None = None) ->
     """
     Team-scoped access as the TS workflow helper: HR and admin for anyone; `area`'s specialist role; everyone for
     themselves; a manager for the people they manage. ForbiddenError('not allowed to act for this employee')
-    otherwise. Callers check the employee's company separately (hajiri.core.auth.assert_manages does both).
+    otherwise. An employee outside the active company is NotFoundError('employee not found') first, so ids from
+    another company of a group behave as not found (hajiri.core.auth.assert_manages does the same).
     """
+    if user.company_id and is_uuid(employee_id):
+        if not Employee.objects.for_company(user.company_id).filter(pk=employee_id).exists():
+            raise NotFoundError('employee not found')
     if has_role(user, 'hr'):
         return
     if area and has_module(user, area):
@@ -106,6 +117,10 @@ def assert_manages(user: AuthUser, employee_id: str, area: str | None = None) ->
 
 # ---------------------------------------------------------------- instances
 
+INSTANCE_FIELDS = ('id', 'company_id', 'object_type', 'object_id', 'employee_id', 'steps', 'current_step', 'state',
+                   'created_at', 'completed_at', 'routing', 'amount', 'flow_id')
+
+
 def _inst(r: dict | None) -> dict | None:
     if r is None:
         return None
@@ -118,12 +133,22 @@ def _inst(r: dict | None) -> dict | None:
     return out
 
 
+def instances():
+    """Every workflow instance as the dicts this app hands out (scope with .for_company before reading)."""
+    return WorkflowInstance.objects.all()
+
+
 def get_instance(instance_id: str) -> dict | None:
-    return _inst(one('SELECT * FROM workflow_instance WHERE id = %s', [str(instance_id)]))
+    return _inst(instances().filter(pk=as_uuid(instance_id)).values(*INSTANCE_FIELDS).first())
+
+
+def instance_in(company_id: str | None, instance_id) -> dict | None:
+    """The instance if it belongs to this company; another company's approval does not exist for the caller."""
+    return _inst(instances().for_company(company_id).filter(pk=as_uuid(instance_id)).values(*INSTANCE_FIELDS).first())
 
 
 def instance_for_object(object_type: str, object_id: str) -> dict | None:
-    return _inst(one('SELECT * FROM workflow_instance WHERE object_type = %s AND object_id = %s', [object_type, str(object_id)]))
+    return _inst(instances().filter(object_type=object_type, object_id=as_uuid(object_id)).values(*INSTANCE_FIELDS).first())
 
 
 def approvers_for_step(company_id: str, employee_id: str | None, step: dict | str | None,
@@ -156,7 +181,7 @@ def _current_step(inst: dict) -> dict | None:
 
 def can_act(user: AuthUser, inst: dict, cache: dict | None = None) -> bool:
     """Admins may act anywhere, nobody may decide their own request."""
-    if inst['state'] != 'pending':
+    if inst['state'] != State.PENDING:
         return False
     if inst.get('employee_id') and user.employee_id == str(inst['employee_id']):
         return False
@@ -186,12 +211,11 @@ def can_view(user: AuthUser, inst: dict) -> bool:
         return True
     if can_act(user, inst):
         return True
-    return bool(rows('SELECT 1 FROM approval_action WHERE instance_id = %s AND (actor_id = %s OR on_behalf_of = %s) LIMIT 1',
-                     [inst['id'], user.id, user.id]))
+    return ApprovalAction.objects.filter(Q(actor_id=user.id) | Q(on_behalf_of=user.id), instance_id=inst['id']).exists()
 
 
 def _iso_ms(d: datetime) -> str:
-    """JS Date.toISOString(): UTC with milliseconds."""
+    """The instant as UTC with milliseconds ('2026-10-27T04:19:00.123Z'), the TS engine's signature input."""
     d = d.astimezone(timezone.utc)
     return d.strftime('%Y-%m-%dT%H:%M:%S.') + f'{d.microsecond // 1000:03d}Z'
 
@@ -211,13 +235,19 @@ def start_workflow(*, company_id: str, object_type: str, object_id: str, employe
     """
     flow = choose_flow(str(company_id), object_type, employee_id and str(employee_id))
     steps = steps_for_amount(flow.steps, amount)
-    r = one("""INSERT INTO workflow_instance (company_id, object_type, object_id, employee_id, steps, amount, flow_id)
-               VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *""",
-            [str(company_id), object_type, str(object_id), employee_id and str(employee_id), json.dumps(steps),
-             None if amount is None else Decimal(str(amount)), flow.flow_id])
-    inst = _inst(r)
+    created = WorkflowInstance.objects.create(
+        company_id=company_id, object_type=object_type, object_id=object_id, employee_id=employee_id, steps=steps,
+        amount=None if amount is None else Decimal(str(amount)), flow_id=flow.flow_id)
+    inst = get_instance(created.pk)
     _notify_step_approvers(inst, title, body)
     return get_instance(inst['id'])
+
+
+def _append_routing(instance_id: str, entries: list[dict]) -> None:
+    """routing || entries in one UPDATE, so concurrent notes are never lost."""
+    WorkflowInstance.objects.filter(pk=instance_id).update(routing=Func(
+        F('routing'), Value(entries, output_field=JSONField()), arg_joiner=' || ', template='(%(expressions)s)',
+        output_field=JSONField()))
 
 
 def _notify_step_approvers(inst: dict, title: str, body: str) -> None:
@@ -228,8 +258,7 @@ def _notify_step_approvers(inst: dict, title: str, body: str) -> None:
     notes = visible_notes(res)
     # Approver away, delegated or nobody set: say so on the request so the requester and HR can see why it went where it did.
     if notes or fell_back_to_hr(res):
-        execute('UPDATE workflow_instance SET routing = routing || %s::jsonb WHERE id = %s',
-                [json.dumps([{'step': inst['current_step'], 'at': _iso_ms(datetime.now(timezone.utc)), 'notes': notes}]), inst['id']])
+        _append_routing(inst['id'], [{'step': inst['current_step'], 'at': _iso_ms(datetime.now(timezone.utc)), 'notes': notes}])
     for user_id in res.users:
         notify(company_id=inst['company_id'], user_id=user_id, template=f"{inst['object_type']}.pending", title=title, body=body,
                payload={'instanceId': inst['id'], 'objectType': inst['object_type'], 'objectId': inst['object_id'],
@@ -249,15 +278,16 @@ def act(*, instance_id: str, user: AuthUser, decision: str, reason: str | None =
     step applies the object's handler. Must be called inside a transaction; the row is locked FOR UPDATE.
     Returns the new state.
     """
-    inst = _inst(one('SELECT * FROM workflow_instance WHERE id = %s FOR UPDATE', [str(instance_id)]))
+    decision = str(decision)
+    inst = _inst(instances().select_for_update().filter(pk=as_uuid(instance_id)).values(*INSTANCE_FIELDS).first())
     if not inst:
         raise NotFoundError('approval not found')
-    if inst['state'] != 'pending':
+    if inst['state'] != State.PENDING:
         raise ConflictError(f"request already {inst['state']}")
     if not can_act(user, inst):
         raise ForbiddenError('you are not an approver for this step')
     reason = (reason or '').strip() or None
-    if decision == 'reject' and not reason:
+    if decision == ApprovalAction.Decision.REJECT and not reason:
         raise BadRequestError('a reason is required to reject')
     if on_behalf_of:
         # Delegation is recorded, never assumed: only HR/admin may act on behalf of someone, and only for a real approver of this step.
@@ -270,44 +300,45 @@ def act(*, instance_id: str, user: AuthUser, decision: str, reason: str | None =
 
     acted_at = _now_ms()
     signature = signature_of(inst['id'], inst['current_step'], user.id, decision, acted_at)
-    execute("""INSERT INTO approval_action (instance_id, step, actor_id, decision, reason, on_behalf_of, signature, acted_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            [inst['id'], inst['current_step'], user.id, decision, reason, on_behalf_of and str(on_behalf_of), signature, acted_at])
+    ApprovalAction.objects.create(instance_id=inst['id'], step=inst['current_step'], actor_id=user.id, decision=decision,
+                                  reason=reason, on_behalf_of_id=on_behalf_of and str(on_behalf_of), signature=signature,
+                                  acted_at=acted_at)
 
-    if decision == 'reject':
-        state = 'rejected'
-        execute("UPDATE workflow_instance SET state = 'rejected', completed_at = now() WHERE id = %s", [inst['id']])
+    row = WorkflowInstance.objects.filter(pk=inst['id'])
+    if decision == ApprovalAction.Decision.REJECT:
+        state = State.REJECTED
+        row.update(state=state, completed_at=Now())
     elif inst['current_step'] + 1 >= len(inst['steps']):
-        state = 'approved'
-        execute("UPDATE workflow_instance SET state = 'approved', current_step = %s, completed_at = now() WHERE id = %s",
-                [inst['current_step'] + 1, inst['id']])
+        state = State.APPROVED
+        row.update(state=state, current_step=inst['current_step'] + 1, completed_at=Now())
     else:
-        state = 'pending'
-        execute('UPDATE workflow_instance SET current_step = %s WHERE id = %s', [inst['current_step'] + 1, inst['id']])
-        # JS String.replace with a string pattern replaces only the first '_'.
+        state = State.PENDING
+        row.update(current_step=inst['current_step'] + 1)
+        # Only the first '_' becomes a space (the TS String.replace with a string pattern).
         _notify_step_approvers({**inst, 'current_step': inst['current_step'] + 1}, 'Approval needed',
                                f"{inst['object_type'].replace('_', ' ', 1)} awaiting your decision (step {inst['current_step'] + 2})")
     audit(decision, inst['object_type'], actor_id=user.id, row_id=inst['object_id'],
           after={'instanceId': inst['id'], 'step': inst['current_step'], 'reason': reason, 'signature': signature})
 
-    if state != 'pending':
+    if state != State.PENDING:
         handler = _handlers.get(inst['object_type'])
         if handler:
-            handler(inst['object_id'], state, DecisionContext(user.id, reason, payload or {}))
-    return state
+            handler(inst['object_id'], str(state), DecisionContext(user.id, reason, payload or {}))
+    return str(state)
 
 
 def cancel_workflow(object_type: str, object_id: str) -> None:
     """The requester withdrew (or HR cancelled) the request: a pending approval ends as 'cancelled'."""
-    execute("""UPDATE workflow_instance SET state = 'cancelled', completed_at = now()
-                WHERE object_type = %s AND object_id = %s AND state = 'pending'""", [object_type, str(object_id)])
+    (instances().filter(object_type=object_type, object_id=as_uuid(object_id), state=State.PENDING)
+     .update(state=State.CANCELLED, completed_at=Now()))
 
 
 def pending_older_than(hours: float) -> list[dict]:
     """Pending instances older than N hours with their current approvers, for SLA reminders and escalation."""
+    cutoff = ExpressionWrapper(Now() - timedelta(hours=hours), output_field=DateTimeField())
     out = []
-    for r in rows("""SELECT * FROM workflow_instance WHERE state = 'pending' AND created_at < now() - make_interval(hours => %s)
-                      ORDER BY created_at""", [hours]):
+    for r in (instances().filter(state=State.PENDING, created_at__lt=cutoff).order_by('created_at', 'id')
+              .values(*INSTANCE_FIELDS)):
         inst = _inst(r)
         step = _current_step(inst)
         out.append({'instance': inst, 'approvers': approvers_for_step(inst['company_id'], inst.get('employee_id'), step) if step else []})
@@ -330,8 +361,8 @@ def _recompute_after(employee_id: str | None) -> None:
 def decide(user: AuthUser, instance_id: str, decision: str, *, reason: str | None = None, on_behalf_of: str | None = None,
            approved_min: int | None = None) -> str:
     """POST /workflow/:id/approve|reject. Another company's approval does not exist for this user (404, not 403)."""
-    existing = get_instance(instance_id)
-    if not existing or existing['company_id'] != user.company_id:
+    existing = instance_in(user.company_id, instance_id)
+    if not existing:
         raise NotFoundError('approval not found')
     with transaction.atomic():
         state = act(instance_id=str(instance_id), user=user, decision=decision, reason=reason, on_behalf_of=on_behalf_of,
@@ -344,13 +375,13 @@ def bulk_approve(user: AuthUser, ids: list[str]) -> list[dict]:
     """Approve several at once; each one commits or fails on its own: [{'id', 'state'} | {'id', 'error'}]."""
     results = []
     for i in ids:
-        existing = get_instance(i)
-        if not existing or existing['company_id'] != user.company_id:
+        existing = instance_in(user.company_id, i)
+        if not existing:
             results.append({'id': i, 'error': 'approval not found'})
             continue
         try:
             with transaction.atomic():
-                state = act(instance_id=i, user=user, decision='approve')
+                state = act(instance_id=i, user=user, decision=ApprovalAction.Decision.APPROVE)
         except Exception as e:  # noqa: BLE001 - as the TS route: any failure is reported for that id, the rest go on
             results.append({'id': i, 'error': getattr(e, 'message', None) or str(e)})
             continue
@@ -362,8 +393,8 @@ def bulk_approve(user: AuthUser, ids: list[str]) -> list[dict]:
 def detail(user: AuthUser, instance_id: str) -> dict:
     """GET /workflow/:id. Only the subject, their line manager, HR, current approvers and people who already acted may
     read it (leave reasons can be medical)."""
-    inst = get_instance(instance_id)
-    if not inst or inst['company_id'] != user.company_id or not can_view(user, inst):
+    inst = instance_in(user.company_id, instance_id)
+    if not inst or not can_view(user, inst):
         raise NotFoundError('approval not found')
     return {'instance': inst, 'summary': summarise(inst), 'actions': timeline(inst)}
 
@@ -378,9 +409,10 @@ def _employee_of(row: dict) -> dict | None:
 
 
 def _pending_for(user: AuthUser) -> list[dict]:
-    return [_inst(r) | {'emp_code': r['emp_code'], 'name_en': r['name_en'], 'name_ne': r['name_ne']} for r in rows(
-        """SELECT w.*, e.emp_code, e.name_en, e.name_ne FROM workflow_instance w LEFT JOIN employee e ON e.id = w.employee_id
-            WHERE w.company_id = %s AND w.state = 'pending' ORDER BY w.created_at""", [user.company_id])]
+    return [_inst(r) for r in instances().for_company(user.company_id).filter(state=State.PENDING)
+            .order_by('created_at', 'id')
+            .values(*INSTANCE_FIELDS, emp_code=F('employee__emp_code'), name_en=F('employee__name_en'),
+                    name_ne=F('employee__name_ne'))]
 
 
 def inbox_for(user: AuthUser) -> list[dict]:
@@ -390,15 +422,15 @@ def inbox_for(user: AuthUser) -> list[dict]:
     """
     if not user.company_id:
         return []
-    items = []
     cache: dict = {}
-    for row in _pending_for(user):
-        if not can_act(user, row, cache):
-            continue
+    rows = [row for row in _pending_for(user) if can_act(user, row, cache)]
+    cards = summaries(rows)
+    items = []
+    for row in rows:
         items.append({
             'instanceId': row['id'], 'objectType': row['object_type'], 'objectId': row['object_id'],
             'step': row['current_step'], 'totalSteps': len(row['steps']), 'createdAt': row['created_at'],
-            'employee': _employee_of(row), 'summary': summarise(row),
+            'employee': _employee_of(row), 'summary': cards[row['id']],
             'routing': [n for x in row['routing'] if x.get('step') == row['current_step'] for n in x.get('notes', [])],
         })
     return items
@@ -412,60 +444,139 @@ def inbox_count(user: AuthUser) -> int:
     return sum(1 for row in _pending_for(user) if can_act(user, row, cache))
 
 
+def as_member_of(user: AuthUser, company_id: str) -> AuthUser | None:
+    """The same person as they are in another of their companies (that company's roles and employee record), or None
+    when they have no access there. Only for reading what they could see after switching company."""
+    ref = user.company(company_id)
+    if ref is None:
+        return None
+    return replace(user, company_id=ref.id, employee_id=ref.employee_id, roles=tuple(ref.roles), group_id=ref.group_id)
+
+
+def inbox_elsewhere(user: AuthUser) -> list[dict]:
+    """Group-wide: how many approvals wait for this person in each of their OTHER companies (only companies they can
+    switch to, counted with their roles there) -> [{'companyId', 'name', 'count'}] for the ones with any, in the order of
+    the company switcher."""
+    out = []
+    for ref in user.companies:
+        if ref.id == user.company_id:
+            continue
+        there = as_member_of(user, ref.id)
+        n = inbox_count(there) if there else 0
+        if n:
+            out.append({'companyId': ref.id, 'name': ref.name, 'count': n})
+    return out
+
+
 def _num(v) -> int | float:
-    """JS Number() of a numeric column: integral values as int."""
+    """A numeric column as a JSON number: integral values as int."""
     if v is None:
         return 0
     f = float(v)
     return int(f) if f.is_integer() else f
 
 
-def _safe_rows(sql: str, params) -> list[dict]:
-    """A query against a table that may not exist yet in older databases (the TS .catch(() => ({rows: []})))."""
-    try:
-        with transaction.atomic():
-            return rows(sql, params)
-    except DatabaseError:
-        return []
+def _hhmm(t) -> str | None:
+    return t.strftime('%H:%M') if t is not None else None
+
+
+def _leave_summaries(company_id: str, ids) -> dict[str, dict]:
+    """Inbox card context of several leave requests in one query: the request, the balance of its leave type and up to
+    five colleagues off (pending or approved) on overlapping days."""
+    if not ids:
+        return {}
+    balance = (LeaveLedger.objects.filter(employee_id=OuterRef('employee_id'), leave_type_id=OuterRef('leave_type_id'))
+               .values('employee_id').annotate(b=Sum('delta_days')).values('b'))
+    overlap = (LeaveRequest.objects.for_company(company_id).exclude(pk=OuterRef('pk')).exclude(employee_id=OuterRef('employee_id'))
+               .filter(status__in=(LeaveRequest.Status.PENDING, LeaveRequest.Status.APPROVED),
+                       from_date__lte=OuterRef('to_date'), to_date__gte=OuterRef('from_date'))
+               .values('employee__name_en')[:5])
+    found = (LeaveRequest.objects.for_company(company_id).filter(pk__in=[as_uuid(i) for i in ids])
+             .annotate(balance=Coalesce(Subquery(balance), Value(Decimal(0)), output_field=DecimalField()),
+                       overlap=ArraySubquery(overlap))
+             .values('id', 'from_date', 'to_date', 'half_day', 'days_requested', 'reason', 'from_time', 'to_time', 'hours',
+                     'balance', 'overlap', type_code=F('leave_type__code'), type_name=F('leave_type__name_en')))
+    out = {}
+    for lr in found:
+        balance_now = _num(lr['balance'])
+        days = _num(lr['days_requested'])
+        s = {
+            'leaveType': lr['type_code'], 'leaveTypeName': lr['type_name'], 'from': lr['from_date'].isoformat(),
+            'to': lr['to_date'].isoformat(), 'halfDay': lr['half_day'], 'days': days, 'reason': lr['reason'],
+            'balanceNow': balance_now, 'balanceAfter': _num(Decimal(str(balance_now)) - Decimal(str(days))),
+            'teamOverlap': list(lr['overlap'] or []),
+        }
+        if lr['from_time']:
+            s.update({'fromTime': _hhmm(lr['from_time']), 'toTime': _hhmm(lr['to_time']), 'hours': _num(lr['hours'])})
+        out[str(lr['id'])] = s
+    return out
+
+
+def _leave_summary(company_id: str, oid: str) -> dict:
+    return _leave_summaries(company_id, [oid]).get(str(oid), {})
+
+
+_REG_FIELDS = ('local_date', 'kind', 'punch_time', 'punch_direction', 'shift_id', 'reason')
+_OT_FIELDS = ('local_date', 'requested_min', 'reason')
+
+
+def _rows_by_id(model, company_id: str, ids, fields) -> dict[str, dict]:
+    if not ids:
+        return {}
+    return {str(r.pop('pk')): r for r in model.objects.for_company(company_id).filter(pk__in=[as_uuid(i) for i in ids])
+            .values('pk', *fields)}
+
+
+def summaries(insts: list[dict]) -> dict[str, dict]:
+    """summarise() for many instances of one company ({instance id: summary}), with the built-in leave, correction and
+    overtime cards read in one query per type instead of one per card."""
+    if not insts:
+        return {}
+    cid = insts[0]['company_id']
+    of = lambda t: [i['object_id'] for i in insts if i['object_type'] == t]  # noqa: E731
+    batched = {'leave_request': _leave_summaries(cid, of('leave_request')),
+               'regularisation_request': _rows_by_id(RegularisationRequest, cid, of('regularisation_request'), _REG_FIELDS),
+               'ot_request': _rows_by_id(OtRequest, cid, of('ot_request'), _OT_FIELDS)}
+    out = {}
+    for i in insts:
+        found = batched.get(i['object_type'])
+        out[i['id']] = found.get(str(i['object_id']), {}) if found is not None else summarise(i)
+    return out
+
+
+def _payroll_summary(company_id: str, oid: str) -> dict:
+    r = (PayrollRun.objects.for_company(company_id).filter(pk=oid)
+         .annotate(n_payslips=Count('payslips'), net_total=Coalesce(Sum('payslips__net'), Value(Decimal(0)),
+                                                                     output_field=DecimalField()))
+         .values('run_type', 'status', 'n_payslips', 'net_total', bs_year=F('period__bs_year'),
+                 bs_month=F('period__bs_month')).first())
+    if not r:
+        return {}
+    return {'run_type': r['run_type'], 'status': r['status'], 'bs_year': r['bs_year'], 'bs_month': r['bs_month'],
+            'payslips': r['n_payslips'], 'total_net': str(r['net_total'])}
+
+
+def _training_summary(company_id: str, oid: str) -> dict:
+    r = (LrnEnrollment.objects.for_company(company_id).filter(pk=oid)
+         .values('reason', course_title=F('course__title'), delivery=F('course__delivery'), course_cost=F('course__cost'),
+                 starts_at=F('session__starts_at')).first())
+    if not r:
+        return {}
+    return {'course_title': r['course_title'], 'delivery': r['delivery'], 'cost': r['course_cost'], 'reason': r['reason'],
+            'starts_at': r['starts_at']}
 
 
 def summarise(inst: dict) -> dict:
     """Object-specific context for the inbox card (plan §13.5 manager inbox card)."""
-    t, oid = inst['object_type'], inst['object_id']
+    t, oid, cid = inst['object_type'], inst['object_id'], inst['company_id']
     if t == 'leave_request':
-        lr = one("""SELECT lr.from_date, lr.to_date, lr.half_day, lr.days_requested, lr.reason, lt.code AS type_code,
-                           lt.name_en AS type_name, lr.leave_type_id, lr.employee_id,
-                           to_char(lr.from_time, 'HH24:MI') AS from_time, to_char(lr.to_time, 'HH24:MI') AS to_time, lr.hours
-                      FROM leave_request lr JOIN leave_type lt ON lt.id = lr.leave_type_id WHERE lr.id = %s""", [oid])
-        if not lr:
-            return {}
-        bal = one('SELECT coalesce(sum(delta_days), 0)::text AS balance FROM leave_ledger WHERE employee_id = %s AND leave_type_id = %s',
-                  [lr['employee_id'], lr['leave_type_id']])
-        overlap = rows("""SELECT e.name_en FROM leave_request o JOIN employee e ON e.id = o.employee_id
-                           WHERE o.id <> %s AND o.status IN ('pending', 'approved') AND o.employee_id <> %s
-                             AND o.from_date <= %s::date AND o.to_date >= %s::date AND e.company_id = %s LIMIT 5""",
-                       [oid, lr['employee_id'], lr['to_date'], lr['from_date'], inst['company_id']])
-        balance = _num(Decimal(bal['balance']) if bal else 0)
-        days = _num(lr['days_requested'])
-        out = {
-            'leaveType': lr['type_code'], 'leaveTypeName': lr['type_name'], 'from': lr['from_date'].isoformat(),
-            'to': lr['to_date'].isoformat(), 'halfDay': lr['half_day'], 'days': days, 'reason': lr['reason'],
-            'balanceNow': balance, 'balanceAfter': _num(Decimal(str(balance)) - Decimal(str(days))),
-            'teamOverlap': [x['name_en'] for x in overlap],
-        }
-        if lr['from_time']:
-            out.update({'fromTime': lr['from_time'], 'toTime': lr['to_time'], 'hours': _num(lr['hours'])})
-        return out
+        return _leave_summary(cid, oid)
     if t == 'regularisation_request':
-        return one('SELECT local_date, kind, punch_time, punch_direction, shift_id, reason FROM regularisation_request WHERE id = %s',
-                   [oid]) or {}
+        return RegularisationRequest.objects.for_company(cid).filter(pk=oid).values(*_REG_FIELDS).first() or {}
     if t == 'ot_request':
-        return one('SELECT local_date, requested_min, reason FROM ot_request WHERE id = %s', [oid]) or {}
+        return OtRequest.objects.for_company(cid).filter(pk=oid).values(*_OT_FIELDS).first() or {}
     if t == 'payroll_run':
-        r = _safe_rows("""SELECT r.run_type, r.status, p.bs_year, p.bs_month, (SELECT count(*) FROM payslip s WHERE s.run_id = r.id) AS payslips,
-                                 (SELECT coalesce(sum(net), 0)::text FROM payslip s WHERE s.run_id = r.id) AS total_net
-                            FROM payroll_run r JOIN payroll_period p ON p.id = r.period_id WHERE r.id = %s""", [oid])
-        return r[0] if r else {}
+        return _payroll_summary(cid, oid)
     if t == 'timesheet' and t not in _summarisers:
         try:
             from hajiri.timesheets.services import summarise_timesheet  # type: ignore[attr-defined]
@@ -473,17 +584,15 @@ def summarise(inst: dict) -> dict:
             return {}
         return summarise_timesheet(oid)
     if t == 'letter_request':
-        return one("""SELECT t.name AS letter, lr.purpose, lr.addressed_to FROM letter_request lr
-                        JOIN letter_template t ON t.id = lr.template_id WHERE lr.id = %s""", [oid]) or {}
+        return (LetterRequest.objects.for_company(cid).filter(pk=oid)
+                .values('purpose', 'addressed_to', letter=F('template__name')).first()) or {}
     if t == 'training_nomination':
-        return one("""SELECT c.title AS course_title, c.delivery, c.cost, e.reason, s.starts_at FROM lrn_enrollment e
-                        JOIN lrn_course c ON c.id = e.course_id LEFT JOIN lrn_session s ON s.id = e.session_id
-                       WHERE e.id = %s""", [oid]) or {}
+        return _training_summary(cid, oid)
     fn = _summarisers.get(t)
     return fn(inst) if fn else {}
 
 
 def timeline(inst: dict) -> list[dict]:
-    return rows("""SELECT a.step, a.decision, a.reason, a.acted_at, a.signature, a.on_behalf_of, u.name AS actor_name, u.id AS actor_id
-                     FROM approval_action a JOIN app_user u ON u.id = a.actor_id WHERE a.instance_id = %s ORDER BY a.acted_at""",
-                [inst['id']])
+    return list(ApprovalAction.objects.filter(instance_id=inst['id']).order_by('acted_at', 'id')
+                .values('step', 'decision', 'reason', 'acted_at', 'signature', 'on_behalf_of', 'actor_id',
+                        actor_name=F('actor__name')))

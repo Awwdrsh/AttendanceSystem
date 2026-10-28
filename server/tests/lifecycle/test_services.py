@@ -5,7 +5,7 @@ import pytest
 
 from hajiri.core import auth
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
 from hajiri.employees import service as emp
 from hajiri.lifecycle import api

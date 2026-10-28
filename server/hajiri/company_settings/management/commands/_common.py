@@ -2,14 +2,14 @@ import os
 
 from django.core.management.base import CommandError
 
-from hajiri.core.db import one
+from hajiri.db.models import Company
 
 
 def company_id(code: str) -> str:
-    r = one('SELECT id FROM company WHERE code = %s', [code])
-    if not r:
+    cid = Company.objects.filter(code=code).values_list('id', flat=True).first()
+    if not cid:
         raise CommandError(f'company {code} not found (run create_company first)')
-    return str(r['id'])
+    return str(cid)
 
 
 def password_arg(opts) -> str | None:

@@ -11,3 +11,12 @@ urlpatterns = [
     path('_/employees/<uuid:id>/overview', views.overview, name='overview'),
     path('_/employees/<uuid:id>/sensitive', views.sensitive, name='sensitive'),
 ]
+
+# JSON API for Bearer-token clients (TS: /api/v1/employees/...).
+from rest_framework.routers import SimpleRouter  # noqa: E402
+
+from . import api  # noqa: E402
+
+router = SimpleRouter(trailing_slash=False)
+router.register('api/v1/employees', api.EmployeeViewSet, basename='api-employee')
+urlpatterns += router.urls

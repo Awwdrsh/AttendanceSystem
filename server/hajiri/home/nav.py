@@ -15,7 +15,7 @@ NAV: list[NavItem] = [
 
 def _unread(user) -> int:
     from hajiri.notifications.service import unread_count
-    return unread_count(user.id)
+    return unread_count(user.id, company_id=user.company_id)  # the active company's notices (and those of none)
 
 
 # The red dot on the bell (Layout.tsx polls GET /notifications?unreadOnly).

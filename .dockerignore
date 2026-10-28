@@ -1,11 +1,17 @@
-**/node_modules
-**/dist
+# Same as infra/docker/Dockerfile.dockerignore, for builders that do not read per-Dockerfile ignore files.
 **/.env
 **/.env.*
+**/gateway.env
 !**/.env.example
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.hypothesis
 **/data
 **/logs
 **/.run
+server/staticfiles
 .admin-credentials
 .git
 infra/pgdata

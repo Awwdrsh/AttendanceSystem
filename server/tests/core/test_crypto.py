@@ -1,7 +1,6 @@
-"""crypto.py reads what the TS API wrote, and the TS API reads what crypto.py writes."""
+"""crypto.py reads what the TypeScript API wrote (fixtures recorded from it), so existing data stays readable."""
 import base64
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,8 +9,6 @@ from cryptography.exceptions import InvalidTag
 from hajiri.core.crypto import FieldCipher, hash_password, password_policy_error, sha256_hex, verify_password
 
 FIXTURE = json.loads((Path(__file__).parent.parent / 'parity' / 'fixtures' / 'crypto.json').read_text())
-REPO = Path(__file__).resolve().parents[3]
-TSX = REPO / 'apps' / 'api' / 'node_modules' / '.bin' / 'tsx'
 CIPHER = FieldCipher.from_base64(FIXTURE['key'])
 
 
@@ -49,19 +46,3 @@ def test_password_policy():
     assert password_policy_error('aaaaaaaaaaaaaa') == 'Password is too repetitive'
     assert password_policy_error('Password1234') == 'Password is too common'
     assert password_policy_error('a long enough passphrase') is None
-
-
-@pytest.mark.skipif(not TSX.exists(), reason='TS toolchain removed after cutover')
-def test_ts_reads_python_output(tmp_path):
-    out = {
-        'key': FIXTURE['key'], 'pepper': FIXTURE['pepper'],
-        'cipher': [{'plain': x['plain'], 'aad': x['aad'],
-                    'blob': base64.b64encode(CIPHER.encrypt(x['plain'], x['aad'])).decode()} for x in FIXTURE['cipher']],
-        'passwords': [{'password': x['password'], 'hash': hash_password(x['password'], FIXTURE['pepper'])}
-                      for x in FIXTURE['passwords']],
-    }
-    f = tmp_path / 'py.json'
-    f.write_text(json.dumps(out))
-    r = subprocess.run([str(TSX), 'src/verify-crypto-parity.ts', str(f)], cwd=REPO / 'apps' / 'api',
-                       capture_output=True, text=True, timeout=120)
-    assert r.stdout.strip() == 'OK', r.stdout + r.stderr

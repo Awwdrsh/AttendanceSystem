@@ -1,0 +1,11 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Certificate {{ x.emp_code }} {{ x.title }}</title><style>
+@page{size:A4 landscape;margin:0}body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#17191e}
+.page{box-sizing:border-box;width:297mm;height:210mm;padding:22mm;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;border:10px solid #12773a;outline:2px solid #12773a;outline-offset:-22px}
+.co{font-size:14px;letter-spacing:.2em;text-transform:uppercase;color:#6b707b}h1{font-size:40px;margin:16px 0 4px;font-weight:600;letter-spacing:-.02em}.to{color:#6b707b;margin-top:24px}
+.name{font-size:30px;font-weight:600;margin:6px 0;color:#12773a}.course{font-size:20px;margin:8px 0}.meta{color:#6b707b;margin-top:18px;font-size:13px}
+.sign{display:flex;gap:120px;margin-top:56px}.sign div{border-top:1px solid #9aa0aa;padding-top:6px;width:200px;color:#6b707b;font-size:12px}</style></head><body><div class="page">
+<div class="co">{{ x.company_name }}</div><h1>Certificate of completion</h1><div class="to">This certifies that</div><div class="name">{{ x.name_en }}</div>
+<div>has completed</div><div class="course">{{ x.title }}</div>
+<div class="meta">{{ meta }}</div>
+<div class="meta">Issued {{ issued }}{% if valid_until %} · Valid until {{ valid_until }}{% endif %} · Reference {{ reference }}</div>
+<div class="sign"><div>Trainer</div><div>HR</div></div></div></body></html>

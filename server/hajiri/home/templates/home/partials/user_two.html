@@ -1,4 +1,4 @@
 <div class="hj-row nowrap hj-gap-xs">
   {% if row.two_factor %}{% badge "On" "ok" %}{% else %}<span class="hj-sm hj-muted">Off</span>{% endif %}
-  {% if row.is_admin_view and row.two_factor and not row.is_me %}<button type="button" class="hj-btn subtle xs" hx-get="{% url 'home:user_reset' row.id %}" hx-target="#hj-modal-body">Reset</button>{% endif %}
+  {% if row.can_reset and row.two_factor and not row.is_me %}<button type="button" class="hj-btn subtle xs" hx-get="{% url 'home:user_reset' row.id %}" hx-target="#hj-modal-body">Reset</button>{% endif %}
 </div>

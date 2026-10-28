@@ -1,18 +1,21 @@
 """
-CSV for Excel (port of apps/api/src/modules/reports/csv.ts and sendTable in reports/routes.ts). Every module's CSV
-export goes through csv_cell, which neutralises spreadsheet formulas.
+CSV for Excel (port of apps/api/src/modules/reports/csv.ts and sendTable in reports/routes.ts), written by Python's csv
+module through hajiri.web.csv. Every module's CSV export goes through csv_cell, which neutralises spreadsheet formulas.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import date, datetime
 from typing import Any, Iterable
 
 from django.http import HttpResponse
 
 from hajiri.core.bsdate import bs_label
+from hajiri.core.numbers import to_fixed
+from hajiri.core.clock import NPT
+from hajiri.web import csv as web_csv
 
 
 @dataclass(frozen=True)
@@ -45,44 +48,32 @@ class Table:
         return {'columns': [c.to_dict() for c in self.columns], 'rows': self.rows, **self.extra}
 
 
-def _js_iso(d: datetime) -> str:
-    d = d.astimezone(timezone.utc) if d.tzinfo else d
-    return d.strftime('%Y-%m-%dT%H:%M:%S.') + f'{d.microsecond // 1000:03d}Z'
-
-
-def _text(v: Any) -> str:
+def _text(v: Any) -> Any:
+    """A report value as CSV text: booleans true/false, instants ISO UTC with milliseconds, whole floats without .0,
+    JSON values compact (what the TS export wrote). None stays None (an empty cell)."""
+    if v is None or isinstance(v, str):
+        return v
     if isinstance(v, bool):
         return 'true' if v else 'false'
-    if isinstance(v, datetime):
-        return _js_iso(v)
-    if isinstance(v, date):
-        return v.isoformat()
     if isinstance(v, float) and v.is_integer():
         return str(int(v))
     if isinstance(v, (dict, list)):
-        import json
         return json.dumps(v, ensure_ascii=False, separators=(',', ':'), default=str)
+    if isinstance(v, (datetime, date)):
+        return v                       # hajiri.web.csv writes dates ISO and instants in UTC with milliseconds
     return str(v)
 
 
 def csv_cell(v: Any) -> str:
-    """One RFC 4180 cell. A text cell starting with = + - @ tab or CR would be evaluated by Excel, so it gets a leading
-    apostrophe; plain numbers (including negatives) are left alone."""
-    if v is None:
-        return ''
-    s = _text(v)
-    if re.match(r'[=+\-@\t\r]', s) and not re.fullmatch(r'-?\d+(\.\d+)?', s):
-        s = "'" + s
-    return '"' + s.replace('"', '""') + '"' if re.search(r'[",\r\n]', s) else s
+    """One RFC 4180 cell (the csv module). A text cell starting with = + - @ tab or CR would be evaluated by Excel, so
+    it gets a leading apostrophe; plain numbers (including negatives) are left alone."""
+    return web_csv.csv_cell(_text(v))
 
 
 def to_csv(columns: Iterable[Column | dict], rows: Iterable[dict]) -> str:
     """CSV with a UTF-8 BOM so Excel opens Devanagari correctly, CRLF line ends."""
-    cs = [c if isinstance(c, Column) else Column(c['key'], c['header'], c.get('type')) for c in columns]
-    lines = [','.join(csv_cell(c.header) for c in cs)]
-    for r in rows:
-        lines.append(','.join(csv_cell(r.get(c.key)) for c in cs))
-    return '﻿' + '\r\n'.join(lines) + '\r\n'
+    cs = [c.to_dict() if isinstance(c, Column) else c for c in columns]
+    return web_csv.to_csv(cs, ({c['key']: _text(r.get(c['key'])) for c in cs} for r in rows))
 
 
 def csv_response(filename: str, columns, rows) -> HttpResponse:
@@ -127,17 +118,13 @@ def npt_hhmm(d: datetime | None) -> str:
     """'HH:MM' in Nepal time for an instant, or ''."""
     if not d:
         return ''
-    return (d.astimezone(timezone.utc) + timedelta(minutes=345)).strftime('%H:%M')
+    return d.astimezone(NPT).strftime('%H:%M')
 
 
 def hours(minutes) -> str:
     """Minutes as hours with two decimals ('0.00' for none)."""
     if not minutes:
         return '0.00'
-    return _to_fixed(float(minutes) / 60, 2)
+    return to_fixed(float(minutes) / 60, 2)
 
 
-def _to_fixed(x: float, n: int) -> str:
-    """Number.prototype.toFixed: rounds the exact binary value half away from zero."""
-    d = Decimal(x).quantize(Decimal(1).scaleb(-n), rounding='ROUND_HALF_UP')
-    return f'{d:.{n}f}'

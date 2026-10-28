@@ -12,7 +12,7 @@ from django.test import Client
 from engines.attendance import local_time_ms
 
 from hajiri.attendance.service import recompute_day
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.regularisation import services
 from tests.core.fixtures import bearer
 from tests.core.punches import insert_punch

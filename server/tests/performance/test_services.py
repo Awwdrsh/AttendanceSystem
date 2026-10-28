@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError, ValidationError
 from hajiri.learning import services as lrn
 from hajiri.performance import services as perf

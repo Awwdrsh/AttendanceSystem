@@ -11,7 +11,7 @@ from django.test import Client
 
 from hajiri.core import auth
 from hajiri.core.auth import create_user
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.field.services import close_stale_breaks
 from tests.core.fixtures import PW
 from tests.punch.api import SELFIE, add_days, get, post, punch, put, today

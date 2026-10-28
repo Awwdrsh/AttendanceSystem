@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from django.test import Client
 
-from hajiri.core.db import one
+from tests.support.sql import one
 from hajiri.documents import services as docs
 from hajiri.documents.letters import npt_today
 from tests.web.factories import htmx, hx_triggers, set_features_off, sign_in, toasts

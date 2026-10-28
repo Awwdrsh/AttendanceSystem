@@ -34,7 +34,7 @@ def _boom_unique(request):
     # A real unique violation: the second company with the same code.
     from django.db import transaction
 
-    from hajiri.core.db import execute
+    from tests.support.sql import execute
     with transaction.atomic():
         execute("INSERT INTO company (code, name_en) VALUES ('DUP1', 'One')")
         execute("INSERT INTO company (code, name_en) VALUES ('DUP1', 'Two')")

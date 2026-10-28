@@ -1,24 +1,20 @@
 """Performance, learning and hiring (port of apps/api/src/db/demo-suite/talent.ts)."""
 from __future__ import annotations
 
-import base64
 import re
 
-from hajiri.core.db import execute, one, rows
-from hajiri.files.service import upload
+from hajiri.db.models import (
+    HiringInterview, HiringJob, HiringOffer, HiringRequisition, LrnCourse, LrnEnrollment, PerfGoal, PerfJournal, PerfKeyResult,
+    PerfReview, PerfReviewItem,
+)
 from hajiri.hiring import services as hiring
 from hajiri.learning import services as learning
 from hajiri.performance import conversations, goals, reviews
 from hajiri.people import service as people
 from hajiri.workflow import service as workflow
 
-from .context import DemoContext, already_seeded
-from .kit import Actor, ApiError, add_days_iso, iso_z, make_pdf, npt_instant, pick
-
-
-def instance_of(ctx: DemoContext, type_: str, id_: str) -> str | None:
-    r = one('SELECT id FROM workflow_instance WHERE object_type = %s AND object_id = %s', [type_, id_])
-    return str(r['id']) if r else None
+from .context import DemoContext, already_seeded, instance_of
+from .kit import Actor, ApiError, add_days_iso, npt_instant, pick
 
 
 def approve_as(ctx: DemoContext, who: Actor, type_: str, id_: str) -> None:
@@ -27,16 +23,10 @@ def approve_as(ctx: DemoContext, who: Actor, type_: str, id_: str) -> None:
         ctx.kit.call(f'POST /workflow/{inst}/approve', workflow.decide, who.user, inst, 'approve')
 
 
-def _upload_pdf_file(ctx: DemoContext, who: Actor, purpose: str, filename: str, title: str, lines: list[str]) -> str:
-    pdf = make_pdf(title, lines)
-    return str(ctx.kit.call('POST /files', upload, who.user,
-                            {'purpose': purpose, 'filename': filename, 'dataUrl': f'data:application/pdf;base64,{base64.b64encode(pdf).decode()}'})['id'])
-
-
 def seed_performance(ctx: DemoContext) -> None:
     """Company and team goals with key results and check-ins, a KPI library, competencies, a review cycle in self-review, 1-on-1s, feedback and journal notes."""
     kit, hr, today = ctx.kit, ctx.hr, ctx.today
-    if already_seeded(ctx, 'performance', 'SELECT 1 FROM perf_journal WHERE company_id = %s LIMIT 1', 'SELECT 1 FROM perf_goal WHERE company_id = %s LIMIT 1'):
+    if already_seeded(ctx, 'performance', PerfJournal.objects.all(), PerfGoal.objects.all()):
         return
     fy_end = add_days_iso(today, 270)
 
@@ -70,9 +60,9 @@ def seed_performance(ctx: DemoContext) -> None:
         g = goal(mgr, {'scope': 'individual', 'employeeId': e.id, 'parentId': None if i % 2 else c1, 'title': pick(titles, i), 'weight': 100,
                        'dueDate': add_days_iso(today, 90 + i * 10),
                        'keyResults': [{'title': 'Progress', 'measure': 'percent', 'startValue': 0, 'targetValue': 100, 'currentValue': 10 + ((i * 17) % 70)}]})
-        kr = one('SELECT id FROM perf_key_result WHERE goal_id = %s LIMIT 1', [g])
+        kr = PerfKeyResult.objects.for_company(ctx.company_id).filter(goal_id=g).values_list('id', flat=True).first()
         kit.call(f'POST /performance/goals/{g}/checkins', goals.checkin, ctx.as_(e).user, g,
-                 {**({'keyResultId': str(kr['id']), 'value': 20 + ((i * 17) % 70)} if kr else {'progress': 25}), 'confidence': 1 + (i % 3),
+                 {**({'keyResultId': str(kr), 'value': 20 + ((i * 17) % 70)} if kr else {'progress': 25}), 'confidence': 1 + (i % 3),
                   'comment': pick(['On track; the hard part is done.', 'Blocked on hardware delivery, catching up next week.', 'Good progress, two customers in pilot.'], i)})
 
     for body in ({'designation': 'Backend Engineer', 'title': 'Deployments without rollback', 'measure': 'percent', 'defaultTarget': 95, 'unit': '%'},
@@ -101,13 +91,13 @@ def seed_performance(ctx: DemoContext) -> None:
                           'peerDue': add_days_iso(today, 20), 'calibrationDue': add_days_iso(today, 30)}))
     kit.call(f'POST /performance/cycles/{cycle}/launch', reviews.launch_cycle, hr.user, cycle)
     # A few people already submitted their self review.
-    for i, r in enumerate(rows('SELECT id, employee_id FROM perf_review WHERE cycle_id = %s', [cycle])[:4]):
+    for i, r in enumerate(PerfReview.objects.for_company(ctx.company_id).filter(cycle_id=cycle).values('id', 'employee_id')[:4]):
         e = next((x for x in ctx.employees if x.id == str(r['employee_id'])), None)
         if not e or not e.user_id:
             continue
-        items = rows('SELECT id FROM perf_review_item WHERE review_id = %s', [r['id']])
+        items = PerfReviewItem.objects.for_company(ctx.company_id).filter(review_id=r['id']).values_list('id', flat=True)
         kit.call(f"PUT /performance/reviews/{r['id']}/self", reviews.save_self, ctx.as_(e).user, str(r['id']), {
-            'items': [{'id': str(it['id']), 'rating': 3 + ((i + k) % 3),
+            'items': [{'id': str(it), 'rating': 3 + ((i + k) % 3),
                        'comment': pick(['Delivered what I planned.', 'Took on more than expected.', 'Still learning here.'], i + k)} for k, it in enumerate(items)],
             'summary': 'A good half: shipped the main goal and helped the new joiners. I want to grow in system design next.', 'submit': i < 3,
         })
@@ -118,7 +108,7 @@ def seed_performance(ctx: DemoContext) -> None:
         if not mgr.employee_id:
             continue
         kit.call('POST /performance/one-on-ones', conversations.create_meeting, mgr.user,
-                 {'withEmployeeId': e.id, 'scheduledAt': iso_z(npt_instant(add_days_iso(today, 1 + i), '15:00')), 'cadence': 'biweekly' if i % 2 else 'weekly',
+                 {'withEmployeeId': e.id, 'scheduledAt': npt_instant(add_days_iso(today, 1 + i), '15:00').isoformat(), 'cadence': 'biweekly' if i % 2 else 'weekly',
                   'agenda': ['How is the current goal going?', pick(['Workload and focus', 'Career growth', 'Feedback on the last release'], i)]})
         kit.call('POST /performance/journal', conversations.add_journal, mgr.user,
                  {'employeeId': e.id, 'noteDate': add_days_iso(today, -7 - i), 'tag': 'improvement' if i % 3 == 2 else 'positive',
@@ -134,8 +124,7 @@ def seed_performance(ctx: DemoContext) -> None:
 def seed_learning(ctx: DemoContext) -> None:
     """A course catalogue with a mandatory safety course, sessions, enrolments (requested, attended, completed) and certificates."""
     kit, hr, today = ctx.kit, ctx.hr, ctx.today
-    if already_seeded(ctx, 'learning', "SELECT 1 FROM lrn_enrollment e JOIN lrn_course c ON c.id = e.course_id WHERE c.company_id = %s AND c.code = 'K8S-201'",
-                      'SELECT 1 FROM lrn_course WHERE company_id = %s LIMIT 1'):
+    if already_seeded(ctx, 'learning', LrnEnrollment.objects.filter(course__code='K8S-201'), LrnCourse.objects.all()):
         return
 
     def course(b: dict) -> str:
@@ -157,24 +146,25 @@ def seed_learning(ctx: DemoContext) -> None:
 
     def session(course_id: str, b: dict) -> str:
         return str(kit.call(f'POST /learning/courses/{course_id}/sessions', learning.add_session, hr.user, course_id, b))
-    fire_session = session(fire, {'startsAt': iso_z(npt_instant(add_days_iso(today, 1), '14:00')), 'endsAt': iso_z(npt_instant(add_days_iso(today, 1), '16:00')),
+    fire_session = session(fire, {'startsAt': npt_instant(add_days_iso(today, 1), '14:00').isoformat(), 'endsAt': npt_instant(add_days_iso(today, 1), '16:00').isoformat(),
                                   'venue': 'Meeting room 2', 'trainer': 'Nepal Fire Safety Services', 'capacity': 30})
-    k8s_session = session(k8s, {'startsAt': iso_z(npt_instant(add_days_iso(today, 9), '10:00')), 'endsAt': iso_z(npt_instant(add_days_iso(today, 10), '17:00')),
+    k8s_session = session(k8s, {'startsAt': npt_instant(add_days_iso(today, 9), '10:00').isoformat(), 'endsAt': npt_instant(add_days_iso(today, 10), '17:00').isoformat(),
                                 'venue': 'Training room', 'trainer': 'Ram Thapa', 'capacity': 12})
 
     everyone = [e.id for e in ctx.employees]
     kit.call('POST /learning/enrollments/assign', learning.assign, hr.user, {'courseId': fire, 'sessionId': fire_session, 'employeeIds': everyone[:12]})
     # The session took place three weeks ago (sessions are scheduled ahead, so it is moved back once people are enrolled).
     kit.call(f'PATCH /learning/sessions/{fire_session}', learning.update_session, hr.user, fire_session,
-             {'startsAt': iso_z(npt_instant(add_days_iso(today, -20), '14:00')), 'endsAt': iso_z(npt_instant(add_days_iso(today, -20), '16:00')), 'status': 'completed'})
-    for i, en in enumerate(rows('SELECT id, employee_id FROM lrn_enrollment WHERE course_id = %s ORDER BY employee_id', [fire])):
+             {'startsAt': npt_instant(add_days_iso(today, -20), '14:00').isoformat(), 'endsAt': npt_instant(add_days_iso(today, -20), '16:00').isoformat(), 'status': 'completed'})
+    enrollments = LrnEnrollment.objects.for_company(ctx.company_id)
+    for i, en in enumerate(enrollments.filter(course_id=fire).order_by('employee_id').values('id', 'employee_id')):
         if i > 8:
             break
         eid = str(en['id'])
         kit.call(f'POST /learning/enrollments/{eid}/attendance', learning.record_attendance, hr.user, eid, {'attended': True})
         kit.call(f'POST /learning/enrollments/{eid}/complete', learning.complete, hr.user, eid)
         if i % 3 == 0:
-            f = _upload_pdf_file(ctx, hr, 'training_certificate', 'fire-safety-certificate.pdf', 'Certificate of completion',
+            f = kit.upload_pdf(hr, 'training_certificate', 'fire-safety-certificate.pdf', 'Certificate of completion',
                                  ['Fire safety and evacuation', f"Issued to employee {str(en['employee_id'])[:8]}", 'Nepal Fire Safety Services'])
             kit.call(f'POST /learning/enrollments/{eid}/certificate', learning.attach_certificate, hr.user, eid,
                      {'fileId': f, 'issuedOn': add_days_iso(today, -20), 'expiresOn': add_days_iso(today, 20 if i == 0 else 345)})
@@ -185,7 +175,7 @@ def seed_learning(ctx: DemoContext) -> None:
         kit.call('POST /learning/enrollments/self', learning.self_enroll, ctx.as_(e).user,
                  {'courseId': k8s, 'sessionId': k8s_session,
                   'reason': pick(['I run GPU jobs every day and want to schedule them better.', 'Needed for the inference endpoints goal.'], i)})
-    for en in rows('SELECT id, employee_id FROM lrn_enrollment WHERE course_id = %s', [k8s])[:2]:
+    for en in enrollments.filter(course_id=k8s).values('id', 'employee_id')[:2]:
         e = next(x for x in ctx.employees if x.id == str(en['employee_id']))
         try:
             approve_as(ctx, ctx.manager_of(e), 'training_nomination', str(en['id']))
@@ -209,7 +199,7 @@ CANDIDATES = [
 def seed_hiring(ctx: DemoContext) -> None:
     """A hiring request, two open jobs on the careers page, candidates across the pipeline, interviews with scorecards, and an offer."""
     kit, hr, today = ctx.kit, ctx.hr, ctx.today
-    if already_seeded(ctx, 'hiring', 'SELECT 1 FROM hiring_offer WHERE company_id = %s LIMIT 1', 'SELECT 1 FROM hiring_requisition WHERE company_id = %s LIMIT 1'):
+    if already_seeded(ctx, 'hiring', HiringOffer.objects.all(), HiringRequisition.objects.all()):
         return
     units = kit.call('GET /people/structure', people.structure, hr.user)['units']
     eng = next((u['id'] for u in units if u['code'] == 'PRD'), None)
@@ -254,7 +244,7 @@ def seed_hiring(ctx: DemoContext) -> None:
     kit.call(f'POST /hiring/jobs/{job2}/publish', hiring.publish_job, hr.user, job2)
 
     def cv(name: str) -> str:
-        return _upload_pdf_file(ctx, hr, 'hiring_cv', f"{re.sub(r'\s+', '-', name)}-CV.pdf", f'{name} - Curriculum Vitae',
+        return kit.upload_pdf(hr, 'hiring_cv', f"{re.sub(r'\s+', '-', name)}-CV.pdf", f'{name} - Curriculum Vitae',
                                 ['Backend engineer', 'Experience: Go, PostgreSQL, Kubernetes', 'Education: BE Computer, Pulchowk Campus'])
     apps: list[str] = []
     for name, email, years, employer, source in CANDIDATES:
@@ -270,7 +260,7 @@ def seed_hiring(ctx: DemoContext) -> None:
             a = kit.call(route, hiring.add_candidate, hr.user, job, {'name': name, 'email': email, 'cvFileId': cv(name), 'experienceYears': years,
                                                                      'currentEmployer': employer, 'answers': {'q1': years, 'q2': True}})
         apps.append(str(a))
-    stages = one('SELECT stages FROM hiring_job WHERE id = %s', [job])['stages']
+    stages = HiringJob.objects.for_company(ctx.company_id).values_list('stages', flat=True).get(pk=job)
 
     def stage(pattern: str) -> str:
         return next((s for s in stages if re.search(pattern, s, re.I)), stages[1])
@@ -294,7 +284,7 @@ def seed_hiring(ctx: DemoContext) -> None:
                       {'title': 'System design', 'date': add_days_iso(today, 1), 'time': '14:00', 'durationMin': 60, 'mode': 'in_person',
                        'location': 'Meeting room 1', 'panel': panel}))
     # It happened last week (interviews can only be booked ahead, so move it back before the panel scores it).
-    execute('UPDATE hiring_interview SET starts_at = %s WHERE id = %s', [npt_instant(add_days_iso(today, -5), '14:00'), iv])
+    HiringInterview.objects.for_company(ctx.company_id).filter(pk=iv).update(starts_at=npt_instant(add_days_iso(today, -5), '14:00'))
     kit.call(f'POST /hiring/interviews/{iv}/scorecard', hiring.submit_scorecard, hr.user, iv,
              {'ratings': {'System design': 5, 'Coding': 4, 'Communication': 4, 'Culture add': 5}, 'recommendation': 'strong_yes',
               'notes': 'Designed the GPU scheduler cleanly and asked sharp questions about billing.'})

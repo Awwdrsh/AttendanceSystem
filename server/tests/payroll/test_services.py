@@ -7,7 +7,7 @@ import base64
 import pytest
 
 from hajiri.core.errors import ConflictError, ForbiddenError
-from hajiri.payroll import api, compliance, tax_savings
+from hajiri.payroll import compliance, services, tax_savings
 from hajiri.payroll.seeds import seed_payroll_defaults
 
 from .helpers import attendance_for, execute, get, master_data, one, post, rows
@@ -151,10 +151,10 @@ def test_tax_savings_rejection_tells_the_employee_why(s):
 
 def test_own_declaration_is_a_request_and_drafts_are_not_kept(s):
     fy = tax_savings.current_fiscal_year_start()
-    r = api.put_declaration(s['hr_ram'].user, {'fiscalYearStart': fy, 'lifePremium': '1000.00'})
+    r = services.put_declaration(s['hr_ram'].user, {'fiscalYearStart': fy, 'lifePremium': '1000.00'})
     assert r['status'] == 'pending'
     with pytest.raises(Exception) as e:
-        api.put_declaration(s['sita'].user, {'fiscalYearStart': fy, 'submit': False})
+        services.put_declaration(s['sita'].user, {'fiscalYearStart': fy, 'submit': False})
     assert str(e.value) == 'drafts are not kept; submit the declaration when it is ready'
 
 

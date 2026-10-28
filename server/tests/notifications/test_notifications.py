@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.core.errors import NotFoundError
 from hajiri.notifications.service import (
     LogSender, OutboxRow, SmtpSender, WebhookSender, daily_digest, deliver_queued, in_quiet_hours, inbox, inbox_from_query,
@@ -124,22 +124,22 @@ def test_webhook_sender_posts_json_and_fails_on_error_status():
 
 
 def test_smtp_sender_sends_mail_from_smtp_url():
-    sent = {}
-
-    class FakeSmtp:
-        def login(self, u, p):
-            sent['login'] = (u, p)
-
-        def send_message(self, msg):
-            sent['msg'] = msg
-
-        def quit(self):
-            sent['quit'] = True
-    s = SmtpSender('smtp://hr%40acme.np:s3cret@mail.acme.np:2525?from=hr%40acme.np', connect=lambda self: FakeSmtp())
-    assert (s.host, s.port, s.sender) == ('mail.acme.np', 2525, 'hr@acme.np')
+    """SMTP_URL configures Django's SMTP backend (STARTTLS when offered); the message goes out from the URL's sender.
+    (The hand-written SMTP client of the port is gone: Django's backend is exercised with its locmem stand-in.)"""
+    from django.core import mail
+    from django.core.mail import get_connection
+    s = SmtpSender('smtp://hr%40acme.np:s3cret@mail.acme.np:2525?from=hr%40acme.np')
+    assert (s.host, s.port, s.sender, s.user, s.password, s.tls) == ('mail.acme.np', 2525, 'hr@acme.np', 'hr@acme.np', 's3cret', False)
+    real = s.connection()
+    assert type(real).__name__ == 'OpportunisticTlsBackend'
+    assert (real.host, real.port, real.username, real.use_ssl) == ('mail.acme.np', 2525, 'hr@acme.np', False)
+    s = SmtpSender('smtp://hr%40acme.np:s3cret@mail.acme.np:2525?from=hr%40acme.np',
+                   connection=get_connection('django.core.mail.backends.locmem.EmailBackend'))
+    mail.outbox = []
     s.send(_row(channel='email', title='Leave approved', body='Your leave was approved.'))
-    assert sent['login'] == ('hr@acme.np', 's3cret')
-    assert sent['msg']['To'] == 'a@b.c' and sent['msg']['Subject'] == 'Leave approved'
+    assert len(mail.outbox) == 1
+    m = mail.outbox[0]
+    assert (m.to, m.subject, m.from_email, m.body) == (['a@b.c'], 'Leave approved', 'hr@acme.np', 'Your leave was approved.')
     with pytest.raises(RuntimeError, match='no recipient for email'):
         s.send(_row(channel='email', recipient_email=None))
 

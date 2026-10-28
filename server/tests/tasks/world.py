@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute
+from hajiri.db.models import EmployeeAssignment
 from hajiri.core.errors import HttpError
 from hajiri.files import service as files
 from hajiri.tasks import services as tk
@@ -58,7 +58,7 @@ def build() -> World:
               sita=make_user(co, roles=['employee'], employee=sita_e),
               ram=make_user(co, roles=['manager'], employee=ram_e),
               other=make_user(co, roles=['employee'], employee=gita_e), sita_e=sita_e, ram_e=ram_e)
-    execute('UPDATE employee_assignment SET manager_id = %s WHERE employee_id = %s', [ram_e.id, sita_e.id])
+    EmployeeAssignment.objects.filter(employee=sita_e).update(manager=ram_e)
     return w
 
 

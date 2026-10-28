@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from tests.web.factories import make_company, make_employee, make_user
 
 

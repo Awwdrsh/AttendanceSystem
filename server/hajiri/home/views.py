@@ -8,6 +8,7 @@ import json
 import uuid
 from datetime import timedelta
 
+from django.db.models import Exists, OuterRef, Q
 from django.http import HttpResponse, HttpResponseRedirect
 from django.shortcuts import render
 from django.urls import NoReverseMatch, reverse
@@ -16,6 +17,8 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 from hajiri.core.auth import ROLES, company_id_of, has_role
 from hajiri.core.clock import npt_today
 from hajiri.core.errors import BadRequestError, HttpError, ValidationError
+from hajiri.core.scoping import get_or_404
+from hajiri.db.models import AppUser
 from hajiri.web.decorators import login_required, require_role
 from hajiri.web.format import fmt_date_long, fmt_time, greeting
 from hajiri.web.htmx import close_modal, flash, hx_redirect, is_htmx, refresh, toast, trigger
@@ -23,6 +26,8 @@ from hajiri.web.nav import ROLE_HELP, ROLE_LABEL, feature_on
 from hajiri.web.tables import Column, Table, table_response
 
 from . import services as s
+from .forms import (AttendanceRulesForm, CodeNameForm, FeaturesForm, PunchForm, ResetTwoFactorForm, SecurityForm,
+                    UserNewForm, UserUpdateForm, generic_body)
 
 
 def _url(name: str, *args) -> str | None:
@@ -136,23 +141,7 @@ def month_fragment(request):
 
 def _punch_body(post) -> dict:
     from hajiri.punch.services import utc_now_iso
-    body = {'direction': post.get('direction') or 'in', 'source': 'web',
-            'clientTime': post.get('clientTime') or utc_now_iso(),
-            'idempotencyKey': post.get('idempotency_key') or str(uuid.uuid4())}
-    lat, lng, acc = post.get('lat'), post.get('lng'), post.get('accuracy')
-    if lat not in (None, '') and lng not in (None, ''):
-        try:
-            body.update(lat=float(lat), lng=float(lng))
-            if acc not in (None, ''):
-                body['accuracyM'] = round(float(acc))
-        except ValueError:
-            pass
-    reason = (post.get('reason') or '').strip()
-    if reason:
-        body['reason'] = reason
-    if post.get('selfie'):
-        body['selfie'] = post['selfie']
-    return body
+    return PunchForm(post).body(utc_now_iso())
 
 
 @require_POST
@@ -211,7 +200,7 @@ def punch(request):
 def _notifications_ctx(user) -> dict:
     from hajiri.notifications.service import inbox
     from hajiri.web.format import relative_time
-    q = inbox(user.id, limit=50)
+    q = inbox(user.id, limit=50, company_id=user.company_id)
     for n in q['notifications']:
         n['ago'] = relative_time(n['created_at'])
     unread = q['unread']
@@ -283,7 +272,7 @@ def settings_attendance(request):
     from hajiri.company_settings.services import put_setting
     user = request.hajiri_user
     stored = _settings_values(user).get('attendance.policy') or {}
-    put_setting(user, 'attendance.policy', s.attendance_body(stored, request.POST))
+    put_setting(user, 'attendance.policy', AttendanceRulesForm(request.POST).body(stored))
     return toast(request, HttpResponse(status=204), 'Attendance rules saved. They apply to future recalculations.')
 
 
@@ -294,7 +283,7 @@ def settings_preview(request):
     user = request.hajiri_user
     stored = _settings_values(user).get('attendance.policy') or {}
     today = npt_today()
-    r = preview_attendance(user, {'policy': s.attendance_body(stored, request.POST),
+    r = preview_attendance(user, {'policy': AttendanceRulesForm(request.POST).body(stored),
                                   'from': (today - timedelta(days=30)).isoformat(), 'to': today.isoformat()})
     text = f"{r['summary']} {r['affectedEmployees']} of {r['employees']} employees would change."
     return render(request, 'home/partials/preview.html', {'text': text})
@@ -309,7 +298,7 @@ def settings_generic(request, tab):
     key, _title, _desc, fields = s.GENERIC[tab]
     user = request.hajiri_user
     stored = _settings_values(user).get(key) or {}
-    put_setting(user, key, s.generic_body(fields, stored, request.POST))
+    put_setting(user, key, generic_body(fields, stored, request.POST))
     return toast(request, HttpResponse(status=204), 'Settings saved.')
 
 
@@ -318,7 +307,7 @@ def settings_generic(request, tab):
 def settings_security(request):
     from hajiri.company_settings.services import put_setting
     user = request.hajiri_user
-    roles = [r for r in request.POST.getlist('require2faRoles')]
+    roles = SecurityForm(request.POST).roles()
     put_setting(user, 'security.policy', {'require2faRoles': roles})
     if s.affects_me(user, roles):
         # The next page asks for two-step set-up before anything else (RequireRole after refresh()).
@@ -332,8 +321,7 @@ def settings_security(request):
 def settings_branch(request):
     from hajiri.company_settings.services import create_branch
     user = request.hajiri_user
-    code, name = (request.POST.get('code') or '').strip().upper(), (request.POST.get('name') or '').strip()
-    create_branch(user, {'code': code, 'nameEn': name})
+    create_branch(user, CodeNameForm(request.POST).branch())
     return render(request, 'home/partials/org.html', _org_ctx(user))
 
 
@@ -342,24 +330,31 @@ def settings_branch(request):
 def settings_unit(request):
     from hajiri.company_settings.services import create_org_unit
     user = request.hajiri_user
-    create_org_unit(user, {'kind': request.POST.get('kind') or 'department', 'code': (request.POST.get('code') or '').strip().upper(),
-                           'nameEn': (request.POST.get('name') or '').strip()})
+    create_org_unit(user, CodeNameForm(request.POST).unit())
     return render(request, 'home/partials/org.html', _org_ctx(user))
 
 
 # ================================================================ Settings: Users & roles
 
 def _users_table(request) -> Table:
+    from hajiri.core.companies import is_group_admin
     from hajiri.core.users import list_users
+    from hajiri.db.models import GroupMember
     user = request.hajiri_user
     admin = s.is_admin(user)
     rows = list_users(user)
+    # Members who also hold a group role are reset by the group admin only (see _resettable_users).
+    group_roles = (set() if not admin or is_group_admin(user) else
+                   {str(i) for i in GroupMember.objects.filter(group__companies=user.company_id).values_list('user_id', flat=True)})
     for u in rows:
         u['id'] = str(u['id'])
         u['is_admin_view'] = admin
+        u['can_reset'] = admin and not (u.get('membership') and u['id'] in group_roles)
         u['is_me'] = u['id'] == user.id
         u['role_text'] = ', '.join(ROLE_LABEL.get(r, r) for r in u['roles'])
         u['role_options'] = [{'value': r, 'label': ROLE_LABEL[r], 'on': r in u['roles']} for r in ROLES]
+        # Group members: their account belongs to another company; roles and status here are this company's only.
+        u['from_text'] = f"From {u.get('home_company') or 'another company'}" if u.get('membership') else None
     cols = [
         Column('name', 'Name', template='home/partials/user_name.html', csv=lambda r: r['name']),
         Column('roles', 'Roles', template='home/partials/user_roles.html', width='280px', csv=lambda r: r['role_text']),
@@ -373,11 +368,56 @@ def _users_table(request) -> Table:
                  empty_hint='Add a user so they can sign in.' if admin else None, page_size=100)
 
 
+def _group_access_ctx(user) -> dict:
+    """People who work in this company through a group role (managed on the group pages, listed here read-only), and
+    whether the company is in a group, so its admin can give people of the other companies access."""
+    from hajiri.core.companies import is_group_admin
+    from hajiri.core.collation import sorted_by_name
+    from hajiri.core.users import group_role_holders
+    holders = [{'id': str(uid), 'name': u.name, 'email': u.email,
+                'role_text': ', '.join(ROLE_LABEL.get(r, r) for r in roles)}
+               for uid, roles, u in group_role_holders(user.company_id)] if user.group_id else []
+    return {'in_group': bool(user.group_id), 'group_holders': sorted_by_name(holders, key=lambda r: r['name']),
+            'group_admin': is_group_admin(user)}
+
+
 @require_GET
 @require_role('hr')
 def users_page(request):
     table = _users_table(request)
-    return table_response(request, table, 'home/users.html', {'table': table, 'is_admin': s.is_admin(request.hajiri_user)})
+    return table_response(request, table, 'home/users.html', {'table': table, 'is_admin': s.is_admin(request.hajiri_user),
+                                                              **_group_access_ctx(request.hajiri_user)})
+
+
+@require_http_methods(['GET', 'POST'])
+@require_role('admin')
+def user_access_new(request):
+    """Modal: give a person from another company of the group access to this company, with roles here (and an
+    employee record here). Granting again updates the roles of an existing access."""
+    from hajiri.core.companies import grant_access
+    from hajiri.web.group import AccessForm
+    form = AccessForm(request.POST or None)
+    ctx = {'form': form, 'role_help': ROLE_HELP}
+    if request.method == 'POST':
+        if not form.is_valid():
+            return render(request, 'home/partials/user_access.html', ctx, status=422)
+        d = form.cleaned_data
+        grant_access(request.hajiri_user, {'email': d['email'], 'roles': d['roles'],
+                                           'employee_id': str(d['employee_id']) if d['employee_id'] else None})
+        r = HttpResponse(status=204)
+        close_modal(r)
+        refresh(r, 'users')
+        return toast(request, r, 'Access given.')
+    return render(request, 'home/partials/user_access.html', ctx)
+
+
+@require_POST
+@require_role('admin')
+def user_access_revoke(request, id):
+    """Take away a group member's access to this company (their own account and home company are untouched)."""
+    from hajiri.core.companies import revoke_access
+    revoke_access(request.hajiri_user, str(id))
+    return toast(request, refresh(HttpResponse(status=204), 'users'), 'Access removed.')
 
 
 @require_POST
@@ -385,17 +425,18 @@ def users_page(request):
 def user_update(request, id):
     """Roles (from the role picker) or status (Disable / Activate)."""
     from hajiri.core.users import admin_update_user
-    body: dict = {}
-    if 'status' in request.POST:
-        body['status'] = request.POST['status']
-    if request.POST.get('roles_sent'):
-        roles = request.POST.getlist('roles')
-        if not roles:
-            r = refresh(HttpResponse(status=204), 'users')
-            return toast(request, r, 'A user needs at least one role. Disable the user instead.', 'info')
-        body['roles'] = roles
+    body = UserUpdateForm(request.POST).body()
+    if 'roles' in body and not body['roles']:
+        r = refresh(HttpResponse(status=204), 'users')
+        return toast(request, r, 'A user needs at least one role. Disable the user instead.', 'info')
     admin_update_user(request.hajiri_user, str(id), body)
     return refresh(HttpResponse(status=204), 'users')
+
+
+def _resettable_users(actor):
+    """Whose two-step sign-in this company's admin may reset (hajiri.core.auth.resettable_users)."""
+    from hajiri.core.auth import resettable_users
+    return resettable_users(actor)
 
 
 @require_http_methods(['GET', 'POST'])
@@ -403,16 +444,11 @@ def user_update(request, id):
 def user_reset(request, id):
     """Reset two-step sign-in for a lost or replaced phone."""
     from hajiri.core.auth import admin_reset_two_factor
-    from hajiri.core.db import one
-    from hajiri.core.errors import NotFoundError
-    target = one('SELECT id, name FROM app_user WHERE id = %s AND company_id = %s', [str(id), company_id_of(request.hajiri_user)])
-    if not target:
-        raise NotFoundError('user not found')
+    target = get_or_404(_resettable_users(request.hajiri_user).values('id', 'name'), company_id_of(request.hajiri_user),
+                        'user not found', pk=id)
     if request.method == 'GET':
         return render(request, 'home/partials/user_reset.html', {'target': target})
-    reason = (request.POST.get('reason') or '').strip()
-    if len(reason) < 3:
-        raise ValidationError([{'path': 'reason', 'message': 'Too small: expected string to have >=3 characters'}])
+    reason = ResetTwoFactorForm(request.POST).reason_text()
     admin_reset_two_factor(request.hajiri_user, str(id), reason)
     r = HttpResponse(status=204)
     close_modal(r)
@@ -434,12 +470,7 @@ def user_new(request):
     from hajiri.core.users import admin_create_user
     if request.method == 'GET':
         return render(request, 'home/partials/user_new.html', _new_user_ctx())
-    p = request.POST
-    body = {'email': (p.get('email') or '').strip(), 'name': p.get('name') or '', 'password': p.get('password') or '',
-            'roles': p.getlist('roles')}
-    if p.get('employee_id'):
-        body['employeeId'] = p['employee_id']
-    admin_create_user(request.hajiri_user, body)
+    admin_create_user(request.hajiri_user, UserNewForm(request.POST).body())
     r = HttpResponse(status=204)
     close_modal(r)
     refresh(r, 'users')
@@ -469,7 +500,7 @@ def features_save(request):
     from hajiri.features.services import FEATURE_KEYS, get_features, set_features
     user = request.hajiri_user
     current = get_features(user)['enabled']
-    on = set(request.POST.getlist('on'))
+    on = FeaturesForm(request.POST).switched_on()
     changed = {k: (k in on) for k in FEATURE_KEYS if (k in on) != current[k]}
     if not changed:
         raise BadRequestError('nothing to save')

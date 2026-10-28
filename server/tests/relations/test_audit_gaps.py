@@ -1,5 +1,5 @@
 """Gaps found by the completeness audit against routes.ts and the React pages."""
-from hajiri.core.db import one
+from tests.support.sql import one
 from hajiri.relations import services as S
 from tests.web.factories import htmx
 

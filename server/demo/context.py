@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import re
 import secrets
+from datetime import date
 from dataclasses import dataclass, field
 from typing import Callable
 
+from django.db.models import BooleanField, ExpressionWrapper, OuterRef, Q, QuerySet, Subquery, UUIDField
+from django.db.models.functions import Coalesce
+
 from hajiri.core.auth import create_user
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute, one, rows
+from hajiri.db.models import AppUser, Company, CompanyMembership, Employee, EmployeeAssignment
 
 from .kit import Actor, Kit
 
@@ -55,7 +59,7 @@ class DemoContext:
         hit = self._sessions.get(e.user_id)
         if hit:
             return hit
-        a = self.kit.actor(e.user_id)
+        a = self.kit.actor(e.user_id, self.company_id)
         self._sessions[e.user_id] = a
         return a
 
@@ -65,12 +69,13 @@ class DemoContext:
         return self.as_(m) if m and m.user_id else self.hr
 
 
-def already_seeded(ctx: DemoContext, section: str, done_sql: str, started_sql: str) -> bool:
+def already_seeded(ctx: DemoContext, section: str, done: QuerySet, started: QuerySet) -> bool:
     """True when a section's data is already there (its last record exists), so the section is skipped. When only its
-    first records exist, an earlier run stopped half-way: refuse rather than add duplicates."""
-    if rows(done_sql, [ctx.company_id]):
+    first records exist, an earlier run stopped half-way: refuse rather than add duplicates. Both querysets are
+    scoped to the context's company."""
+    if done.for_company(ctx.company_id).exists():
         return True
-    if rows(started_sql, [ctx.company_id]):
+    if started.for_company(ctx.company_id).exists():
         raise RuntimeError(f'the {section} data is only partly there from an earlier run; restore the demo database '
                            '(or remove that data) and run again')
     return False
@@ -84,60 +89,101 @@ def _iso(v) -> str | None:
     return None if v is None else (v if isinstance(v, str) else v.isoformat())
 
 
+def _employees(company_id: str, today: str) -> list[Employee]:
+    """Active employees in code order, with their assignment on `today` and the account that signs in as them in
+    this company (a home account, else a group member given access with this employee record)."""
+    current = EmployeeAssignment.objects.filter(employee=OuterRef('pk'), valid__contains=date.fromisoformat(today))
+    home_account = (AppUser.objects.filter(employee=OuterRef('pk'), status=AppUser.Status.ACTIVE)
+                    .order_by('created_at').values('id')[:1])
+    member = CompanyMembership.objects.filter(employee=OuterRef('pk'), status=CompanyMembership.Status.ACTIVE,
+                                              user__status=AppUser.Status.ACTIVE).values('user_id')[:1]
+    return list(Employee.objects.for_company(company_id).filter(status=Employee.Status.ACTIVE)
+                .annotate(org_unit_id=Subquery(current.values('org_unit_id')[:1]),
+                          org_code=Subquery(current.values('org_unit__code')[:1]),
+                          manager_id=Subquery(current.values('manager_id')[:1]),
+                          branch_id=Subquery(current.values('branch_id')[:1]),
+                          user_id=Coalesce(Subquery(home_account), Subquery(member), output_field=UUIDField()))
+                .order_by('emp_code'))
+
+
+def demo_hr(company_id: str) -> AppUser | None:
+    """The account the seeder works as: an active HR (preferred) or admin of the company, home account, who has set
+    their password."""
+    return (AppUser.objects.home_of(company_id)
+            .filter(status=AppUser.Status.ACTIVE, roles__overlap=[AppUser.Role.HR, AppUser.Role.ADMIN], must_change_password=False)
+            .order_by(ExpressionWrapper(Q(roles__contains=[AppUser.Role.HR]), output_field=BooleanField()).desc(), 'created_at')
+            .first())
+
+
+def _add_manager_role(company_id: str, user_id) -> None:
+    """Give an account the manager role in this company (home account roles, or the membership's roles)."""
+    u = AppUser.objects.filter(pk=user_id, company_id=company_id).first()
+    target = u or CompanyMembership.objects.for_company(company_id).filter(user_id=user_id).first()
+    if target is not None and AppUser.Role.MANAGER not in target.roles:
+        target.roles = [*target.roles, AppUser.Role.MANAGER]
+        if u is not None:
+            target.save(update_fields=['roles'])
+        else:
+            CompanyMembership.objects.filter(user_id=user_id, company_id=company_id).update(roles=target.roles)
+
+
+def employee_email(first_name: str, code: str, domain: str) -> str:
+    """first@domain, or first.code@domain when that address is taken."""
+    first = re.sub(r'[^a-z]', '', re.split(r'\s+', first_name)[0].lower()) or 'user'
+    email = f'{first}@{domain}'
+    if AppUser.objects.filter(email=email).exists():
+        email = f'{first}.{code.lower()}@{domain}'
+    return email
+
+
 def build_context(kit: Kit, company_code: str, log: Callable[[str], None]) -> DemoContext:
-    c = one('SELECT id, name_en FROM company WHERE code = %s', [company_code])
+    c = Company.objects.filter(code=company_code).values('id', 'name_en').first()
     if not c:
         raise RuntimeError(f'company {company_code} not found')
     company_id = str(c['id'])
     today = npt_today().isoformat()
-    hr_row = one("""SELECT id, email FROM app_user WHERE company_id = %s AND status = 'active' AND (roles && ARRAY['hr', 'admin']::text[])
-                      AND NOT must_change_password
-                    ORDER BY 'hr' = ANY(roles) DESC, created_at LIMIT 1""", [company_id])
+    hr_row = demo_hr(company_id)
     if not hr_row:
         raise RuntimeError('the company needs an active HR or admin user (who has set their password) to run the demo suite')
-    parts = hr_row['email'].split('@')
+    parts = hr_row.email.split('@')
     domain = parts[1] if len(parts) > 1 else 'example.com'
 
-    def load() -> list[dict]:
-        return rows("""
-            SELECT e.id, e.emp_code, e.name_en, e.gender, e.designation, e.join_date, a.org_unit_id, o.code AS org_code, a.manager_id, a.branch_id,
-                   (SELECT u.id FROM app_user u WHERE u.employee_id = e.id AND u.status = 'active' ORDER BY u.created_at LIMIT 1) AS user_id
-              FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> %s::date LEFT JOIN org_unit o ON o.id = a.org_unit_id
-             WHERE e.company_id = %s AND e.status = 'active' ORDER BY e.emp_code""", [today, company_id])
-
-    found = load()
+    found = _employees(company_id, today)
     if len(found) < 8:
         raise RuntimeError(f'the demo suite needs at least 8 active employees (found {len(found)})')
 
     # Every employee gets an account so they can raise requests; the password is random (HR can reset it to hand it over).
-    managers = {str(r['manager_id']) for r in found if r['manager_id']}
+    managers = {str(r.manager_id) for r in found if r.manager_id}
     created = 0
     for r in found:
-        rid = str(r['id'])
-        want_roles = ['employee', 'manager'] if rid in managers else ['employee']
-        if r['user_id']:
+        rid = str(r.id)
+        if r.user_id:
             if rid in managers:
-                execute("""UPDATE app_user SET roles = array(SELECT DISTINCT unnest(roles || ARRAY['manager']::text[]))
-                            WHERE id = %s AND NOT ('manager' = ANY(roles))""", [r['user_id']])
+                _add_manager_role(company_id, r.user_id)
             continue
-        first = re.sub(r'[^a-z]', '', re.split(r'\s+', r['name_en'])[0].lower()) or 'user'
-        email = f'{first}@{domain}'
-        if one('SELECT 1 AS x FROM app_user WHERE email = %s', [email]):
-            email = f"{first}.{r['emp_code'].lower()}@{domain}"
-        create_user(company_id=company_id, employee_id=rid, email=email, name=r['name_en'], password=secrets.token_urlsafe(18),
-                    roles=want_roles, must_change_password=False)
+        want_roles = [AppUser.Role.EMPLOYEE, AppUser.Role.MANAGER] if rid in managers else [AppUser.Role.EMPLOYEE]
+        create_user(company_id=company_id, employee_id=rid, email=employee_email(r.name_en, r.emp_code, domain), name=r.name_en,
+                    password=secrets.token_urlsafe(18), roles=want_roles, must_change_password=False)
         created += 1
     if created:
         log(f'created {created} employee accounts (random passwords; reset one with the CLI to sign in as that person)')
-        found = load()
+        found = _employees(company_id, today)
 
     employees = []
     for r in found:
-        names = re.split(r'\s+', r['name_en'])
+        names = re.split(r'\s+', r.name_en)
         employees.append(DemoEmployee(
-            id=str(r['id']), code=r['emp_code'], name=r['name_en'], first=names[0], last=' '.join(names[1:]) or names[0],
-            gender=r['gender'], designation=r['designation'], join_date=_iso(r['join_date']), org_unit_id=_s(r['org_unit_id']),
-            org_code=r['org_code'], manager_id=_s(r['manager_id']), branch_id=_s(r['branch_id']), user_id=_s(r['user_id'])))
-    hr = kit.actor(str(hr_row['id']))
+            id=str(r.id), code=r.emp_code, name=r.name_en, first=names[0], last=' '.join(names[1:]) or names[0],
+            gender=r.gender, designation=r.designation, join_date=_iso(r.join_date), org_unit_id=_s(r.org_unit_id),
+            org_code=r.org_code, manager_id=_s(r.manager_id), branch_id=_s(r.branch_id), user_id=_s(r.user_id)))
+    hr = kit.actor(str(hr_row.id), company_id)
     return DemoContext(kit=kit, company_id=company_id, company_name=c['name_en'], today=today, domain=domain, hr=hr,
                        employees=employees, log=log)
+
+
+def instance_of(ctx: DemoContext, object_type: str, object_id: str) -> str | None:
+    """The approval workflow of a record in the context's company (None when it needed no approval)."""
+    from hajiri.db.models import WorkflowInstance
+    found = (WorkflowInstance.objects.for_company(ctx.company_id).filter(object_type=object_type, object_id=object_id)
+             .values_list('id', flat=True).first())
+    return str(found) if found else None

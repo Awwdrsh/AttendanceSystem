@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
 from hajiri.timesheets import services as ts
 from hajiri.web.csv import to_csv
@@ -362,7 +362,7 @@ def test_weekly_messages_notifications_and_audit(w):
         ts.add_entry(w.sita, {'date': w.MON, 'durationMin': 5})
     with pytest.raises(ConflictError, match=r'Only a timesheet waiting for approval can be withdrawn \(it is approved\).'):
         ts.withdraw_timesheet(w.sita, tid)
-    actions = [r['action'] for r in __import__('hajiri.core.db', fromlist=['rows']).rows(
+    actions = [r['action'] for r in __import__('tests.support.sql', fromlist=['rows']).rows(
         "SELECT action FROM audit_log WHERE table_name = 'timesheet' ORDER BY id")]
     assert actions == ['submit', 'approve']   # the workflow engine audits the decision on the object
     row = one('SELECT status, decided_by::text AS by, decision_comment FROM timesheet WHERE id = %s', [tid])

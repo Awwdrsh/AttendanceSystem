@@ -11,7 +11,7 @@ from django.utils.html import format_html
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from hajiri.core.errors import ConflictError
-from hajiri.core.http import ApiEncoder
+from hajiri.core.api import ApiEncoder
 from hajiri.web.decorators import login_required, require_role
 from hajiri.web.forms import first_error
 from hajiri.web.format import fmt_date, fmt_time, relative_time, today_npt
@@ -117,14 +117,16 @@ def device_detail(request, id):
 @require_GET
 @require_role('hr')
 def device_commands(request, id):
+    d = services.get_device(request.hajiri_user, id)     # another company's device is 404, not an empty list
     return render(request, 'devices/partials/commands.html', {
-        'd': {'id': id}, 'commands': services.commands(request.hajiri_user, id)[:10]})
+        'd': d, 'commands': services.commands(request.hajiri_user, id)[:10]})
 
 
 @require_GET
 @require_role('hr')
 def device_mappings(request, id):
-    return render(request, 'devices/partials/mappings.html', {'d': {'id': id}, 'mappings': _mappings(request.hajiri_user, id)})
+    d = services.get_device(request.hajiri_user, id)
+    return render(request, 'devices/partials/mappings.html', {'d': d, 'mappings': _mappings(request.hajiri_user, id)})
 
 
 def _done(request, message, *targets, close=True):
@@ -175,6 +177,7 @@ def device_key(request, id):
 @require_POST
 @require_role('hr')
 def device_sync(request, id):
+    services.get_device(request.hajiri_user, id)     # another company's device is 404, not "0 queued"
     r = services.sync_users(request.hajiri_user, id)
     return _done(request, f"{r['queued']} user records queued for the terminal.", 'device-commands', close=False)
 

@@ -8,7 +8,7 @@ from datetime import timedelta
 from django.test import Client
 
 from hajiri.core.clock import npt_today
-from hajiri.core.db import one
+from hajiri.db.models import LeaveType, OtSlip
 
 
 class Api:
@@ -47,13 +47,11 @@ def days_ago(n: int) -> str:
 
 
 def slip(employee_id: str, day: str, minutes: int, day_type: str = 'working') -> str:
-    return str(one("""INSERT INTO ot_slip (employee_id, local_date, detected_min, day_type) VALUES (%s, %s, %s, %s)
-                      RETURNING id""", [employee_id, day, minutes, day_type])['id'])
+    return str(OtSlip.objects.create(employee_id=employee_id, local_date=day, detected_min=minutes, day_type=day_type).id)
 
 
 def sub_type(company_id: str) -> str:
-    return str(one("SELECT id FROM leave_type WHERE company_id = %s AND code = 'SUBSTITUTE'", [company_id])['id'])
-
+    return str(LeaveType.objects.for_company(company_id).values_list('id', flat=True).get(code='SUBSTITUTE'))
 
 
 def browser(token: str) -> Client:

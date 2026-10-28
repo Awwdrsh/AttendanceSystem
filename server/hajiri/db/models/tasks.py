@@ -6,100 +6,162 @@ from django.contrib.postgres.fields import ArrayField, DateRangeField
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class Task(models.Model):
+    class Priority(models.TextChoices):
+        LOW = 'low', 'Low'
+        NORMAL = 'normal', 'Normal'
+        HIGH = 'high', 'High'
+        URGENT = 'urgent', 'Urgent'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    board = models.ForeignKey('TaskBoard', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='tasks')
+    board = models.ForeignKey('TaskBoard', models.DO_NOTHING, related_name='tasks')
     column_id = models.TextField()
     title = models.TextField()
     description = models.TextField(blank=True, null=True)
-    priority = models.TextField(db_default='normal')
+    priority = models.TextField(choices=Priority, db_default='normal')
     due_date = models.DateField(blank=True, null=True)
     labels = ArrayField(models.TextField(), db_default=[])
     position = models.FloatField(db_default=0)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='tasks_as_created_by', db_column='created_by', blank=True, null=True)
     completed_at = models.DateTimeField(blank=True, null=True)
     archived_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'task'
+
+    def __str__(self):
+        return str(self.title)
 
 
 class TaskAssignee(models.Model):
     pk = models.CompositePrimaryKey('task_id', 'user_id')
-    task = models.ForeignKey(Task, models.DO_NOTHING)
-    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
+    task = models.ForeignKey(Task, models.DO_NOTHING, related_name='task_assignees')
+    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='task_assignees')
+
+    company_scope = 'task__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'task_assignee'
 
+    def __str__(self):
+        return f'TaskAssignee {self.pk}'
+
 
 class TaskAttachment(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    task = models.ForeignKey(Task, models.DO_NOTHING)
-    file = models.ForeignKey('hajiri.StoredFile', models.DO_NOTHING)
-    added_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='added_by', blank=True, null=True)
+    task = models.ForeignKey(Task, models.DO_NOTHING, related_name='task_attachments')
+    file = models.ForeignKey('hajiri.StoredFile', models.DO_NOTHING, related_name='task_attachments')
+    added_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='task_attachments_as_added_by', db_column='added_by', blank=True, null=True)
     added_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'file__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'task_attachment'
 
+    def __str__(self):
+        return f'TaskAttachment {self.id}'
+
 
 class TaskBoard(models.Model):
+    class Kind(models.TextChoices):
+        PERSONAL = 'personal', 'Personal'
+        TEAM = 'team', 'Team'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    kind = models.TextField()
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='task_boards')
+    kind = models.TextField(choices=Kind)
     name = models.TextField()
-    owner_user = models.OneToOneField('hajiri.AppUser', models.DO_NOTHING)
+    owner_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='task_boards')
     columns = models.JSONField()
     archived_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'task_board'
+        # One personal board per person in each company (migration 0005).
+        constraints = [models.UniqueConstraint(fields=['owner_user', 'company'], condition=models.Q(kind='personal'), name='task_board_one_personal')]
+
+    def __str__(self):
+        return str(self.name)
 
 
 class TaskBoardMember(models.Model):
     pk = models.CompositePrimaryKey('board_id', 'user_id')
-    board = models.ForeignKey(TaskBoard, models.DO_NOTHING)
-    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
+    board = models.ForeignKey(TaskBoard, models.DO_NOTHING, related_name='task_board_members')
+    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='task_board_members')
     added_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'board__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'task_board_member'
 
+    def __str__(self):
+        return f'TaskBoardMember {self.pk}'
+
 
 class TaskChecklistItem(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    task = models.ForeignKey(Task, models.DO_NOTHING)
+    task = models.ForeignKey(Task, models.DO_NOTHING, related_name='task_checklist_items')
     text = models.TextField()
     done = models.BooleanField(db_default=False)
     position = models.IntegerField(db_default=0)
 
+    company_scope = 'task__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'task_checklist_item'
+
+    def __str__(self):
+        return f'TaskChecklistItem {self.id}'
 
 
 class TaskComment(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    task = models.ForeignKey(Task, models.DO_NOTHING)
-    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
+    task = models.ForeignKey(Task, models.DO_NOTHING, related_name='task_comments')
+    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='task_comments')
     body = models.TextField()
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'task__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'task_comment'
 
+    def __str__(self):
+        return f'TaskComment {self.id}'
+
 
 class TaskReminderSent(models.Model):
     pk = models.CompositePrimaryKey('task_id', 'user_id', 'kind', 'local_date')
-    task = models.ForeignKey(Task, models.DO_NOTHING)
-    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
+    task = models.ForeignKey(Task, models.DO_NOTHING, related_name='task_reminder_sents')
+    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='task_reminder_sents')
     kind = models.TextField()
     local_date = models.DateField()
 
+    company_scope = 'task__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'task_reminder_sent'
+
+    def __str__(self):
+        return f'TaskReminderSent {self.pk}'

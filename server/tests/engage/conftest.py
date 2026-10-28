@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from django.test import Client
 
-from hajiri.core.db import one
+from hajiri.db.models import Branch, OrgUnit
 from hajiri.engage import services
 from tests.web.factories import make_company, make_employee, make_user, sign_in
 from tests.web.fixtures import *  # noqa: F401,F403
@@ -28,11 +28,9 @@ def client_for(user) -> Client:
 @pytest.fixture
 def world(db):
     co = make_company('DEMO', 'Demo Company')
-    branch = one("INSERT INTO branch (company_id, code, name_en) VALUES (%s, 'HQ', 'Head Office') RETURNING id", [co.id])['id']
-    dept_a = str(one("INSERT INTO org_unit (company_id, kind, code, name_en) VALUES (%s, 'department', 'ENG', 'Engineering') RETURNING id",
-                     [co.id])['id'])
-    dept_b = str(one("INSERT INTO org_unit (company_id, kind, code, name_en) VALUES (%s, 'department', 'OPS', 'Operations') RETURNING id",
-                     [co.id])['id'])
+    branch = Branch.objects.create(company=co, code='HQ', name_en='Head Office').id
+    dept_a = str(OrgUnit.objects.create(company=co, kind=OrgUnit.Kind.DEPARTMENT, code='ENG', name_en='Engineering').id)
+    dept_b = str(OrgUnit.objects.create(company=co, kind=OrgUnit.Kind.DEPARTMENT, code='OPS', name_en='Operations').id)
     ram_e = make_employee(co, code='E002', name='Ram Thapa', branch=branch, org_unit=dept_a)
     sita_e = make_employee(co, code='E001', name='Sita Sharma', branch=branch, org_unit=dept_a, manager=ram_e)
     hr = make_user(co, roles=['hr'], name='HR Person')

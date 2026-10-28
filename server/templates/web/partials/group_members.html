@@ -1,0 +1,21 @@
+<div id="group-members" hx-get="{% url 'web:group_members' %}" hx-trigger="hj:refresh-group-members from:body" hx-swap="outerHTML">
+{% if members %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Person</th><th>Home company</th><th>Roles here</th><th>Employee record</th><th>Since</th><th></th></tr></thead>
+    <tbody>
+    {% for m in members %}
+      <tr>
+        <td><span class="hj-strong">{{ m.name }}</span><div class="hj-small hj-muted">{{ m.email }}</div></td>
+        <td>{{ m.homeCompany|default:"—" }}</td>
+        <td>{% for r in m.roles %}{{ r|role_label }}{% if not forloop.last %}, {% endif %}{% endfor %}{% if m.status != 'active' %} {% badge "Disabled" "idle" %}{% endif %}</td>
+        <td>{{ m.employeeName|default:"Not linked" }}</td>
+        <td>{{ m.createdAt|bs_date }}</td>
+        <td class="right"><button class="hj-btn danger subtle xs" hx-post="{% url 'web:group_access_revoke' m.userId %}" {% confirm_attrs "Remove this person's access to this company? Their own company is not affected." label="Remove access" %}>Remove</button></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div></div>
+{% else %}
+  {% empty_state title="Nobody from other companies yet" hint="Give access to someone of the group, for example group HR or a director." icon="users" compact=True %}
+{% endif %}
+</div>

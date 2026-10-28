@@ -1,5 +1,5 @@
 """Gaps found when auditing the engage port against the TS code and React pages."""
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.core.errors import BadRequestError
 from hajiri.engage import services as S
 from tests.web.factories import htmx, toasts

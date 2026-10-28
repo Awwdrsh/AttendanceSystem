@@ -4,31 +4,50 @@ versions and expiry alerts; letter templates, issued letters with reference numb
 workflow engine); company policies with acknowledgements and reminders.
 
 Every public function takes the signed-in AuthUser and, where the TS route had one, a body or query in the TS API's
-shape (camelCase keys), validated with the same rules and messages as the zod schemas. Errors are the TS ones.
+shape (camelCase keys), validated by the serializers in serializers.py with the same rules and messages as the zod
+schemas. Every query is scoped to the user's ACTIVE company; another company's id is simply not found. Errors are the
+TS ones.
 """
 from __future__ import annotations
 
-import json
-import uuid as _uuid
-from datetime import datetime, timedelta, timezone
+from collections import defaultdict
+from datetime import date, datetime, timedelta
 from typing import Any
 
-from django.db import transaction
+from django.db import models, transaction
+from django.db.models import Count, Exists, F, OuterRef, Q, Subquery
+from django.db.models.functions import Coalesce, Now
 
 from hajiri.core.audit import audit
 from hajiri.core.auth import AuthUser, company_id_of, has_role
 from hajiri.core.bsdate import bs_label
 from hajiri.core.clock import now as clock_now
-from hajiri.core.db import execute, one, rows
+from hajiri.core.clock import npt_today as npt_date
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
-from hajiri.core.schema import Arr, Bool, Enum, Int, IsoDate, Obj, Str, Uuid, parse
+from hajiri.core.settings_store import put_setting
+from hajiri.core.validation import parse_uuid, plain, validate
+from hajiri.db.models import (
+    Branch, CompanyPolicy, DocumentCategory, DocumentExpiryAlert, Employee, EmployeeAssignment, EmployeeDocument,
+    IssuedLetter, LetterRequest, LetterTemplate, OrgUnit, PolicyAck, PolicyNudge,
+)
 from hajiri.files.store import attach_file, delete_file, read_file
 from hajiri.notifications.service import notify, notify_role, user_id_for_employee
 from hajiri.workflow.service import DecisionContext, act, cancel_workflow, register_handler, start_workflow
 
-from .letters import (PLACEHOLDERS, company_head, employee_letter_values, esc, letter_settings, next_ref_no, npt_today,
-                      render_body, render_letter_html, render_subject, seed_document_defaults, subject_text,
-                      unknown_placeholders)
+from .filters import OPEN_REQUEST, LetterFilter, LetterRequestFilter
+from .letters import (PLACEHOLDERS, SETTINGS_KEY, company_head, employee_letter_values, esc, letter_settings,
+                      next_ref_no, npt_today, render_body, render_letter_html, render_subject, seed_document_defaults,
+                      subject_text, unknown_placeholders)
+from .serializers import (
+    PolicyArchivedQuery, DocumentCategoryIn, DocumentCategoryPatchIn, DocumentIn, DocumentPatchIn, DocumentHistoryQuery, LetterIssueIn, LetterRequestIn,
+    LettersQuery, LetterSettingsIn, CompanyPolicyIn, CompanyPolicyPatchIn, LetterPreviewIn, DocumentQueueQuery, RequestsQuery, LetterTemplateIn,
+    LetterTemplatePatchIn, DocumentVerifyIn, LetterVoidIn,
+)
+
+DocStatus = EmployeeDocument.Status
+ReqStatus = LetterRequest.Status
+Audience = CompanyPolicy.Audience
+ACTIVE = Employee.Status.ACTIVE
 
 # ---------------------------------------------------------------- shared helpers
 
@@ -43,22 +62,6 @@ def ensure_defaults(company_id: str) -> None:
     _seeded.add(company_id)
 
 
-def _norm(v: Any) -> Any:
-    if isinstance(v, _uuid.UUID):
-        return str(v)
-    if isinstance(v, list):
-        return [_norm(x) for x in v]
-    return v
-
-
-def _r(r: dict | None) -> dict | None:
-    return None if r is None else {k: _norm(v) for k, v in r.items()}
-
-
-def _rs(rs: list[dict]) -> list[dict]:
-    return [_r(r) for r in rs]
-
-
 def is_hr(u: AuthUser) -> bool:
     return has_role(u, 'hr')
 
@@ -68,52 +71,129 @@ def _require_hr(u: AuthUser) -> None:
         raise ForbiddenError('requires role hr')
 
 
-def _assert_employee_in_company(company_id: str, employee_id: str) -> dict:
-    r = one('SELECT name_en, emp_code, status FROM employee WHERE id = %s AND company_id = %s', [employee_id, company_id])
+def _today() -> date:
+    return date.fromisoformat(npt_today())
+
+
+def _q(serializer, query: dict | None) -> dict:
+    """A query string as zod saw it: empty values count as absent."""
+    return plain(validate(serializer, {k: v for k, v in (query or {}).items() if v not in (None, '')}))
+
+
+def _body(serializer, body: Any) -> dict:
+    return plain(validate(serializer, body))
+
+
+def employee_row(company_id: str, employee_id: str) -> dict:
+    """Name, code and status of an employee of the company; NotFoundError otherwise."""
+    r = Employee.objects.for_company(company_id).filter(pk=employee_id).values('name_en', 'emp_code', 'status').first()
     if not r:
         raise NotFoundError('employee not found')
     return r
 
 
-def _uuid_param(v: Any) -> str:
-    return parse(Uuid(), str(v))
+def _set_if(fields: dict, key: str, value: Any) -> None:
+    """coalesce($n, column): only a value that was given replaces the column."""
+    if value is not None:
+        fields[key] = value
 
 
 # ---------------------------------------------------------------- policy audience
 
+def _unit_children(company_id: str) -> dict[str, list[str]]:
+    """The company's unit tree as parent id -> child ids."""
+    children: dict[str, list[str]] = defaultdict(list)
+    for uid, parent in OrgUnit.objects.for_company(company_id).values_list('id', 'parent_id'):
+        if parent:
+            children[str(parent)].append(str(uid))
+    return children
+
+
+def _units_under(company_id: str, roots: list[str], children: dict[str, list[str]] | None = None) -> set[str]:
+    """The org units at or below `roots` (sub-units up to 20 levels down), from the company's unit tree."""
+    if children is None:
+        children = _unit_children(company_id)
+    found = {str(r) for r in roots}
+    frontier = list(found)
+    for _ in range(20):
+        frontier = [c for u in frontier for c in children.get(u, ()) if c not in found]
+        if not frontier:
+            break
+        found.update(frontier)
+    return found
+
+
+def audience_queryset(company_id: str, p: dict, only_employee: str | None = None) -> models.QuerySet:
+    """Active employees a policy is addressed to: everyone, chosen branches, or chosen departments (with sub-units),
+    by today's assignment."""
+    qs = Employee.objects.for_company(company_id).filter(status=ACTIVE)
+    if only_employee:
+        qs = qs.filter(pk=only_employee)
+    if p['audience'] == Audience.ALL:
+        return qs
+    ids = [str(x) for x in (p.get('audience_ids') or [])]
+    if not ids:
+        return qs.none()
+    current = EmployeeAssignment.objects.filter(employee=OuterRef('pk'), valid__contains=_today())
+    if p['audience'] == Audience.BRANCH:
+        return qs.filter(Exists(current.filter(branch_id__in=ids)))
+    return qs.filter(Exists(current.filter(org_unit_id__in=_units_under(company_id, ids))))
+
+
 def audience_ids(company_id: str, p: dict, only_employee: str | None = None) -> list[str]:
-    """Active employees a policy is addressed to: everyone, chosen branches, or chosen departments (including sub-units)."""
-    r = rows("""
-        WITH RECURSIVE anc(unit_id, ancestor_id, depth) AS (
-            SELECT id, id, 0 FROM org_unit WHERE company_id = %(c)s
-            UNION ALL
-            SELECT anc.unit_id, o.parent_id, anc.depth + 1 FROM anc JOIN org_unit o ON o.id = anc.ancestor_id
-             WHERE o.parent_id IS NOT NULL AND anc.depth < 20)
-        SELECT e.id FROM employee e
-          LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> %(d)s::date
-         WHERE e.company_id = %(c)s AND e.status = 'active' AND (%(only)s::uuid IS NULL OR e.id = %(only)s::uuid)
-           AND CASE %(aud)s::text
-                 WHEN 'all' THEN true
-                 WHEN 'branch' THEN coalesce(a.branch_id = ANY(%(ids)s::uuid[]), false)
-                 ELSE EXISTS (SELECT 1 FROM anc WHERE anc.unit_id = a.org_unit_id AND anc.ancestor_id = ANY(%(ids)s::uuid[]))
-               END""",
-        {'c': company_id, 'aud': p['audience'], 'ids': [str(x) for x in (p.get('audience_ids') or [])],
-         'only': only_employee, 'd': npt_today()})
-    return [str(x['id']) for x in r]
+    return [str(x) for x in audience_queryset(company_id, p, only_employee).order_by('id').values_list('id', flat=True)]
+
+
+class AudienceIndex:
+    """The audiences of many policies of one company from one read of its active employees and today's assignments
+    (and the unit tree, when a department audience asks for it), so a list of policies does not query per policy.
+    Same rules as audience_queryset."""
+
+    def __init__(self, company_id: str, only_employee: str | None = None):
+        self.company_id = company_id
+        people = Employee.objects.for_company(company_id).filter(status=ACTIVE)
+        if only_employee:
+            people = people.filter(pk=only_employee)
+        self.everyone = [str(x) for x in people.order_by('id').values_list('id', flat=True)]
+        self.by_branch: dict[str, set[str]] = defaultdict(set)
+        self.by_unit: dict[str, set[str]] = defaultdict(set)
+        assignments = (EmployeeAssignment.objects.filter(employee__in=people, valid__contains=_today())
+                       .values_list('employee_id', 'branch_id', 'org_unit_id'))
+        for employee_id, branch_id, unit_id in assignments:
+            if branch_id:
+                self.by_branch[str(branch_id)].add(str(employee_id))
+            if unit_id:
+                self.by_unit[str(unit_id)].add(str(employee_id))
+        self._children: dict[str, list[str]] | None = None
+
+    def ids(self, p: dict) -> list[str]:
+        if p['audience'] == Audience.ALL:
+            return self.everyone
+        wanted = [str(x) for x in (p.get('audience_ids') or [])]
+        if not wanted:
+            return []
+        if p['audience'] == Audience.BRANCH:
+            groups = [self.by_branch.get(b, ()) for b in wanted]
+        else:
+            if self._children is None:
+                self._children = _unit_children(self.company_id)
+            groups = [self.by_unit.get(u, ()) for u in _units_under(self.company_id, wanted, self._children)]
+        members = set().union(*groups)
+        return [e for e in self.everyone if e in members]
 
 
 # ---------------------------------------------------------------- letter requests (workflow)
 
 def apply_letter_request_decision(request_id: str, state: str, ctx: DecisionContext) -> None:
-    lr = one("""SELECT lr.employee_id, lr.company_id, lr.status, t.name FROM letter_request lr
-                  JOIN letter_template t ON t.id = lr.template_id WHERE lr.id = %s FOR UPDATE OF lr""", [request_id])
+    """The workflow engine's handler: record HR's decision on a letter request (the row is locked first)."""
+    lr = (LetterRequest.objects.select_for_update(of=('self',)).filter(pk=request_id)
+          .values('employee_id', 'company_id', 'status', name=F('template__name')).first())
     if not lr:
         raise NotFoundError('letter request not found')
-    if lr['status'] != 'pending':
+    if lr['status'] != ReqStatus.PENDING:
         raise ConflictError(f"request already {lr['status']}")
-    execute('UPDATE letter_request SET status = %s, decision_reason = %s, decided_at = now() WHERE id = %s',
-            [state, ctx.reason, request_id])
-    if state == 'rejected':
+    LetterRequest.objects.filter(pk=request_id).update(status=state, decision_reason=ctx.reason, decided_at=Now())
+    if state == ReqStatus.REJECTED:
         emp = str(lr['employee_id'])
         notify(company_id=str(lr['company_id']), user_id=user_id_for_employee(emp), employee_id=emp,
                template='letter_request.rejected', title=f"{lr['name']} request declined",
@@ -126,209 +206,152 @@ register_handler('letter_request', apply_letter_request_decision)
 
 # ---------------------------------------------------------------- daily job
 
-def documents_daily_job(now: datetime | None = None) -> dict:
-    """
-    Expiry alerts at 30, 7 and 0 days before a document expires (one per document and threshold; HR gets one summary
-    per company), and a weekly reminder to employees who have not acknowledged a policy that needs acknowledgement.
-    """
-    now = now or clock_now()
-    today = (now.astimezone(timezone.utc) + timedelta(minutes=345)).date().isoformat()
-    docs = rows("""
-        SELECT d.id, d.company_id, d.employee_id, d.title, d.expiry_date::text AS expiry_date, (d.expiry_date - %s::date) AS days,
-               d.visible_to_employee, e.name_en
-          FROM employee_document d JOIN employee e ON e.id = d.employee_id
-         WHERE d.deleted_at IS NULL AND d.is_current AND d.status <> 'rejected' AND d.expiry_date IS NOT NULL AND e.status = 'active'
-           AND d.expiry_date - %s::date BETWEEN -30 AND 30
-         ORDER BY d.expiry_date""", [today, today])
-    expiry_alerts = 0
+def _expiry_when(expiry: str, days: int) -> str:
+    if days < 0:
+        return f'expired on {bs_label(expiry)}'
+    if days == 0:
+        return 'expires today'
+    return f'expires on {bs_label(expiry)} (in {days} days)'
+
+
+def _expiry_alerts(today: date) -> int:
+    """Alerts at 30, 7 and 0 days before a document expires: one per document and threshold to the employee (when
+    they can see it), and one summary per company to HR."""
+    docs = (EmployeeDocument.objects
+            .filter(deleted_at__isnull=True, is_current=True, employee__status=ACTIVE,
+                    expiry_date__range=(today - timedelta(days=30), today + timedelta(days=30)))
+            .exclude(status=DocStatus.REJECTED)
+            .order_by('expiry_date', 'id')
+            .values('id', 'company_id', 'employee_id', 'title', 'expiry_date', 'visible_to_employee',
+                    name_en=F('employee__name_en')))
+    sent = 0
     per_company: dict[str, list[str]] = {}
     for d in docs:
-        days = d['days']
+        days = (d['expiry_date'] - today).days
+        expiry = d['expiry_date'].isoformat()
         threshold = 0 if days <= 0 else 7 if days <= 7 else 30
+        when = _expiry_when(expiry, days)
         with transaction.atomic():
-            if not execute('INSERT INTO document_expiry_alert (document_id, threshold) VALUES (%s, %s) ON CONFLICT DO NOTHING',
-                           [d['id'], threshold]):
+            _, created = DocumentExpiryAlert.objects.get_or_create(document_id=d['id'], threshold=threshold)
+            if not created:
                 continue
-            expiry_alerts += 1
-            when = (f"expired on {bs_label(d['expiry_date'])}" if days < 0 else 'expires today' if days == 0
-                    else f"expires on {bs_label(d['expiry_date'])} (in {days} days)")
+            sent += 1
+            employee_id, company_id = str(d['employee_id']), str(d['company_id'])
             if d['visible_to_employee']:
-                user_id = user_id_for_employee(str(d['employee_id']))
+                user_id = user_id_for_employee(employee_id)
                 if user_id:
-                    notify(company_id=str(d['company_id']), user_id=user_id, employee_id=str(d['employee_id']),
-                           template='document.expiring',
+                    notify(company_id=company_id, user_id=user_id, employee_id=employee_id, template='document.expiring',
                            title=f"{d['title']} {'has expired' if days < 0 else 'is expiring'}",
                            body=f"Your {d['title']} {when}. Upload the renewed document under Profile, Documents & letters.",
                            payload={'documentId': str(d['id']), 'threshold': threshold}, channels=('push',))
-        per_company.setdefault(str(d['company_id']), []).append(f"{d['name_en']}: {d['title']} {when}")
+        per_company.setdefault(company_id, []).append(f"{d['name_en']}: {d['title']} {when}")
     for company_id, lines in per_company.items():
         notify_role(company_id, 'hr', template='document.expiring.summary',
                     title=f"{len(lines)} employee document{'' if len(lines) == 1 else 's'} expiring",
                     body='; '.join(lines[:10]) + (f'; and {len(lines) - 10} more' if len(lines) > 10 else ''),
                     payload={'count': len(lines)})
+    return sent
 
-    policy_nudges = 0
-    policies = rows("""SELECT id, company_id, title, audience, audience_ids FROM company_policy
-                        WHERE archived_at IS NULL AND requires_ack AND published_at < %s::timestamptz - interval '2 days'""", [now])
+
+def _remind(company_id: str, policy: dict, employee_id: str, at=None) -> bool:
+    """One acknowledgement reminder, and the nudge time recorded. False when the employee has no sign-in."""
+    user_id = user_id_for_employee(employee_id)
+    if not user_id:
+        return False
+    with transaction.atomic():
+        notify(company_id=company_id, user_id=user_id, employee_id=employee_id, template='policy.reminder',
+               title=f"Please read: {policy['title']}",
+               body=f"{policy['title']} is waiting for your acknowledgement under Profile, Documents & letters.",
+               payload={'policyId': str(policy['id'])})
+        PolicyNudge.objects.bulk_create([PolicyNudge(policy_id=policy['id'], employee_id=employee_id,
+                                                     last_sent_at=at or clock_now())],
+                                        update_conflicts=True, unique_fields=['policy', 'employee'],
+                                        update_fields=['last_sent_at'])
+    return True
+
+
+def _acknowledged(policy_id, employee_ids) -> set[str]:
+    return {str(x) for x in PolicyAck.objects.filter(policy_id=policy_id, employee_id__in=employee_ids)
+            .values_list('employee_id', flat=True)}
+
+
+def _policy_nudges(now: datetime) -> int:
+    """A weekly reminder to everyone in the audience of a policy that needs acknowledgement and is two days old."""
+    sent = 0
+    policies = (CompanyPolicy.objects.filter(archived_at__isnull=True, requires_ack=True,
+                                             published_at__lt=now - timedelta(days=2))
+                .order_by('published_at', 'id').values('id', 'company_id', 'title', 'audience', 'audience_ids'))
+    audiences: dict[str, AudienceIndex] = {}
     for p in policies:
         cid = str(p['company_id'])
-        ids = audience_ids(cid, p)
+        if cid not in audiences:
+            audiences[cid] = AudienceIndex(cid)
+        ids = audiences[cid].ids(p)
         if not ids:
             continue
-        due = rows("""
-            SELECT x AS employee_id FROM unnest(%s::uuid[]) x
-             WHERE NOT EXISTS (SELECT 1 FROM policy_ack a WHERE a.policy_id = %s AND a.employee_id = x)
-               AND NOT EXISTS (SELECT 1 FROM policy_nudge n WHERE n.policy_id = %s AND n.employee_id = x
-                                  AND n.last_sent_at > %s::timestamptz - interval '7 days')""", [ids, p['id'], p['id'], now])
-        for r in due:
-            employee_id = str(r['employee_id'])
-            user_id = user_id_for_employee(employee_id)
-            if not user_id:
-                continue
-            with transaction.atomic():
-                notify(company_id=cid, user_id=user_id, employee_id=employee_id, template='policy.reminder',
-                       title=f"Please read: {p['title']}",
-                       body=f"{p['title']} is waiting for your acknowledgement under Profile, Documents & letters.",
-                       payload={'policyId': str(p['id'])})
-                execute("""INSERT INTO policy_nudge (policy_id, employee_id, last_sent_at) VALUES (%s, %s, %s)
-                           ON CONFLICT (policy_id, employee_id) DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at""",
-                        [p['id'], employee_id, now])
-            policy_nudges += 1
-    return {'expiryAlerts': expiry_alerts, 'policyNudges': policy_nudges}
+        done = _acknowledged(p['id'], ids)
+        recent = {str(x) for x in PolicyNudge.objects.filter(policy_id=p['id'], employee_id__in=ids,
+                                                             last_sent_at__gt=now - timedelta(days=7))
+                  .values_list('employee_id', flat=True)}
+        for employee_id in ids:
+            if employee_id not in done and employee_id not in recent and _remind(cid, p, employee_id, now):
+                sent += 1
+    return sent
 
 
-# ---------------------------------------------------------------- schemas
-
-_CODE = dict(regex=r'^[a-z0-9_]{2,40}$', regex_message='lowercase letters, digits and _')
-
-CATEGORY_BODY = Obj({
-    'code': Str(**_CODE),
-    'name': Str(trim=True, min=1, max=80),
-    'employeeCanUpload': Bool(default=True),
-    'expiryRequired': Bool(default=False),
-    'visibleToEmployee': Bool(default=True),
-    'sortOrder': Int(min=0, max=999, default=50),
-})
-CATEGORY_PATCH = Obj({
-    'name': Str(trim=True, min=1, max=80, optional=True),
-    'employeeCanUpload': Bool(optional=True),
-    'expiryRequired': Bool(optional=True),
-    'visibleToEmployee': Bool(optional=True),
-    'sortOrder': Int(min=0, max=999, optional=True),
-    'active': Bool(optional=True),
-})
-DOCUMENT_BODY = Obj({
-    'categoryId': Uuid(),
-    'title': Str(trim=True, min=1, max=120),
-    'fileId': Uuid(),
-    'expiryDate': IsoDate(nullish=True),
-    'visibleToEmployee': Bool(optional=True),
-    'notes': Str(trim=True, max=500, nullish=True),
-    'replacesId': Uuid(nullish=True),
-})
-DOCUMENT_PATCH = Obj({
-    'title': Str(trim=True, min=1, max=120, optional=True),
-    'expiryDate': IsoDate(nullish=True),
-    'visibleToEmployee': Bool(optional=True),
-    'notes': Str(trim=True, max=500, nullish=True),
-})
-VERIFY_BODY = Obj({'decision': Enum(('verify', 'reject')), 'reason': Str(trim=True, max=300, optional=True)})
-TEMPLATE_BODY = Obj({
-    'code': Str(**_CODE),
-    'name': Str(trim=True, min=1, max=80),
-    'subject': Str(trim=True, min=1, max=160),
-    'body': Str(trim=True, min=1, max=20000),
-    'requestable': Bool(default=False),
-    'visibleToEmployee': Bool(default=True),
-})
-TEMPLATE_PATCH = Obj({
-    'name': Str(trim=True, min=1, max=80, optional=True),
-    'subject': Str(trim=True, min=1, max=160, optional=True),
-    'body': Str(trim=True, min=1, max=20000, optional=True),
-    'requestable': Bool(optional=True),
-    'visibleToEmployee': Bool(optional=True),
-    'active': Bool(optional=True),
-})
-SETTINGS_BODY = Obj({
-    'signatoryName': Str(trim=True, max=80, nullable=True),
-    'signatoryTitle': Str(trim=True, max=80, nullable=True),
-    'refPrefix': Str(trim=True, regex=r'^[A-Za-z0-9/_-]{1,20}$', regex_message='letters, digits, / _ - only'),
-})
-PREVIEW_BODY = Obj({
-    'employeeId': Uuid(), 'templateId': Uuid(optional=True), 'subject': Str(max=160, optional=True),
-    'body': Str(max=20000, optional=True), 'purpose': Str(max=300, nullish=True), 'addressedTo': Str(max=200, nullish=True),
-})
-ISSUE_BODY = Obj({
-    'templateId': Uuid(), 'employeeId': Uuid(), 'visibleToEmployee': Bool(optional=True),
-    'purpose': Str(trim=True, max=300, nullish=True), 'addressedTo': Str(trim=True, max=200, nullish=True),
-    'requestId': Uuid(optional=True), 'allowMissing': Bool(default=False),
-})
-LETTERS_QUERY = Obj({'employeeId': Uuid(optional=True), 'q': Str(max=80, optional=True),
-                     'limit': Int(min=1, max=500, default=200, coerce=True)})
-VOID_BODY = Obj({'reason': Str(trim=True, min=3, max=300)})
-REQUEST_BODY = Obj({'templateId': Uuid(), 'purpose': Str(trim=True, min=3, max=300),
-                    'addressedTo': Str(trim=True, max=200, nullish=True)})
-REQUESTS_QUERY = Obj({'status': Enum(('pending', 'approved', 'rejected', 'issued', 'cancelled', 'open'), optional=True)})
-POLICY_BODY = Obj({
-    'title': Str(trim=True, min=1, max=160),
-    'description': Str(trim=True, max=2000, nullish=True),
-    'fileId': Uuid(),
-    'audience': Enum(('all', 'branch', 'department'), default='all'),
-    'audienceIds': Arr(Uuid(), max=100, default=list),
-    'requiresAck': Bool(default=True),
-})
-POLICY_PATCH = Obj({
-    'title': Str(trim=True, min=1, max=160, optional=True),
-    'description': Str(trim=True, max=2000, nullish=True),
-    'requiresAck': Bool(optional=True),
-    'archived': Bool(optional=True),
-})
-HISTORY_QUERY = Obj({'history': Enum(('0', '1'), optional=True)})
-QUEUE_QUERY = Obj({'days': Int(min=0, max=365, default=30, coerce=True)})
-ARCHIVED_QUERY = Obj({'archived': Enum(('0', '1'), optional=True)})
-
-
-def _q(schema: Obj, query: dict | None) -> dict:
-    """A query string as zod saw it: empty values count as absent."""
-    return parse(schema, {k: v for k, v in (query or {}).items() if v not in (None, '')})
+def documents_daily_job(now: datetime | None = None) -> dict:
+    """
+    Expiry alerts at 30, 7 and 0 days before a document expires (one per document and threshold; HR gets one summary
+    per company), and a weekly reminder to employees who have not acknowledged a policy that needs acknowledgement.
+    A background job: it works through every company, each step scoped by its row's company.
+    """
+    now = now or clock_now()
+    today = npt_date(now)
+    return {'expiryAlerts': _expiry_alerts(today), 'policyNudges': _policy_nudges(now)}
 
 
 # ---------------------------------------------------------------- categories
 
+CATEGORY_FIELDS = ('id', 'code', 'name', 'employee_can_upload', 'expiry_required', 'visible_to_employee', 'sort_order',
+                   'active')
+
+
 def list_categories(user: AuthUser) -> list[dict]:
     company_id = company_id_of(user)
     ensure_defaults(company_id)
-    return _rs(rows("""SELECT id, code, name, employee_can_upload, expiry_required, visible_to_employee, sort_order, active
-                         FROM document_category WHERE company_id = %s AND (%s OR active) ORDER BY sort_order, name""",
-                    [company_id, is_hr(user)]))
+    qs = DocumentCategory.objects.for_company(company_id)
+    if not is_hr(user):
+        qs = qs.filter(active=True)
+    return [plain(r) for r in qs.order_by('sort_order', 'name').values(*CATEGORY_FIELDS)]
 
 
 def create_category(user: AuthUser, body: dict) -> dict:
     _require_hr(user)
     company_id = company_id_of(user)
-    b = parse(CATEGORY_BODY, body)
+    b = _body(DocumentCategoryIn, body)
     with transaction.atomic():
-        r = one("""INSERT INTO document_category (company_id, code, name, employee_can_upload, expiry_required, visible_to_employee, sort_order)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                [company_id, b['code'], b['name'], b['employeeCanUpload'], b['expiryRequired'], b['visibleToEmployee'],
-                 b['sortOrder']])
-        audit('create', 'document_category', actor_id=user.id, row_id=r['id'], after=b)
-    return {'id': str(r['id'])}
+        c = DocumentCategory.objects.create(
+            company_id=company_id, code=b['code'], name=b['name'], employee_can_upload=b['employeeCanUpload'],
+            expiry_required=b['expiryRequired'], visible_to_employee=b['visibleToEmployee'], sort_order=b['sortOrder'])
+        audit('create', 'document_category', actor_id=user.id, row_id=c.id, after=b)
+    return {'id': str(c.id)}
+
+
+_CATEGORY_COLUMNS = {'name': 'name', 'employeeCanUpload': 'employee_can_upload', 'expiryRequired': 'expiry_required',
+                     'visibleToEmployee': 'visible_to_employee', 'sortOrder': 'sort_order', 'active': 'active'}
 
 
 def update_category(user: AuthUser, category_id: str, body: dict) -> dict:
     _require_hr(user)
     company_id = company_id_of(user)
-    cid = _uuid_param(category_id)
-    b = parse(CATEGORY_PATCH, body)
+    cid = parse_uuid(category_id)
+    b = _body(DocumentCategoryPatchIn, body)
+    fields: dict = {}
+    for key, column in _CATEGORY_COLUMNS.items():
+        _set_if(fields, column, b.get(key))
     with transaction.atomic():
-        n = execute("""UPDATE document_category SET name = coalesce(%s, name), employee_can_upload = coalesce(%s, employee_can_upload),
-                              expiry_required = coalesce(%s, expiry_required), visible_to_employee = coalesce(%s, visible_to_employee),
-                              sort_order = coalesce(%s, sort_order), active = coalesce(%s, active)
-                        WHERE id = %s AND company_id = %s""",
-                    [b.get('name'), b.get('employeeCanUpload'), b.get('expiryRequired'), b.get('visibleToEmployee'),
-                     b.get('sortOrder'), b.get('active'), cid, company_id])
-        if not n:
+        qs = DocumentCategory.objects.for_company(company_id).filter(pk=cid)
+        if not (qs.update(**fields) if fields else qs.exists()):
             raise NotFoundError('category not found')
         audit('update', 'document_category', actor_id=user.id, row_id=cid, after=b)
     return {'ok': True}
@@ -336,11 +359,30 @@ def update_category(user: AuthUser, category_id: str, body: dict) -> dict:
 
 # ---------------------------------------------------------------- employee documents
 
-DOC_COLS = """d.id, d.company_id, d.employee_id, d.category_id, c.name AS category_name, d.title, d.file_id, d.version, d.replaces_id,
-       d.is_current, d.status, d.reject_reason, d.expiry_date::text AS expiry_date, d.visible_to_employee, d.notes, d.uploaded_by,
-       u.name AS uploaded_by_name, d.verified_at, d.created_at, f.filename, f.mime, f.bytes"""
-DOC_FROM = """FROM employee_document d JOIN document_category c ON c.id = d.category_id JOIN stored_file f ON f.id = d.file_id
-  LEFT JOIN app_user u ON u.id = d.uploaded_by"""
+DOC_FIELDS = ('id', 'company_id', 'employee_id', 'category_id', 'title', 'file_id', 'version', 'replaces_id',
+              'is_current', 'status', 'reject_reason', 'expiry_date', 'visible_to_employee', 'notes', 'uploaded_by_id',
+              'verified_at', 'created_at')
+
+
+def _documents(company_id: str) -> models.QuerySet:
+    """The company's documents that have not been deleted."""
+    return EmployeeDocument.objects.for_company(company_id).filter(deleted_at__isnull=True)
+
+
+def _doc_values(qs: models.QuerySet, *extra, **annotations) -> models.QuerySet:
+    """DOC_COLS of the TS route: the document with its category name, uploader name and file details."""
+    return qs.values(*DOC_FIELDS, *extra, category_name=F('category__name'), uploaded_by_name=F('uploaded_by__name'),
+                     filename=F('file__filename'), mime=F('file__mime'), bytes=F('file__bytes'), **annotations)
+
+
+def _doc_row(r: dict, today: date | None = None) -> dict:
+    r = plain(r)
+    r['uploaded_by'] = r.pop('uploaded_by_id')
+    expiry = r['expiry_date']
+    r['expiry_date'] = expiry.isoformat() if expiry else None
+    if today is not None:
+        r['days_left'] = (expiry - today).days if expiry else None
+    return r
 
 
 def _list_docs(user: AuthUser, employee_id: str, include_history: bool) -> list[dict]:
@@ -349,12 +391,14 @@ def _list_docs(user: AuthUser, employee_id: str, include_history: bool) -> list[
     hr = is_hr(user)
     if not hr and user.employee_id != employee_id:
         raise ForbiddenError('you can only see your own documents')
-    _assert_employee_in_company(company_id, employee_id)
-    return _rs(rows(f"""SELECT {DOC_COLS} {DOC_FROM}
-                         WHERE d.company_id = %s AND d.employee_id = %s AND d.deleted_at IS NULL AND (%s OR d.is_current)
-                           AND (%s OR d.visible_to_employee OR d.uploaded_by = %s)
-                         ORDER BY c.sort_order, c.name, d.title, d.version DESC""",
-                    [company_id, employee_id, include_history and hr, hr, user.id]))
+    employee_row(company_id, employee_id)
+    qs = _documents(company_id).filter(employee_id=employee_id)
+    if not (include_history and hr):
+        qs = qs.filter(is_current=True)
+    if not hr:
+        qs = qs.filter(Q(visible_to_employee=True) | Q(uploaded_by_id=user.id))
+    qs = qs.order_by('category__sort_order', 'category__name', 'title', '-version')
+    return [_doc_row(r) for r in _doc_values(qs)]
 
 
 def my_documents(user: AuthUser) -> list[dict]:
@@ -365,8 +409,8 @@ def my_documents(user: AuthUser) -> list[dict]:
 
 
 def employee_documents(user: AuthUser, employee_id: str, query: dict | None = None) -> list[dict]:
-    eid = _uuid_param(employee_id)
-    q = _q(HISTORY_QUERY, query)
+    eid = parse_uuid(employee_id)
+    q = _q(DocumentHistoryQuery, query)
     return _list_docs(user, eid, q.get('history') == '1')
 
 
@@ -374,28 +418,27 @@ def queue(user: AuthUser, query: dict | None = None) -> dict:
     """HR queues: documents awaiting verification and documents expiring soon."""
     _require_hr(user)
     company_id = company_id_of(user)
-    q = _q(QUEUE_QUERY, query)
-    pending = rows(f"""SELECT e.emp_code, e.name_en, {DOC_COLS} {DOC_FROM} JOIN employee e ON e.id = d.employee_id
-                        WHERE d.company_id = %s AND d.deleted_at IS NULL AND d.status = 'pending' ORDER BY d.created_at""",
-                   [company_id])
-    expiring = rows(f"""SELECT e.emp_code, e.name_en, (d.expiry_date - %s::date) AS days_left, {DOC_COLS} {DOC_FROM}
-                          JOIN employee e ON e.id = d.employee_id
-                         WHERE d.company_id = %s AND d.deleted_at IS NULL AND d.is_current AND d.status <> 'rejected' AND e.status = 'active'
-                           AND d.expiry_date IS NOT NULL AND d.expiry_date <= %s::date + %s::int ORDER BY d.expiry_date""",
-                    [npt_today(), company_id, npt_today(), q['days']])
-    return {'pending': _rs(pending), 'expiring': _rs(expiring)}
+    q = _q(DocumentQueueQuery, query)
+    today = _today()
+    who = {'emp_code': F('employee__emp_code'), 'name_en': F('employee__name_en')}
+    pending = _doc_values(_documents(company_id).filter(status=DocStatus.PENDING).order_by('created_at', 'id'), **who)
+    expiring = _doc_values(
+        _documents(company_id).filter(is_current=True, employee__status=ACTIVE, expiry_date__isnull=False,
+                                      expiry_date__lte=today + timedelta(days=q['days']))
+        .exclude(status=DocStatus.REJECTED).order_by('expiry_date', 'id'), **who)
+    return {'pending': [_doc_row(r) for r in pending], 'expiring': [_doc_row(r, today) for r in expiring]}
 
 
 def add_document(user: AuthUser, employee_id: str, body: dict) -> dict:
     company_id = company_id_of(user)
-    eid = _uuid_param(employee_id)
-    b = parse(DOCUMENT_BODY, body)
+    eid = parse_uuid(employee_id)
+    b = _body(DocumentIn, body)
     hr = is_hr(user)
     if not hr and user.employee_id != eid:
         raise ForbiddenError('you can only upload your own documents')
-    emp = _assert_employee_in_company(company_id, eid)
-    c = one("""SELECT name, employee_can_upload, expiry_required, visible_to_employee, active FROM document_category
-                WHERE id = %s AND company_id = %s""", [b['categoryId'], company_id])
+    emp = employee_row(company_id, eid)
+    c = (DocumentCategory.objects.for_company(company_id).filter(pk=b['categoryId'])
+         .values('name', 'employee_can_upload', 'expiry_required', 'visible_to_employee', 'active').first())
     if not c or not c['active']:
         raise BadRequestError('choose a document category')
     if not hr and not c['employee_can_upload']:
@@ -408,22 +451,21 @@ def add_document(user: AuthUser, employee_id: str, body: dict) -> dict:
     with transaction.atomic():
         version = 1
         if replaces:
-            o = one("""SELECT employee_id, version, is_current, uploaded_by, status, visible_to_employee FROM employee_document
-                        WHERE id = %s AND company_id = %s AND deleted_at IS NULL FOR UPDATE""", [replaces, company_id])
+            o = (_documents(company_id).select_for_update().filter(pk=replaces)
+                 .values('employee_id', 'version', 'is_current', 'uploaded_by_id', 'visible_to_employee').first())
             if (not o or str(o['employee_id']) != eid
-                    or (not hr and not o['visible_to_employee'] and str(o['uploaded_by'] or '') != user.id)):
+                    or (not hr and not o['visible_to_employee'] and str(o['uploaded_by_id'] or '') != user.id)):
                 raise NotFoundError('the document to replace was not found')
             if not o['is_current']:
                 raise ConflictError('only the latest version can be replaced')
             version = o['version'] + 1
-            execute('UPDATE employee_document SET is_current = false WHERE id = %s', [replaces])
-        r = one("""INSERT INTO employee_document (company_id, employee_id, category_id, title, file_id, version, replaces_id, status,
-                                                  expiry_date, visible_to_employee, notes, uploaded_by, verified_by, verified_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                [company_id, eid, b['categoryId'], b['title'], b['fileId'], version, replaces, 'verified' if hr else 'pending',
-                 expiry, visible if hr else True, b.get('notes'), user.id, user.id if hr else None,
-                 clock_now() if hr else None])
-        doc_id = str(r['id'])
+            EmployeeDocument.objects.filter(pk=replaces).update(is_current=False)
+        d = EmployeeDocument.objects.create(
+            company_id=company_id, employee_id=eid, category_id=b['categoryId'], title=b['title'], file_id=b['fileId'],
+            version=version, replaces_id=replaces, status=DocStatus.VERIFIED if hr else DocStatus.PENDING,
+            expiry_date=expiry, visible_to_employee=visible if hr else True, notes=b.get('notes'),
+            uploaded_by_id=user.id, verified_by_id=user.id if hr else None, verified_at=clock_now() if hr else None)
+        doc_id = str(d.id)
         attach_file(company_id=company_id, file_id=b['fileId'], user_id=user.id, purpose='employee_document',
                     attached_to=f'employee_document:{doc_id}')
         audit('create', 'employee_document', actor_id=user.id, row_id=doc_id,
@@ -441,18 +483,28 @@ def add_document(user: AuthUser, employee_id: str, body: dict) -> dict:
 
 
 def load_doc(company_id: str, doc_id: str) -> dict:
-    d = one(f'SELECT {DOC_COLS} {DOC_FROM} WHERE d.id = %s AND d.company_id = %s AND d.deleted_at IS NULL', [doc_id, company_id])
+    """A document of the company (any employee); NotFoundError otherwise."""
+    d = _doc_values(_documents(company_id).filter(pk=parse_uuid(doc_id))).first()
     if not d:
         raise NotFoundError('document not found')
-    return _r(d)
+    return _doc_row(d)
 
 
 def document_for(user: AuthUser, doc_id: str) -> dict:
     """A document the user may see (HR: any in the company; the employee: their own visible ones and own uploads)."""
-    d = load_doc(company_id_of(user), _uuid_param(doc_id))
+    d = load_doc(company_id_of(user), parse_uuid(doc_id))
     own = user.employee_id == d['employee_id'] and (d['visible_to_employee'] or d['uploaded_by'] == user.id)
     if not is_hr(user) and not own:
         raise NotFoundError('document not found')
+    return d
+
+
+def hr_document(user: AuthUser, doc_id: str) -> dict:
+    """A document for HR's forms (edit, send back), with the employee's name."""
+    _require_hr(user)
+    company_id = company_id_of(user)
+    d = load_doc(company_id, doc_id)
+    d['employee_name'] = employee_row(company_id, d['employee_id'])['name_en']
     return d
 
 
@@ -470,8 +522,8 @@ def document_file(user: AuthUser, doc_id: str) -> dict:
 def verify_document(user: AuthUser, doc_id: str, body: dict) -> dict:
     _require_hr(user)
     company_id = company_id_of(user)
-    did = _uuid_param(doc_id)
-    b = parse(VERIFY_BODY, body)
+    did = parse_uuid(doc_id)
+    b = _body(DocumentVerifyIn, body)
     if b['decision'] == 'reject' and not b.get('reason'):
         raise BadRequestError('give a reason so the employee knows what to fix')
     d = load_doc(company_id, did)
@@ -479,9 +531,9 @@ def verify_document(user: AuthUser, doc_id: str, body: dict) -> dict:
         raise ForbiddenError('you cannot verify your own documents')
     verify = b['decision'] == 'verify'
     with transaction.atomic():
-        n = execute("""UPDATE employee_document SET status = %s, reject_reason = %s, verified_by = %s, verified_at = now()
-                        WHERE id = %s AND status = 'pending'""",
-                    ['verified' if verify else 'rejected', None if verify else b['reason'], user.id, did])
+        n = (_documents(company_id).filter(pk=did, status=DocStatus.PENDING)
+             .update(status=DocStatus.VERIFIED if verify else DocStatus.REJECTED,
+                     reject_reason=None if verify else b['reason'], verified_by_id=user.id, verified_at=Now()))
         if not n:
             raise ConflictError('this document is not waiting for verification')
         audit(b['decision'], 'employee_document', actor_id=user.id, row_id=did, after={'reason': b.get('reason')})
@@ -497,19 +549,22 @@ def verify_document(user: AuthUser, doc_id: str, body: dict) -> dict:
 def update_document(user: AuthUser, doc_id: str, body: dict) -> dict:
     _require_hr(user)
     company_id = company_id_of(user)
-    did = _uuid_param(doc_id)
-    b = parse(DOCUMENT_PATCH, body)
+    did = parse_uuid(doc_id)
+    b = _body(DocumentPatchIn, body)
     before = load_doc(company_id, did)
-    has_expiry, has_notes = 'expiryDate' in b, 'notes' in b
+    fields: dict = {}
+    _set_if(fields, 'title', b.get('title'))
+    _set_if(fields, 'visible_to_employee', b.get('visibleToEmployee'))
+    if 'expiryDate' in b:
+        fields['expiry_date'] = b['expiryDate']
+    if 'notes' in b:
+        fields['notes'] = b['notes']
     with transaction.atomic():
-        execute("""UPDATE employee_document SET title = coalesce(%s, title), expiry_date = CASE WHEN %s THEN %s::date ELSE expiry_date END,
-                          visible_to_employee = coalesce(%s, visible_to_employee), notes = CASE WHEN %s THEN %s ELSE notes END
-                    WHERE id = %s AND company_id = %s""",
-                [b.get('title'), has_expiry, b.get('expiryDate'), b.get('visibleToEmployee'), has_notes, b.get('notes'),
-                 did, company_id])
+        if fields:
+            _documents(company_id).filter(pk=did).update(**fields)
         # A new expiry date restarts its alerts.
-        if has_expiry and b.get('expiryDate') != before['expiry_date']:
-            execute('DELETE FROM document_expiry_alert WHERE document_id = %s', [did])
+        if 'expiryDate' in b and b['expiryDate'] != before['expiry_date']:
+            DocumentExpiryAlert.objects.filter(document_id=did).delete()
         audit('update', 'employee_document', actor_id=user.id, row_id=did,
               before={'title': before['title'], 'expiryDate': before['expiry_date'], 'visible': before['visible_to_employee']},
               after=b)
@@ -519,18 +574,18 @@ def update_document(user: AuthUser, doc_id: str, body: dict) -> dict:
 def delete_document(user: AuthUser, doc_id: str) -> dict:
     """HR deletes any document; an employee only their own upload that HR has not verified yet. The bytes are wiped."""
     company_id = company_id_of(user)
-    did = _uuid_param(doc_id)
+    did = parse_uuid(doc_id)
     d = load_doc(company_id, did)
-    own_pending = user.employee_id == d['employee_id'] and d['uploaded_by'] == user.id and d['status'] != 'verified'
+    own_pending = user.employee_id == d['employee_id'] and d['uploaded_by'] == user.id and d['status'] != DocStatus.VERIFIED
     if not is_hr(user) and not own_pending:
         if user.employee_id == d['employee_id']:
             raise ForbiddenError('only HR can delete a verified document')
         raise NotFoundError('document not found')
     with transaction.atomic():
-        execute('UPDATE employee_document SET deleted_at = now(), deleted_by = %s, is_current = false WHERE id = %s', [user.id, did])
+        _documents(company_id).filter(pk=did).update(deleted_at=Now(), deleted_by_id=user.id, is_current=False)
         # Deleting the latest version brings the previous one back.
         if d['is_current'] and d['replaces_id']:
-            execute('UPDATE employee_document SET is_current = true WHERE id = %s AND deleted_at IS NULL', [d['replaces_id']])
+            _documents(company_id).filter(pk=d['replaces_id']).update(is_current=True)
         delete_file(company_id, d['file_id'])
         audit('delete', 'employee_document', actor_id=user.id, row_id=did,
               before={'employeeId': d['employee_id'], 'title': d['title'], 'version': d['version']})
@@ -538,6 +593,10 @@ def delete_document(user: AuthUser, doc_id: str) -> dict:
 
 
 # ---------------------------------------------------------------- letter settings and templates
+
+TEMPLATE_FIELDS = ('id', 'code', 'name', 'subject', 'body', 'requestable', 'visible_to_employee', 'is_builtin', 'active',
+                   'updated_at')
+
 
 def placeholders(user: AuthUser) -> list[dict]:
     _require_hr(user)
@@ -552,14 +611,16 @@ def get_letter_settings(user: AuthUser) -> dict:
 def save_letter_settings(user: AuthUser, body: dict) -> dict:
     _require_hr(user)
     company_id = company_id_of(user)
-    b = parse(SETTINGS_BODY, body)
+    b = _body(LetterSettingsIn, body)
     before = letter_settings(company_id)
     with transaction.atomic():
-        execute("""INSERT INTO company_setting (company_id, key, value, updated_by) VALUES (%s, 'documents.letters', %s, %s)
-                   ON CONFLICT (company_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now(), updated_by = EXCLUDED.updated_by""",
-                [company_id, json.dumps(b), user.id])
-        audit('update', 'company_setting', actor_id=user.id, row_id='documents.letters', before=before, after=b)
+        put_setting(company_id, SETTINGS_KEY, b, updated_by=user.id)
+        audit('update', 'company_setting', actor_id=user.id, row_id=SETTINGS_KEY, before=before, after=b)
     return b
+
+
+def _templates(company_id: str) -> models.QuerySet:
+    return LetterTemplate.objects.for_company(company_id)
 
 
 def list_templates(user: AuthUser) -> list[dict]:
@@ -567,19 +628,19 @@ def list_templates(user: AuthUser) -> list[dict]:
     company_id = company_id_of(user)
     ensure_defaults(company_id)
     if is_hr(user):
-        return _rs(rows("""SELECT id, code, name, subject, body, requestable, visible_to_employee, is_builtin, active, updated_at
-                             FROM letter_template WHERE company_id = %s ORDER BY active DESC, name""", [company_id]))
-    return _rs(rows("""SELECT id, code, name, subject FROM letter_template WHERE company_id = %s AND active AND requestable
-                        ORDER BY name""", [company_id]))
+        qs = _templates(company_id).order_by('-active', 'name').values(*TEMPLATE_FIELDS)
+    else:
+        qs = (_templates(company_id).filter(active=True, requestable=True).order_by('name')
+              .values('id', 'code', 'name', 'subject'))
+    return [plain(r) for r in qs]
 
 
 def get_template(user: AuthUser, template_id: str) -> dict:
     _require_hr(user)
-    t = one("""SELECT id, code, name, subject, body, requestable, visible_to_employee, is_builtin, active, updated_at
-                 FROM letter_template WHERE id = %s AND company_id = %s""", [_uuid_param(template_id), company_id_of(user)])
+    t = _templates(company_id_of(user)).filter(pk=parse_uuid(template_id)).values(*TEMPLATE_FIELDS).first()
     if not t:
         raise NotFoundError('template not found')
-    return _r(t)
+    return plain(t)
 
 
 def _check_placeholders(subject: str, body: str) -> None:
@@ -591,32 +652,35 @@ def _check_placeholders(subject: str, body: str) -> None:
 def create_template(user: AuthUser, body: dict) -> dict:
     _require_hr(user)
     company_id = company_id_of(user)
-    b = parse(TEMPLATE_BODY, body)
+    b = _body(LetterTemplateIn, body)
     _check_placeholders(b['subject'], b['body'])
     with transaction.atomic():
-        r = one("""INSERT INTO letter_template (company_id, code, name, subject, body, requestable, visible_to_employee, updated_by)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                [company_id, b['code'], b['name'], b['subject'], b['body'], b['requestable'], b['visibleToEmployee'], user.id])
-        audit('create', 'letter_template', actor_id=user.id, row_id=r['id'], after={'code': b['code'], 'name': b['name']})
-    return {'id': str(r['id'])}
+        t = LetterTemplate.objects.create(
+            company_id=company_id, code=b['code'], name=b['name'], subject=b['subject'], body=b['body'],
+            requestable=b['requestable'], visible_to_employee=b['visibleToEmployee'], updated_by_id=user.id)
+        audit('create', 'letter_template', actor_id=user.id, row_id=t.id, after={'code': b['code'], 'name': b['name']})
+    return {'id': str(t.id)}
+
+
+_TEMPLATE_COLUMNS = {'name': 'name', 'subject': 'subject', 'body': 'body', 'requestable': 'requestable',
+                     'visibleToEmployee': 'visible_to_employee', 'active': 'active'}
 
 
 def update_template(user: AuthUser, template_id: str, body: dict) -> dict:
     _require_hr(user)
     company_id = company_id_of(user)
-    tid = _uuid_param(template_id)
-    b = parse(TEMPLATE_PATCH, body)
+    tid = parse_uuid(template_id)
+    b = _body(LetterTemplatePatchIn, body)
     _check_placeholders(b.get('subject') or '', b.get('body') or '')
-    before = one("""SELECT name, subject, body, requestable, visible_to_employee, active FROM letter_template
-                     WHERE id = %s AND company_id = %s""", [tid, company_id])
+    qs = _templates(company_id).filter(pk=tid)
+    before = qs.values('name', 'subject', 'body', 'requestable', 'visible_to_employee', 'active').first()
     if not before:
         raise NotFoundError('template not found')
+    fields: dict = {'updated_by_id': user.id, 'updated_at': Now()}
+    for key, column in _TEMPLATE_COLUMNS.items():
+        _set_if(fields, column, b.get(key))
     with transaction.atomic():
-        execute("""UPDATE letter_template SET name = coalesce(%s, name), subject = coalesce(%s, subject), body = coalesce(%s, body),
-                          requestable = coalesce(%s, requestable), visible_to_employee = coalesce(%s, visible_to_employee),
-                          active = coalesce(%s, active), updated_by = %s, updated_at = now() WHERE id = %s AND company_id = %s""",
-                [b.get('name'), b.get('subject'), b.get('body'), b.get('requestable'), b.get('visibleToEmployee'), b.get('active'),
-                 user.id, tid, company_id])
+        qs.update(**fields)
         audit('update', 'letter_template', actor_id=user.id, row_id=tid, before=before, after=b)
     return {'ok': True}
 
@@ -643,9 +707,9 @@ def build_letter(company_id: str, tpl: dict, employee_id: str, *, ref_no: str, p
 def preview_letter(user: AuthUser, body: dict) -> dict:
     _require_hr(user)
     company_id = company_id_of(user)
-    b = parse(PREVIEW_BODY, body)
+    b = _body(LetterPreviewIn, body)
     if b.get('templateId'):
-        t = one('SELECT subject, body FROM letter_template WHERE id = %s AND company_id = %s', [b['templateId'], company_id])
+        t = _templates(company_id).filter(pk=b['templateId']).values('subject', 'body').first()
         if not t:
             raise NotFoundError('template not found')
         tpl = {'subject': b['subject'] if b.get('subject') is not None else t['subject'],
@@ -662,31 +726,39 @@ def preview_letter(user: AuthUser, body: dict) -> dict:
 
 # ---------------------------------------------------------------- issued letters
 
+def _letters(company_id: str) -> models.QuerySet:
+    return IssuedLetter.objects.for_company(company_id)
+
+
+def _requests(company_id: str) -> models.QuerySet:
+    return LetterRequest.objects.for_company(company_id)
+
+
 def issue_letter(user: AuthUser, body: dict) -> dict:
     _require_hr(user)
     company_id = company_id_of(user)
-    b = parse(ISSUE_BODY, body)
+    b = _body(LetterIssueIn, body)
     ensure_defaults(company_id)
     request_id = b.get('requestId')
     with transaction.atomic():
-        tpl = one('SELECT id, code, subject, body, active, visible_to_employee FROM letter_template WHERE id = %s AND company_id = %s',
-                  [b['templateId'], company_id])
+        tpl = (_templates(company_id).filter(pk=b['templateId'])
+               .values('id', 'code', 'subject', 'body', 'active', 'visible_to_employee').first())
         if not tpl or not tpl['active']:
             raise NotFoundError('template not found')
-        _assert_employee_in_company(company_id, b['employeeId'])
+        employee_row(company_id, b['employeeId'])
         purpose, addressed_to = b.get('purpose'), b.get('addressedTo')
         if request_id:
-            q = one("""SELECT employee_id, status, purpose, addressed_to, workflow_instance_id FROM letter_request
-                        WHERE id = %s AND company_id = %s FOR UPDATE""", [request_id, company_id])
+            q = (_requests(company_id).select_for_update().filter(pk=request_id)
+                 .values('employee_id', 'status', 'purpose', 'addressed_to', 'workflow_instance_id').first())
             if not q:
                 raise NotFoundError('letter request not found')
             if str(q['employee_id']) != b['employeeId']:
                 raise BadRequestError('the request belongs to another employee')
-            if q['status'] not in ('pending', 'approved'):
+            if q['status'] not in OPEN_REQUEST:
                 raise ConflictError(f"request already {q['status']}")
             purpose = purpose if purpose is not None else q['purpose']
             addressed_to = addressed_to if addressed_to is not None else q['addressed_to']
-            if q['status'] == 'pending' and q['workflow_instance_id']:
+            if q['status'] == ReqStatus.PENDING and q['workflow_instance_id']:
                 act(instance_id=str(q['workflow_instance_id']), user=user, decision='approve')
         s = letter_settings(company_id)
         # Check for missing values before taking a reference number.
@@ -697,15 +769,14 @@ def issue_letter(user: AuthUser, body: dict) -> dict:
         ref_no = next_ref_no(company_id, s.get('refPrefix') or '')
         letter = build_letter(company_id, tpl, b['employeeId'], ref_no=ref_no, purpose=purpose, addressed_to=addressed_to)
         visible = b['visibleToEmployee'] if b.get('visibleToEmployee') is not None else tpl['visible_to_employee']
-        r = one("""INSERT INTO issued_letter (company_id, employee_id, template_id, template_code, ref_no, subject, html,
-                                              visible_to_employee, request_id, issued_by)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                [company_id, b['employeeId'], tpl['id'], tpl['code'], ref_no, letter['subject'], letter['html'], visible,
-                 request_id, user.id])
-        letter_id = str(r['id'])
+        row = IssuedLetter.objects.create(
+            company_id=company_id, employee_id=b['employeeId'], template_id=tpl['id'], template_code=tpl['code'],
+            ref_no=ref_no, subject=letter['subject'], html=letter['html'], visible_to_employee=visible,
+            request_id=request_id, issued_by_id=user.id)
+        letter_id = str(row.id)
         if request_id:
-            execute("""UPDATE letter_request SET status = 'issued', issued_letter_id = %s, decided_at = coalesce(decided_at, now())
-                        WHERE id = %s""", [letter_id, request_id])
+            _requests(company_id).filter(pk=request_id).update(
+                status=ReqStatus.ISSUED, issued_letter_id=letter_id, decided_at=Coalesce('decided_at', Now()))
         audit('issue', 'issued_letter', actor_id=user.id, row_id=letter_id,
               after={'employeeId': b['employeeId'], 'template': tpl['code'], 'refNo': ref_no, 'requestId': request_id})
         if visible:
@@ -716,33 +787,43 @@ def issue_letter(user: AuthUser, body: dict) -> dict:
     return {'id': letter_id, 'refNo': ref_no}
 
 
+LETTER_FIELDS = ('id', 'employee_id', 'template_code', 'ref_no', 'subject', 'visible_to_employee', 'request_id',
+                 'issued_at', 'voided_at', 'void_reason')
+
+
 def list_letters(user: AuthUser, query: dict | None = None) -> list[dict]:
     company_id = company_id_of(user)
-    q = _q(LETTERS_QUERY, query)
+    q = _q(LettersQuery, query)
     hr = is_hr(user)
     if not hr and q.get('employeeId') and q['employeeId'] != user.employee_id:
         raise ForbiddenError('you can only see your own letters')
     employee_id = q.get('employeeId') if hr else user.employee_id
     if not hr and not employee_id:
         return []
-    term = (q.get('q') or '').strip() or None
-    return _rs(rows("""
-        SELECT l.id, l.employee_id, e.emp_code, e.name_en, l.template_code, l.ref_no, l.subject, l.visible_to_employee, l.request_id,
-               l.issued_at, l.voided_at, l.void_reason, iu.name AS issued_by_name
-          FROM issued_letter l JOIN employee e ON e.id = l.employee_id LEFT JOIN app_user iu ON iu.id = l.issued_by
-         WHERE l.company_id = %(c)s AND (%(e)s::uuid IS NULL OR l.employee_id = %(e)s::uuid)
-           AND (%(hr)s OR (l.visible_to_employee AND l.voided_at IS NULL))
-           AND (%(q)s::text IS NULL OR l.ref_no ILIKE '%%' || %(q)s || '%%' OR e.name_en ILIKE '%%' || %(q)s || '%%'
-                OR e.emp_code ILIKE '%%' || %(q)s || '%%' OR l.subject ILIKE '%%' || %(q)s || '%%')
-         ORDER BY l.issued_at DESC LIMIT %(lim)s""",
-        {'c': company_id, 'e': employee_id, 'hr': hr, 'q': term, 'lim': q['limit']}))
+    qs = _letters(company_id)
+    if not hr:
+        qs = qs.filter(visible_to_employee=True, voided_at__isnull=True)
+    qs = LetterFilter({'employeeId': employee_id, 'q': q.get('q')}, queryset=qs).qs
+    qs = (qs.order_by('-issued_at', '-id')
+          .values(*LETTER_FIELDS, emp_code=F('employee__emp_code'), name_en=F('employee__name_en'),
+                  issued_by_name=F('issued_by__name'))[:q['limit']])
+    return [plain(r) for r in qs]
+
+
+def letter_ref(user: AuthUser, letter_id: str) -> dict:
+    """{id, ref_no} of a letter of the company, for HR's void form."""
+    _require_hr(user)
+    r = _letters(company_id_of(user)).filter(pk=parse_uuid(letter_id)).values('id', 'ref_no').first()
+    if not r:
+        raise NotFoundError('letter not found')
+    return plain(r)
 
 
 def letter_html(user: AuthUser, letter_id: str) -> str:
     company_id = company_id_of(user)
-    lid = _uuid_param(letter_id)
-    row = one('SELECT employee_id, html, visible_to_employee, voided_at, void_reason FROM issued_letter WHERE id = %s AND company_id = %s',
-              [lid, company_id])
+    lid = parse_uuid(letter_id)
+    row = (_letters(company_id).filter(pk=lid)
+           .values('employee_id', 'html', 'visible_to_employee', 'voided_at', 'void_reason').first())
     own = bool(row) and user.employee_id == str(row['employee_id']) and row['visible_to_employee'] and not row['voided_at']
     if not row or (not is_hr(user) and not own):
         raise NotFoundError('letter not found')
@@ -758,11 +839,11 @@ def letter_html(user: AuthUser, letter_id: str) -> str:
 def void_letter(user: AuthUser, letter_id: str, body: dict) -> dict:
     _require_hr(user)
     company_id = company_id_of(user)
-    lid = _uuid_param(letter_id)
-    b = parse(VOID_BODY, body)
+    lid = parse_uuid(letter_id)
+    b = _body(LetterVoidIn, body)
     with transaction.atomic():
-        n = execute("""UPDATE issued_letter SET voided_at = now(), voided_by = %s, void_reason = %s
-                        WHERE id = %s AND company_id = %s AND voided_at IS NULL""", [user.id, b['reason'], lid, company_id])
+        n = (_letters(company_id).filter(pk=lid, voided_at__isnull=True)
+             .update(voided_at=Now(), voided_by_id=user.id, void_reason=b['reason']))
         if not n:
             raise NotFoundError('letter not found or already voided')
         audit('void', 'issued_letter', actor_id=user.id, row_id=lid, after=b)
@@ -771,72 +852,71 @@ def void_letter(user: AuthUser, letter_id: str, body: dict) -> dict:
 
 # ---------------------------------------------------------------- letter requests
 
+REQUEST_FIELDS = ('id', 'employee_id', 'template_id', 'purpose', 'addressed_to', 'status')
+
+
+def _request_values(qs: models.QuerySet, *extra) -> models.QuerySet:
+    return qs.values(*REQUEST_FIELDS, *extra, emp_code=F('employee__emp_code'), name_en=F('employee__name_en'),
+                     template_name=F('template__name'), template_code=F('template__code'))
+
+
 def request_letter(user: AuthUser, body: dict) -> dict:
     company_id = company_id_of(user)
     if not user.employee_id:
         raise BadRequestError('only employees can request letters')
     employee_id = user.employee_id
-    b = parse(REQUEST_BODY, body)
+    b = _body(LetterRequestIn, body)
     ensure_defaults(company_id)
-    t0 = one('SELECT name FROM letter_template WHERE id = %s AND company_id = %s AND active AND requestable',
-             [b['templateId'], company_id])
-    if not t0:
+    name = (_templates(company_id).filter(pk=b['templateId'], active=True, requestable=True)
+            .values_list('name', flat=True).first())
+    if not name:
         raise BadRequestError('this letter cannot be requested')
-    name = t0['name']
-    if one("""SELECT 1 FROM letter_request WHERE employee_id = %s AND template_id = %s AND status IN ('pending', 'approved')""",
-           [employee_id, b['templateId']]):
+    if _requests(company_id).filter(employee_id=employee_id, template_id=b['templateId'], status__in=OPEN_REQUEST).exists():
         raise ConflictError(f'you already have an open request for a {name.lower()}')
-    emp = _assert_employee_in_company(company_id, employee_id)
+    emp = employee_row(company_id, employee_id)
     with transaction.atomic():
-        r = one("""INSERT INTO letter_request (company_id, employee_id, template_id, purpose, addressed_to, created_by)
-                   VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
-                [company_id, employee_id, b['templateId'], b['purpose'], b.get('addressedTo'), user.id])
-        req_id = str(r['id'])
+        r = LetterRequest.objects.create(company_id=company_id, employee_id=employee_id, template_id=b['templateId'],
+                                         purpose=b['purpose'], addressed_to=b.get('addressedTo'), created_by_id=user.id)
+        req_id = str(r.id)
         inst = start_workflow(company_id=company_id, object_type='letter_request', object_id=req_id, employee_id=employee_id,
                               title=f'{name} requested', body=f"{emp['name_en']} asked for a {name.lower()}: {b['purpose']}")
-        execute('UPDATE letter_request SET workflow_instance_id = %s WHERE id = %s', [inst['id'], req_id])
+        LetterRequest.objects.filter(pk=req_id).update(workflow_instance_id=inst['id'])
         audit('create', 'letter_request', actor_id=user.id, row_id=req_id, after=b)
     return {'id': req_id}
 
 
 def list_requests(user: AuthUser, query: dict | None = None) -> list[dict]:
     company_id = company_id_of(user)
-    q = _q(REQUESTS_QUERY, query)
+    q = _q(RequestsQuery, query)
     hr = is_hr(user)
     if not hr and not user.employee_id:
         return []
-    return _rs(rows("""
-        SELECT lr.id, lr.employee_id, e.emp_code, e.name_en, lr.template_id, t.name AS template_name, t.code AS template_code,
-               lr.purpose, lr.addressed_to, lr.status, lr.decision_reason, lr.issued_letter_id, lr.created_at, lr.decided_at
-          FROM letter_request lr JOIN employee e ON e.id = lr.employee_id JOIN letter_template t ON t.id = lr.template_id
-         WHERE lr.company_id = %(c)s AND (%(hr)s OR lr.employee_id = %(e)s::uuid)
-           AND (%(s)s::text IS NULL OR (%(s)s = 'open' AND lr.status IN ('pending', 'approved')) OR lr.status = %(s)s)
-         ORDER BY lr.created_at DESC LIMIT 300""",
-        {'c': company_id, 'hr': hr, 'e': user.employee_id, 's': q.get('status')}))
+    filters = {'status': q.get('status')}
+    if not hr:
+        filters['employeeId'] = user.employee_id
+    qs = LetterRequestFilter(filters, queryset=_requests(company_id)).qs.order_by('-created_at', '-id')
+    return [plain(r) for r in _request_values(qs, 'decision_reason', 'issued_letter_id', 'created_at', 'decided_at')[:300]]
 
 
 def get_request(user: AuthUser, request_id: str) -> dict:
     """One letter request, for HR preparing the letter."""
     _require_hr(user)
-    r = one("""SELECT lr.id, lr.employee_id, e.emp_code, e.name_en, lr.template_id, t.name AS template_name, t.code AS template_code,
-                      lr.purpose, lr.addressed_to, lr.status
-                 FROM letter_request lr JOIN employee e ON e.id = lr.employee_id JOIN letter_template t ON t.id = lr.template_id
-                WHERE lr.id = %s AND lr.company_id = %s""", [_uuid_param(request_id), company_id_of(user)])
+    r = _request_values(_requests(company_id_of(user)).filter(pk=parse_uuid(request_id))).first()
     if not r:
         raise NotFoundError('letter request not found')
-    return _r(r)
+    return plain(r)
 
 
 def cancel_request(user: AuthUser, request_id: str) -> dict:
     company_id = company_id_of(user)
-    rid = _uuid_param(request_id)
-    row = one('SELECT employee_id, status FROM letter_request WHERE id = %s AND company_id = %s', [rid, company_id])
+    rid = parse_uuid(request_id)
+    row = _requests(company_id).filter(pk=rid).values('employee_id', 'status').first()
     if not row or (str(row['employee_id']) != user.employee_id and not is_hr(user)):
         raise NotFoundError('request not found')
-    if row['status'] not in ('pending', 'approved'):
+    if row['status'] not in OPEN_REQUEST:
         raise ConflictError(f"request already {row['status']}")
     with transaction.atomic():
-        execute("UPDATE letter_request SET status = 'cancelled', decided_at = now() WHERE id = %s", [rid])
+        _requests(company_id).filter(pk=rid).update(status=ReqStatus.CANCELLED, decided_at=Now())
         cancel_workflow('letter_request', rid)
         audit('cancel', 'letter_request', actor_id=user.id, row_id=rid)
     return {'ok': True}
@@ -844,37 +924,47 @@ def cancel_request(user: AuthUser, request_id: str) -> dict:
 
 # ---------------------------------------------------------------- company policies
 
+POLICY_FIELDS = ('id', 'title', 'description', 'audience', 'audience_ids', 'requires_ack', 'published_at')
+
+
+def _policies(company_id: str) -> models.QuerySet:
+    return CompanyPolicy.objects.for_company(company_id)
+
+
+def _my_ack(employee_id: str | None):
+    """When this employee acknowledged the outer policy (NULL if not, or if there is no employee record)."""
+    if not employee_id:
+        return models.Value(None, output_field=models.DateTimeField())
+    return Subquery(PolicyAck.objects.filter(policy=OuterRef('pk'), employee_id=employee_id).values('acknowledged_at')[:1])
+
+
 def list_policies(user: AuthUser, query: dict | None = None) -> list[dict]:
     company_id = company_id_of(user)
-    q = _q(ARCHIVED_QUERY, query)
+    q = _q(PolicyArchivedQuery, query)
     if is_hr(user):
-        ps = _rs(rows("""
-            SELECT p.id, p.title, p.description, p.audience, p.audience_ids, p.requires_ack, p.published_at, p.archived_at, f.filename,
-                   (SELECT count(*)::int FROM policy_ack a JOIN employee e ON e.id = a.employee_id
-                     WHERE a.policy_id = p.id AND e.status = 'active') AS acks
-              FROM company_policy p JOIN stored_file f ON f.id = p.file_id
-             WHERE p.company_id = %s AND (%s OR p.archived_at IS NULL) ORDER BY p.archived_at NULLS FIRST, p.published_at DESC""",
-            [company_id, q.get('archived') == '1']))
+        qs = _policies(company_id)
+        if q.get('archived') != '1':
+            qs = qs.filter(archived_at__isnull=True)
+        qs = (qs.order_by(F('archived_at').asc(nulls_first=True), '-published_at')
+              .values(*POLICY_FIELDS, 'archived_at', filename=F('file__filename'), my_ack_at=_my_ack(user.employee_id),
+                      acks=Count('policy_acks', filter=Q(policy_acks__employee__status=ACTIVE))))
         out = []
-        for p in ps:
-            ids = audience_ids(company_id, p)
-            my_ack = None
-            if user.employee_id:
-                mine = one('SELECT acknowledged_at FROM policy_ack WHERE policy_id = %s AND employee_id = %s', [p['id'], user.employee_id])
-                my_ack = mine['acknowledged_at'] if mine else None
-            out.append({**p, 'audience_size': len(ids), 'my_ack_at': my_ack,
+        audiences = AudienceIndex(company_id)
+        for p in qs:
+            p = plain(p)
+            ids = audiences.ids(p)
+            out.append({**p, 'audience_size': len(ids),
                         'in_audience': bool(user.employee_id) and not p['archived_at'] and user.employee_id in ids})
         return out
     if not user.employee_id:
         return []
-    ps = _rs(rows("""
-        SELECT p.id, p.title, p.description, p.audience, p.audience_ids, p.requires_ack, p.published_at, f.filename,
-               (SELECT acknowledged_at FROM policy_ack a WHERE a.policy_id = p.id AND a.employee_id = %s) AS my_ack_at
-          FROM company_policy p JOIN stored_file f ON f.id = p.file_id
-         WHERE p.company_id = %s AND p.archived_at IS NULL ORDER BY p.published_at DESC""", [user.employee_id, company_id]))
+    qs = (_policies(company_id).filter(archived_at__isnull=True).order_by('-published_at')
+          .values(*POLICY_FIELDS, filename=F('file__filename'), my_ack_at=_my_ack(user.employee_id)))
     out = []
-    for p in ps:
-        if audience_ids(company_id, p, user.employee_id):
+    audiences = AudienceIndex(company_id, user.employee_id)
+    for p in qs:
+        p = plain(p)
+        if audiences.ids(p):
             out.append({'id': p['id'], 'title': p['title'], 'description': p['description'], 'requires_ack': p['requires_ack'],
                         'published_at': p['published_at'], 'filename': p['filename'], 'my_ack_at': p['my_ack_at'],
                         'in_audience': True})
@@ -884,23 +974,23 @@ def list_policies(user: AuthUser, query: dict | None = None) -> list[dict]:
 def publish_policy(user: AuthUser, body: dict) -> dict:
     _require_hr(user)
     company_id = company_id_of(user)
-    b = parse(POLICY_BODY, body)
+    b = _body(CompanyPolicyIn, body)
     aud, aud_ids = b['audience'], b['audienceIds']
-    if aud != 'all' and not aud_ids:
+    if aud != Audience.ALL and not aud_ids:
         raise BadRequestError(f'choose at least one {aud}')
-    if aud != 'all':
-        table = 'branch' if aud == 'branch' else 'org_unit'
-        n = one(f'SELECT count(*)::int AS n FROM {table} WHERE company_id = %s AND id = ANY(%s::uuid[])', [company_id, aud_ids])['n']
-        if n != len(set(aud_ids)):
+    if aud != Audience.ALL:
+        model = Branch if aud == Audience.BRANCH else OrgUnit
+        if model.objects.for_company(company_id).filter(pk__in=aud_ids).count() != len(set(aud_ids)):
             raise BadRequestError(f'unknown {aud}')
-    stored_ids = [] if aud == 'all' else aud_ids
+    stored_ids = [] if aud == Audience.ALL else aud_ids
     with transaction.atomic():
-        r = one("""INSERT INTO company_policy (company_id, title, description, file_id, audience, audience_ids, requires_ack, created_by)
-                   VALUES (%s, %s, %s, %s, %s, %s::uuid[], %s, %s) RETURNING id""",
-                [company_id, b['title'], b.get('description'), b['fileId'], aud, stored_ids, b['requiresAck'], user.id])
-        pid = str(r['id'])
+        p = CompanyPolicy.objects.create(company_id=company_id, title=b['title'], description=b.get('description'),
+                                         file_id=b['fileId'], audience=aud, audience_ids=stored_ids,
+                                         requires_ack=b['requiresAck'], created_by_id=user.id)
+        pid = str(p.id)
         attach_file(company_id=company_id, file_id=b['fileId'], user_id=user.id, purpose='company_document',
                     attached_to=f'company_policy:{pid}')
+        nudged = []
         for employee_id in audience_ids(company_id, {'audience': aud, 'audience_ids': stored_ids}):
             user_id = user_id_for_employee(employee_id)
             if not user_id:
@@ -911,7 +1001,8 @@ def publish_policy(user: AuthUser, body: dict) -> dict:
                          if b['requiresAck'] else f"{b['title']} is available under Profile, Documents & letters."),
                    payload={'policyId': pid})
             if b['requiresAck']:
-                execute('INSERT INTO policy_nudge (policy_id, employee_id) VALUES (%s, %s) ON CONFLICT DO NOTHING', [pid, employee_id])
+                nudged.append(PolicyNudge(policy_id=pid, employee_id=employee_id))
+        PolicyNudge.objects.bulk_create(nudged, ignore_conflicts=True)
         audit('create', 'company_policy', actor_id=user.id, row_id=pid,
               after={'title': b['title'], 'audience': aud, 'requiresAck': b['requiresAck']})
     return {'id': pid}
@@ -920,16 +1011,18 @@ def publish_policy(user: AuthUser, body: dict) -> dict:
 def update_policy(user: AuthUser, policy_id: str, body: dict) -> dict:
     _require_hr(user)
     company_id = company_id_of(user)
-    pid = _uuid_param(policy_id)
-    b = parse(POLICY_PATCH, body)
+    pid = parse_uuid(policy_id)
+    b = _body(CompanyPolicyPatchIn, body)
+    fields: dict = {}
+    _set_if(fields, 'title', b.get('title'))
+    _set_if(fields, 'requires_ack', b.get('requiresAck'))
+    if 'description' in b:
+        fields['description'] = b['description']
+    if b.get('archived') is not None:
+        fields['archived_at'] = Coalesce('archived_at', Now()) if b['archived'] else None
     with transaction.atomic():
-        n = execute("""UPDATE company_policy SET title = coalesce(%s, title), description = CASE WHEN %s THEN %s ELSE description END,
-                              requires_ack = coalesce(%s, requires_ack),
-                              archived_at = CASE WHEN %s::boolean IS NULL THEN archived_at WHEN %s THEN coalesce(archived_at, now()) ELSE NULL END
-                        WHERE id = %s AND company_id = %s""",
-                    [b.get('title'), 'description' in b, b.get('description'), b.get('requiresAck'), b.get('archived'),
-                     b.get('archived'), pid, company_id])
-        if not n:
+        qs = _policies(company_id).filter(pk=pid)
+        if not (qs.update(**fields) if fields else qs.exists()):
             raise NotFoundError('policy not found')
         audit('update', 'company_policy', actor_id=user.id, row_id=pid, after=b)
     return {'ok': True}
@@ -937,11 +1030,12 @@ def update_policy(user: AuthUser, policy_id: str, body: dict) -> dict:
 
 def _load_policy_for(user: AuthUser, policy_id: str) -> tuple[str, dict, bool]:
     company_id = company_id_of(user)
-    row = _r(one("""SELECT id, title, file_id, audience, audience_ids, requires_ack, archived_at FROM company_policy
-                     WHERE id = %s AND company_id = %s""", [_uuid_param(policy_id), company_id]))
+    row = (_policies(company_id).filter(pk=parse_uuid(policy_id))
+           .values('id', 'title', 'file_id', 'audience', 'audience_ids', 'requires_ack', 'archived_at').first())
     if not row:
         raise NotFoundError('policy not found')
-    member = bool(user.employee_id) and not row['archived_at'] and len(audience_ids(company_id, row, user.employee_id)) > 0
+    row = plain(row)
+    member = bool(user.employee_id) and not row['archived_at'] and bool(audience_ids(company_id, row, user.employee_id))
     if not is_hr(user) and not member:
         raise NotFoundError('policy not found')
     return company_id, row, member
@@ -960,7 +1054,7 @@ def acknowledge_policy(user: AuthUser, policy_id: str) -> dict:
     _, row, member = _load_policy_for(user, policy_id)
     if not member:
         raise ForbiddenError('this policy is not addressed to you')
-    execute('INSERT INTO policy_ack (policy_id, employee_id) VALUES (%s, %s) ON CONFLICT DO NOTHING', [row['id'], user.employee_id])
+    PolicyAck.objects.bulk_create([PolicyAck(policy_id=row['id'], employee_id=user.employee_id)], ignore_conflicts=True)
     return {'ok': True}
 
 
@@ -968,11 +1062,13 @@ def policy_acks(user: AuthUser, policy_id: str) -> list[dict]:
     _require_hr(user)
     company_id, row, _ = _load_policy_for(user, policy_id)
     ids = audience_ids(company_id, row)
-    return _rs(rows("""
-        SELECT e.id AS employee_id, e.emp_code, e.name_en, a.acknowledged_at, n.last_sent_at AS last_reminded_at
-          FROM employee e LEFT JOIN policy_ack a ON a.policy_id = %s AND a.employee_id = e.id
-          LEFT JOIN policy_nudge n ON n.policy_id = %s AND n.employee_id = e.id
-         WHERE e.id = ANY(%s::uuid[]) ORDER BY a.acknowledged_at NULLS FIRST, e.emp_code""", [row['id'], row['id'], ids]))
+    acked = PolicyAck.objects.filter(policy_id=row['id'], employee=OuterRef('pk')).values('acknowledged_at')[:1]
+    nudged = PolicyNudge.objects.filter(policy_id=row['id'], employee=OuterRef('pk')).values('last_sent_at')[:1]
+    qs = (Employee.objects.for_company(company_id).filter(pk__in=ids)
+          .annotate(acknowledged_at=Subquery(acked), last_reminded_at=Subquery(nudged))
+          .order_by(F('acknowledged_at').asc(nulls_first=True), 'emp_code')
+          .values('emp_code', 'name_en', 'acknowledged_at', 'last_reminded_at', employee_id=F('id')))
+    return [plain(r) for r in qs]
 
 
 def remind_policy(user: AuthUser, policy_id: str) -> dict:
@@ -981,30 +1077,16 @@ def remind_policy(user: AuthUser, policy_id: str) -> dict:
     if row['archived_at']:
         raise ConflictError('this policy is archived')
     ids = audience_ids(company_id, row)
-    pending = rows("""SELECT x AS id FROM unnest(%s::uuid[]) x
-                       WHERE NOT EXISTS (SELECT 1 FROM policy_ack a WHERE a.policy_id = %s AND a.employee_id = x)""", [ids, row['id']])
-    sent = 0
-    for p in pending:
-        employee_id = str(p['id'])
-        user_id = user_id_for_employee(employee_id)
-        if not user_id:
-            continue
-        with transaction.atomic():
-            notify(company_id=company_id, user_id=user_id, employee_id=employee_id, template='policy.reminder',
-                   title=f"Please read: {row['title']}",
-                   body=f"{row['title']} is waiting for your acknowledgement under Profile, Documents & letters.",
-                   payload={'policyId': row['id']})
-            execute("""INSERT INTO policy_nudge (policy_id, employee_id) VALUES (%s, %s)
-                       ON CONFLICT (policy_id, employee_id) DO UPDATE SET last_sent_at = now()""", [row['id'], employee_id])
-        sent += 1
+    done = _acknowledged(row['id'], ids)
+    sent = sum(1 for employee_id in ids if employee_id not in done and _remind(company_id, row, employee_id))
     return {'sent': sent}
 
 
 # ---------------------------------------------------------------- pickers for the pages
 
 def branches(user: AuthUser) -> list[dict]:
-    return _rs(rows('SELECT id, name_en FROM branch WHERE company_id = %s ORDER BY name_en', [company_id_of(user)]))
+    return [plain(r) for r in Branch.objects.for_company(company_id_of(user)).order_by('name_en').values('id', 'name_en')]
 
 
 def org_units(user: AuthUser) -> list[dict]:
-    return _rs(rows('SELECT id, name_en FROM org_unit WHERE company_id = %s ORDER BY name_en', [company_id_of(user)]))
+    return [plain(r) for r in OrgUnit.objects.for_company(company_id_of(user)).order_by('name_en').values('id', 'name_en')]

@@ -59,7 +59,8 @@ def local_time_ms(local_date: str, hhmm: str, day_offset: int = 0) -> int:
 
 
 def _civil_from_days(z: int) -> tuple[int, int, int]:
-    """Proleptic Gregorian (y, m, d) for days since 1970-01-01, any year (H. Hinnant's algorithm)."""
+    """Proleptic Gregorian (y, m, d) for days since 1970-01-01, for years datetime.date cannot hold (H. Hinnant's
+    algorithm). JS Dates reach +-275,760 years and print them in the expanded '+YYYYYY' form."""
     z += 719_468
     era = z // 146_097
     doe = z - era * 146_097
@@ -75,7 +76,12 @@ def _iso_date_prefix(t: float) -> str:
     """new Date(t).toISOString().slice(0, 10), including its RangeError and expanded-year form."""
     if not math.isfinite(t) or abs(t) > 8.64e15:
         raise AttendanceRangeError('Invalid time value')
-    y, m, d = _civil_from_days(math.trunc(t) // _DAY_MS)
+    days = math.trunc(t) // _DAY_MS
+    try:
+        return date.fromordinal(_EPOCH_ORDINAL + days).isoformat()
+    except (ValueError, OverflowError):
+        pass  # before year 1 or after 9999
+    y, m, d = _civil_from_days(days)
     year = f'{y:04d}' if 0 <= y <= 9999 else f'{"+" if y > 0 else "-"}{abs(y):06d}'
     return f'{year}-{m:02d}-{d:02d}'[:10]
 

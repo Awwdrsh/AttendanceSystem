@@ -20,3 +20,12 @@ urlpatterns = [
     path('_/insights/builder/saved', views.builder_saved, name='builder_saved'),
     path('_/insights/builder/saved/<uuid:id>/delete', views.builder_saved_delete, name='builder_saved_delete'),
 ]
+
+# JSON API for Bearer-token clients (TS: /api/v1/insights/...).
+from . import api  # noqa: E402
+
+urlpatterns += [
+    path('api/v1/insights', api.InsightsView.as_view(), name='api_insights'),
+    path('api/v1/insights/filters', api.InsightsFiltersView.as_view(), name='api_filters'),
+    path('api/v1/insights/export/<str:dataset>', api.InsightsExportView.as_view(), name='api_export'),
+]

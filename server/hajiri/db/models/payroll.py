@@ -6,90 +6,146 @@ from django.contrib.postgres.fields import ArrayField, DateRangeField
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class BankFile(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    run = models.ForeignKey('PayrollRun', models.DO_NOTHING)
+    run = models.ForeignKey('PayrollRun', models.DO_NOTHING, related_name='bank_files')
     bank_code = models.TextField()
     format = models.TextField()
     filename = models.TextField()
     content = models.TextField()
     checksum = models.TextField()
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='bank_files_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'run__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'bank_file'
 
+    def __str__(self):
+        return str(self.filename)
+
 
 class Loan(models.Model):
+    class Kind(models.TextChoices):
+        LOAN = 'loan', 'Loan'
+        ADVANCE = 'advance', 'Advance'
+
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        CLOSED = 'closed', 'Closed'
+        PAUSED = 'paused', 'Paused'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    kind = models.TextField(db_default='loan')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='loans')
+    kind = models.TextField(choices=Kind, db_default='loan')
     principal = models.DecimalField(max_digits=14, decimal_places=2)
     emi = models.DecimalField(max_digits=14, decimal_places=2)
     start_bs_year = models.SmallIntegerField()
     start_bs_month = models.SmallIntegerField()
     installments = models.IntegerField()
-    status = models.TextField(db_default='active')
+    status = models.TextField(choices=Status, db_default='active')
     note = models.TextField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='loans_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'loan'
 
+    def __str__(self):
+        return f'Loan {self.id}'
+
 
 class LoanInstallment(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    loan = models.ForeignKey(Loan, models.DO_NOTHING)
-    payslip = models.ForeignKey('Payslip', models.DO_NOTHING)
+    loan = models.ForeignKey(Loan, models.DO_NOTHING, related_name='loan_installments')
+    payslip = models.ForeignKey('Payslip', models.DO_NOTHING, related_name='loan_installments')
     amount = models.DecimalField(max_digits=14, decimal_places=2)
+
+    company_scope = 'loan__employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'loan_installment'
         unique_together = (('loan', 'payslip'),)
 
+    def __str__(self):
+        return f'LoanInstallment {self.id}'
+
 
 class PayrollHold(models.Model):
+    class ReleaseMode(models.TextChoices):
+        PAYROLL = 'payroll', 'Payroll'
+        OUTSIDE = 'outside', 'Outside'
+
+    class Status(models.TextChoices):
+        HELD = 'held', 'Held'
+        RELEASING = 'releasing', 'Releasing'
+        RELEASED = 'released', 'Released'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    run = models.ForeignKey('PayrollRun', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='payroll_holds')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='payroll_holds')
+    run = models.ForeignKey('PayrollRun', models.DO_NOTHING, related_name='payroll_holds_as_run')
     amount = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
     reason = models.TextField()
-    status = models.TextField(db_default='held')
-    release_mode = models.TextField(blank=True, null=True)
-    release_run = models.ForeignKey('PayrollRun', models.DO_NOTHING, related_name='payrollhold_release_run_set', blank=True, null=True)
+    status = models.TextField(choices=Status, db_default='held')
+    release_mode = models.TextField(choices=ReleaseMode, blank=True, null=True)
+    release_run = models.ForeignKey('PayrollRun', models.DO_NOTHING, related_name='payroll_holds_as_release_run', blank=True, null=True)
     release_note = models.TextField(blank=True, null=True)
-    held_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='held_by', blank=True, null=True)
+    held_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='payroll_holds_as_held_by', db_column='held_by', blank=True, null=True)
     held_at = models.DateTimeField(db_default=Now())
-    released_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='released_by', related_name='payrollhold_released_by_set', blank=True, null=True)
+    released_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='payroll_holds_as_released_by', db_column='released_by', blank=True, null=True)
     released_at = models.DateTimeField(blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'payroll_hold'
         unique_together = (('run', 'employee'),)
 
+    def __str__(self):
+        return f'PayrollHold {self.id}'
+
 
 class PayrollInput(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    run = models.ForeignKey('PayrollRun', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    run = models.ForeignKey('PayrollRun', models.DO_NOTHING, related_name='payroll_inputs')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='payroll_inputs')
     component_code = models.TextField()
     amount = models.DecimalField(max_digits=14, decimal_places=2)
     note = models.TextField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='payroll_inputs_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'payroll_input'
 
+    def __str__(self):
+        return f'PayrollInput {self.id}'
+
 
 class PayrollOpeningBalance(models.Model):
+    class Source(models.TextChoices):
+        PREVIOUS_EMPLOYER = 'previous_employer', 'Previous employer'
+        GO_LIVE = 'go_live', 'Go live'
+        OTHER = 'other', 'Other'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='payroll_opening_balances')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='payroll_opening_balances')
     fiscal_year_start = models.IntegerField()
     gross = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
     taxable = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
@@ -98,19 +154,25 @@ class PayrollOpeningBalance(models.Model):
     retirement_employer = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
     festival_paid = models.BooleanField(db_default=False)
     months = models.SmallIntegerField(db_default=0)
-    source = models.TextField(db_default='previous_employer')
+    source = models.TextField(choices=Source, db_default='previous_employer')
     note = models.TextField(blank=True, null=True)
-    updated_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='updated_by', blank=True, null=True)
+    updated_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='payroll_opening_balances_as_updated_by', db_column='updated_by', blank=True, null=True)
     updated_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'payroll_opening_balance'
         unique_together = (('employee', 'fiscal_year_start'),)
 
+    def __str__(self):
+        return f'PayrollOpeningBalance {self.id}'
+
 
 class PayrollPeriod(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='payroll_periods')
     bs_year = models.SmallIntegerField()
     bs_month = models.SmallIntegerField()
     start_ad = models.DateField()
@@ -118,23 +180,47 @@ class PayrollPeriod(models.Model):
     days = models.SmallIntegerField()
     attendance_locked_at = models.DateTimeField(blank=True, null=True)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'payroll_period'
         unique_together = (('company', 'bs_year', 'bs_month'),)
 
+    def __str__(self):
+        return f'PayrollPeriod {self.id}'
+
 
 class PayrollRun(models.Model):
+    class RunType(models.TextChoices):
+        REGULAR = 'regular', 'Regular'
+        OFF_CYCLE = 'off_cycle', 'Off cycle'
+        ARREARS = 'arrears', 'Arrears'
+        SUPPLEMENTARY = 'supplementary', 'Supplementary'
+        FINAL_SETTLEMENT = 'final_settlement', 'Final settlement'
+        BONUS = 'bonus', 'Bonus'
+
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Draft'
+        PREFLIGHT_FAILED = 'preflight_failed', 'Preflight failed'
+        COMPUTED = 'computed', 'Computed'
+        REVIEWED = 'reviewed', 'Reviewed'
+        APPROVED = 'approved', 'Approved'
+        LOCKED = 'locked', 'Locked'
+        DISBURSED = 'disbursed', 'Disbursed'
+        FILED = 'filed', 'Filed'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    period = models.ForeignKey(PayrollPeriod, models.DO_NOTHING)
-    run_type = models.TextField(db_default='regular')
-    status = models.TextField(db_default='draft')
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='payroll_runs')
+    period = models.ForeignKey(PayrollPeriod, models.DO_NOTHING, related_name='payroll_runs')
+    run_type = models.TextField(choices=RunType, db_default='regular')
+    status = models.TextField(choices=Status, db_default='draft')
     rounding_policy = models.TextField(db_default='half_up_rupee')
-    references_run = models.ForeignKey('self', models.DO_NOTHING, blank=True, null=True)
+    references_run = models.ForeignKey('self', models.DO_NOTHING, related_name='payroll_runs_as_references_run', blank=True, null=True)
     preflight = models.JSONField(blank=True, null=True)
     variance = models.JSONField(blank=True, null=True)
-    maker = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, blank=True, null=True)
-    checker = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='payrollrun_checker_set', blank=True, null=True)
+    maker = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='payroll_runs_as_maker', blank=True, null=True)
+    checker = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='payroll_runs_as_checker', blank=True, null=True)
     approval_signature = models.TextField(blank=True, null=True)
     computed_at = models.DateTimeField(blank=True, null=True)
     reviewed_at = models.DateTimeField(blank=True, null=True)
@@ -147,14 +233,20 @@ class PayrollRun(models.Model):
     params = models.JSONField(db_default={})
     totals = models.JSONField(blank=True, null=True)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'payroll_run'
+
+    def __str__(self):
+        return f'PayrollRun {self.id}'
 
 
 class Payslip(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    run = models.ForeignKey(PayrollRun, models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    run = models.ForeignKey(PayrollRun, models.DO_NOTHING, related_name='payslips')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='payslips')
     inputs_snapshot = models.JSONField()
     rule_version_ids = ArrayField(models.UUIDField(), db_default=[])
     bs_days_in_month = models.SmallIntegerField()
@@ -174,109 +266,179 @@ class Payslip(models.Model):
     published_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'payslip'
         unique_together = (('run', 'employee'),)
 
+    def __str__(self):
+        return f'Payslip {self.id}'
+
 
 class PayslipLine(models.Model):
+    class Type(models.TextChoices):
+        EARNING = 'earning', 'Earning'
+        DEDUCTION = 'deduction', 'Deduction'
+        EMPLOYER_CONTRIBUTION = 'employer_contribution', 'Employer contribution'
+        STATISTICAL = 'statistical', 'Statistical'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    payslip = models.ForeignKey(Payslip, models.DO_NOTHING)
+    payslip = models.ForeignKey(Payslip, models.DO_NOTHING, related_name='payslip_lines')
     component_code = models.TextField()
-    type = models.TextField()
+    type = models.TextField(choices=Type)
     name_en = models.TextField()
     name_ne = models.TextField(blank=True, null=True)
     amount = models.DecimalField(max_digits=14, decimal_places=2)
     basis = models.JSONField(blank=True, null=True)
     sort_order = models.IntegerField(db_default=0)
 
+    company_scope = 'payslip__employee__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'payslip_line'
+
+    def __str__(self):
+        return str(self.name_en)
 
 
 class SalaryAssignment(models.Model):
     pk = models.CompositePrimaryKey('employee_id', 'valid')
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    structure_version = models.ForeignKey('SalaryStructureVersion', models.DO_NOTHING)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='salary_assignments')
+    structure_version = models.ForeignKey('SalaryStructureVersion', models.DO_NOTHING, related_name='salary_assignments')
     valid = DateRangeField()
     base_amounts = models.JSONField()
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='salary_assignments_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'salary_assignment'
 
+    def __str__(self):
+        return f'SalaryAssignment {self.pk}'
+
 
 class SalaryComponent(models.Model):
+    class Rounding(models.TextChoices):
+        PAISA = 'paisa', 'Paisa'
+        RUPEE = 'rupee', 'Rupee'
+
+    class Type(models.TextChoices):
+        EARNING = 'earning', 'Earning'
+        DEDUCTION = 'deduction', 'Deduction'
+        EMPLOYER_CONTRIBUTION = 'employer_contribution', 'Employer contribution'
+        STATISTICAL = 'statistical', 'Statistical'
+
     pk = models.CompositePrimaryKey('company_id', 'code')
     code = models.TextField()
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='salary_components')
     name_en = models.TextField()
     name_ne = models.TextField(blank=True, null=True)
-    type = models.TextField()
+    type = models.TextField(choices=Type)
     formula = models.TextField(blank=True, null=True)
     condition = models.TextField(blank=True, null=True)
     depends_on_payment_days = models.BooleanField(db_default=False)
     taxable = models.BooleanField(db_default=True)
     statutory = models.BooleanField(db_default=False)
-    rounding = models.TextField(db_default='paisa')
+    rounding = models.TextField(choices=Rounding, db_default='paisa')
     sort_order = models.IntegerField(db_default=0)
     active = models.BooleanField(db_default=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'salary_component'
 
+    def __str__(self):
+        return str(self.name_en)
+
 
 class SalaryStructure(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='salary_structures')
     code = models.TextField()
     name_en = models.TextField()
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'salary_structure'
         unique_together = (('company', 'code'),)
 
+    def __str__(self):
+        return str(self.name_en)
+
 
 class SalaryStructureVersion(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    structure = models.ForeignKey(SalaryStructure, models.DO_NOTHING)
+    structure = models.ForeignKey(SalaryStructure, models.DO_NOTHING, related_name='salary_structure_versions')
     version = models.IntegerField()
     components = models.JSONField()
     frozen_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'structure__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'salary_structure_version'
         unique_together = (('structure', 'version'),)
 
+    def __str__(self):
+        return f'SalaryStructureVersion {self.id}'
+
 
 class TaxDeclaration(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Draft'
+        SUBMITTED = 'submitted', 'Submitted'
+        VERIFIED = 'verified', 'Verified'
+        REJECTED = 'rejected', 'Rejected'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='tax_declarations')
     fiscal_year_start = models.IntegerField()
     life_premium = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
     health_premium = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
     cit_monthly = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
     medical_cost = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
     other_retirement_annual = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
-    status = models.TextField(db_default='draft')
-    verified_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='verified_by', blank=True, null=True)
+    status = models.TextField(choices=Status, db_default='draft')
+    verified_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='tax_declarations_as_verified_by', db_column='verified_by', blank=True, null=True)
     verified_at = models.DateTimeField(blank=True, null=True)
     updated_at = models.DateTimeField(db_default=Now())
     donation = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
     cit_from_month = models.SmallIntegerField(blank=True, null=True)
     cit_prev_monthly = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
 
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'tax_declaration'
         unique_together = (('employee', 'fiscal_year_start'),)
 
+    def __str__(self):
+        return f'TaxDeclaration {self.id}'
+
 
 class TaxDeclarationRequest(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='tax_declaration_requests')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='tax_declaration_requests')
     fiscal_year_start = models.IntegerField()
     life_premium = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
     health_premium = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
@@ -285,15 +447,21 @@ class TaxDeclarationRequest(models.Model):
     other_retirement_annual = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
     note = models.TextField(blank=True, null=True)
     proof_file_ids = ArrayField(models.UUIDField(), db_default=[])
-    status = models.TextField(db_default='pending')
+    status = models.TextField(choices=Status, db_default='pending')
     workflow_instance_id = models.UUIDField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='tax_declaration_requests_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
-    decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='decided_by', related_name='taxdeclarationrequest_decided_by_set', blank=True, null=True)
+    decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='tax_declaration_requests_as_decided_by', db_column='decided_by', blank=True, null=True)
     decided_at = models.DateTimeField(blank=True, null=True)
     decision_note = models.TextField(blank=True, null=True)
     donation = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'tax_declaration_request'
         unique_together = (('employee', 'fiscal_year_start'),)
+
+    def __str__(self):
+        return f'TaxDeclarationRequest {self.id}'

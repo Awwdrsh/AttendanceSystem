@@ -3,7 +3,7 @@ import pytest
 from django.test import Client
 
 from hajiri.core import auth
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.core.users import list_users
 from hajiri.features.service import disabled_features, invalidate_features
 from tests.web.factories import PW, htmx, hx_triggers, make_employee, make_user, sign_in, signed_in_client, toasts

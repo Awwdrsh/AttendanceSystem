@@ -34,3 +34,12 @@ urlpatterns = [
     path('_/people/structure/<str:kind>/<uuid:id>/delete', views.structure_delete, name='structure_delete'),
     path('_/people/policy', views.policy, name='policy'),
 ]
+
+# JSON API for Bearer-token clients (TS: /api/v1/people/...).
+from rest_framework.routers import SimpleRouter  # noqa: E402
+
+from . import api  # noqa: E402
+
+router = SimpleRouter(trailing_slash=False)
+router.register('api/v1/people', api.PeopleViewSet, basename='api-people')
+urlpatterns += router.urls

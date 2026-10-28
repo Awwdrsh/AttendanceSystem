@@ -7,7 +7,7 @@ from django.test import Client
 
 from hajiri.core.clock import npt_today
 from hajiri.core.crypto import field_cipher
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.core.errors import ForbiddenError, NotFoundError
 from hajiri.devices import biometrics as bio
 from tests.web.factories import htmx, sign_in, toasts

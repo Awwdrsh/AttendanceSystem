@@ -1,6 +1,6 @@
 """
 Tasks pages (TasksPage.tsx at /tasks and /tasks/<board>, TaskDrawer.tsx, MyTodoCard.tsx on Home) and their HTMX
-actions. Rules live in services.py; views turn form posts into the TS request bodies.
+actions. Rules live in services.py; the forms in forms.py turn page posts into the TS request bodies.
 """
 from __future__ import annotations
 
@@ -10,21 +10,20 @@ from django.urls import reverse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from hajiri.core.errors import NotFoundError
-from hajiri.core.schema import is_uuid
+from hajiri.core.scoping import is_uuid
 from hajiri.files.store import stored_file_response
 from hajiri.web.decorators import login_required, require_feature
 from hajiri.web.htmx import close_modal, hx_redirect, is_htmx, refresh, toast
 
 from . import services
+from .forms import (
+    AttachmentForm, BoardForm, BoardSettingsForm, ChecklistForm, CommentForm, MoveForm, QuickAddForm, TaskUpdateForm,
+)
 from .services import PRIORITY_LABEL, PRIORITY_TONE
 
 BOARD_TARGET = 'tk-board'
 REPORT_TARGET = 'tk-report'
 TODO_TARGET = 'tk-todo'
-
-
-def _checked(request, name: str) -> bool:
-    return request.POST.get(name) in ('on', '1', 'true')
 
 
 def _initials(name: str) -> str:
@@ -44,9 +43,10 @@ def _decorate(t: dict, today: str) -> dict:
 def _picker(user, current_id: str | None) -> dict:
     data = services.list_boards(user)
     boards = data['boards']
-    return {'boards': boards, 'can_create': data['canCreateTeamBoard'],
-            'current_id': current_id or next((b['id'] for b in boards if b['kind'] == 'personal'), None)
-            or (boards[0]['id'] if boards else None)}
+    out = {'boards': boards, 'can_create': data['canCreateTeamBoard'],
+           'current_id': current_id or next((b['id'] for b in boards if b['kind'] == 'personal'), None)
+           or (boards[0]['id'] if boards else None)}
+    return out
 
 
 def _board_ctx(user, board_id: str) -> dict:
@@ -129,16 +129,9 @@ def board_report(request, board_id):
 def board_new(request):
     user = request.hajiri_user
     if request.method == 'POST':
-        board = services.create_board(user, {'name': (request.POST.get('name') or '').strip(),
-                                             'addMyReports': _checked(request, 'add_my_reports')})
+        board = services.create_board(user, BoardForm(request.POST).body())
         return hx_redirect(request, reverse('tasks:board_detail', args=[board['id']]))
     return render(request, 'tasks/partials/board_new.html', {})
-
-
-def _columns_from_post(request) -> list[dict]:
-    ids, names = request.POST.getlist('col_id'), request.POST.getlist('col_name')
-    done = set(request.POST.getlist('col_done'))
-    return [{'id': i, 'name': n, 'done': i in done} for i, n in zip(ids, names)]
 
 
 @require_http_methods(['GET', 'POST'])
@@ -150,14 +143,10 @@ def board_settings(request, board_id):
     services.assert_owner(d['access'])
     board = d['board']
     if request.method == 'POST':
-        body: dict = {'name': (request.POST.get('name') or '').strip(), 'columns': _columns_from_post(request)}
-        move_to = request.POST.get('move_to') or ''
-        if move_to:
-            body['moveTo'] = move_to
-        services.update_board(user, board['id'], body)
+        form = BoardSettingsForm(request.POST)
+        services.update_board(user, board['id'], form.board())
         if board['kind'] == 'team':
-            ids = [x for x in request.POST.getlist('member_ids') if x.strip()]
-            services.set_members(user, board['id'], {'userIds': ids})
+            services.set_members(user, board['id'], form.members())
         resp = hx_redirect(request, reverse('tasks:board_detail', args=[board['id']]))
         return toast(request, resp, 'Board saved.')
     options = []
@@ -184,11 +173,9 @@ def board_archive(request, board_id):
 @login_required
 @require_feature('tasks')
 def task_new(request, board_id):
-    title = (request.POST.get('title') or '').strip()
-    if not title:
-        return _board_fragment(request, board_id)
-    column = request.POST.get('column_id') or ''
-    services.create_task(request.hajiri_user, board_id, {'title': title, **({'columnId': column} if column else {})})
+    body = QuickAddForm(request.POST).task()
+    if body:
+        services.create_task(request.hajiri_user, board_id, body)
     return _board_fragment(request, board_id)
 
 
@@ -198,7 +185,8 @@ def task_new(request, board_id):
 def task_move(request, board_id):
     """Drag and drop: move a card to another column."""
     user = request.hajiri_user
-    task_id, column_id = request.POST.get('task_id') or '', request.POST.get('column_id') or ''
+    d = MoveForm(request.POST).cleaned()
+    task_id, column_id = d['task_id'], d['column_id']
     task, board, _ = services.task_for(user, task_id)
     if board['id'] != str(board_id):
         raise NotFoundError('task not found')
@@ -284,35 +272,12 @@ def task(request, task_id):
 @require_feature('tasks')
 def task_update(request, task_id):
     """One field at a time, as the drawer saves: title, description, column, priority, due date, labels, assignees."""
-    p = request.POST
-    user = request.hajiri_user
-    body: dict = {}
-    if 'title' in p:
-        title = p['title'].strip()
-        if not title:
-            return _drawer(request, task_id)   # the drawer only saves a non-empty title
-        body['title'] = title
-    if 'description' in p:
-        body['description'] = p['description'] or None
-    if 'column_id' in p:
-        body['columnId'] = p['column_id']
-    if 'priority' in p:
-        body['priority'] = p['priority']
-    if 'due_date' in p:
-        body['dueDate'] = p['due_date'] or None
-    if 'labels_sent' in p:
-        labels = [x for x in p.getlist('labels') if x.strip()]
-        new = (p.get('label_new') or '').strip()
-        if new and new not in labels and len(labels) < 8:
-            labels.append(new[:24])
-        drop = p.get('remove_label')
-        if drop is not None:
-            labels = [x for x in labels if x != drop]
-        body['labels'] = [x[:24] for x in labels]
-    if 'assignees_sent' in p:
-        body['assigneeIds'] = [x for x in p.getlist('assignee_ids') if x.strip()]
+    form = TaskUpdateForm(request.POST)
+    if form.empty_title():
+        return _drawer(request, task_id)   # the drawer only saves a non-empty title
+    body = form.patch()
     if body:
-        services.update_task(user, task_id, body)
+        services.update_task(request.hajiri_user, task_id, body)
     return _changed(request, task_id)
 
 
@@ -332,7 +297,7 @@ def task_delete(request, task_id):
 @login_required
 @require_feature('tasks')
 def checklist_add(request, task_id):
-    text = (request.POST.get('text') or '').strip()
+    text = ChecklistForm(request.POST).cleaned()['text']
     if text:
         services.add_checklist(request.hajiri_user, task_id, {'text': text})
     return _changed(request, task_id)
@@ -343,8 +308,8 @@ def checklist_add(request, task_id):
 @require_feature('tasks')
 def checklist_update(request, item_id):
     user = request.hajiri_user
-    task_id = services.checklist_task_id(item_id)
-    services.update_checklist(user, item_id, {'done': _checked(request, 'done')})
+    task_id = services.checklist_task_id(user, item_id)
+    services.update_checklist(user, item_id, {'done': ChecklistForm(request.POST).cleaned()['done']})
     return _changed(request, task_id)
 
 
@@ -353,7 +318,7 @@ def checklist_update(request, item_id):
 @require_feature('tasks')
 def checklist_delete(request, item_id):
     user = request.hajiri_user
-    task_id = services.checklist_task_id(item_id)
+    task_id = services.checklist_task_id(user, item_id)
     services.delete_checklist(user, item_id)
     return _changed(request, task_id)
 
@@ -362,7 +327,7 @@ def checklist_delete(request, item_id):
 @login_required
 @require_feature('tasks')
 def comment_add(request, task_id):
-    body = (request.POST.get('body') or '').strip()
+    body = CommentForm(request.POST).cleaned()['body']
     if body:
         services.add_comment(request.hajiri_user, task_id, {'body': body})
     return _changed(request, task_id)
@@ -372,7 +337,7 @@ def comment_add(request, task_id):
 @login_required
 @require_feature('tasks')
 def attachment_add(request, task_id):
-    file_id = (request.POST.get('file_id') or '').strip()
+    file_id = AttachmentForm(request.POST).cleaned()['file_id']
     if file_id:
         services.add_attachment(request.hajiri_user, task_id, {'fileId': file_id})
     return _changed(request, task_id)
@@ -390,6 +355,6 @@ def attachment_file(request, att_id):
 @login_required
 @require_feature('tasks')
 def attachment_delete(request, att_id):
-    task_id = services.attachment_task_id(att_id)
+    task_id = services.attachment_task_id(request.hajiri_user, att_id)
     services.delete_attachment(request.hajiri_user, att_id)
     return _changed(request, task_id)

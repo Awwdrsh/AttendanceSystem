@@ -6,70 +6,75 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from django.db import transaction
+from django.db.models import BooleanField, Case, Count, ExpressionWrapper, F, Q, Value, When
+from django.db.models.functions import Coalesce, Now
 
 from hajiri.core.auth import AuthUser, company_id_of, has_role, is_manager_of
-from hajiri.core.db import execute, one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
-from hajiri.core.schema import Arr, Bool, DateTimeStr, Enum, IsoDate, Obj, Str, Uuid, parse, parse_uuid
+from hajiri.core.scoping import as_uuid
+from hajiri.core.validation import parse_uuid, plain, validate
+from hajiri.db.models import Employee, PerfFeedback, PerfJournal, PerfOneOnOne, PerfOneOnOneItem
 from hajiri.notifications.service import notify, user_id_for_employee
 
-from .common import direct_manager, employee_in_company, is_above_in_chain, me
+from . import serializers as s
+from .common import current_assignments, direct_manager, employee_in_company, is_above_in_chain, me, plain_row, plain_rows
 
-CADENCE_DAYS = {'weekly': 7, 'biweekly': 14, 'monthly': 30}
-CADENCES = ('none', 'weekly', 'biweekly', 'monthly')
-TAGS = ('positive', 'improvement', 'neutral')
+CADENCE_DAYS = {PerfOneOnOne.Cadence.WEEKLY: 7, PerfOneOnOne.Cadence.BIWEEKLY: 14, PerfOneOnOne.Cadence.MONTHLY: 30}
+CADENCES = s.CADENCES
+TAGS = s.TAGS
 _JOURNAL_ONLY = "only the employee's managers and HR keep a journal"
+FStatus, MStatus, Kind = PerfFeedback.Status, PerfOneOnOne.Status, PerfOneOnOneItem.Kind
 
 
-def _s(r: dict, *keys: str) -> dict:
-    for k in keys:
-        if r.get(k) is not None:
-            r[k] = str(r[k])
-    return r
+def _instant(iso: str) -> datetime:
+    return datetime.fromisoformat(iso.replace('Z', '+00:00'))
 
 
 # ---------------------------------------------------------------- manager's journal (private to the author and HR)
 
 def journal(user: AuthUser, query: dict) -> list[dict]:
-    q = parse(Obj({'employeeId': Uuid(), 'from': IsoDate(optional=True), 'to': IsoDate(optional=True)}), query)
+    q = plain(validate(s.JournalQueryIn, query))
     company_id = company_id_of(user)
     employee_in_company(company_id, q['employeeId'])
     if not is_above_in_chain(user, q['employeeId']):
         raise ForbiddenError(_JOURNAL_ONLY)
-    out = rows("""
-        SELECT j.id, j.note_date, j.tag, j.note, j.created_at, j.author_id, u.name AS author_name FROM perf_journal j JOIN app_user u ON u.id = j.author_id
-         WHERE j.employee_id = %s AND j.company_id = %s AND (%s OR j.author_id = %s)
-           AND (%s::date IS NULL OR j.note_date >= %s) AND (%s::date IS NULL OR j.note_date <= %s)
-         ORDER BY j.note_date DESC, j.created_at DESC""",
-               [q['employeeId'], company_id, has_role(user, 'hr'), user.id, q.get('from'), q.get('from'), q.get('to'), q.get('to')])
-    return [_s(r, 'id', 'author_id') for r in out]
+    qs = PerfJournal.objects.for_company(company_id).filter(employee_id=q['employeeId'])
+    if not has_role(user, 'hr'):
+        qs = qs.filter(author_id=user.id)
+    if q.get('from'):
+        qs = qs.filter(note_date__gte=q['from'])
+    if q.get('to'):
+        qs = qs.filter(note_date__lte=q['to'])
+    return plain_rows(qs.order_by('-note_date', '-created_at')
+                      .values('id', 'note_date', 'tag', 'note', 'created_at', 'author_id', author_name=F('author__name')))
 
 
 def add_journal(user: AuthUser, body: dict) -> str:
-    b = parse(Obj({'employeeId': Uuid(), 'noteDate': IsoDate(), 'tag': Enum(TAGS, default='neutral'),
-                   'note': Str(trim=True, min=1, max=4000)}), body)
+    b = plain(validate(s.JournalIn, body))
     company_id = company_id_of(user)
     employee_in_company(company_id, b['employeeId'])
     if not is_above_in_chain(user, b['employeeId']):
         raise ForbiddenError(_JOURNAL_ONLY)
-    return str(one('INSERT INTO perf_journal (company_id, employee_id, author_id, note_date, tag, note) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id',
-                   [company_id, b['employeeId'], user.id, b['noteDate'], b['tag'], b['note']])['id'])
+    j = PerfJournal.objects.create(company_id=company_id, employee_id=b['employeeId'], author_id=user.id, note_date=b['noteDate'],
+                                   tag=b['tag'], note=b['note'])
+    return str(j.id)
 
 
 def delete_journal(user: AuthUser, entry_id: str) -> None:
-    if not execute('DELETE FROM perf_journal WHERE id = %s AND company_id = %s AND author_id = %s',
-                   [parse_uuid(str(entry_id)), company_id_of(user), user.id]):
+    n, _ = PerfJournal.objects.for_company(company_id_of(user)).filter(pk=parse_uuid(entry_id), author_id=user.id).delete()
+    if not n:
         raise NotFoundError('note not found')
 
 
 # ---------------------------------------------------------------- continuous feedback
 
-FEEDBACK_SELECT = """
-  SELECT f.id, f.status, f.prompt, f.body, f.private_to_manager, f.created_at, f.given_at,
-         f.giver_employee_id, g.name_en AS giver_name, f.subject_employee_id, s.name_en AS subject_name,
-         f.requester_employee_id, rq.name_en AS requester_name
-    FROM perf_feedback f JOIN employee g ON g.id = f.giver_employee_id JOIN employee s ON s.id = f.subject_employee_id
-    LEFT JOIN employee rq ON rq.id = f.requester_employee_id"""
+FEEDBACK_VALUES = ('id', 'status', 'prompt', 'body', 'private_to_manager', 'created_at', 'given_at', 'giver_employee_id',
+                   'subject_employee_id', 'requester_employee_id')
+
+
+def _feedback_rows(qs) -> list[dict]:
+    return plain_rows(qs.values(*FEEDBACK_VALUES, giver_name=F('giver_employee__name_en'), subject_name=F('subject_employee__name_en'),
+                                requester_name=F('requester_employee__name_en')))
 
 
 def feedback(user: AuthUser, query: dict) -> list[dict]:
@@ -77,45 +82,41 @@ def feedback(user: AuthUser, query: dict) -> list[dict]:
     received: given feedback about me (not the private-to-manager ones). given: what I wrote. requests: feedback I was
     asked for and requests I made. about: everything about an employee, for their managers and HR.
     """
-    q = parse(Obj({'box': Enum(('received', 'given', 'requests', 'about'), default='received'), 'employeeId': Uuid(optional=True)}), query)
+    q = plain(validate(s.FeedbackQueryIn, query))
     company_id = company_id_of(user)
+    qs = PerfFeedback.objects.for_company(company_id)
     if q['box'] == 'about':
         if not q.get('employeeId'):
             raise BadRequestError('employeeId is required')
         employee_in_company(company_id, q['employeeId'])
         if not is_above_in_chain(user, q['employeeId']):
             raise ForbiddenError("only the employee's managers and HR see all feedback")
-        out = rows(f"{FEEDBACK_SELECT} WHERE f.company_id = %s AND f.subject_employee_id = %s AND f.status = 'given' ORDER BY f.given_at DESC",
-                   [company_id, q['employeeId']])
-        return [_s(r, 'id', 'giver_employee_id', 'subject_employee_id', 'requester_employee_id') for r in out]
+        return _feedback_rows(qs.filter(subject_employee_id=q['employeeId'], status=FStatus.GIVEN).order_by('-given_at'))
     emp = me(user)
     where = {
-        'received': "f.subject_employee_id = %s AND f.status = 'given' AND NOT f.private_to_manager",
-        'given': "f.giver_employee_id = %s AND f.status = 'given'",
-        'requests': "((f.giver_employee_id = %s AND f.status = 'requested') OR f.requester_employee_id = %s)",
+        'received': Q(subject_employee_id=emp, status=FStatus.GIVEN, private_to_manager=False),
+        'given': Q(giver_employee_id=emp, status=FStatus.GIVEN),
+        'requests': Q(giver_employee_id=emp, status=FStatus.REQUESTED) | Q(requester_employee_id=emp),
     }[q['box']]
-    params = [company_id, emp] + ([emp] if q['box'] == 'requests' else [])
-    out = rows(f'{FEEDBACK_SELECT} WHERE f.company_id = %s AND {where} ORDER BY coalesce(f.given_at, f.created_at) DESC LIMIT 300', params)
-    res = []
-    for f in out:
-        _s(f, 'id', 'giver_employee_id', 'subject_employee_id', 'requester_employee_id')
+    out = []
+    for f in _feedback_rows(qs.filter(where).order_by(Coalesce('given_at', 'created_at').desc())[:300]):
         # A requester who is the subject sees who answered, but not the text of private-to-manager answers.
         if q['box'] == 'requests' and f['giver_employee_id'] != emp and f['private_to_manager'] and f['subject_employee_id'] == emp:
             f = {**f, 'body': None}
-        res.append(f)
-    return res
+        out.append(f)
+    return out
 
 
 def give_feedback(user: AuthUser, body: dict) -> None:
-    b = parse(Obj({'toEmployeeId': Uuid(), 'body': Str(trim=True, min=1, max=4000), 'privateToManager': Bool(default=False)}), body)
+    b = plain(validate(s.GiveFeedbackIn, body))
     giver = me(user)
     company_id = company_id_of(user)
     if b['toEmployeeId'] == giver:
         raise BadRequestError('you cannot give feedback to yourself')
     employee_in_company(company_id, b['toEmployeeId'])
     with transaction.atomic():
-        execute("""INSERT INTO perf_feedback (company_id, giver_employee_id, subject_employee_id, status, body, private_to_manager, given_at)
-                   VALUES (%s, %s, %s, 'given', %s, %s, now())""", [company_id, giver, b['toEmployeeId'], b['body'], b['privateToManager']])
+        PerfFeedback.objects.create(company_id=company_id, giver_employee_id=giver, subject_employee_id=b['toEmployeeId'],
+                                    status=FStatus.GIVEN, body=b['body'], private_to_manager=b['privateToManager'], given_at=Now())
         to = direct_manager(b['toEmployeeId']) if b['privateToManager'] else b['toEmployeeId']
         if to:
             notify(company_id=company_id, user_id=user_id_for_employee(to), employee_id=to, template='feedback.given', title='New feedback',
@@ -124,8 +125,7 @@ def give_feedback(user: AuthUser, body: dict) -> None:
 
 
 def request_feedback(user: AuthUser, body: dict) -> None:
-    b = parse(Obj({'fromEmployeeIds': Arr(Uuid(), min=1, max=10), 'aboutEmployeeId': Uuid(optional=True),
-                   'prompt': Str(trim=True, max=1000, optional=True)}), body)
+    b = plain(validate(s.RequestFeedbackIn, body))
     requester = me(user)
     company_id = company_id_of(user)
     subject = b.get('aboutEmployeeId') or requester
@@ -138,8 +138,8 @@ def request_feedback(user: AuthUser, body: dict) -> None:
             if frm == subject:
                 raise BadRequestError('someone cannot give feedback about themselves')
             employee_in_company(company_id, frm)
-            execute("""INSERT INTO perf_feedback (company_id, giver_employee_id, subject_employee_id, requester_employee_id, status, prompt)
-                       VALUES (%s, %s, %s, %s, 'requested', %s)""", [company_id, frm, subject, requester, prompt])
+            PerfFeedback.objects.create(company_id=company_id, giver_employee_id=frm, subject_employee_id=subject,
+                                        requester_employee_id=requester, status=FStatus.REQUESTED, prompt=prompt)
             notify(company_id=company_id, user_id=user_id_for_employee(frm), employee_id=frm, template='feedback.requested',
                    title='Feedback requested',
                    body=f"{user.name} asked for your feedback{' about a colleague' if subject != requester else ''}"
@@ -147,23 +147,23 @@ def request_feedback(user: AuthUser, body: dict) -> None:
 
 
 def _open_request(company_id: str, fid: str, giver: str) -> dict:
-    r = one('SELECT id, status, requester_employee_id, subject_employee_id FROM perf_feedback WHERE id = %s AND company_id = %s AND giver_employee_id = %s',
-            [fid, company_id, giver])
+    r = plain_row(PerfFeedback.objects.for_company(company_id).filter(pk=fid, giver_employee_id=giver)
+                  .values('id', 'status', 'requester_employee_id', 'subject_employee_id').first())
     if not r:
         raise NotFoundError('feedback request not found')
-    if r['status'] != 'requested':
+    if r['status'] != FStatus.REQUESTED:
         raise ConflictError('this request was already answered')
-    return _s(r, 'id', 'requester_employee_id', 'subject_employee_id')
+    return r
 
 
 def answer_feedback(user: AuthUser, fid: str, body: dict) -> None:
-    b = parse(Obj({'body': Str(trim=True, min=1, max=4000), 'privateToManager': Bool(default=False)}), body)
+    b = validate(s.AnswerFeedbackIn, body)
     giver = me(user)
     company_id = company_id_of(user)
-    f = _open_request(company_id, parse_uuid(str(fid)), giver)
+    f = _open_request(company_id, parse_uuid(fid), giver)
     with transaction.atomic():
-        execute("UPDATE perf_feedback SET status = 'given', body = %s, private_to_manager = %s, given_at = now() WHERE id = %s",
-                [b['body'], b['privateToManager'], f['id']])
+        PerfFeedback.objects.filter(pk=f['id']).update(status=FStatus.GIVEN, body=b['body'], private_to_manager=b['privateToManager'],
+                                                       given_at=Now())
         if f['requester_employee_id']:
             r = f['requester_employee_id']
             notify(company_id=company_id, user_id=user_id_for_employee(r), employee_id=r, template='feedback.answered', title='Feedback received',
@@ -172,61 +172,59 @@ def answer_feedback(user: AuthUser, fid: str, body: dict) -> None:
 
 def decline_feedback(user: AuthUser, fid: str) -> None:
     giver = me(user)
-    f = _open_request(company_id_of(user), parse_uuid(str(fid)), giver)
-    execute("UPDATE perf_feedback SET status = 'declined' WHERE id = %s", [f['id']])
+    f = _open_request(company_id_of(user), parse_uuid(fid), giver)
+    PerfFeedback.objects.filter(pk=f['id']).update(status=FStatus.DECLINED)
 
 
 def get_feedback_request(user: AuthUser, fid: str) -> dict:
     """An open request I was asked to answer (for the answer form)."""
     emp = me(user)
-    r = one(f"{FEEDBACK_SELECT} WHERE f.id = %s AND f.company_id = %s AND f.giver_employee_id = %s AND f.status = 'requested'",
-            [parse_uuid(str(fid)), company_id_of(user), emp])
-    if not r:
+    rows = _feedback_rows(PerfFeedback.objects.for_company(company_id_of(user))
+                          .filter(pk=parse_uuid(fid), giver_employee_id=emp, status=FStatus.REQUESTED))
+    if not rows:
         raise NotFoundError('feedback request not found')
-    return _s(r, 'id', 'giver_employee_id', 'subject_employee_id', 'requester_employee_id')
+    return rows[0]
 
 
 # ---------------------------------------------------------------- 1-on-1s (only the two people in the meeting)
 
-def _load_meeting(company_id: str, mid: str, employee_id: str) -> dict:
-    m = one('SELECT id, company_id, manager_employee_id, employee_id, scheduled_at, cadence, status FROM perf_one_on_one WHERE id = %s AND company_id = %s',
-            [mid, company_id])
-    if m:
-        _s(m, 'id', 'company_id', 'manager_employee_id', 'employee_id')
+def _load_meeting(company_id: str, mid: str, employee_id: str, lock: bool = False) -> dict:
+    qs = PerfOneOnOne.objects.for_company(company_id).filter(pk=as_uuid(mid))
+    if lock:
+        qs = qs.select_for_update()
+    m = plain_row(qs.values('id', 'company_id', 'manager_employee_id', 'employee_id', 'scheduled_at', 'cadence', 'status').first())
     if not m or (m['manager_employee_id'] != employee_id and m['employee_id'] != employee_id):
         raise NotFoundError('1-on-1 not found')
     return {**m, 'side': 'manager' if m['manager_employee_id'] == employee_id else 'employee'}
 
 
 def meetings(user: AuthUser, with_: str | None = None) -> dict:
-    w = parse(Uuid(optional=True), with_) if with_ else None
+    w = parse_uuid(with_) if with_ else None
     emp = me(user)
     company_id = company_id_of(user)
-    ms = rows("""
-        SELECT o.id, o.manager_employee_id, mg.name_en AS manager_name, o.employee_id, em.name_en AS employee_name, o.scheduled_at, o.cadence, o.status,
-               CASE WHEN o.manager_employee_id = %s THEN 'manager' ELSE 'employee' END AS side,
-               (SELECT count(*)::int FROM perf_one_on_one_item i WHERE i.meeting_id = o.id AND i.kind = 'action' AND NOT i.done) AS open_actions,
-               (SELECT count(*)::int FROM perf_one_on_one_item i WHERE i.meeting_id = o.id AND i.kind = 'agenda') AS agenda_items
-          FROM perf_one_on_one o JOIN employee mg ON mg.id = o.manager_employee_id JOIN employee em ON em.id = o.employee_id
-         WHERE o.company_id = %s AND (o.manager_employee_id = %s OR o.employee_id = %s)
-           AND (%s::uuid IS NULL OR o.manager_employee_id = %s OR o.employee_id = %s)
-         ORDER BY o.status = 'scheduled' DESC, CASE WHEN o.status = 'scheduled' THEN o.scheduled_at END ASC, o.scheduled_at DESC LIMIT 200""",
-              [emp, company_id, emp, emp, w, w, w])
+    qs = PerfOneOnOne.objects.for_company(company_id).filter(Q(manager_employee_id=emp) | Q(employee_id=emp))
+    if w:
+        qs = qs.filter(Q(manager_employee_id=w) | Q(employee_id=w))
+    scheduled = Q(status=MStatus.SCHEDULED)
+    ms = (qs.annotate(side=Case(When(manager_employee_id=emp, then=Value('manager')), default=Value('employee')),
+                      open_actions=Count('perf_one_on_one_items', filter=Q(perf_one_on_one_items__kind=Kind.ACTION,
+                                                                           perf_one_on_one_items__done=False)),
+                      agenda_items=Count('perf_one_on_one_items', filter=Q(perf_one_on_one_items__kind=Kind.AGENDA)))
+          .order_by(ExpressionWrapper(scheduled, output_field=BooleanField()).desc(),
+                    Case(When(scheduled, then=F('scheduled_at'))).asc(), '-scheduled_at')
+          .values('id', 'manager_employee_id', 'employee_id', 'scheduled_at', 'cadence', 'status', 'side', 'open_actions', 'agenda_items',
+                  manager_name=F('manager_employee__name_en'), employee_name=F('employee__name_en'))[:200])
     # Who I can meet with: my direct reports and my own manager.
-    reports = rows("""SELECT e.id, e.name_en, e.designation FROM employee_assignment a JOIN employee e ON e.id = a.employee_id
-                       WHERE a.manager_id = %s AND a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date AND e.status = 'active' ORDER BY e.name_en""", [emp])
+    report_ids = current_assignments().filter(manager_id=emp).values('employee_id')
+    reports = (Employee.objects.for_company(company_id).filter(pk__in=report_ids, status=Employee.Status.ACTIVE)
+               .order_by('name_en').values('id', 'name_en', 'designation'))
     mgr = direct_manager(emp)
-    manager = one('SELECT id, name_en, designation FROM employee WHERE id = %s', [mgr]) if mgr else None
-    return {'meetings': [_s(m, 'id', 'manager_employee_id', 'employee_id') for m in ms], 'reports': [_s(r, 'id') for r in reports],
-            'manager': _s(manager, 'id') if manager else None}
-
-
-MEETING_BODY = Obj({'withEmployeeId': Uuid(), 'scheduledAt': DateTimeStr(), 'cadence': Enum(CADENCES, default='none'),
-                    'agenda': Arr(Str(trim=True, min=1, max=1000), max=20, default=list)})
+    manager = Employee.objects.for_company(company_id).filter(pk=mgr).values('id', 'name_en', 'designation').first() if mgr else None
+    return {'meetings': plain_rows(ms), 'reports': plain_rows(reports), 'manager': plain_row(manager)}
 
 
 def create_meeting(user: AuthUser, body: dict) -> str:
-    b = parse(MEETING_BODY, body)
+    b = plain(validate(s.MeetingIn, body))
     emp = me(user)
     company_id = company_id_of(user)
     employee_in_company(company_id, b['withEmployeeId'])
@@ -237,107 +235,99 @@ def create_meeting(user: AuthUser, body: dict) -> str:
     else:
         raise ForbiddenError('1-on-1s are between a person and their direct manager')
     with transaction.atomic():
-        mid = str(one("""INSERT INTO perf_one_on_one (company_id, manager_employee_id, employee_id, scheduled_at, cadence, created_by)
-                         VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
-                      [company_id, manager_id, employee_id, b['scheduledAt'], b['cadence'], user.id])['id'])
-        for t in b['agenda']:
-            execute("INSERT INTO perf_one_on_one_item (meeting_id, kind, text, added_by) VALUES (%s, 'agenda', %s, %s)", [mid, t, user.id])
+        m = PerfOneOnOne.objects.create(company_id=company_id, manager_employee_id=manager_id, employee_id=employee_id,
+                                        scheduled_at=_instant(b['scheduledAt']), cadence=b['cadence'], created_by_id=user.id)
+        mid = str(m.id)
+        PerfOneOnOneItem.objects.bulk_create([PerfOneOnOneItem(meeting_id=mid, kind=Kind.AGENDA, text=t, added_by_id=user.id)
+                                              for t in b['agenda']])
         other = b['withEmployeeId']
         notify(company_id=company_id, user_id=user_id_for_employee(other), employee_id=other, template='one_on_one.scheduled',
                title='1-on-1 scheduled', body=f'{user.name} scheduled a 1-on-1 with you.', payload={'meetingId': mid})
     return mid
 
 
+MEETING_VALUES = ('id', 'company_id', 'manager_employee_id', 'employee_id', 'scheduled_at', 'cadence', 'status', 'shared_notes',
+                  'created_by_id', 'created_at')
+
+
 def meeting_detail(user: AuthUser, mid: str) -> dict:
     emp = me(user)
     company_id = company_id_of(user)
-    m = _load_meeting(company_id, parse_uuid(str(mid)), emp)
-    row = one("""SELECT o.*, mg.name_en AS manager_name, em.name_en AS employee_name FROM perf_one_on_one o
-                   JOIN employee mg ON mg.id = o.manager_employee_id JOIN employee em ON em.id = o.employee_id WHERE o.id = %s""", [m['id']])
-    mpn = row.pop('manager_private_notes')
-    epn = row.pop('employee_private_notes')
-    _s(row, 'id', 'company_id', 'manager_employee_id', 'employee_id', 'created_by')
-    items = rows("""SELECT i.id, i.kind, i.text, i.owner_employee_id, o.name_en AS owner_name, i.done, i.created_at, i.added_by FROM perf_one_on_one_item i
-                     LEFT JOIN employee o ON o.id = i.owner_employee_id WHERE i.meeting_id = %s ORDER BY i.kind, i.created_at""", [m['id']])
+    m = _load_meeting(company_id, parse_uuid(mid), emp)
+    private = 'manager_private_notes' if m['side'] == 'manager' else 'employee_private_notes'
+    row = plain_row(PerfOneOnOne.objects.filter(pk=m['id'])
+                    .values(*MEETING_VALUES, private_notes=F(private), manager_name=F('manager_employee__name_en'),
+                            employee_name=F('employee__name_en')).get())
+    items = (PerfOneOnOneItem.objects.filter(meeting_id=m['id']).order_by('kind', 'created_at')
+             .values('id', 'kind', 'text', 'owner_employee_id', 'done', 'created_at', 'added_by_id', owner_name=F('owner_employee__name_en')))
     # Earlier open action items between the same two people, so nothing agreed is forgotten.
-    carried = rows("""SELECT i.id, i.text, i.owner_employee_id, o.name_en AS owner_name, p.scheduled_at FROM perf_one_on_one_item i
-                        JOIN perf_one_on_one p ON p.id = i.meeting_id LEFT JOIN employee o ON o.id = i.owner_employee_id
-                       WHERE p.manager_employee_id = %s AND p.employee_id = %s AND p.id <> %s AND i.kind = 'action' AND NOT i.done
-                       ORDER BY p.scheduled_at""", [m['manager_employee_id'], m['employee_id'], m['id']])
-    return {'meeting': {**row, 'side': m['side'], 'private_notes': mpn if m['side'] == 'manager' else epn},
-            'items': [_s(i, 'id', 'owner_employee_id', 'added_by') for i in items],
-            'openActions': [_s(i, 'id', 'owner_employee_id') for i in carried]}
-
-
-MEETING_PATCH = Obj({'scheduledAt': DateTimeStr(optional=True), 'cadence': Enum(CADENCES, optional=True),
-                     'sharedNotes': Str(max=8000, nullish=True), 'privateNotes': Str(max=8000, nullish=True),
-                     'status': Enum(('scheduled', 'done', 'cancelled'), optional=True)})
+    carried = (PerfOneOnOneItem.objects.for_company(company_id)
+               .filter(meeting__manager_employee_id=m['manager_employee_id'], meeting__employee_id=m['employee_id'], kind=Kind.ACTION,
+                       done=False).exclude(meeting_id=m['id']).order_by('meeting__scheduled_at')
+               .values('id', 'text', 'owner_employee_id', owner_name=F('owner_employee__name_en'), scheduled_at=F('meeting__scheduled_at')))
+    return {'meeting': {**row, 'side': m['side']}, 'items': plain_rows(items), 'openActions': plain_rows(carried)}
 
 
 def update_meeting(user: AuthUser, mid: str, body: dict) -> str | None:
     """Returns the id of the next meeting when a recurring one is marked done."""
-    b = parse(MEETING_PATCH, body)
+    b = validate(s.MeetingPatch, body)
     emp = me(user)
     company_id = company_id_of(user)
     with transaction.atomic():
-        m = _load_meeting(company_id, parse_uuid(str(mid)), emp)
-        sets, vals = [], []
-
-        def put(col, v):
-            sets.append(f'{col} = %s')
-            vals.append(v)
+        m = _load_meeting(company_id, parse_uuid(mid), emp, lock=True)   # marking it done twice must not book two next ones
+        changes = {}
         if 'scheduledAt' in b:
-            put('scheduled_at', b['scheduledAt'])
+            changes['scheduled_at'] = _instant(b['scheduledAt'])
         if 'cadence' in b:
-            put('cadence', b['cadence'])
+            changes['cadence'] = b['cadence']
         if 'sharedNotes' in b:
-            put('shared_notes', b['sharedNotes'])
+            changes['shared_notes'] = b['sharedNotes']
         if 'privateNotes' in b:
-            put('manager_private_notes' if m['side'] == 'manager' else 'employee_private_notes', b['privateNotes'])
+            changes['manager_private_notes' if m['side'] == 'manager' else 'employee_private_notes'] = b['privateNotes']
         if 'status' in b:
-            put('status', b['status'])
-        if sets:
-            execute(f"UPDATE perf_one_on_one SET {', '.join(sets)} WHERE id = %s", [*vals, m['id']])
-        next_id = None
+            changes['status'] = b['status']
+        if changes:
+            PerfOneOnOne.objects.filter(pk=m['id']).update(**changes)
         cadence = b.get('cadence') or m['cadence']
-        if b.get('status') == 'done' and m['status'] != 'done' and CADENCE_DAYS.get(cadence):
-            base = datetime.fromisoformat(b['scheduledAt'].replace('Z', '+00:00')) if 'scheduledAt' in b else m['scheduled_at']
-            nxt = base + timedelta(days=CADENCE_DAYS[cadence])
-            next_id = str(one("""INSERT INTO perf_one_on_one (company_id, manager_employee_id, employee_id, scheduled_at, cadence, created_by)
-                                 VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
-                              [company_id, m['manager_employee_id'], m['employee_id'], nxt, cadence, user.id])['id'])
-    return next_id
+        if b.get('status') == MStatus.DONE and m['status'] != MStatus.DONE and CADENCE_DAYS.get(cadence):
+            base = changes.get('scheduled_at') or m['scheduled_at']
+            nxt = PerfOneOnOne.objects.create(company_id=company_id, manager_employee_id=m['manager_employee_id'], employee_id=m['employee_id'],
+                                              scheduled_at=base + timedelta(days=CADENCE_DAYS[cadence]), cadence=cadence,
+                                              created_by_id=user.id)
+            return str(nxt.id)
+    return None
 
 
 def add_meeting_item(user: AuthUser, mid: str, body: dict) -> str:
-    b = parse(Obj({'kind': Enum(('agenda', 'action')), 'text': Str(trim=True, min=1, max=1000), 'ownerEmployeeId': Uuid(nullish=True)}), body)
+    b = plain(validate(s.MeetingItemIn, body))
     emp = me(user)
-    m = _load_meeting(company_id_of(user), parse_uuid(str(mid)), emp)
+    m = _load_meeting(company_id_of(user), parse_uuid(mid), emp)
     owner = b.get('ownerEmployeeId')
     if owner and owner not in (m['manager_employee_id'], m['employee_id']):
         raise BadRequestError('the owner must be one of the two people in the meeting')
-    return str(one('INSERT INTO perf_one_on_one_item (meeting_id, kind, text, owner_employee_id, added_by) VALUES (%s, %s, %s, %s, %s) RETURNING id',
-                   [m['id'], b['kind'], b['text'], owner, user.id])['id'])
+    item = PerfOneOnOneItem.objects.create(meeting_id=m['id'], kind=b['kind'], text=b['text'], owner_employee_id=owner, added_by_id=user.id)
+    return str(item.id)
 
 
 def _item_meeting(company_id: str, item_id: str, emp: str) -> dict:
-    r = one('SELECT meeting_id FROM perf_one_on_one_item WHERE id = %s', [item_id])
-    if not r:
+    meeting_id = PerfOneOnOneItem.objects.for_company(company_id).filter(pk=item_id).values_list('meeting_id', flat=True).first()
+    if not meeting_id:
         raise NotFoundError('item not found')
-    return _load_meeting(company_id, str(r['meeting_id']), emp)
+    return _load_meeting(company_id, str(meeting_id), emp)
 
 
 def update_meeting_item(user: AuthUser, item_id: str, body: dict) -> dict:
-    b = parse(Obj({'done': Bool(optional=True), 'text': Str(trim=True, min=1, max=1000, optional=True)}), body)
-    item_id = parse_uuid(str(item_id))
+    b = validate(s.MeetingItemPatch, body)
+    item_id = parse_uuid(item_id)
     m = _item_meeting(company_id_of(user), item_id, me(user))
-    execute('UPDATE perf_one_on_one_item SET done = coalesce(%s, done), text = coalesce(%s, text) WHERE id = %s',
-            [b.get('done'), b.get('text'), item_id])
+    changes = {k: b[k] for k in ('done', 'text') if b.get(k) is not None}
+    if changes:
+        PerfOneOnOneItem.objects.filter(pk=item_id).update(**changes)
     return m
 
 
 def delete_meeting_item(user: AuthUser, item_id: str) -> dict:
-    item_id = parse_uuid(str(item_id))
+    item_id = parse_uuid(item_id)
     m = _item_meeting(company_id_of(user), item_id, me(user))
-    execute('DELETE FROM perf_one_on_one_item WHERE id = %s', [item_id])
+    PerfOneOnOneItem.objects.filter(pk=item_id).delete()
     return m

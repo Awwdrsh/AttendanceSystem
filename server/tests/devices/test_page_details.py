@@ -3,7 +3,7 @@ PIN, live tab counts, and the biometric page actions not covered elsewhere."""
 import pytest
 from django.test import Client
 
-from hajiri.core.db import one
+from tests.support.sql import one
 from hajiri.core.errors import ValidationError
 from hajiri.devices import biometrics as bio
 from hajiri.devices import services as dev

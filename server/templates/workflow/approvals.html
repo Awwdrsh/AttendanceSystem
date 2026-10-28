@@ -10,6 +10,16 @@
   </form>
   {% endif %}
 {% endpage_header %}
+{% if elsewhere %}
+<div class="hj-alert hj-tone-info" role="status" style="margin-bottom:12px">
+  <i class="ti ti-building-community" aria-hidden="true"></i>
+  <div class="hj-grow"><div class="hj-alert-title">Also waiting for you in your other companies</div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px">
+      {% for c in elsewhere %}{% include "group/partials/open_in.html" with company_id=c.companyId next="/approvals" active=False label=c.label %}{% endfor %}
+    </div>
+  </div>
+</div>
+{% endif %}
 <div id="approvals" hx-get="{% url 'workflow:inbox' %}{% if kind != 'all' %}?kind={{ kind|urlencode }}{% endif %}" hx-trigger="hj:refresh-approvals from:body" hx-swap="innerHTML">
   {% include "workflow/partials/inbox.html" %}
 </div>

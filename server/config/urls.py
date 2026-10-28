@@ -3,6 +3,9 @@ Partial (HTMX) endpoints live under /_/<app>/. The device gateway has its own UR
 from django.urls import include, path
 
 urlpatterns = [
+    # Groups of companies: mounted first so their pages take over /group from hajiri.web.group once they exist.
+    path('', include('hajiri.group.urls')),
+    path('', include('hajiri.group_admin.urls')),
     path('', include(('hajiri.web.urls', 'web'))),
     path('', include(('hajiri.files.urls', 'files'))),
     path('', include(('hajiri.notifications.urls', 'notifications'))),

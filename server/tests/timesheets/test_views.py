@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from django.test import Client
 
-from hajiri.core.db import one, rows
+from tests.support.sql import one, rows
 from hajiri.timesheets import services as ts
 from tests.web.factories import htmx, hx_triggers, set_features_off, sign_in, toasts
 
@@ -396,3 +396,26 @@ def test_project_form_colour_swatches_and_member_checklist(w):
     assert f'value="{w.sita_emp.id}" checked' in body and 'value="#c2255c"' in body
     r = c.post('/_/timesheets/projects/new', {'name': 'Bad colour', 'code': 'BC', 'color': 'red'}, **htmx())
     assert r.status_code == 400
+
+
+def test_history_is_filtered_and_paged(w):
+    """History lists every week through django-filter (status) and Django pagination, 50 weeks a page."""
+    from hajiri.db.models import Timesheet
+    from hajiri.timesheets.views import HISTORY_PAGE_SIZE
+    weeks = [add_days(w.WEEK, -7 * i) for i in range(HISTORY_PAGE_SIZE + 5)]
+    Timesheet.objects.bulk_create([Timesheet(company=w.company, employee=w.sita_emp, week_start=ws,
+                                             status=Timesheet.Status.APPROVED if i % 2 else Timesheet.Status.REJECTED,
+                                             total_min=60) for i, ws in enumerate(weeks)])
+    c = client_for(w.hr)
+    body = c.get('/attendance/timesheets?view=history', **htmx(target='ts-review')).content.decode()
+    assert f'1 to {HISTORY_PAGE_SIZE} of {len(weeks)}' in body and 'Older' in body and 'Newer' not in body
+    assert body.count('hx-get="/_/timesheets/') == HISTORY_PAGE_SIZE
+    body = c.get('/attendance/timesheets?view=history&page=2', **htmx(target='ts-review')).content.decode()
+    assert f'{HISTORY_PAGE_SIZE + 1} to {len(weeks)} of {len(weeks)}' in body and 'Newer' in body
+    assert body.count('hx-get="/_/timesheets/') == 5
+    body = c.get('/attendance/timesheets?view=history&status=approved', **htmx(target='ts-review')).content.decode()
+    approved = len([i for i in range(len(weeks)) if i % 2])
+    assert body.count('hx-get="/_/timesheets/') == approved and 'hj-tone-bad">Returned' not in body
+    # The list is the active company's only.
+    assert client_for(w.outsider).get('/attendance/timesheets?view=history', **htmx(target='ts-review')).content.decode().count(
+        'hx-get="/_/timesheets/') == 0

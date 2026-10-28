@@ -6,7 +6,7 @@ Lifecycle pages checked against the TS web app after the port: the checklist edi
 import pytest
 from django.test import Client
 
-from hajiri.core.db import one, rows
+from tests.support.sql import one, rows
 from tests.people.conftest import build_world
 from tests.web.factories import htmx, sign_in, toasts
 

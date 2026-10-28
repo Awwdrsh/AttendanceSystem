@@ -8,20 +8,30 @@ from __future__ import annotations
 
 import json
 
-from hajiri.core.crypto import field_cipher
-from hajiri.core.db import execute, one
-from hajiri.core.errors import ConflictError, ForbiddenError, NotFoundError
-from hajiri.notifications.service import notify, user_id_for_employee
+from django.db.models import F
+from django.db.models.functions import Now
 
+from hajiri.core.crypto import field_cipher
+from hajiri.core.errors import ConflictError, ForbiddenError, NotFoundError
+from hajiri.db.models import Employee, ProfileChangeRequest
+from hajiri.notifications.service import notify
+
+from .accounts import user_id_for_employee
 from .profile import SECTION_LABEL, apply_section, diff_section
 
 PROFILE_CHANGE = 'profile_change'
 REQ_COLS = ('id', 'company_id', 'employee_id', 'requested_by', 'section', 'summary', 'reason', 'proof_file_id', 'status',
             'decided_by', 'decided_at', 'decision_reason', 'created_at')
+Status = ProfileChangeRequest.Status
 
 
 def _aad(company_id: str, employee_id: str) -> str:
     return f'profile_change:{company_id}:{employee_id}'
+
+
+def req_values(qs):
+    """A ProfileChangeRequest queryset as rows with the TS column names (.values() gives foreign keys as ids)."""
+    return qs.values(*REQ_COLS)
 
 
 def req_row(r: dict | None) -> dict | None:
@@ -35,8 +45,9 @@ def req_row(r: dict | None) -> dict | None:
     return out
 
 
-def decrypt_payload(row: dict) -> dict:
-    return json.loads(field_cipher().decrypt(bytes(row['payload_enc']), _aad(str(row['company_id']), str(row['employee_id']))))
+def decrypt_payload(row) -> dict:
+    get = (lambda k: row[k]) if isinstance(row, dict) else (lambda k: getattr(row, k))
+    return json.loads(field_cipher().decrypt(bytes(get('payload_enc')), _aad(str(get('company_id')), str(get('employee_id')))))
 
 
 def create_change_request(*, company_id: str, employee_id: str, requested_by: str, section: str, value: dict,
@@ -45,40 +56,41 @@ def create_change_request(*, company_id: str, employee_id: str, requested_by: st
     changes = diff_section(employee_id, section, value)
     if not changes:
         raise ConflictError('nothing would change; the profile already has these details')
-    if one("SELECT 1 AS x FROM profile_change_request WHERE employee_id = %s AND section = %s AND status = 'pending'", [employee_id, section]):
+    if ProfileChangeRequest.objects.for_company(company_id).filter(employee_id=employee_id, section=section,
+                                                                    status=Status.PENDING).exists():
         raise ConflictError(f'a change to {SECTION_LABEL[section].lower()} is already waiting for approval')
-    row = req_row(one(f"""INSERT INTO profile_change_request (company_id, employee_id, requested_by, section, payload_enc, summary, reason, proof_file_id)
-                          VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING {', '.join(REQ_COLS)}""",
-                      [company_id, employee_id, requested_by, section,
-                       field_cipher().encrypt(json.dumps(value, ensure_ascii=False), _aad(company_id, str(employee_id))),
-                       json.dumps({'changes': changes, 'byHr': by_hr}, ensure_ascii=False), reason, proof_file_id]))
-    emp = one('SELECT name_en FROM employee WHERE id = %s', [employee_id])
+    created = ProfileChangeRequest.objects.create(
+        company_id=company_id, employee_id=employee_id, requested_by_id=requested_by, section=section,
+        payload_enc=field_cipher().encrypt(json.dumps(value, ensure_ascii=False), _aad(company_id, str(employee_id))),
+        summary={'changes': changes, 'byHr': by_hr}, reason=reason, proof_file_id=proof_file_id)
+    row = req_row(req_values(ProfileChangeRequest.objects.filter(pk=created.pk)).get())
+    name = Employee.objects.filter(pk=employee_id).values_list('name_en', flat=True).first()
     start_workflow(company_id=company_id, object_type=PROFILE_CHANGE, object_id=row['id'], employee_id=str(employee_id),
                    title='Second approval needed' if by_hr else 'Profile change to review',
-                   body=f"{emp['name_en'] if emp else 'An employee'}: {SECTION_LABEL[section].lower()} ({', '.join(c['label'] for c in changes)})")
+                   body=f"{name or 'An employee'}: {SECTION_LABEL[section].lower()} ({', '.join(c['label'] for c in changes)})")
     return row
 
 
 def decided(object_id: str, state: str, ctx) -> None:
     """Workflow decision handler for profile changes (runs inside the decision's transaction)."""
-    row = one('SELECT * FROM profile_change_request WHERE id = %s FOR UPDATE', [object_id])
+    row = ProfileChangeRequest.objects.select_for_update().filter(pk=object_id).first()
     if not row:
         raise NotFoundError('change request not found')
-    if row['status'] != 'pending':
-        raise ConflictError(f"this change request is already {row['status']}")
+    if row.status != Status.PENDING:
+        raise ConflictError(f'this change request is already {row.status}')
     # Maker-checker: whoever proposed a change can never be the one who approves it.
-    if state == 'approved' and str(row['requested_by']) == str(ctx.actor_id):
+    if state == 'approved' and str(row.requested_by_id) == str(ctx.actor_id):
         raise ForbiddenError('a different HR person must approve this change')
     if state == 'approved':
-        apply_section(company_id=str(row['company_id']), employee_id=str(row['employee_id']), section=row['section'],
-                      value=decrypt_payload(row), actor_id=ctx.actor_id, source='change_request', ref_id=str(row['id']))
-    execute('UPDATE profile_change_request SET status = %s, decided_by = %s, decided_at = now(), decision_reason = %s WHERE id = %s',
-            [state, ctx.actor_id, ctx.reason, row['id']])
-    recipients = [str(row['requested_by'])]
-    emp_user = user_id_for_employee(str(row['employee_id']))
+        apply_section(company_id=str(row.company_id), employee_id=str(row.employee_id), section=row.section,
+                      value=decrypt_payload(row), actor_id=ctx.actor_id, source='change_request', ref_id=str(row.id))
+    ProfileChangeRequest.objects.filter(pk=row.pk).update(status=state, decided_by_id=ctx.actor_id, decided_at=Now(),
+                                                          decision_reason=ctx.reason)
+    recipients = [str(row.requested_by_id)]
+    emp_user = user_id_for_employee(str(row.employee_id))
     if emp_user and emp_user not in recipients:
         recipients.append(emp_user)
-    label = SECTION_LABEL[row['section']]
+    label = SECTION_LABEL[row.section]
     if state == 'rejected' and ctx.reason:
         body = f'{label}: {ctx.reason}'
     elif state == 'approved':
@@ -88,20 +100,20 @@ def decided(object_id: str, state: str, ctx) -> None:
     for user_id in recipients:
         if user_id == str(ctx.actor_id):
             continue
-        notify(company_id=str(row['company_id']), user_id=user_id, template=f'{PROFILE_CHANGE}.{state}',
+        notify(company_id=str(row.company_id), user_id=user_id, template=f'{PROFILE_CHANGE}.{state}',
                title='Profile change approved' if state == 'approved' else 'Profile change not approved', body=body,
-               payload={'requestId': str(row['id'])})
+               payload={'requestId': str(row.id)})
 
 
 def summarise(inst: dict) -> dict:
-    row = one('SELECT section, summary, reason, proof_file_id, requested_by FROM profile_change_request WHERE id = %s', [inst['object_id']])
+    row = (ProfileChangeRequest.objects.filter(pk=inst['object_id'])
+           .values('section', 'summary', 'reason', 'proof_file_id', requested_by_name=F('requested_by__name')).first())
     if not row:
         return {}
-    by = one('SELECT name FROM app_user WHERE id = %s', [row['requested_by']])
     summary = row['summary'] or {}
     return {
         'section': row['section'], 'sectionLabel': SECTION_LABEL[row['section']], 'changes': summary.get('changes') or [],
-        'reason': row['reason'], 'hasProof': bool(row['proof_file_id']), 'requestedBy': by['name'] if by else None,
+        'reason': row['reason'], 'hasProof': bool(row['proof_file_id']), 'requestedBy': row['requested_by_name'],
         'byHr': bool(summary.get('byHr')),
     }
 

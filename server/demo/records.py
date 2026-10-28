@@ -4,7 +4,11 @@ from __future__ import annotations
 import math
 import re
 
-from hajiri.core.db import execute, one
+from django.db.models.functions import Lower, Now
+
+from hajiri.db.models import (
+    Asset, AssetType, CompanyPolicy, Employee, EmployeeDocument, EmployeeExit, HelpdeskTicket, LifecycleCase,
+)
 from hajiri.documents import services as documents
 from hajiri.helpdesk import services as helpdesk
 from hajiri.lifecycle import api as lifecycle
@@ -16,8 +20,7 @@ from .kit import add_days_iso, base36, pick
 def seed_documents(ctx: DemoContext) -> None:
     """Documents on file (verified, waiting, expiring), letters issued and requested, and a handbook to acknowledge."""
     kit, hr = ctx.kit, ctx.hr
-    if already_seeded(ctx, 'documents', 'SELECT 1 FROM company_policy WHERE company_id = %s LIMIT 1',
-                      'SELECT 1 FROM employee_document WHERE company_id = %s LIMIT 1'):
+    if already_seeded(ctx, 'documents', CompanyPolicy.objects.all(), EmployeeDocument.objects.all()):
         return
     cats = kit.call('GET /documents/categories', documents.list_categories, hr.user)
 
@@ -45,7 +48,8 @@ def seed_documents(ctx: DemoContext) -> None:
             add(hr, e.id, {'categoryId': cat('passport'), 'title': 'Passport bio page', 'fileId': pp,
                            'expiryDate': add_days_iso(ctx.today, 45 if i == 1 else 12)})
     # HR uploads count as verified; a few employees uploaded their own and wait for HR.
-    execute("UPDATE employee_document SET status = 'verified', verified_at = now() WHERE company_id = %s AND status = 'pending'", [ctx.company_id])
+    (EmployeeDocument.objects.for_company(ctx.company_id).filter(status=EmployeeDocument.Status.PENDING)
+     .update(status=EmployeeDocument.Status.VERIFIED, verified_at=Now()))
     for e in ctx.employees[2:5]:
         me = ctx.as_(e)
         f = kit.upload_pdf(me, 'employee_document', f'pan-{e.code}.pdf', f'PAN card - {e.name}', ['Permanent Account Number card.'])
@@ -83,15 +87,16 @@ def seed_documents(ctx: DemoContext) -> None:
 def seed_assets(ctx: DemoContext) -> None:
     """Laptops, phones and ID cards, most of them handed out."""
     kit, hr = ctx.kit, ctx.hr
-    if already_seeded(ctx, 'assets', "SELECT 1 FROM asset WHERE company_id = %s AND tag = 'LAP-OLD-7'", 'SELECT 1 FROM asset WHERE company_id = %s LIMIT 1'):
+    if already_seeded(ctx, 'assets', Asset.objects.filter(tag='LAP-OLD-7'), Asset.objects.all()):
         return
     lifecycle.ensure_defaults(hr.user)
     kit.call('GET /lifecycle/asset-types', lifecycle.asset_types, hr.user)  # creates the default types on first use
 
     def type_id(name: str) -> str:
-        r = one('SELECT id FROM asset_type WHERE company_id = %s AND lower(name) = lower(%s)', [ctx.company_id, name])
-        if r:
-            return str(r['id'])
+        found = (AssetType.objects.for_company(ctx.company_id).alias(lname=Lower('name')).filter(lname=name.lower())
+                 .values_list('id', flat=True).first())
+        if found:
+            return str(found)
         return str(kit.call('POST /lifecycle/asset-types', lifecycle.add_asset_type, hr.user, {'name': name})['id'])
     laptop, phone, card = type_id('Laptop'), type_id('Mobile phone'), type_id('ID card')
     models = ['MacBook Pro 14 M3', 'Dell Latitude 7440', 'ThinkPad X1 Carbon Gen 11', 'MacBook Air 13 M2']
@@ -119,8 +124,7 @@ def seed_assets(ctx: DemoContext) -> None:
 def seed_lifecycle(ctx: DemoContext) -> None:
     """Onboarding for the latest joiners (part done), a probation review waiting for HR, and a resignation in clearance."""
     kit, hr = ctx.kit, ctx.hr
-    if already_seeded(ctx, 'lifecycle', 'SELECT 1 FROM employee_exit WHERE company_id = %s LIMIT 1',
-                      'SELECT 1 FROM lifecycle_case WHERE company_id = %s LIMIT 1'):
+    if already_seeded(ctx, 'lifecycle', EmployeeExit.objects.all(), LifecycleCase.objects.all()):
         return
     lifecycle.ensure_defaults(hr.user)
     kit.call('GET /lifecycle/templates', lifecycle.templates, hr.user)
@@ -139,7 +143,8 @@ def seed_lifecycle(ctx: DemoContext) -> None:
 
     # Probation: the newest joiner's manager recommends confirmation; it waits for HR in Approvals.
     on_probation = newest[1] if len(newest) > 1 else newest[0]
-    execute('UPDATE employee SET probation_end = %s WHERE id = %s AND probation_end IS NULL', [add_days_iso(ctx.today, 9), on_probation.id])
+    (Employee.objects.for_company(ctx.company_id).filter(pk=on_probation.id, probation_end__isnull=True)
+     .update(probation_end=add_days_iso(ctx.today, 9)))
     mgr = ctx.manager_of(on_probation)
     kit.call('POST /lifecycle/probation/reviews', lifecycle.submit_review, mgr.user,
              {'employeeId': on_probation.id, 'rating': 4, 'recommendation': 'confirm',
@@ -175,8 +180,7 @@ TICKETS = [
 def seed_helpdesk(ctx: DemoContext) -> None:
     """Help desk tickets in every state, with replies."""
     kit, hr = ctx.kit, ctx.hr
-    if already_seeded(ctx, 'helpdesk', "SELECT 1 FROM helpdesk_ticket WHERE company_id = %s AND subject = 'Parking space for two-wheelers'",
-                      'SELECT 1 FROM helpdesk_ticket WHERE company_id = %s LIMIT 1'):
+    if already_seeded(ctx, 'helpdesk', HelpdeskTicket.objects.filter(subject='Parking space for two-wheelers'), HelpdeskTicket.objects.all()):
         return
     cats = kit.call('GET /helpdesk/categories', helpdesk.list_categories, hr.user)
 

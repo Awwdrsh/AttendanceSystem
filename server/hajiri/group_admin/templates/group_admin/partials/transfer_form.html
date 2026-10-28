@@ -1,0 +1,22 @@
+<form id="transfer-form" class="hj-form" hx-post="{% url 'group_admin:transfer_new' %}" hx-target="this" hx-swap="outerHTML">
+  {% form_errors form %}
+  <div class="hj-form-row">
+    <div>{% employee_picker "employee_id" value=form.employee_id.value label="Employee" required=True error=form.employee_id.errors|first %}</div>
+    <div class="hj-fieldset">
+      <label class="hj-label" for="f-to_company_id">Moves to<span class="req" aria-hidden="true">*</span></label>
+      <select name="to_company_id" id="f-to_company_id" class="hj-select" required hx-get="{% url 'group_admin:transfer_target' %}" hx-target="#transfer-target" hx-swap="innerHTML" hx-trigger="change">
+        {% for id, name in form.fields.to_company_id.choices %}<option value="{{ id }}"{% if id == form.to_company_id.value %} selected{% endif %}>{{ name }}</option>{% endfor %}
+      </select>
+      {% for e in form.to_company_id.errors %}<div class="hj-error">{{ e }}</div>{% endfor %}
+    </div>
+  </div>
+  <div class="hj-form-row">
+    {% bs_date_input "effective_date" value=form.effective_date.value label="First day in the new company" required=True error=form.effective_date.errors|first description="Their last working day here is the day before." %}
+    {% form_field form.emp_code %}
+  </div>
+  {% form_field form.designation %}
+  <div id="transfer-target">{% include "group_admin/partials/transfer_target.html" %}</div>
+  {% form_field form.carry_salary %}
+  {% form_field form.note %}
+  <div class="hj-end"><button class="hj-btn" type="submit" {% confirm_attrs "Transfer this employee? Their employment here ends the day before the transfer date and a new record starts in the other company." label="Transfer" %}><i class="ti ti-arrows-exchange" aria-hidden="true"></i>Transfer</button></div>
+</form>

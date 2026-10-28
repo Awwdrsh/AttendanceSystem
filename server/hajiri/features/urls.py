@@ -1,3 +1,7 @@
-from django.urls import path  # noqa: F401
+from django.urls import path
 
-urlpatterns: list = []
+from . import api
+
+urlpatterns = [
+    path('api/v1/settings/features', api.features, name='api_features'),
+]

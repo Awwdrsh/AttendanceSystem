@@ -5,7 +5,7 @@ import re
 import pytest
 from django.test import Client
 
-from hajiri.core.db import one, rows
+from tests.support.sql import one, rows
 from tests.web.factories import htmx, hx_triggers, toasts
 
 

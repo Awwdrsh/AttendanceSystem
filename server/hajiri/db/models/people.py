@@ -6,10 +6,12 @@ from django.contrib.postgres.fields import ArrayField, DateRangeField
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class Branch(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('Company', models.DO_NOTHING)
+    company = models.ForeignKey('Company', models.DO_NOTHING, related_name='branches')
     code = models.TextField()
     name_en = models.TextField()
     name_ne = models.TextField(blank=True, null=True)
@@ -17,69 +19,144 @@ class Branch(models.Model):
     created_at = models.DateTimeField(db_default=Now())
     address = models.TextField(blank=True, null=True)
     phone = models.TextField(blank=True, null=True)
-    head_employee = models.ForeignKey('Employee', models.DO_NOTHING, blank=True, null=True)
+    head_employee = models.ForeignKey('Employee', models.DO_NOTHING, related_name='branches_as_head', blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'branch'
         unique_together = (('company', 'code'),)
 
+    def __str__(self):
+        return str(self.name_en)
+
 
 class CareerEvent(models.Model):
+    class Kind(models.TextChoices):
+        HIRE = 'hire', 'Hire'
+        CONFIRMATION = 'confirmation', 'Confirmation'
+        PROMOTION = 'promotion', 'Promotion'
+        TRANSFER = 'transfer', 'Transfer'
+        DESIGNATION_CHANGE = 'designation_change', 'Designation change'
+        GRADE_CHANGE = 'grade_change', 'Grade change'
+        MANAGER_CHANGE = 'manager_change', 'Manager change'
+        EMPLOYMENT_TYPE_CHANGE = 'employment_type_change', 'Employment type change'
+        SALARY_REVISION = 'salary_revision', 'Salary revision'
+        SEPARATION = 'separation', 'Separation'
+        REHIRE = 'rehire', 'Rehire'
+        NOTE = 'note', 'Note'
+        SUSPENSION = 'suspension', 'Suspension'
+        LEAVE_OF_ABSENCE = 'leave_of_absence', 'Leave of absence'
+        ACTING = 'acting', 'Acting'
+        DEPUTATION = 'deputation', 'Deputation'
+
+    class Status(models.TextChoices):
+        SCHEDULED = 'scheduled', 'Scheduled'
+        APPLIED = 'applied', 'Applied'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('Company', models.DO_NOTHING)
-    employee = models.ForeignKey('Employee', models.DO_NOTHING)
-    kind = models.TextField()
+    company = models.ForeignKey('Company', models.DO_NOTHING, related_name='career_events')
+    employee = models.ForeignKey('Employee', models.DO_NOTHING, related_name='career_events')
+    kind = models.TextField(choices=Kind)
     effective_date = models.DateField()
     details = models.JSONField(db_default={})
     before = models.JSONField(blank=True, null=True)
     note = models.TextField(blank=True, null=True)
-    status = models.TextField(db_default='scheduled')
+    status = models.TextField(choices=Status, db_default='scheduled')
     applied_at = models.DateTimeField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='career_events_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'career_event'
 
+    def __str__(self):
+        return f'CareerEvent {self.id}'
+
 
 class Designation(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='designations')
     code = models.TextField()
     name_en = models.TextField()
     grade = models.TextField(blank=True, null=True)
     job_level = models.SmallIntegerField(blank=True, null=True)
-    org_unit = models.ForeignKey('OrgUnit', models.DO_NOTHING, blank=True, null=True)
+    org_unit = models.ForeignKey('OrgUnit', models.DO_NOTHING, related_name='designations', blank=True, null=True)
     description = models.TextField(blank=True, null=True)
     active = models.BooleanField(db_default=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'designation'
         unique_together = (('company', 'code'),)
 
+    def __str__(self):
+        return str(self.name_en)
+
 
 class Employee(models.Model):
+    class BloodGroup(models.TextChoices):
+        A_POS = 'A+', 'A+'
+        A_NEG = 'A-', 'A-'
+        B_POS = 'B+', 'B+'
+        B_NEG = 'B-', 'B-'
+        AB_POS = 'AB+', 'AB+'
+        AB_NEG = 'AB-', 'AB-'
+        O_POS = 'O+', 'O+'
+        O_NEG = 'O-', 'O-'
+
+    class Gender(models.TextChoices):
+        MALE = 'male', 'Male'
+        FEMALE = 'female', 'Female'
+        OTHER = 'other', 'Other'
+
+    class MaritalStatus(models.TextChoices):
+        SINGLE = 'single', 'Single'
+        COUPLE = 'couple', 'Couple'
+
+    class Regime(models.TextChoices):
+        SSF = 'ssf', 'SSF'
+        PF = 'pf', 'PF'
+        NONE = 'none', 'None'
+
+    class RemoteAreaClass(models.TextChoices):
+        A = 'A', 'A'
+        B = 'B', 'B'
+        C = 'C', 'C'
+        D = 'D', 'D'
+
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        EXITED = 'exited', 'Exited'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='employees')
     emp_code = models.TextField()
     name_en = models.TextField()
     name_ne = models.TextField(blank=True, null=True)
-    gender = models.TextField(blank=True, null=True)
+    gender = models.TextField(choices=Gender, blank=True, null=True)
     dob = models.DateField(blank=True, null=True)
     ot_eligible = models.BooleanField(db_default=True)
     weekly_off_days = ArrayField(models.SmallIntegerField(), db_default=[6])
-    status = models.TextField(db_default='active')
+    status = models.TextField(choices=Status, db_default='active')
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
-    marital_status = models.TextField(blank=True, null=True)
+    marital_status = models.TextField(choices=MaritalStatus, blank=True, null=True)
     join_date = models.DateField(blank=True, null=True)
     exit_date = models.DateField(blank=True, null=True)
     designation = models.TextField(blank=True, null=True)
     grade = models.TextField(blank=True, null=True)
     phone = models.TextField(blank=True, null=True)
     email = models.TextField(blank=True, null=True)
-    regime = models.TextField(db_default='ssf')
+    regime = models.TextField(choices=Regime, db_default='ssf')
     ssf_id = models.TextField(blank=True, null=True)
     pf_id = models.TextField(blank=True, null=True)
     cit_id = models.TextField(blank=True, null=True)
@@ -90,13 +167,13 @@ class Employee(models.Model):
     bank_account_enc = models.BinaryField(blank=True, null=True)
     bank_account_last4 = models.TextField(blank=True, null=True)
     is_resident = models.BooleanField(db_default=True)
-    remote_area_class = models.TextField(blank=True, null=True)
+    remote_area_class = models.TextField(choices=RemoteAreaClass, blank=True, null=True)
     disability = models.BooleanField(db_default=False)
     festival_month = models.SmallIntegerField(blank=True, null=True)
     probation_end = models.DateField(blank=True, null=True)
     work_from_home = models.BooleanField(db_default=False)
-    designation_ref = models.ForeignKey(Designation, models.DO_NOTHING, db_column='designation_id', blank=True, null=True)
-    blood_group = models.TextField(blank=True, null=True)
+    designation_ref = models.ForeignKey(Designation, models.DO_NOTHING, related_name='employees', db_column='designation_id', blank=True, null=True)
+    blood_group = models.TextField(choices=BloodGroup, blank=True, null=True)
     nationality = models.TextField(blank=True, null=True)
     personal_email = models.TextField(blank=True, null=True)
     personal_phone = models.TextField(blank=True, null=True)
@@ -113,71 +190,107 @@ class Employee(models.Model):
     licence_no_enc = models.BinaryField(blank=True, null=True)
     licence_expiry = models.DateField(blank=True, null=True)
     confirmed_on = models.DateField(blank=True, null=True)
-    avatar_file = models.ForeignKey('StoredFile', models.DO_NOTHING, blank=True, null=True)
+    avatar_file = models.ForeignKey('StoredFile', models.DO_NOTHING, related_name='employees', blank=True, null=True)
     field_work = models.BooleanField(db_default=False)
     contract_end = models.DateField(blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'employee'
         unique_together = (('company', 'emp_code'),)
 
+    def __str__(self):
+        return str(self.name_en)
+
 
 class EmployeeAssignment(models.Model):
+    class EmploymentType(models.TextChoices):
+        REGULAR = 'regular', 'Regular'
+        WORK_BASED = 'work_based', 'Work based'
+        TIME_BASED = 'time_based', 'Time based'
+        CASUAL = 'casual', 'Casual'
+        PART_TIME = 'part_time', 'Part time'
+
     pk = models.CompositePrimaryKey('employee_id', 'valid')
-    employee = models.ForeignKey(Employee, models.DO_NOTHING)
+    employee = models.ForeignKey(Employee, models.DO_NOTHING, related_name='employee_assignments')
     valid = DateRangeField()
-    org_unit = models.ForeignKey('OrgUnit', models.DO_NOTHING, blank=True, null=True)
-    branch = models.ForeignKey(Branch, models.DO_NOTHING, blank=True, null=True)
-    manager = models.ForeignKey(Employee, models.DO_NOTHING, related_name='employeeassignment_manager_set', blank=True, null=True)
-    employment_type = models.TextField()
+    org_unit = models.ForeignKey('OrgUnit', models.DO_NOTHING, related_name='employee_assignments', blank=True, null=True)
+    branch = models.ForeignKey(Branch, models.DO_NOTHING, related_name='employee_assignments', blank=True, null=True)
+    manager = models.ForeignKey(Employee, models.DO_NOTHING, related_name='employee_assignments_as_manager', blank=True, null=True)
+    employment_type = models.TextField(choices=EmploymentType)
     probation_end = models.DateField(blank=True, null=True)
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'employee_assignment'
 
+    def __str__(self):
+        return f'EmployeeAssignment {self.pk}'
+
 
 class EmployeeConfirmation(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey(Employee, models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='employee_confirmations')
+    employee = models.ForeignKey(Employee, models.DO_NOTHING, related_name='employee_confirmations')
     confirmed_on = models.DateField()
-    review = models.ForeignKey('ProbationReview', models.DO_NOTHING, blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    review = models.ForeignKey('ProbationReview', models.DO_NOTHING, related_name='employee_confirmations', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='employee_confirmations_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'employee_confirmation'
 
+    def __str__(self):
+        return f'EmployeeConfirmation {self.id}'
+
 
 class EmployeeDocument(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        VERIFIED = 'verified', 'Verified'
+        REJECTED = 'rejected', 'Rejected'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey(Employee, models.DO_NOTHING)
-    category = models.ForeignKey('hajiri.DocumentCategory', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='employee_documents')
+    employee = models.ForeignKey(Employee, models.DO_NOTHING, related_name='employee_documents')
+    category = models.ForeignKey('hajiri.DocumentCategory', models.DO_NOTHING, related_name='employee_documents')
     title = models.TextField()
-    file = models.ForeignKey('StoredFile', models.DO_NOTHING)
+    file = models.ForeignKey('StoredFile', models.DO_NOTHING, related_name='employee_documents')
     version = models.IntegerField(db_default=1)
-    replaces = models.ForeignKey('self', models.DO_NOTHING, blank=True, null=True)
+    replaces = models.ForeignKey('self', models.DO_NOTHING, related_name='employee_documents_as_replaces', blank=True, null=True)
     is_current = models.BooleanField(db_default=True)
-    status = models.TextField(db_default='pending')
+    status = models.TextField(choices=Status, db_default='pending')
     reject_reason = models.TextField(blank=True, null=True)
     expiry_date = models.DateField(blank=True, null=True)
     visible_to_employee = models.BooleanField(db_default=True)
     notes = models.TextField(blank=True, null=True)
-    uploaded_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='uploaded_by', blank=True, null=True)
-    verified_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='verified_by', related_name='employeedocument_verified_by_set', blank=True, null=True)
+    uploaded_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='employee_documents_as_uploaded_by', db_column='uploaded_by', blank=True, null=True)
+    verified_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='employee_documents_as_verified_by', db_column='verified_by', blank=True, null=True)
     verified_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     deleted_at = models.DateTimeField(blank=True, null=True)
-    deleted_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='deleted_by', related_name='employeedocument_deleted_by_set', blank=True, null=True)
+    deleted_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='employee_documents_as_deleted_by', db_column='deleted_by', blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'employee_document'
 
+    def __str__(self):
+        return str(self.title)
+
 
 class EmployeeEducation(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey(Employee, models.DO_NOTHING)
+    employee = models.ForeignKey(Employee, models.DO_NOTHING, related_name='employee_educations')
     level = models.TextField()
     degree = models.TextField(blank=True, null=True)
     field = models.TextField(blank=True, null=True)
@@ -188,13 +301,19 @@ class EmployeeEducation(models.Model):
     result = models.TextField(blank=True, null=True)
     sort = models.SmallIntegerField(db_default=0)
 
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'employee_education'
+
+    def __str__(self):
+        return f'EmployeeEducation {self.id}'
 
 
 class EmployeeEmergencyContact(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey(Employee, models.DO_NOTHING)
+    employee = models.ForeignKey(Employee, models.DO_NOTHING, related_name='employee_emergency_contacts')
     name = models.TextField()
     relation = models.TextField()
     phone = models.TextField()
@@ -202,15 +321,38 @@ class EmployeeEmergencyContact(models.Model):
     address = models.TextField(blank=True, null=True)
     sort = models.SmallIntegerField(db_default=0)
 
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'employee_emergency_contact'
 
+    def __str__(self):
+        return str(self.name)
+
 
 class EmployeeExit(models.Model):
+    class Kind(models.TextChoices):
+        RESIGNATION = 'resignation', 'Resignation'
+        TERMINATION = 'termination', 'Termination'
+        RETIREMENT = 'retirement', 'Retirement'
+        CONTRACT_END = 'contract_end', 'Contract end'
+        DEATH = 'death', 'Death'
+        OTHER = 'other', 'Other'
+        TRANSFER = 'transfer', 'Transfer to a sister company'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        ACCEPTED = 'accepted', 'Accepted'
+        REJECTED = 'rejected', 'Rejected'
+        WITHDRAWN = 'withdrawn', 'Withdrawn'
+        CANCELLED = 'cancelled', 'Cancelled'
+        COMPLETED = 'completed', 'Completed'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.OneToOneField(Employee, models.DO_NOTHING)
-    kind = models.TextField()
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='employee_exits')
+    employee = models.ForeignKey(Employee, models.DO_NOTHING, related_name='employee_exits')
+    kind = models.TextField(choices=Kind)
     voluntary = models.BooleanField()
     reason_category = models.TextField(blank=True, null=True)
     reason = models.TextField(blank=True, null=True)
@@ -218,19 +360,27 @@ class EmployeeExit(models.Model):
     notice_days = models.SmallIntegerField(db_default=0)
     proposed_lwd = models.DateField()
     accepted_lwd = models.DateField(blank=True, null=True)
-    status = models.TextField(db_default='pending')
-    initiated_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='initiated_by', blank=True, null=True)
+    status = models.TextField(choices=Status, db_default='pending')
+    initiated_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='employee_exits_as_initiated_by', db_column='initiated_by', blank=True, null=True)
     decided_at = models.DateTimeField(blank=True, null=True)
     completed_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'employee_exit'
+        constraints = [models.UniqueConstraint(fields=['employee'], condition=models.Q(status__in=['pending', 'accepted']),
+                                              name='employee_exit_open_idx')]
+
+    def __str__(self):
+        return f'EmployeeExit {self.id}'
 
 
 class EmployeeExperience(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey(Employee, models.DO_NOTHING)
+    employee = models.ForeignKey(Employee, models.DO_NOTHING, related_name='employee_experiences')
     organisation = models.TextField()
     designation = models.TextField(blank=True, null=True)
     from_date = models.DateField(blank=True, null=True)
@@ -239,13 +389,19 @@ class EmployeeExperience(models.Model):
     reason_for_leaving = models.TextField(blank=True, null=True)
     sort = models.SmallIntegerField(db_default=0)
 
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'employee_experience'
+
+    def __str__(self):
+        return f'EmployeeExperience {self.id}'
 
 
 class EmployeeFamily(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey(Employee, models.DO_NOTHING)
+    employee = models.ForeignKey(Employee, models.DO_NOTHING, related_name='employee_families')
     name = models.TextField()
     relation = models.TextField()
     dob = models.DateField(blank=True, null=True)
@@ -256,112 +412,194 @@ class EmployeeFamily(models.Model):
     nominee_share = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True)
     sort = models.SmallIntegerField(db_default=0)
 
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'employee_family'
 
+    def __str__(self):
+        return str(self.name)
+
 
 class EmployeeFieldHistory(models.Model):
+    class Source(models.TextChoices):
+        HR_EDIT = 'hr_edit', 'Hr edit'
+        CHANGE_REQUEST = 'change_request', 'Change request'
+        CAREER_EVENT = 'career_event', 'Career event'
+        IMPORT = 'import', 'Import'
+        SYSTEM = 'system', 'System'
+
     id = models.BigAutoField(primary_key=True)
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey(Employee, models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='employee_field_histories')
+    employee = models.ForeignKey(Employee, models.DO_NOTHING, related_name='employee_field_histories')
     field = models.TextField()
     old_value = models.TextField(blank=True, null=True)
     new_value = models.TextField(blank=True, null=True)
-    source = models.TextField()
+    source = models.TextField(choices=Source)
     ref_id = models.UUIDField(blank=True, null=True)
-    changed_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='changed_by', blank=True, null=True)
+    changed_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='employee_field_histories_as_changed_by', db_column='changed_by', blank=True, null=True)
     changed_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'employee_field_history'
 
+    def __str__(self):
+        return f'EmployeeFieldHistory {self.id}'
+
 
 class EmployeeTempAssignment(models.Model):
+    class Kind(models.TextChoices):
+        ACTING = 'acting', 'Acting'
+        DEPUTATION = 'deputation', 'Deputation'
+
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        ENDED = 'ended', 'Ended'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey(Employee, models.DO_NOTHING)
-    kind = models.TextField()
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='employee_temp_assignments')
+    employee = models.ForeignKey(Employee, models.DO_NOTHING, related_name='employee_temp_assignments')
+    kind = models.TextField(choices=Kind)
     designation = models.TextField(blank=True, null=True)
-    designation_ref = models.ForeignKey(Designation, models.DO_NOTHING, db_column='designation_id', blank=True, null=True)
-    branch = models.ForeignKey(Branch, models.DO_NOTHING, blank=True, null=True)
-    org_unit = models.ForeignKey('OrgUnit', models.DO_NOTHING, blank=True, null=True)
+    designation_ref = models.ForeignKey(Designation, models.DO_NOTHING, related_name='employee_temp_assignments', db_column='designation_id', blank=True, null=True)
+    branch = models.ForeignKey(Branch, models.DO_NOTHING, related_name='employee_temp_assignments', blank=True, null=True)
+    org_unit = models.ForeignKey('OrgUnit', models.DO_NOTHING, related_name='employee_temp_assignments', blank=True, null=True)
     start_date = models.DateField()
     end_date = models.DateField()
     note = models.TextField(blank=True, null=True)
-    status = models.TextField(db_default='active')
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    status = models.TextField(choices=Status, db_default='active')
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='employee_temp_assignments_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     ended_at = models.DateTimeField(blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'employee_temp_assignment'
 
+    def __str__(self):
+        return f'EmployeeTempAssignment {self.id}'
+
 
 class KyeCampaign(models.Model):
+    class AudienceKind(models.TextChoices):
+        ALL = 'all', 'All'
+        BRANCH = 'branch', 'Branch'
+        DEPARTMENT = 'department', 'Department'
+
+    class Status(models.TextChoices):
+        OPEN = 'open', 'Open'
+        CLOSED = 'closed', 'Closed'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='kye_campaigns')
     title = models.TextField()
     message = models.TextField(blank=True, null=True)
     sections = ArrayField(models.TextField())
-    audience_kind = models.TextField(db_default='all')
+    audience_kind = models.TextField(choices=AudienceKind, db_default='all')
     audience_id = models.UUIDField(blank=True, null=True)
     due_date = models.DateField()
-    status = models.TextField(db_default='open')
+    status = models.TextField(choices=Status, db_default='open')
     reminded = models.BooleanField(db_default=False)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='kye_campaigns_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     closed_at = models.DateTimeField(blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'kye_campaign'
 
+    def __str__(self):
+        return str(self.title)
+
 
 class KyeResponse(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        CONFIRMED = 'confirmed', 'Confirmed'
+        CHANGES_REQUESTED = 'changes_requested', 'Changes requested'
+
     pk = models.CompositePrimaryKey('campaign_id', 'employee_id')
-    campaign = models.ForeignKey(KyeCampaign, models.DO_NOTHING)
-    employee = models.ForeignKey(Employee, models.DO_NOTHING)
-    status = models.TextField(db_default='pending')
+    campaign = models.ForeignKey(KyeCampaign, models.DO_NOTHING, related_name='kye_responses')
+    employee = models.ForeignKey(Employee, models.DO_NOTHING, related_name='kye_responses')
+    status = models.TextField(choices=Status, db_default='pending')
     note = models.TextField(blank=True, null=True)
     responded_at = models.DateTimeField(blank=True, null=True)
     last_nudged_at = models.DateTimeField(blank=True, null=True)
 
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'kye_response'
 
+    def __str__(self):
+        return f'KyeResponse {self.pk}'
+
 
 class OrgUnit(models.Model):
+    class Kind(models.TextChoices):
+        DEPARTMENT = 'department', 'Department'
+        TEAM = 'team', 'Team'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    branch = models.ForeignKey(Branch, models.DO_NOTHING, blank=True, null=True)
-    parent = models.ForeignKey('self', models.DO_NOTHING, blank=True, null=True)
-    kind = models.TextField()
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='org_units')
+    branch = models.ForeignKey(Branch, models.DO_NOTHING, related_name='org_units', blank=True, null=True)
+    parent = models.ForeignKey('self', models.DO_NOTHING, related_name='children', blank=True, null=True)
+    kind = models.TextField(choices=Kind)
     code = models.TextField()
     name_en = models.TextField()
     name_ne = models.TextField(blank=True, null=True)
-    head_employee = models.ForeignKey(Employee, models.DO_NOTHING, blank=True, null=True)
+    head_employee = models.ForeignKey(Employee, models.DO_NOTHING, related_name='org_units_as_head', blank=True, null=True)
     description = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'org_unit'
         unique_together = (('company', 'code'),)
 
+    def __str__(self):
+        return str(self.name_en)
+
 
 class ProfileChangeRequest(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey(Employee, models.DO_NOTHING)
-    requested_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='requested_by')
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='profile_change_requests')
+    employee = models.ForeignKey(Employee, models.DO_NOTHING, related_name='profile_change_requests')
+    requested_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='profile_change_requests_as_requested_by', db_column='requested_by')
     section = models.TextField()
     payload_enc = models.BinaryField()
     summary = models.JSONField(db_default={})
     reason = models.TextField(blank=True, null=True)
-    proof_file = models.ForeignKey('StoredFile', models.DO_NOTHING, blank=True, null=True)
-    status = models.TextField(db_default='pending')
-    decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='decided_by', related_name='profilechangerequest_decided_by_set', blank=True, null=True)
+    proof_file = models.ForeignKey('StoredFile', models.DO_NOTHING, related_name='profile_change_requests', blank=True, null=True)
+    status = models.TextField(choices=Status, db_default='pending')
+    decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='profile_change_requests_as_decided_by', db_column='decided_by', blank=True, null=True)
     decided_at = models.DateTimeField(blank=True, null=True)
     decision_reason = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'profile_change_request'
+
+    def __str__(self):
+        return f'ProfileChangeRequest {self.id}'

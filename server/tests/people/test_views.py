@@ -2,7 +2,7 @@
 from django.test import Client
 
 from hajiri.core.clock import npt_today
-from hajiri.core.db import one
+from tests.support.sql import one
 from hajiri.people import service as ppl
 from tests.web.factories import htmx, hx_triggers, sign_in, toasts
 

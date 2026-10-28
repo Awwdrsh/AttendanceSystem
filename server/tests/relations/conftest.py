@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from django.test import Client
 
-from hajiri.core.db import execute, one
+from hajiri.db.models import Branch
 from tests.web.factories import make_company, make_employee, make_user, sign_in
 from tests.web.fixtures import *  # noqa: F401,F403
 
@@ -23,7 +23,7 @@ def client_for(user) -> Client:
 @pytest.fixture
 def world(db):
     co = make_company('DEMO', 'Demo Company')
-    branch = str(one("INSERT INTO branch (company_id, code, name_en) VALUES (%s, 'HQ', 'Head Office') RETURNING id", [co.id])['id'])
+    branch = str(Branch.objects.create(company=co, code='HQ', name_en='Head Office').id)
 
     def new_employee(code: str, **extra):
         extra.setdefault('join_date', date(2020, 1, 1))
@@ -43,4 +43,4 @@ def world(db):
     other_hr = make_user(other, roles=['hr'], name='Other HR', email='hr@other-rel.local')
     return SimpleNamespace(co=co, company_id=str(co.id), branch=branch, sita_e=sita_e, ram_e=ram_e, sita=sita, ram=ram, hr=hr, hr2=hr2,
                            member=member, member_e=member_e, outsider=outsider, other=other, other_hr=other_hr,
-                           new_employee=new_employee, execute=execute)
+                           new_employee=new_employee)

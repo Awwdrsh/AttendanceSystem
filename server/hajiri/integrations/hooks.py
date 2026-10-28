@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from hajiri.core.db import one
+from hajiri.db.models import Employee
 from hajiri.worker.registry import hook
 
 
@@ -50,8 +50,8 @@ def run_hire_hooks(event: HireEvent) -> None:
 def _joined(e: HireEvent) -> None:
     record = hook('people.record_career_event')
     if record:
-        emp = one('SELECT designation FROM employee WHERE id = %s', [e.employee_id])
-        designation = emp and emp['designation']
+        designation = (Employee.objects.for_company(e.company_id).filter(pk=e.employee_id)
+                       .values_list('designation', flat=True).first())
         record(company_id=e.company_id, employee_id=e.employee_id, kind='hire', effective_date=e.join_date,
                details={'designation': designation} if designation else {}, note='Hired through the careers pipeline',
                actor_id=e.actor_id)

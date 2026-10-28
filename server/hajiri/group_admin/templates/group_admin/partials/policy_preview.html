@@ -1,0 +1,22 @@
+{% if applied %}{% alert "ok" title="Copied" %}{{ preview.totals.create|num }} created and {{ preview.totals.overwrite|num }} overwritten from {{ preview.source.name }}.{% endalert %}{% endif %}
+{% for t in preview.targets %}
+  {% section t.name hint=t.summary %}
+  {% for s in t.sections %}
+    <h4 class="hj-strong hj-mt-sm">{{ s.label }} <span class="hj-muted hj-small">{{ s.counts.create }} new · {{ s.counts.overwrite }} overwrite · {{ s.counts.keep }} kept · {{ s.counts.same }} same · {{ s.counts.skip }} not copied</span></h4>
+    {% if s.items %}
+    <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+      <tbody>
+      {% for i in s.items %}
+        <tr><td>{{ i.label }}</td>
+          <td>{% if i.action == 'create' %}{% badge "Create" "ok" %}{% elif i.action == 'overwrite' %}{% badge "Overwrite" "warn" %}{% elif i.action == 'keep' %}{% badge "Kept" "idle" %}{% elif i.action == 'same' %}{% badge "Same" "idle" %}{% else %}{% badge "Not copied" "bad" %}{% endif %}</td>
+          <td class="hj-muted hj-small">{{ i.reason|default:"" }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table></div></div>
+    {% else %}<p class="hj-help">Nothing to copy: {{ preview.source.name }} has none.</p>{% endif %}
+  {% endfor %}
+  {% endsection %}
+{% endfor %}
+{% if not applied %}
+  <div class="hj-end hj-mt"><button class="hj-btn" hx-post="{% url 'group_admin:policies_apply' %}" hx-include="#policy-form" hx-target="#policy-preview" hx-swap="innerHTML" {% confirm_attrs "Copy as previewed? Created and overwritten items take effect in those companies at once." label="Copy" %}{% if not preview.totals.create and not preview.totals.overwrite %} disabled{% endif %}><i class="ti ti-copy" aria-hidden="true"></i>Copy {{ preview.totals.create|add:preview.totals.overwrite }} items</button></div>
+{% endif %}

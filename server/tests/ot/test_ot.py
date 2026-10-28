@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from hajiri.core.db import execute, one
+from hajiri.db.models import AttendanceDay, Employee, OtRequest, OtSlip
 from hajiri.leave.services import ledger_balance
 
 from .helpers import days_ago, slip, sub_type
@@ -16,8 +16,8 @@ def test_rejects_more_than_4_hours_a_day_and_more_than_24_hours_a_week(world):
     # Monday..Saturday of a past week each already carry 4 h of OT.
     base = date(2026, 9, 13)  # Sunday
     for i in range(6):
-        execute("""INSERT INTO attendance_day (employee_id, local_date, version, status, ot_min, inputs_hash)
-                   VALUES (%s, %s, 1, 'Present', 240, 'h')""", [world.demo['sita'], (base + timedelta(days=i)).isoformat()])
+        AttendanceDay.objects.create(employee_id=world.demo['sita'], local_date=base + timedelta(days=i), version=1,
+                                     status='Present', ot_min=240, inputs_hash='h')
     r = world.hr.post('/api/v1/ot/requests', {'employeeId': world.demo['sita'], 'localDate': '2026-09-19', 'requestedMin': 60})
     assert r.status_code == 400
     assert 'weekly overtime cap' in r.json()['error']
@@ -33,16 +33,16 @@ def test_manager_approves_a_smaller_amount_past_dated_window_applies_to_employee
     assert item['summary']['requested_min'] == 120
     ok = world.ram.post(f"/api/v1/workflow/{item['instanceId']}/approve", {'approvedMin': 60})
     assert ok.json()['state'] == 'approved'
-    row = one('SELECT approved_min, status FROM ot_request WHERE id = %s', [rid])
+    row = OtRequest.objects.values('approved_min', 'status').get(pk=rid)
     assert row == {'approved_min': 60, 'status': 'approved'}
     assert world.sita.post('/api/v1/ot/requests', {'localDate': days_ago(20), 'requestedMin': 30}).status_code == 400
     assert world.sita.post('/api/v1/ot/requests', {'localDate': d, 'requestedMin': 30}).status_code == 409
 
 
 def test_ineligible_grades_cannot_request_ot(world):
-    execute('UPDATE employee SET ot_eligible = false WHERE id = %s', [world.demo['ram']])
+    Employee.objects.filter(pk=world.demo['ram']).update(ot_eligible=False)
     assert world.ram.post('/api/v1/ot/requests', {'localDate': days_ago(1), 'requestedMin': 30}).status_code == 400
-    execute('UPDATE employee SET ot_eligible = true WHERE id = %s', [world.demo['ram']])
+    Employee.objects.filter(pk=world.demo['ram']).update(ot_eligible=True)
 
 
 # ---------------------------------------------------------------- overtime slips
@@ -53,7 +53,7 @@ def test_hr_approves_a_detected_slip_capped_at_detected_minutes_posted_slip_is_i
     assert len(own.json()['slips']) == 0
     a = world.hr.post(f'/api/v1/ot/slips/{slip_id}/approve', {'approvedMin': 200})
     assert a.json()['approvedMin'] == 120
-    execute("UPDATE ot_slip SET status = 'posted' WHERE id = %s", [slip_id])
+    OtSlip.objects.filter(pk=slip_id).update(status=OtSlip.Status.POSTED)
     assert world.hr.post(f'/api/v1/ot/slips/{slip_id}/reject', {'reason': 'already posted'}).status_code == 409
 
 

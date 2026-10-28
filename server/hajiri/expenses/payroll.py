@@ -17,9 +17,17 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from hajiri.core.db import execute, rows
+from django.db import transaction
+from django.db.models import Exists, F, OuterRef, Q, Sum
+from django.db.models.functions import Now
+
+from hajiri.db.models import ExpenseClaim, ExpensePayout, PayslipLine, SalaryComponent, TravelRequest
 
 from .services import D, money, rs
+
+Payout = ExpensePayout.Status
+Source = ExpensePayout.SourceType
+Code = ExpensePayout.ComponentCode
 
 PAYOUT_COMPONENTS: dict[str, dict] = {
     'EXP_REIMB': {'code': 'EXP_REIMB', 'type': 'earning', 'nameEn': 'Expense reimbursement', 'nameNe': None,
@@ -36,18 +44,24 @@ PAYING_RUNS = frozenset({'regular', 'supplementary', 'off_cycle', 'final_settlem
 
 def release_run_payouts(run_id: str) -> None:
     """Start of a (re)compute: everything this run held goes back to the pool before it is claimed again."""
-    execute("UPDATE expense_payout SET payroll_run_id = NULL WHERE payroll_run_id = %s AND status = 'pending'", [str(run_id)])
+    ExpensePayout.objects.filter(payroll_run_id=run_id, status=Payout.PENDING).update(payroll_run=None)
+
+
+def _claimable(company_id: str, run_id: str):
+    """Pending payouts no other run holds (free, or already held by this run)."""
+    return (ExpensePayout.objects.for_company(company_id).filter(status=Payout.PENDING)
+            .filter(Q(payroll_run__isnull=True) | Q(payroll_run_id=run_id)))
 
 
 def claim_payouts(company_id: str, run_id: str, run_type: str, employee_id: str) -> list[dict]:
     """Claim the employee's pending payouts for this run and return them as payroll inputs."""
     if run_type not in PAYING_RUNS:
         return []
-    r = rows("""UPDATE expense_payout SET payroll_run_id = %s
-                 WHERE id IN (SELECT id FROM expense_payout WHERE company_id = %s AND employee_id = %s AND status = 'pending'
-                                AND (payroll_run_id IS NULL OR payroll_run_id = %s) FOR UPDATE)
-                 RETURNING component_code, amount::text, note""", [str(run_id), str(company_id), str(employee_id), str(run_id)])
-    return [{'code': p['component_code'], 'amount': p['amount'], 'note': p['note'] or ''} for p in r]
+    with transaction.atomic():
+        held = list(_claimable(company_id, run_id).filter(employee_id=employee_id).select_for_update()
+                    .order_by('created_at', 'id').values('id', 'component_code', 'amount', 'note'))
+        ExpensePayout.objects.filter(pk__in=[p['id'] for p in held]).update(payroll_run_id=run_id)
+    return [{'code': p['component_code'], 'amount': str(p['amount']), 'note': p['note'] or ''} for p in held]
 
 
 def with_payout_components(company_id: str, components: list[dict], inputs: list[dict]) -> list[dict]:
@@ -56,8 +70,8 @@ def with_payout_components(company_id: str, components: list[dict], inputs: list
               if c in PAYOUT_COMPONENTS and not any(x['code'] == c for x in components)]
     if not needed:
         return components
-    custom = {x['code']: x['name_en'] for x in rows(
-        'SELECT code, name_en FROM salary_component WHERE company_id = %s AND code = ANY(%s) AND active', [str(company_id), needed])}
+    custom = dict(SalaryComponent.objects.for_company(company_id).filter(code__in=needed, active=True)
+                  .values_list('code', 'name_en'))
     return [*components, *({**PAYOUT_COMPONENTS[c], 'nameEn': custom.get(c, PAYOUT_COMPONENTS[c]['nameEn'])} for c in needed)]
 
 
@@ -65,12 +79,10 @@ def payout_preview(company_id: str, run_id: str, run_type: str, employee_ids: li
     """Pre-flight: what this run will pay out (or recover) for claims and travel."""
     if run_type not in PAYING_RUNS or not employee_ids:
         return {'count': 0, 'reimburse': '0.00', 'recover': '0.00', 'employees': []}
-    r = rows("""SELECT e.emp_code, p.component_code, p.amount::text FROM expense_payout p JOIN employee e ON e.id = p.employee_id
-                 WHERE p.company_id = %s AND p.employee_id = ANY(%s::uuid[]) AND p.status = 'pending'
-                   AND (p.payroll_run_id IS NULL OR p.payroll_run_id = %s) ORDER BY e.emp_code""",
-             [str(company_id), [str(e) for e in employee_ids], str(run_id)])
-    reimburse = sum((D(x['amount']) for x in r if x['component_code'] != 'EXP_RECOVERY'), Decimal(0))
-    recover = sum((D(x['amount']) for x in r if x['component_code'] == 'EXP_RECOVERY'), Decimal(0))
+    r = list(_claimable(company_id, run_id).filter(employee_id__in=[str(e) for e in employee_ids])
+             .order_by('employee__emp_code', 'created_at', 'id').values('component_code', 'amount', emp_code=F('employee__emp_code')))
+    reimburse = sum((x['amount'] for x in r if x['component_code'] != Code.EXP_RECOVERY), Decimal(0))
+    recover = sum((x['amount'] for x in r if x['component_code'] == Code.EXP_RECOVERY), Decimal(0))
     by_emp: dict[str, int] = {}
     for x in r:
         by_emp[x['emp_code']] = by_emp.get(x['emp_code'], 0) + 1
@@ -89,38 +101,45 @@ def settle_run_payouts(run_id: str) -> None:
     Lock: the run's payouts are paid. A recovery the pay could not fully cover (deductions are capped at the pay left)
     keeps the rest outstanding as a new payout for the next run, and the source records are marked paid.
     """
-    held = rows("""SELECT id::text, company_id::text, employee_id::text, source_type, source_id::text, component_code, amount::text, note
-                     FROM expense_payout WHERE payroll_run_id = %s AND status = 'pending' ORDER BY created_at FOR UPDATE""", [str(run_id)])
-    if not held:
-        return
-    recovered = rows("""SELECT ps.employee_id::text, coalesce(sum(l.amount), 0)::text AS amount FROM payslip ps
-                          JOIN payslip_line l ON l.payslip_id = ps.id
-                         WHERE ps.run_id = %s AND l.component_code = 'EXP_RECOVERY' GROUP BY ps.employee_id""", [str(run_id)])
-    available = {x['employee_id']: D(x['amount']) for x in recovered}
-    for p in held:
-        paid = D(p['amount'])
-        if p['component_code'] == 'EXP_RECOVERY':
-            left = available.get(p['employee_id'], Decimal(0))
-            paid = left if left < paid else paid
-            available[p['employee_id']] = left - paid
-            rest = D(p['amount']) - paid
-            if rest > 0:
-                execute("""INSERT INTO expense_payout (company_id, employee_id, source_type, source_id, component_code, amount, note,
-                                                       parent_payout_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                        [p['company_id'], p['employee_id'], p['source_type'], p['source_id'], p['component_code'], money(rest),
-                         f"{p['note'] or ''} (balance)"[:200], p['id']])
-        execute("UPDATE expense_payout SET status = 'paid', paid_amount = %s, paid_at = now() WHERE id = %s", [money(paid), p['id']])
-    mark_sources_paid(held)
+    with transaction.atomic():
+        held = list(ExpensePayout.objects.filter(payroll_run_id=run_id, status=Payout.PENDING).select_for_update()
+                    .order_by('created_at', 'id'))
+        if not held:
+            return
+        available = {str(x['payslip__employee_id']): x['amount'] for x in (
+            PayslipLine.objects.filter(payslip__run_id=run_id, component_code=Code.EXP_RECOVERY)
+            .values('payslip__employee_id').annotate(amount=Sum('amount')).order_by())}
+        balances = []
+        for p in held:
+            paid = p.amount
+            if p.component_code == Code.EXP_RECOVERY:
+                emp = str(p.employee_id)
+                left = available.get(emp, Decimal(0))
+                paid = min(left, paid)
+                available[emp] = left - paid
+                rest = p.amount - paid
+                if rest > 0:
+                    balances.append(ExpensePayout(
+                        company_id=p.company_id, employee_id=p.employee_id, source_type=p.source_type, source_id=p.source_id,
+                        component_code=p.component_code, amount=money(rest), note=f"{p.note or ''} (balance)"[:200],
+                        parent_payout_id=p.id))
+            ExpensePayout.objects.filter(pk=p.id).update(status=Payout.PAID, paid_amount=money(paid), paid_at=Now())
+        ExpensePayout.objects.bulk_create(balances)
+        mark_sources_paid([{'source_type': p.source_type, 'source_id': p.source_id} for p in held])
 
 
 def mark_sources_paid(payouts: list[dict]) -> None:
-    for p in payouts:
-        if p['source_type'] == 'expense_claim':
-            execute("""UPDATE expense_claim c SET status = 'paid', paid_at = now(), updated_at = now() WHERE c.id = %s AND c.status = 'approved'
-                         AND NOT EXISTS (SELECT 1 FROM expense_payout x WHERE x.source_type = 'expense_claim' AND x.source_id = c.id
-                                           AND x.status = 'pending')""", [str(p['source_id'])])
-        elif p['source_type'] == 'travel_advance':
-            execute("UPDATE travel_request SET advance_status = 'paid' WHERE id = %s AND advance_status = 'pending'", [str(p['source_id'])])
+    """A claim is paid once none of its payouts is still pending; a travel advance once its payout is paid."""
+    claims = {str(p['source_id']) for p in payouts if p['source_type'] == Source.EXPENSE_CLAIM}
+    advances = {str(p['source_id']) for p in payouts if p['source_type'] == Source.TRAVEL_ADVANCE}
+    if claims:
+        still_pending = ExpensePayout.objects.filter(source_type=Source.EXPENSE_CLAIM, source_id=OuterRef('pk'),
+                                                     status=Payout.PENDING)
+        (ExpenseClaim.objects.filter(pk__in=claims, status=ExpenseClaim.Status.APPROVED).exclude(Exists(still_pending))
+         .update(status=ExpenseClaim.Status.PAID, paid_at=Now(), updated_at=Now()))
+    if advances:
+        (TravelRequest.objects.filter(pk__in=advances, advance_status=TravelRequest.AdvanceStatus.PENDING)
+         .update(advance_status=TravelRequest.AdvanceStatus.PAID))
 
 
 __all__ = ['PAYOUT_COMPONENTS', 'PAYING_RUNS', 'release_run_payouts', 'claim_payouts', 'with_payout_components', 'payout_preview',

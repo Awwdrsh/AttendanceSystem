@@ -15,6 +15,15 @@
     </select>
   </form>
   {% include "timesheets/partials/timesheet_table.html" with rows=timesheets kind="history" empty_title="No timesheets yet" empty_hint="Timesheets appear here once people submit their weeks." %}
+  {% if page.has_other_pages %}
+  <nav class="hj-row hj-between" aria-label="History pages">
+    <span class="hj-small hj-muted">{{ page.start_index }} to {{ page.end_index }} of {{ page.paginator.count }}</span>
+    <span class="hj-row" style="--gap:8px">
+      {% if page.has_previous %}<a class="hj-btn default sm" href="?view=history&status={{ status }}&page={{ page.previous_page_number }}" hx-get="?view=history&status={{ status }}&page={{ page.previous_page_number }}" hx-target="#ts-review" hx-swap="outerHTML" hx-push-url="true">Newer</a>{% endif %}
+      {% if page.has_next %}<a class="hj-btn default sm" href="?view=history&status={{ status }}&page={{ page.next_page_number }}" hx-get="?view=history&status={{ status }}&page={{ page.next_page_number }}" hx-target="#ts-review" hx-swap="outerHTML" hx-push-url="true">Older</a>{% endif %}
+    </span>
+  </nav>
+  {% endif %}
 {% elif view == 'week' %}
   <div class="hj-section-title">
     <div><h3>Who has submitted</h3><p>{{ label }}</p></div>

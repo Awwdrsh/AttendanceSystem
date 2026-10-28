@@ -7,7 +7,7 @@ import pytest
 from django.test import Client
 
 from hajiri.core import auth
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.leave.services import leave_type_by_code
 from tests.punch.api import post, put, today
 from tests.web.factories import htmx, hx_triggers, toasts

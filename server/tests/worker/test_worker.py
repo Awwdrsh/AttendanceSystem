@@ -7,7 +7,7 @@ from engines.attendance import local_time_ms
 from hajiri.attendance.repo import from_ms
 from hajiri.attendance.service import enqueue_recompute
 from hajiri.core.clock import now as _now
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.worker import registry
 from hajiri.worker.runner import Scheduler
 from hajiri.worker.tasks import (
@@ -216,3 +216,48 @@ def test_scheduler_tick_runs_under_the_worker_lock(demo):
     assert out is not None and 'nightly' in out
     # The nightly marker stops a second scheduler (another process) from running it again that day.
     assert 'nightly' not in Scheduler(senders=[]).due_jobs(datetime(2026, 9, 21, 18, 55, tzinfo=timezone.utc))
+
+
+# ---------------------------------------------------------------- django.tasks
+
+def test_scheduler_enqueues_tasks_once_and_a_task_worker_runs_them(demo):
+    from django_tasks_db.models import DBTaskResult
+    from hajiri.worker.runner import make_task_worker
+    from hajiri.worker.tasks import run_job
+    s = Scheduler()
+    at = datetime(2026, 9, 21, 6, 0, tzinfo=timezone.utc)
+    out = s.tick(at)
+    assert set(out) >= {'queue', 'deliver', 'digest'}
+    assert DBTaskResult.objects.filter(task_path=run_job.module_path, status='READY').count() == len(out)
+    # While a job still waits, the next tick does not queue a copy.
+    again = Scheduler().tick(at)
+    assert again['queue'] == 'already queued'
+    worker = make_task_worker(interval=0)
+    # What db_worker's loop does for each ready task (the loop itself closes connections between tasks, which the
+    # test transaction cannot survive).
+    for task_result in list(DBTaskResult.objects.ready().order_by('enqueued_at')):
+        task_result.claim(worker.worker_id)
+        worker.run_task(task_result)
+    done = DBTaskResult.objects.get(id=out['queue'])
+    assert done.status == 'SUCCESSFUL' and 'queue' in done.return_value
+
+
+def test_run_job_skips_when_the_job_runs_elsewhere(demo):
+    from django.db import connections
+    from hajiri.worker.tasks import run_job
+    other = connections.create_connection('default')      # another worker process, as far as PostgreSQL knows
+    try:
+        with other.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(hashtext('hajiri.job:digest'))")
+        assert run_job.call('digest') == {'digest': {'skipped': 'already running in another worker'}}
+    finally:
+        other.close()
+    assert 'digest' in run_job.call('digest')
+
+
+def test_run_scheduler_once_command(demo):
+    from io import StringIO
+    from django.core.management import call_command
+    out = StringIO()
+    call_command('run_scheduler', '--once', stdout=out)
+    assert '"queue"' in out.getvalue()

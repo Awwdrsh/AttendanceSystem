@@ -1,0 +1,7 @@
+<form class="hj-form" data-modal-title="Add a company to the group" hx-post="{% url 'web:group_company_new' %}" hx-target="this" hx-swap="outerHTML">
+  {% form_errors form %}
+  <p class="hj-help">The new company gets the standard leave types, approval flows and settings. You become its admin; switch to it from the sidebar to add people.</p>
+  <div class="hj-form-row">{% form_field form.code %}{% form_field form.name_en %}</div>
+  {% form_field form.name_ne %}
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit">Add company</button></div>
+</form>

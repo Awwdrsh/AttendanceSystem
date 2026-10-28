@@ -5,10 +5,12 @@ Foreign keys use DO_NOTHING: the database enforces ON DELETE (cascade, set null 
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class DocumentCategory(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='document_categories')
     code = models.TextField()
     name = models.TextField()
     employee_can_upload = models.BooleanField(db_default=True)
@@ -18,75 +20,112 @@ class DocumentCategory(models.Model):
     active = models.BooleanField(db_default=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'document_category'
         unique_together = (('company', 'code'),)
 
+    def __str__(self):
+        return str(self.name)
+
 
 class DocumentExpiryAlert(models.Model):
     pk = models.CompositePrimaryKey('document_id', 'threshold')
-    document = models.ForeignKey('EmployeeDocument', models.DO_NOTHING)
+    document = models.ForeignKey('EmployeeDocument', models.DO_NOTHING, related_name='document_expiry_alerts')
     threshold = models.SmallIntegerField()
     sent_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'document__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'document_expiry_alert'
 
+    def __str__(self):
+        return f'DocumentExpiryAlert {self.pk}'
+
 
 class IssuedLetter(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    template = models.ForeignKey('LetterTemplate', models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='issued_letters')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='issued_letters')
+    template = models.ForeignKey('LetterTemplate', models.DO_NOTHING, related_name='issued_letters', blank=True, null=True)
     template_code = models.TextField()
     ref_no = models.TextField()
     subject = models.TextField()
     html = models.TextField()
     visible_to_employee = models.BooleanField(db_default=True)
-    request = models.ForeignKey('LetterRequest', models.DO_NOTHING, blank=True, null=True)
-    issued_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='issued_by', blank=True, null=True)
+    request = models.ForeignKey('LetterRequest', models.DO_NOTHING, related_name='issued_letters', blank=True, null=True)
+    issued_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='issued_letters_as_issued_by', db_column='issued_by', blank=True, null=True)
     issued_at = models.DateTimeField(db_default=Now())
     voided_at = models.DateTimeField(blank=True, null=True)
-    voided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='voided_by', related_name='issuedletter_voided_by_set', blank=True, null=True)
+    voided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='issued_letters_as_voided_by', db_column='voided_by', blank=True, null=True)
     void_reason = models.TextField(blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'issued_letter'
         unique_together = (('company', 'ref_no'),)
 
+    def __str__(self):
+        return str(self.subject)
+
 
 class LetterRequest(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        ISSUED = 'issued', 'Issued'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    template = models.ForeignKey('LetterTemplate', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='letter_requests')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='letter_requests')
+    template = models.ForeignKey('LetterTemplate', models.DO_NOTHING, related_name='letter_requests')
     purpose = models.TextField()
     addressed_to = models.TextField(blank=True, null=True)
-    status = models.TextField(db_default='pending')
+    status = models.TextField(choices=Status, db_default='pending')
     decision_reason = models.TextField(blank=True, null=True)
     workflow_instance_id = models.UUIDField(blank=True, null=True)
     issued_letter_id = models.UUIDField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='letter_requests_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     decided_at = models.DateTimeField(blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'letter_request'
 
+    def __str__(self):
+        return f'LetterRequest {self.id}'
+
 
 class LetterSequence(models.Model):
     pk = models.CompositePrimaryKey('company_id', 'bs_year')
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='letter_sequences')
     bs_year = models.IntegerField()
     last_no = models.IntegerField(db_default=0)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'letter_sequence'
 
+    def __str__(self):
+        return f'LetterSequence {self.pk}'
+
 
 class LetterTemplate(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='letter_templates')
     code = models.TextField()
     name = models.TextField()
     subject = models.TextField()
@@ -95,30 +134,48 @@ class LetterTemplate(models.Model):
     visible_to_employee = models.BooleanField(db_default=True)
     is_builtin = models.BooleanField(db_default=False)
     active = models.BooleanField(db_default=True)
-    updated_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='updated_by', blank=True, null=True)
+    updated_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='letter_templates_as_updated_by', db_column='updated_by', blank=True, null=True)
     updated_at = models.DateTimeField(db_default=Now())
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'letter_template'
         unique_together = (('company', 'code'),)
 
+    def __str__(self):
+        return str(self.name)
+
 
 class PolicyAck(models.Model):
     pk = models.CompositePrimaryKey('policy_id', 'employee_id')
-    policy = models.ForeignKey('hajiri.CompanyPolicy', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    policy = models.ForeignKey('hajiri.CompanyPolicy', models.DO_NOTHING, related_name='policy_acks')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='policy_acks')
     acknowledged_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'policy_ack'
 
+    def __str__(self):
+        return f'PolicyAck {self.pk}'
+
 
 class PolicyNudge(models.Model):
     pk = models.CompositePrimaryKey('policy_id', 'employee_id')
-    policy = models.ForeignKey('hajiri.CompanyPolicy', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    policy = models.ForeignKey('hajiri.CompanyPolicy', models.DO_NOTHING, related_name='policy_nudges')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='policy_nudges')
     last_sent_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'policy_nudge'
+
+    def __str__(self):
+        return f'PolicyNudge {self.pk}'

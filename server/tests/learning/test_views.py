@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from django.test import Client
 
-from hajiri.core.db import one, rows
+from tests.support.sql import one, rows
 from hajiri.files import service as files
 from hajiri.learning import services as lrn
 from hajiri.workflow import service as wf

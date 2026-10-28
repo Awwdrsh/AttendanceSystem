@@ -8,9 +8,12 @@ is written raw; lone surrogates as lowercase \\udxxx).
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import re
 from typing import Any
 
+_SURROGATE = re.compile('[\ud800-\udfff]')
 _ESC = {'"': '\\"', '\\': '\\\\', '\b': '\\b', '\f': '\\f', '\n': '\\n', '\r': '\\r', '\t': '\\t'}
 
 
@@ -49,6 +52,11 @@ def _js_number(x: int | float) -> str:
 
 
 def _js_string(s: str) -> str:
+    # Without surrogate code points, json.dumps(ensure_ascii=False) escapes exactly what JSON.stringify does ('"',
+    # '\\', \b \f \n \r \t, other C0 controls as lowercase \u00xx, everything else raw). Surrogates (only from
+    # strings decoded with 'surrogatepass') need JS's pairing rules below.
+    if not _SURROGATE.search(s):
+        return json.dumps(s, ensure_ascii=False)
     out = ['"']
     i, n = 0, len(s)
     while i < n:

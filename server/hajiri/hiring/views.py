@@ -1,7 +1,9 @@
 """
 Hiring hub pages (/hiring, /hiring/pipeline, /hiring/interviews, /hiring/requisitions; HiringHub in pages/hubs.tsx)
 and their HTMX fragments under /_/hiring/... The JSON API of the TS module was used only by the web app, so it became
-these pages; the services take the same camelCase bodies the TS routes took.
+these pages. Posts are read by the forms in hajiri.hiring.forms into the camelCase bodies the TS routes took, and
+the services validate them with their serializers. Everything works in the active company: an id of another
+company is not found, even for a GET that only draws a form.
 
 Forms in a drawer (job, hiring request) close everything on success. Forms in the shared modal opened from the
 candidate drawer (interview, offer, hire, reject, scorecard) close only the modal: their root element listens for
@@ -9,22 +11,22 @@ candidate drawer (interview, offer, hire, reject, scorecard) close only the moda
 """
 from __future__ import annotations
 
-import json
 from collections import OrderedDict
 
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.utils.html import format_html
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from hajiri.core.api import ApiEncoder
 from hajiri.core.auth import MODULE_ROLES, has_role
-from hajiri.core.http import json_response
 from hajiri.files.store import stored_file_response
 from hajiri.web.decorators import login_required, require_feature, require_module, require_role
 from hajiri.web.format import add_days, fmt_date_long, fmt_date_short, today_npt
-from hajiri.web.htmx import close_modal, is_htmx, refresh, toast, trigger
+from hajiri.web.htmx import close_modal, htmx_target, is_htmx, refresh, toast, trigger
 from hajiri.web.tables import Column, Table, table_response
 
+from . import forms
 from . import labels as L
 from . import services
 
@@ -45,40 +47,6 @@ def _done(request, message: str | None, *refreshes: str, tone: str = 'ok', close
 
 def _base(request) -> str:
     return request.build_absolute_uri('/').rstrip('/')
-
-
-def _num(v):
-    v = (v or '').strip().replace(',', '')
-    if v == '':
-        return None
-    try:
-        f = float(v)
-    except ValueError:
-        return v
-    return int(f) if f.is_integer() else f
-
-
-def _money(v):
-    v = (v or '').strip().replace(',', '')
-    if v == '':
-        return None
-    try:
-        f = float(v)
-    except ValueError:
-        return v
-    return str(int(f)) if f.is_integer() else v
-
-
-def _opt(v):
-    v = (v or '').strip()
-    return v or None
-
-
-def _json(v, default):
-    try:
-        return json.loads(v) if v else default
-    except ValueError:
-        return default
 
 
 # ================================================================ jobs
@@ -125,7 +93,7 @@ def _reports_ctx(user) -> dict:
         total = f['total']
         stages = []
         for st in f['stages']:
-            pct = services._js_round(100 * st['reached'] / total) if total else 0
+            pct = services._half_up(100 * st['reached'] / total) if total else 0
             stages.append({'stage': st['stage'], 'reached': st['reached'], 'pct': pct,
                            'label': f"{st['reached']} ({pct}%)" if total else str(st['reached'])})
         funnel.append({'title': f['title'], 'stages': stages})
@@ -205,38 +173,6 @@ def _sid(v):
     return None if v is None else str(v)
 
 
-def _job_body(p) -> dict:
-    return {
-        'title': p.get('title', ''), 'category': _opt(p.get('category')), 'location': _opt(p.get('location')),
-        'workMode': p.get('workMode') or 'onsite', 'employmentType': p.get('employmentType') or 'full_time',
-        'openings': _num(p.get('openings')) or 1, 'experienceMin': _num(p.get('experienceMin')),
-        'experienceMax': _num(p.get('experienceMax')), 'salaryMin': _money(p.get('salaryMin')), 'salaryMax': _money(p.get('salaryMax')),
-        'showSalary': p.get('showSalary') == '1', 'deadline': _opt(p.get('deadline')), 'orgUnitId': _opt(p.get('orgUnitId')),
-        'branchId': _opt(p.get('branchId')), 'hiringManagerId': _opt(p.get('hiringManagerId')),
-        'description': p.get('description', ''), 'requirements': p.get('requirements', ''),
-        'stages': [s for s in _json(p.get('stages_json'), []) if isinstance(s, str)], 'questions': _questions(_json(p.get('questions_json'), [])),
-    }
-
-
-def _questions(qs) -> list:
-    """The editor's questions with only the rule that is chosen (setRule in JobForm.tsx)."""
-    out = []
-    for q in qs if isinstance(qs, list) else []:
-        if not isinstance(q, dict):
-            continue
-        item = {k: q[k] for k in ('id', 'kind', 'label', 'required') if k in q}
-        rule = q.get('rule')
-        if rule in ('knockout', 'preferred') and q.get('kind') != 'text':
-            item[rule] = ({'min': _num(str(q.get('min') if q.get('min') is not None else '')) or 0} if q.get('kind') == 'number'
-                          else {'equals': q.get('equals') or 'yes'})
-        elif rule is None:
-            for k in ('knockout', 'preferred'):
-                if q.get(k) is not None:
-                    item[k] = q[k]
-        out.append(item)
-    return out
-
-
 @require_http_methods(['GET', 'POST'])
 @require_module('hiring')
 @require_feature('hiring')
@@ -245,7 +181,7 @@ def job_new(request):
     req_id = request.GET.get('requisition') or request.POST.get('requisitionId') or None
     requisition = services.get_requisition(user, req_id) if req_id else None
     if request.method == 'POST':
-        body = _job_body(request.POST)
+        body = forms.JobForm(request.POST).to_body()
         body['requisitionId'] = req_id
         services.create_job(user, body)
         resp = _done(request, 'Job created as a draft. Publish it when it is ready.', 'jobs', 'requisitions', close='all')
@@ -261,7 +197,7 @@ def job_new(request):
 def job_edit(request, id):
     user = request.hajiri_user
     if request.method == 'POST':
-        services.update_job(user, str(id), _job_body(request.POST))
+        services.update_job(user, str(id), forms.JobForm(request.POST).to_body())
         return _done(request, 'Job saved.', 'jobs', close='all')
     job = services.get_job(user, str(id))['job']
     return render(request, 'hiring/partials/job_form.html', _job_form_ctx(request, job=job))
@@ -289,8 +225,7 @@ def job_close(request, id):
 def policy(request):
     user = request.hajiri_user
     if request.method == 'POST':
-        services.set_policy(user, {'retentionDays': _num(request.POST.get('retentionDays')) or 180,
-                                   'careersEnabled': request.POST.get('careersEnabled') == '1'})
+        services.set_policy(user, forms.PolicyForm(request.POST).to_body())
         return _done(request, 'Hiring settings saved.', close='all')
     return render(request, 'hiring/partials/policy.html', {'p': services.policy(user)})
 
@@ -342,15 +277,7 @@ def requisitions(request):
 def requisition_new(request):
     user = request.hajiri_user
     if request.method == 'POST':
-        p = request.POST
-        kind = p.get('kind') or 'new'
-        services.create_requisition(user, {
-            'title': p.get('title', ''), 'designation': _opt(p.get('designation')), 'orgUnitId': _opt(p.get('orgUnitId')),
-            'branchId': _opt(p.get('branchId')), 'headcount': _num(p.get('headcount')) or 1, 'salaryMin': _money(p.get('salaryMin')),
-            'salaryMax': _money(p.get('salaryMax')), 'kind': kind,
-            'replacingEmployeeId': _opt(p.get('replacingEmployeeId')) if kind == 'replacement' else None,
-            'justification': p.get('justification', ''),
-        })
+        services.create_requisition(user, forms.RequisitionForm(request.POST).to_body())
         return _done(request, 'Request sent to HR for approval.', 'requisitions', close='all')
     return render(request, 'hiring/partials/requisition_form.html', {'lookups': _lookups(user)})
 
@@ -397,7 +324,7 @@ def _board_ctx(request, job_id: str | None) -> dict:
 def pipeline(request):
     ctx = _board_ctx(request, request.GET.get('job') or None)
     ctx['open_candidate'] = request.GET.get('candidate') or None
-    if is_htmx(request) and request.headers.get('HX-Target') == 'board':
+    if is_htmx(request) and htmx_target(request) == 'board':
         return render(request, 'hiring/partials/board.html', ctx)
     return render(request, 'hiring/pipeline.html', ctx)
 
@@ -407,7 +334,7 @@ def pipeline(request):
 @require_feature('hiring')
 def move(request, id):
     stage = request.POST.get('stage', '')
-    services.move_application(request.hajiri_user, str(id), {'stage': stage})
+    services.move_application(request.hajiri_user, str(id), {'stage': stage})   # the stage name, checked against the job
     name = request.POST.get('name')
     return _done(request, f'{name} moved to {stage}.' if name else f'Moved to {stage}.', 'board', 'candidate', close=None)
 
@@ -419,12 +346,7 @@ def candidate_new(request, id):
     user = request.hajiri_user
     job = services.load_job(user, str(id))
     if request.method == 'POST':
-        p = request.POST
-        app_id = services.add_candidate(user, str(id), {
-            'name': p.get('name', ''), 'email': p.get('email', '').strip(), 'phone': _opt(p.get('phone')),
-            'source': p.get('source') or 'referral', 'experienceYears': _num(p.get('experienceYears')),
-            'currentEmployer': _opt(p.get('currentEmployer')), 'coverNote': _opt(p.get('coverNote')), 'cvFileId': _opt(p.get('cvFileId')),
-        })
+        app_id = services.add_candidate(user, str(id), forms.CandidateForm(request.POST).to_body())
         resp = _done(request, 'Candidate added.', 'board', close='all')
         return trigger(resp, 'hj:open-candidate', {'url': f'/_/hiring/applications/{app_id}'})
     return render(request, 'hiring/partials/candidate_form.html', {'job': job})
@@ -492,15 +414,7 @@ def cv(request, id):
 @require_role(*STAFF)
 @require_feature('hiring')
 def update(request, id):
-    p = request.POST
-    body: dict = {}
-    if 'rating' in p:
-        body['rating'] = _num(p.get('rating')) or None
-    if 'tags' in p:
-        body['tags'] = [t.strip() for t in p.get('tags', '').split(',') if t.strip()]
-    if 'ownerUserId' in p:
-        body['ownerUserId'] = _opt(p.get('ownerUserId'))
-    services.update_application(request.hajiri_user, str(id), body)
+    services.update_application(request.hajiri_user, str(id), forms.ApplicationForm(request.POST).to_body())
     return _done(request, None, 'candidate', 'board', close=None)
 
 
@@ -511,8 +425,7 @@ def reject(request, id):
     user = request.hajiri_user
     app, _, _ = services.load_app(user, str(id))
     if request.method == 'POST':
-        emailed = services.reject_application(user, str(id), {'reason': request.POST.get('reason', ''),
-                                                               'notifyCandidate': request.POST.get('notifyCandidate') == '1'})
+        emailed = services.reject_application(user, str(id), forms.RejectForm(request.POST).to_body())
         return _done(request, f"{app['name']} was told by e-mail." if emailed else 'Application closed.', 'candidate', 'board')
     return render(request, 'hiring/partials/reject.html', {'app': app})
 
@@ -529,7 +442,7 @@ def reopen(request, id):
 @require_role(*STAFF)
 @require_feature('hiring')
 def note(request, id):
-    services.add_note(request.hajiri_user, str(id), {'body': request.POST.get('body', '')})
+    services.add_note(request.hajiri_user, str(id), forms.NoteForm(request.POST).to_body())
     return _done(request, 'Note added.', 'candidate', close=None)
 
 
@@ -539,7 +452,7 @@ def note(request, id):
 def export(request, id):
     data = services.export_candidate(request.hajiri_user, str(id))
     cand_id = data.pop('_candidate_id')
-    res = json_response(data)
+    res = JsonResponse(data, encoder=ApiEncoder, json_dumps_params={'ensure_ascii': False})
     res['Content-Disposition'] = f'attachment; filename="candidate-{cand_id}.json"'
     return res
 
@@ -552,13 +465,9 @@ def export(request, id):
 def interview_new(request, id):
     user = request.hajiri_user
     if request.method == 'POST':
-        p = request.POST
-        notify_candidate = p.get('notifyCandidate') == '1'
-        services.schedule_interview(user, str(id), {
-            'title': p.get('title') or 'Interview', 'date': p.get('date', ''), 'time': p.get('time', ''),
-            'durationMin': _num(p.get('durationMin')) or 45, 'mode': p.get('mode', ''), 'location': _opt(p.get('location')),
-            'panel': p.getlist('panel'), 'notifyCandidate': notify_candidate,
-        })
+        body = forms.InterviewForm(request.POST).to_body()
+        notify_candidate = body['notifyCandidate']
+        services.schedule_interview(user, str(id), body)
         return _done(request, 'Interview scheduled. The panel and the candidate have been told.' if notify_candidate
                      else 'Interview scheduled. The panel has been told.', 'candidate', 'board', 'interviews')
     app, _, _ = services.load_app(user, str(id))
@@ -570,8 +479,9 @@ def interview_new(request, id):
 @require_role(*STAFF)
 @require_feature('hiring')
 def interview_update(request, id):
-    status = request.POST.get('status')
-    services.update_interview(request.hajiri_user, str(id), {'status': status} if status else {})
+    body = forms.InterviewStatusForm(request.POST).to_body()
+    status = body.get('status')
+    services.update_interview(request.hajiri_user, str(id), body)
     return _done(request, 'Interview cancelled.' if status == 'cancelled' else 'Marked as done.', 'candidate', 'interviews', close=None)
 
 
@@ -581,11 +491,7 @@ def interview_update(request, id):
 def scorecard(request, id):
     user = request.hajiri_user
     if request.method == 'POST':
-        p = request.POST
-        ratings = {c: int(p[f'rating_{i}']) for i, c in enumerate(L.DEFAULT_CRITERIA) if (p.get(f'rating_{i}') or '0').isdigit()
-                   and int(p.get(f'rating_{i}') or 0) > 0}
-        services.submit_scorecard(user, str(id), {'ratings': ratings, 'recommendation': p.get('recommendation', ''),
-                                                  'notes': _opt(p.get('notes'))})
+        services.submit_scorecard(user, str(id), forms.ScorecardForm(request.POST).to_body())
         return _done(request, 'Scorecard saved.', 'candidate', 'interviews')
     i = services.interview_for_scorecard(user, str(id))
     # A fresh scorecard each time it is opened, as ScorecardModal does; saving replaces the earlier one.
@@ -615,7 +521,7 @@ def interviews(request):
     groups = [{'label': f'Today, {fmt_date_long(d)}' if d == today else fmt_date_long(d), 'items': v} for d, v in days.items()]
     ctx = {'groups': groups, 'scope': scope, 'when': when,
            'empty_title': 'No interviews coming up' if when == 'upcoming' else 'No interviews in the last 90 days'}
-    if is_htmx(request) and request.headers.get('HX-Target') == 'interviews':
+    if is_htmx(request) and htmx_target(request) == 'interviews':
         return render(request, 'hiring/partials/interviews.html', ctx)
     return render(request, 'hiring/interviews.html', ctx)
 
@@ -628,10 +534,7 @@ def interviews(request):
 def offer_new(request, id):
     user = request.hajiri_user
     if request.method == 'POST':
-        p = request.POST
-        services.create_offer(user, str(id), {
-            'designation': p.get('designation', ''), 'salary': _money(p.get('salary')) or '', 'joinDate': p.get('joinDate', ''),
-            'expiresOn': _opt(p.get('expiresOn')), 'notes': _opt(p.get('notes'))})
+        services.create_offer(user, str(id), forms.OfferForm(request.POST).to_body())
         return _done(request, 'Offer drafted. Another HR user needs to approve it before it goes to the candidate.', 'candidate', 'board')
     app, job, _ = services.load_app(user, str(id))
     today = today_npt()
@@ -650,8 +553,9 @@ def offer_letter(request, id):
 @require_module('hiring')
 @require_feature('hiring')
 def offer_respond(request, id):
-    response = request.POST.get('response', '')
-    services.respond_offer(request.hajiri_user, str(id), {'response': response})
+    body = forms.RespondForm(request.POST).to_body()
+    response = body['response']
+    services.respond_offer(request.hajiri_user, str(id), body)
     return _done(request, 'Marked as accepted. You can hire the candidate now.' if response == 'accepted' else 'Marked as declined.',
                  'candidate', close=None)
 
@@ -670,13 +574,7 @@ def offer_withdraw(request, id):
 def hire(request, id):
     user = request.hajiri_user
     if request.method == 'POST':
-        p = request.POST
-        body = {'empCode': (p.get('empCode') or '').strip().upper(), 'probationEnd': _opt(p.get('probationEnd'))}
-        if _opt(p.get('gender')):
-            body['gender'] = p['gender']
-        if _opt(p.get('shiftId')):
-            body['shiftId'] = p['shiftId']
-        services.hire(user, str(id), body)
+        services.hire(user, str(id), forms.HireForm(request.POST).to_body())
         return _done(request, 'Employee record created.', 'candidate', 'board')
     d = services.application_detail(user, str(id))
     accepted = next((o for o in d['offers'] if o['status'] == 'accepted'), None)

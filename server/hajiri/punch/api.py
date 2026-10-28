@@ -1,32 +1,41 @@
-"""JSON endpoints of the punch module under /api/v1/punch (the TS paths). The phone app and the browser clock-in
-(Home) call them with a session cookie or a Bearer token."""
+"""JSON endpoints of the punch module under /api/v1/punch (the TS paths): DRF views with the project defaults
+(HajiriAuthentication: cookie with CSRF or Bearer token, IsSignedIn, the TS error shape). The phone app and Bearer
+clients call them; the pages call the same service functions."""
 from __future__ import annotations
 
 from django.http import HttpResponse
+from drf_spectacular.utils import extend_schema
+from rest_framework.decorators import api_view, parser_classes
+from rest_framework.response import Response
 
-from hajiri.core.http import api_view, json_response, read_json
+from hajiri.files.parsers import json_parser
 from hajiri.web.views import client_ip
 
 from . import services
+from .serializers import ManualIn, PunchIn, RangeIn
 
-BODY_MAX = 2_000_000
+BODY_MAX = 2_000_000          # a selfie travels as base64 inside the JSON body
 
 
-@api_view(methods=('POST',))
+@extend_schema(request=PunchIn, responses={201: dict, 200: dict})
+@api_view(['POST'])
+@parser_classes([json_parser(BODY_MAX)])
 def punch(request):
-    status, body = services.punch(request.hajiri_user, read_json(request, BODY_MAX),
-                                  device_token=request.headers.get('X-Device-Token'), ip=client_ip(request))
-    return json_response(body, status=status)
+    status, body = services.punch(request.user, request.data, device_token=request.headers.get('X-Device-Token'),
+                                  ip=client_ip(request))
+    return Response(body, status=status)
 
 
-@api_view()
+@extend_schema(responses=dict)
+@api_view(['GET'])
 def today(request):
-    return services.today(request.hajiri_user)
+    return Response(services.today(request.user))
 
 
-@api_view()
+@extend_schema(parameters=[RangeIn], responses=dict)
+@api_view(['GET'])
 def remote(request):
-    return services.remote(request.hajiri_user, request.GET.dict())
+    return Response(services.remote(request.user, request.query_params.dict()))
 
 
 def photo_response(p: dict) -> HttpResponse:
@@ -37,12 +46,14 @@ def photo_response(p: dict) -> HttpResponse:
     return res
 
 
-@api_view()
+@extend_schema(responses={(200, 'image/jpeg'): bytes})
+@api_view(['GET'])
 def photo(request, id):
-    return photo_response(services.photo(request.hajiri_user, id))
+    return photo_response(services.photo(request.user, id))
 
 
-@api_view(methods=('POST',))
+@extend_schema(request=ManualIn, responses={201: dict, 200: dict})
+@api_view(['POST'])
 def manual(request):
-    status, body = services.manual(request.hajiri_user, read_json(request))
-    return json_response(body, status=status)
+    status, body = services.manual(request.user, request.data)
+    return Response(body, status=status)

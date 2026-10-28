@@ -1,7 +1,8 @@
 from django import forms
 from django.core.validators import RegexValidator
 
-from .services import COMMANDS, PIN_MESSAGE, PIN_RE
+from .constants import COMMANDS, PIN_MESSAGE, PIN_RE
+from .serializers import MODALITIES
 
 
 class ActivateForm(forms.Form):
@@ -25,7 +26,7 @@ class CommandForm(forms.Form):
 
 class ConsentForm(forms.Form):
     employee_id = forms.UUIDField()
-    modality = forms.ChoiceField(choices=[(m, m) for m in ('face', 'fingerprint', 'palm', 'card')])
+    modality = forms.ChoiceField(choices=[(m, m) for m in MODALITIES])
     notice_version = forms.CharField(max_length=40)
     purpose = forms.CharField(max_length=200, required=False)
     signature = forms.CharField(max_length=4000, required=False)

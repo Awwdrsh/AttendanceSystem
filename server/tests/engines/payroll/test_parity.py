@@ -1,7 +1,7 @@
 """Parity with the TS engine beyond the golden files.
 
-The fixtures in tests/parity/fixtures/payroll_*.json are written by packages/payroll-engine/src/dump-parity.ts:
-  apps/api/node_modules/.bin/tsx packages/payroll-engine/src/dump-parity.ts server/tests/parity/fixtures
+The fixtures in tests/parity/fixtures/payroll_*.json were recorded from the TS engine (packages/payroll-engine/src/
+dump-parity.ts, removed with the TypeScript stack; see commit 1bbe88b) and are a fixed record.
 Every case must match exactly: full payslip results (lines, basis, explain text, tax detail, flags), formula parse
 trees, values and error messages, the TDS sweep, amounts in words and the optimum CIT suggestion.
 """
@@ -24,7 +24,7 @@ FIXTURES = Path(__file__).parent.parent.parent / 'parity' / 'fixtures'
 def load(name):
     path = FIXTURES / f'payroll_{name}.json'
     if not path.exists():
-        pytest.fail(f'{path} is missing; run packages/payroll-engine/src/dump-parity.ts')
+        pytest.fail(f'{path} is missing; restore it from git (it was recorded from the TS engine)')
     return json.loads(path.read_text(encoding='utf-8'))
 
 

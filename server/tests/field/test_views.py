@@ -6,7 +6,7 @@ import pytest
 from django.test import Client
 
 from hajiri.core import auth
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from tests.punch.api import OFFICE, SELFIE, add_days, post, punch, put, today
 from tests.web.factories import htmx, hx_triggers, toasts
 

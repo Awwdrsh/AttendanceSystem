@@ -2,7 +2,7 @@
 import pytest
 from django.test import Client
 
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.workflow import flow_admin, service
 from tests.web.factories import htmx, hx_triggers, toasts
 

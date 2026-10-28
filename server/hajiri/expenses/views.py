@@ -8,12 +8,13 @@ from __future__ import annotations
 import json
 from decimal import Decimal, InvalidOperation
 
+from django.db import transaction
 from django.http import HttpResponse
 from django.shortcuts import render
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from hajiri.core.auth import company_id_of, has_role
-from hajiri.core.errors import HttpError
+from hajiri.core.auth import has_role
+from hajiri.core.errors import ConflictError, ForbiddenError, HttpError, NotFoundError
 from hajiri.files.store import stored_file_response
 from hajiri.web.csv import csv_response
 from hajiri.web.decorators import login_required, require_feature, require_role
@@ -21,6 +22,8 @@ from hajiri.web.format import add_days, bs_month_label, fmt_date, fmt_date_short
 from hajiri.web.htmx import close_modal, refresh, toast, trigger
 
 from . import services as ex
+from .forms import (CategoryForm, ClaimForm, ClaimLinesForm, ClaimReviewForm, DecisionForm, NoteForm, PolicySettingsForm,
+                    ReviewFilterForm, SettleForm, SpendFilterForm, TadaForm, TravelForm, TripReviewForm)
 
 FEATURE = 'expenses'
 
@@ -122,10 +125,6 @@ def _into_drawer(resp: HttpResponse) -> HttpResponse:
     return resp
 
 
-def _decimal_text(v: str) -> str:
-    return ''.join(ch for ch in (v or '') if ch.isdigit() or ch == '.')
-
-
 # ================================================================ claims
 
 def _claims_page_ctx(request, own: bool) -> dict:
@@ -142,9 +141,7 @@ def _claims_page_ctx(request, own: bool) -> dict:
             {'label': 'Paid so far', 'value': money(total(lambda c: c['status'] == 'paid', 'totalApproved'))},
         ]
         return {'claims': claims, 'stats': stats, 'own': True}
-    status = request.GET.get('status') or 'pending'
-    if status not in dict(CLAIM_FILTERS):
-        status = 'pending'
+    status = ReviewFilterForm(request.GET).status_for(CLAIM_FILTERS)
     hr = has_role(user, 'hr')
     q = {'scope': 'all' if hr else 'team', **({} if status == 'all' else {'status': status})}
     claims = [_claim_display(c) for c in ex.list_claims(user, q)['claims']]
@@ -185,40 +182,11 @@ def claims_review(request):
 def claims_list(request):
     own = request.GET.get('own') == '1'
     if not own and not has_role(request.hajiri_user, 'manager', 'hr'):
-        from hajiri.core.errors import ForbiddenError
         raise ForbiddenError('requires role manager or hr')
     return render(request, 'expenses/partials/claims_block.html', _claims_page_ctx(request, own))
 
 
 # ---------------------------------------------------------------- claim form
-
-def _items_from_post(request, policy: dict) -> list[dict]:
-    """The form's lines in the TS ClaimItemInput shape (amount lines carry no km, mileage lines no amount)."""
-    kinds = {c['id']: c['kind'] for c in policy['categories']}
-    p = request.POST
-    dates, cats, descs = p.getlist('expense_date'), p.getlist('category_id'), p.getlist('description')
-    amounts, kms, receipts = p.getlist('amount'), p.getlist('km'), p.getlist('receipt_file_id')
-    out = []
-    for i in range(len(descs)):
-        def at(lst, d=''):
-            return lst[i] if i < len(lst) else d
-        it: dict = {'description': at(descs).strip()}
-        if at(dates):
-            it['expenseDate'] = at(dates)
-        if at(cats):
-            it['categoryId'] = at(cats)
-        it['receiptFileId'] = at(receipts) or None
-        if kinds.get(at(cats)) == 'mileage':
-            if at(kms).strip():
-                try:
-                    it['km'] = float(at(kms))
-                except ValueError:
-                    it['km'] = at(kms)
-        elif at(amounts).strip():
-            it['amount'] = at(amounts).strip()
-        out.append(it)
-    return out
-
 
 def _receipt_hint(c: dict) -> str:
     """The text above a line's receipt upload (ClaimForm): needed above the threshold, always, or optional."""
@@ -252,9 +220,9 @@ def _claim_form_ctx(request, policy: dict, claim: dict | None) -> dict:
 
 def _save_claim(request, claim_id: str | None):
     user = request.hajiri_user
-    policy = ex.get_policy(user)
-    submit = request.POST.get('action') == 'submit'
-    body = {'title': (request.POST.get('title') or '').strip(), 'items': _items_from_post(request, policy), 'submit': submit}
+    form = ClaimForm(request.POST)
+    submit = form.submitting
+    body = form.claim(ex.get_policy(user)['categories'])
     try:
         r = ex.update_claim(user, claim_id, body) if claim_id else ex.create_claim(user, body)
     except HttpError as e:
@@ -283,7 +251,6 @@ def claim_edit(request, id):
         return _save_claim(request, str(id))
     d = ex.claim_detail(request.hajiri_user, str(id))
     if d['claim']['employee']['id'] != request.hajiri_user.employee_id or d['claim']['status'] != 'draft':
-        from hajiri.core.errors import ConflictError
         raise ConflictError('only a draft claim can be edited')
     return render(request, 'expenses/partials/claim_form.html', _claim_form_ctx(request, ex.get_policy(request.hajiri_user), d))
 
@@ -305,10 +272,7 @@ def claim_line(request):
 def claim_check(request):
     """Live total and policy checks while the claim is typed (ClaimForm's debounced check)."""
     user = request.hajiri_user
-    policy = ex.get_policy(user)
-    body = {'items': _items_from_post(request, policy)}
-    if request.POST.get('claim_id'):
-        body['claimId'] = request.POST['claim_id']
+    body = ClaimLinesForm(request.POST).check_body(ex.get_policy(user)['categories'])
     try:
         r = ex.check_items(user, body)
     except HttpError:
@@ -374,31 +338,17 @@ def claim_cancel(request, id):
 @login_required
 @require_feature(FEATURE)
 def claim_review(request, id):
-    p = request.POST
-    decision = p.get('decision') or ''
-    body: dict = {'decision': decision}
-    if (p.get('reason') or '').strip():
-        body['reason'] = p['reason'].strip()
-    if decision == 'approve':
-        items = []
-        for key, v in p.items():
-            if key.startswith('adj-') and v.strip() != '':
-                item_id = key[4:]
-                it = {'id': item_id, 'approvedAmount': v.strip()}
-                if (p.get(f'adjreason-{item_id}') or '').strip():
-                    it['reason'] = p[f'adjreason-{item_id}'].strip()
-                items.append(it)
-        body['items'] = items
+    body = ClaimReviewForm(request.POST).review()
     return _claim_action(request, id, lambda: ex.review_claim(request.hajiri_user, str(id), body),
-                         'Claim approved' if decision == 'approve' else 'Claim rejected')
+                         'Claim approved' if body['decision'] == 'approve' else 'Claim rejected')
 
 
 @require_POST
 @require_role('hr')
 @require_feature(FEATURE)
 def claim_pay_outside(request, id):
-    note = (request.POST.get('note') or '').strip()
-    return _claim_action(request, id, lambda: ex.pay_claim_outside(request.hajiri_user, str(id), {'note': note}),
+    body = NoteForm(request.POST).note_body()
+    return _claim_action(request, id, lambda: ex.pay_claim_outside(request.hajiri_user, str(id), body),
                          'Marked as paid; payroll will not pay it')
 
 
@@ -426,9 +376,7 @@ def _trips_page_ctx(request, own: bool) -> dict:
                   **({'tone': 'warn', 'hint': 'Open the trip and add your bills'} if to_settle else {})},
                  {'label': 'Advance not yet settled', 'value': money(out)}]
         return {'trips': trips, 'stats': stats, 'own': True}
-    status = request.GET.get('status') or 'pending'
-    if status not in dict(TRIP_FILTERS):
-        status = 'pending'
+    status = ReviewFilterForm(request.GET).status_for(TRIP_FILTERS)
     hr = has_role(user, 'hr')
     q = {'scope': 'all' if hr else 'team', **({} if status == 'all' else {'status': status})}
     trips = [_trip_display(t, today) for t in ex.list_trips(user, q)['trips']]
@@ -464,23 +412,8 @@ def travel_review(request):
 def trips_list(request):
     own = request.GET.get('own') == '1'
     if not own and not has_role(request.hajiri_user, 'manager', 'hr'):
-        from hajiri.core.errors import ForbiddenError
         raise ForbiddenError('requires role manager or hr')
     return render(request, 'expenses/partials/trips_block.html', _trips_page_ctx(request, own))
-
-
-def _travel_body(request) -> dict:
-    p = request.POST if request.method == 'POST' else request.GET
-    body = {'destination': (p.get('destination') or '').strip(), 'destinationCategory': p.get('destination_category') or '',
-            'purpose': (p.get('purpose') or '').strip(), 'fromDate': p.get('from_date') or '', 'toDate': p.get('to_date') or '',
-            'mode': p.get('mode') or ''}
-    for field, key in (('estimated_cost', 'estimatedCost'), ('advance_requested', 'advanceRequested')):
-        v = _decimal_text(p.get(field) or '')
-        if v:
-            body[key] = v
-    if body['destinationCategory'] == 'international':
-        body['fxRate'] = _decimal_text(p.get('fx_rate') or '') or None
-    return body
 
 
 @require_http_methods(['GET', 'POST'])
@@ -490,7 +423,7 @@ def travel_new(request):
     user = request.hajiri_user
     if request.method == 'POST':
         try:
-            r = ex.request_travel(user, _travel_body(request))
+            r = ex.request_travel(user, TravelForm(request.POST).travel())
         except HttpError as e:
             return _err(request, e, 'Not requested')
         resp = _into_drawer(render(request, 'expenses/partials/trip_detail.html', _trip_detail_ctx(request, r['id'])))
@@ -507,14 +440,12 @@ def travel_new(request):
 @require_feature(FEATURE)
 def travel_quote(request):
     """The allowance figures while the trip is typed (TravelForm's debounced quote)."""
-    b = _travel_body(request)
-    ctx: dict = {'quote': None, 'error': None, 'chain_amount': _n(b.get('estimatedCost'))}
-    ready = b['fromDate'] and b['toDate'] and b['toDate'] >= b['fromDate'] and \
-        (b['destinationCategory'] != 'international' or b.get('fxRate'))
-    if ready and b['destinationCategory'] in ex.DESTINATIONS:
+    form = TravelForm(request.GET)
+    ctx: dict = {'quote': None, 'error': None, 'chain_amount': _n(form.travel().get('estimatedCost'))}
+    body = form.quote()
+    if body:
         try:
-            q = ex.travel_quote(request.hajiri_user, {k: b[k] for k in ('destinationCategory', 'fromDate', 'toDate')}
-                                | ({'fxRate': b['fxRate']} if b.get('fxRate') else {}))['quote']
+            q = ex.travel_quote(request.hajiri_user, body)['quote']
             per_day = (f"USD {q['daRate']} × {q['fxRate']}" if q['currency'] == 'USD' else money(q['daRate'])) + ' per day' + \
                 (f", grade {q['grade']}" if q['grade'] != '*' else '')
             nights = f" ({_plural(q['nights'], 'night', 'nights')})" if q['nights'] else ''
@@ -604,49 +535,24 @@ def trip_cancel(request, id):
 @login_required
 @require_feature(FEATURE)
 def trip_review(request, id):
-    p = request.POST
-    decision = p.get('decision') or ''
-    body: dict = {'decision': decision}
-    if (p.get('reason') or '').strip():
-        body['reason'] = p['reason'].strip()
-    adv = (p.get('advance_approved') or '').strip()
-    if decision == 'approve' and adv:
-        body['advanceApproved'] = adv
+    body = TripReviewForm(request.POST).review()
     return _trip_action(request, id, lambda: ex.review_trip(request.hajiri_user, str(id), body),
-                        'Trip approved' if decision == 'approve' else 'Trip rejected')
+                        'Trip approved' if body['decision'] == 'approve' else 'Trip rejected')
 
 
 @require_POST
 @require_role('hr')
 @require_feature(FEATURE)
 def trip_advance_outside(request, id):
-    note = (request.POST.get('note') or '').strip()
-    return _trip_action(request, id, lambda: ex.pay_advance_outside(request.hajiri_user, str(id), {'note': note}), 'Advance marked as paid')
-
-
-def _bills_from_post(request) -> list[dict]:
-    p = request.POST
-    kinds, dates, descs = p.getlist('bill_kind'), p.getlist('bill_date'), p.getlist('bill_description')
-    amounts, files = p.getlist('bill_amount'), p.getlist('bill_file_id')
-    out = []
-    for i in range(len(kinds)):
-        def at(lst):
-            return lst[i] if i < len(lst) else ''
-        b: dict = {'kind': at(kinds), 'description': at(descs).strip(), 'amount': at(amounts).strip(), 'fileId': at(files) or None}
-        if at(dates):
-            b['billDate'] = at(dates)
-        out.append(b)
-    return out
+    body = NoteForm(request.POST).note_body()
+    return _trip_action(request, id, lambda: ex.pay_advance_outside(request.hajiri_user, str(id), body), 'Advance marked as paid')
 
 
 @require_POST
 @login_required
 @require_feature(FEATURE)
 def trip_settle(request, id):
-    p = request.POST
-    body = {'actualFrom': p.get('actual_from') or '', 'actualTo': p.get('actual_to') or '', 'bills': _bills_from_post(request)}
-    if (p.get('note') or '').strip():
-        body['note'] = p['note'].strip()
+    body = SettleForm(request.POST).settlement()
     return _trip_action(request, id, lambda: ex.settle_trip(request.hajiri_user, str(id), body), 'Sent for approval.',
                         title='Settlement submitted', err_title='Not submitted')
 
@@ -656,21 +562,11 @@ def trip_settle(request, id):
 @require_feature(FEATURE)
 def settle_preview(request, id):
     """SettlementForm's running figures: allowance for the days, lodging up to the limit, the advance and the balance."""
-    user = request.hajiri_user
-    from hajiri.core.db import one
-    t = one("""SELECT employee_id::text, da_rate::text, lodging_rate::text, fx_rate::text, advance_status, advance_approved::text
-                 FROM travel_request WHERE id = %s AND company_id = %s""", [str(id), company_id_of(user)])
-    if not t or t['employee_id'] != user.employee_id:
-        from hajiri.core.errors import NotFoundError
-        raise NotFoundError('travel request not found')
-    f_, to = request.POST.get('actual_from') or '', request.POST.get('actual_to') or ''
-    bills = []
-    for b in _bills_from_post(request):
-        try:
-            if b['amount'] and Decimal(b['amount']) >= 0:
-                bills.append(b)
-        except InvalidOperation:
-            pass
+    t = ex.own_trip(request.hajiri_user, str(id))
+    form = SettleForm(request.POST)
+    d = form.values()
+    f_, to = d['actual_from'], d['actual_to']
+    bills = form.preview_bills()
     # No valid dates yet: zero days (the TS form showed the allowance for 0 days).
     fig = ex.settlement_figures(t, f_, to, bills) if f_ and to and to >= f_ else ex.settlement_figures(t, '2000-01-02', '2000-01-01', bills)
     return render(request, 'expenses/partials/settle_preview.html', {
@@ -692,18 +588,10 @@ def bill_row(request):
 @login_required
 @require_feature(FEATURE)
 def settlement_review(request, id):
-    from hajiri.core.db import one
-    p = request.POST
-    decision = p.get('decision') or ''
-    body: dict = {'decision': decision}
-    if (p.get('reason') or '').strip():
-        body['reason'] = p['reason'].strip()
-    s = one('SELECT travel_request_id::text FROM travel_settlement WHERE id = %s AND company_id = %s', [str(id), company_id_of(request.hajiri_user)])
-    if not s:
-        from hajiri.core.errors import NotFoundError
-        raise NotFoundError('settlement not found')
-    return _trip_action(request, s['travel_request_id'], lambda: ex.review_settlement(request.hajiri_user, str(id), body),
-                        'Settlement approved' if decision == 'approve' else 'Settlement returned')
+    body = DecisionForm(request.POST).decision_body()
+    trip_id = ex.settlement_trip_id(request.hajiri_user, str(id))
+    return _trip_action(request, trip_id, lambda: ex.review_settlement(request.hajiri_user, str(id), body),
+                        'Settlement approved' if body['decision'] == 'approve' else 'Settlement returned')
 
 
 @require_GET
@@ -743,11 +631,10 @@ def _tada_ctx(policy: dict) -> dict:
 
 
 def _spend_ctx(request) -> dict:
-    g = request.GET
     today = today_npt()
-    f, t = g.get('from') or add_days(today, -90), g.get('to') or today
-    group_by = g.get('group_by') if g.get('group_by') in ex.GROUP_BY else 'category'
-    r = ex.report_spend(request.hajiri_user, {'from': f, 'to': t, 'groupBy': group_by})
+    q = SpendFilterForm(request.GET).query(today, add_days(today, -90))
+    f, t, group_by = q['from'], q['to'], q['groupBy']
+    r = ex.report_spend(request.hajiri_user, q)
     total = sum((_n(x['amount']) for x in r['rows']), Decimal(0))
     rows_ = [{**x, 'amount_text': money(x['amount']),
               'share': f"{int((_n(x['amount']) / total * 100).quantize(Decimal(1), rounding='ROUND_HALF_UP'))}%" if total else '—'}
@@ -770,11 +657,7 @@ def policies(request):
 @require_role('hr')
 @require_feature(FEATURE)
 def policy_settings(request):
-    p = request.POST
-    raw_days = (p.get('claim_window_days') or '').strip()
-    days: object = int(raw_days) if raw_days.isdigit() else raw_days
-    ex.save_settings(request.hajiri_user, {'mileageRatePerKm': _decimal_text(p.get('mileage_rate_per_km') or ''),
-                                           'limitMode': p.get('limit_mode') or '', 'claimWindowDays': days})
+    ex.save_settings(request.hajiri_user, PolicySettingsForm(request.POST).settings())
     resp = HttpResponse(status=204)
     refresh(resp, 'exp-categories')
     return toast(request, resp, 'Expense rules saved')
@@ -795,25 +678,17 @@ def category_form(request, id=None):
     policy = ex.get_policy(user)
     cat = next((c for c in policy['categories'] if c['id'] == str(id)), None) if id else None
     if id and not cat:
-        from hajiri.core.errors import NotFoundError
         raise NotFoundError('category not found')
     if request.method == 'POST':
-        p = request.POST
-        kind = p.get('kind') or 'amount'
-        receipt = _decimal_text(p.get('receipt_required_above') or '')
-        body: dict = {'name': (p.get('name') or '').strip(), 'kind': kind,
-                      'receiptRequiredAbove': None if kind == 'mileage' else (receipt or None)}
-        limits = [{'grade': g, 'perClaim': _decimal_text(pc) or None, 'perMonth': _decimal_text(pm) or None}
-                  for g, pc, pm in zip(p.getlist('limit_grade'), p.getlist('limit_per_claim'), p.getlist('limit_per_month'))]
-        from django.db import transaction
+        form = CategoryForm(request.POST)
+        body = form.category(new=not cat)
         with transaction.atomic():
             if cat:
-                body['active'] = p.get('active') == 'on'
                 ex.update_category(user, cat['id'], body)
                 cid = cat['id']
             else:
-                cid = ex.create_category(user, {**body, 'code': (p.get('code') or '').strip().upper()})['id']
-            ex.set_limits(user, cid, {'limits': limits})
+                cid = ex.create_category(user, body)['id']
+            ex.set_limits(user, cid, form.limits())
         resp = HttpResponse(status=204)
         close_modal(resp)
         refresh(resp, 'exp-categories')
@@ -838,15 +713,7 @@ def limit_row(request):
 @require_role('hr')
 @require_feature(FEATURE)
 def tada_rates(request):
-    p = request.POST
-    rates = []
-    for g in p.getlist('grade'):
-        for d in ex.DESTINATIONS:
-            da, lodging = _decimal_text(p.get(f'da|{g}|{d}') or ''), _decimal_text(p.get(f'lodging|{g}|{d}') or '')
-            if not da and not lodging:
-                continue
-            rates.append({'grade': g, 'destination': d, 'daRate': da or '0', 'lodgingRate': lodging or '0'})
-    ex.set_tada_rates(request.hajiri_user, {'rates': rates})
+    ex.set_tada_rates(request.hajiri_user, TadaForm(request.POST).rates())
     return toast(request, HttpResponse(status=204), 'Travel rates saved')
 
 
@@ -867,8 +734,7 @@ def tada_grade_row(request):
 def report_spend(request):
     if request.GET.get('format') == 'csv':
         today = today_npt()
-        r = ex.report_spend(request.hajiri_user, {'from': request.GET.get('from') or add_days(today, -90), 'to': request.GET.get('to') or today,
-                                                  'groupBy': request.GET.get('group_by') or 'category'})
+        r = ex.report_spend(request.hajiri_user, SpendFilterForm(request.GET).query(today, add_days(today, -90), strict=True))
         return csv_response(r['filename'], r['columns'], r['rows'])
     return render(request, 'expenses/partials/spend.html', _spend_ctx(request))
 

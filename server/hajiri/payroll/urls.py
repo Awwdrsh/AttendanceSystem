@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import api_views as a
+from . import api as a
 from . import views as v
 
 P = 'api/v1/payroll/'

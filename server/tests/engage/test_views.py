@@ -3,7 +3,7 @@ import json
 from datetime import date, timedelta
 
 from engines.bs_calendar import BsDate, ad_to_bs, bs_to_ad
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.engage import services as S
 from tests.web.factories import htmx, hx_triggers, set_features_off, toasts
 

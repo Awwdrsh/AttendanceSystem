@@ -1,61 +1,86 @@
 #!/usr/bin/env bash
-# Start the whole system: PostgreSQL, pending migrations, the API and the device gateway.
+# Start Hajiri: PostgreSQL, pending migrations, the web app (waitress), the background worker and the
+# device gateway. With WORKER_MODE=split in server/.env the worker is a scheduler plus TASK_WORKERS task workers.
 #   ./scripts/start.sh            foreground, Ctrl+C stops everything
-#   ./scripts/start.sh --daemon   background; logs in logs/, stop with ./scripts/stop.sh
+#   ./scripts/start.sh --daemon   background; logs in logs/*.log, stop with ./scripts/stop.sh
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$ROOT"
 setup_path
 
 DAEMON=0
-for a in "$@"; do case "$a" in --daemon|-d) DAEMON=1 ;; -h|--help) sed -n '2,5p' "$0"; exit 0 ;; *) fail "unknown option $a" ;; esac; done
+for a in "$@"; do case "$a" in --daemon|-d) DAEMON=1 ;; -h|--help) sed -n '2,6p' "$0"; exit 0 ;; *) fail "unknown option $a" ;; esac; done
 
-[ -f apps/api/.env ] || fail "apps/api/.env missing. Run ./scripts/setup.sh first."
-DATABASE_URL="$(env_get apps/api/.env DATABASE_URL)"
-[ -n "$DATABASE_URL" ] || fail "DATABASE_URL missing from apps/api/.env"
-API_PORT="$(env_get apps/api/.env PORT 3000)"
-GW_PORT="$(env_get apps/gateway/.env PORT 8080)"
+[ -f "$WEB_ENV" ] || fail "server/.env missing. Run ./scripts/setup.sh first."
+require_venv
+DATABASE_URL="$(django_database_url)"
+[ -n "$DATABASE_URL" ] || fail "DATABASE_URL missing from server/.env"
+WEB_PORT="$(web_port)"; GW_PORT="$(gateway_port)"
 PG_HOST="$(pg_host_from_url "$DATABASE_URL")"; PG_PORT="$(pg_port_from_url "$DATABASE_URL")"
 
 step "PostgreSQL ($PG_HOST:$PG_PORT)"
-if ! pg_isready -h "$PG_HOST" -p "$PG_PORT" -q 2>/dev/null; then
+if ! wait_for_django_db; then
   warn "not running; starting"
   pg_service_start
-  wait_for_pg "$PG_HOST" "$PG_PORT" || fail "PostgreSQL did not come up"
+  wait_for_django_db || fail "PostgreSQL did not come up"
 fi
 ok "ready"
 
 step "Migrations"
-pnpm --filter @hajiri/api --silent db:migrate
+manage migrate --noinput >/dev/null
 ok "schema up to date"
 
-mkdir -p logs .run
-# Logs hold employee names and request details: owner-only.
-chmod 700 logs
-for f in logs/*.log; do [ -f "$f" ] && chmod 600 "$f"; done
+for port in "$WEB_PORT" "$GW_PORT"; do
+  if curl -fs "http://localhost:$port/health" >/dev/null 2>&1; then
+    fail "port $port is already serving Hajiri (an earlier start). Stop it first, or set PORT in server/.env / server/gateway.env."
+  fi
+done
+
+secure_logs
 umask 077
 if [ "$DAEMON" = 1 ]; then
-  if [ -f .run/api.pid ] && kill -0 "$(cat .run/api.pid)" 2>/dev/null; then fail "already running (./scripts/stop.sh first)"; fi
+  for f in "$RUN_DIR"/*.pid; do [ -f "$f" ] && pid_running "$f" && fail "already running (./scripts/stop.sh first)"; done
   step "Starting in background"
-  nohup bash -c 'cd apps/gateway && exec node --import tsx src/server.ts' >> logs/gateway.log 2>&1 & echo $! > .run/gateway.pid
-  nohup bash -c 'cd apps/api && exec node --import tsx src/server.ts' >> logs/api.log 2>&1 & echo $! > .run/api.pid
+  for s in $DJANGO_SERVICES; do
+    nohup bash -c 'source "$1/scripts/lib.sh"; service_exec "$2"' _ "$ROOT" "$s" >> "$LOG_DIR/$s.log" 2>&1 &
+    echo $! > "$RUN_DIR/$s.pid"
+  done
   for _ in $(seq 1 60); do
-    curl -fs "http://localhost:$API_PORT/health" >/dev/null 2>&1 && curl -fs "http://localhost:$GW_PORT/health" >/dev/null 2>&1 && break
+    curl -fs "http://localhost:$WEB_PORT/health" >/dev/null 2>&1 && curl -fs "http://localhost:$GW_PORT/health" >/dev/null 2>&1 && break
     sleep 0.5
   done
-  curl -fs "http://localhost:$API_PORT/health" >/dev/null || fail "API did not start; see logs/api.log"
+  curl -fs "http://localhost:$WEB_PORT/health" >/dev/null || fail "web app did not start; see logs/web.log"
   curl -fs "http://localhost:$GW_PORT/health" >/dev/null || fail "gateway did not start; see logs/gateway.log"
-  ok "API     http://localhost:$API_PORT  (pid $(cat .run/api.pid))"
-  ok "Gateway http://localhost:$GW_PORT  (pid $(cat .run/gateway.pid))"
-  echo "  logs: logs/api.log, logs/gateway.log   stop: ./scripts/stop.sh"
+  logs=""
+  for s in $DJANGO_SERVICES; do
+    logs="$logs logs/$s.log"
+    is_background_service "$s" || continue
+    pid_running "$RUN_DIR/$s.pid" || fail "$s did not start; see logs/$s.log"
+  done
+  ok "Web     http://localhost:$WEB_PORT  (pid $(cat "$RUN_DIR/web.pid"))"
+  ok "Gateway http://localhost:$GW_PORT  (pid $(cat "$RUN_DIR/gateway.pid"))"
+  for s in $DJANGO_SERVICES; do
+    is_background_service "$s" && ok "$(printf '%-9s' "$s")(pid $(cat "$RUN_DIR/$s.pid"))"
+  done
+  echo "  logs:$logs   stop: ./scripts/stop.sh"
   exit 0
 fi
 
 step "Starting (Ctrl+C to stop)"
-cleanup() { trap - INT TERM; pkill -TERM -f "$ROOT/apps/(gateway|api)/src/server.ts" 2>/dev/null || pkill -TERM -f 'node --import tsx src/server.ts' 2>/dev/null || true; wait 2>/dev/null; echo; ok "stopped"; }
+PIDS=()
+cleanup() {
+  trap - INT TERM
+  local p
+  for p in "${PIDS[@]}"; do pkill -TERM -P "$p" 2>/dev/null || true; kill -TERM "$p" 2>/dev/null || true; done
+  wait 2>/dev/null
+  echo; ok "stopped"
+}
 trap cleanup INT TERM
-(cd apps/gateway && exec node --import tsx "$ROOT/apps/gateway/src/server.ts") 2>&1 | sed -u 's/^/[gateway] /' &
-(cd apps/api && exec node --import tsx "$ROOT/apps/api/src/server.ts") 2>&1 | sed -u 's/^/[api]     /' &
-echo "  API     http://localhost:$API_PORT/health"
+for s in $DJANGO_SERVICES; do
+  label="$(printf '%-11s' "[$s]")"
+  ( service_exec "$s" ) > >(sed -u "s/^/$label /") 2>&1 &
+  PIDS+=("$!")
+done
+echo "  Web     http://localhost:$WEB_PORT/health"
 echo "  Gateway http://localhost:$GW_PORT/health"
 wait

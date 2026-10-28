@@ -8,7 +8,7 @@ from django.db import connection
 from django.test import Client
 
 from hajiri.core import auth
-from hajiri.core.db import one
+from tests.support.sql import one
 from hajiri.integrations.auth_api import MAX_FAILURES_PER_IP
 from hajiri.integrations.hooks import HireEvent, run_hire_hooks
 from hajiri.worker import registry
@@ -155,7 +155,7 @@ def test_a_hired_candidate_gets_a_joined_event_and_onboarding(demo, monkeypatch)
     events, onboarded = [], []
     monkeypatch.setitem(registry._HOOKS, 'people.record_career_event', lambda **kw: events.append(kw))
     monkeypatch.setitem(registry._HOOKS, 'lifecycle.auto_start_onboarding', lambda *a: onboarded.append(a))
-    from hajiri.core.db import execute
+    from tests.support.sql import execute
     execute("UPDATE employee SET designation = 'Engineer' WHERE id = %s", [demo['sita']])
     run_hire_hooks(HireEvent(company_id=demo['company_id'], employee_id=demo['sita'], application_id='a', job_id='j',
                              join_date='2026-11-01', actor_id=None))

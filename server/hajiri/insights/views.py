@@ -17,8 +17,8 @@ from engines.bs_calendar import ad_to_bs
 
 from hajiri.core.auth import company_id_of
 from hajiri.core.clock import npt_today
-from hajiri.core.db import rows
-from hajiri.core.errors import BadRequestError, HttpError, NotFoundError
+from hajiri.core.errors import BadRequestError, FeatureOffError, HttpError, NotFoundError
+from hajiri.db.models import Branch, OrgUnit
 from hajiri.reports import service as reports
 from hajiri.reports.csv import csv_response, table_response
 from hajiri.reports.people import people_report
@@ -30,6 +30,7 @@ from hajiri.web.middleware import error_message
 from hajiri.web.nav import feature_on
 
 from . import catalog, services
+from .forms import RANGES, InsightsQueryForm, SaveReportForm
 
 VIZ = [f'var(--hj-viz-{i})' for i in range(1, 9)]
 
@@ -39,9 +40,6 @@ def _today() -> str:
 
 
 # ================================================================ insights
-
-RANGES = (('6', '6 months'), ('12', '12 months'), ('24', '24 months'))
-
 
 def range_of(months: int, today: str | None = None) -> dict:
     """The last `months` BS months up to this one, as YYYY-MM keys (InsightsPage rangeOf)."""
@@ -158,7 +156,7 @@ def insight_cards(d: dict) -> tuple[list[dict], list[dict]]:
               table={'columns': ['Month', 'Detected (h)', 'Approved (h)'], 'rows': [[o['label'], o['detectedHours'], o['approvedHours']] for o in ot]}),
         _card('Leave taken by type', 'leave', 'hbars',
               ch.hbars([{'label': x['type'], 'value': x['days']} for x in d['leave']], format=lambda n: f'{fmt_num(n)} d'),
-              subtitle=f"Days taken in this period · {fmt_num(services.js_round(sum(m['days'] for m in d['leaveMonthly']), 10))} days in total",
+              subtitle=f"Days taken in this period · {fmt_num(services.round_half_up(sum(m['days'] for m in d['leaveMonthly']), 10))} days in total",
               table={'columns': ['Leave type', 'Days', 'Per employee'], 'rows': [[x['type'], x['days'], x['perEmployee']] for x in d['leave']]},
               empty=None if d['leave'] else 'No leave taken in this period'),
     ]
@@ -183,12 +181,8 @@ def insight_cards(d: dict) -> tuple[list[dict], list[dict]]:
 
 
 def _insights_query(request) -> tuple[str, dict]:
-    rng = request.GET.get('range') if request.GET.get('range') in dict(RANGES) else '12'
-    q = range_of(int(rng))
-    for k in ('branchId', 'orgUnitId'):
-        if request.GET.get(k):
-            q[k] = request.GET[k]
-    return rng, q
+    rng, filters = InsightsQueryForm(request.GET).query()
+    return rng, {**range_of(int(rng)), **filters}
 
 
 @require_GET
@@ -274,7 +268,6 @@ def _entry(key: str, kind: str) -> catalog.Entry:
 
 def _check_entry(request, e: catalog.Entry) -> None:
     if e.feature and not feature_on(request, e.feature):
-        from hajiri.core.errors import FeatureOffError
         raise FeatureOffError(e.feature)
     if not catalog.available(e):
         raise NotFoundError('not found')
@@ -360,9 +353,10 @@ def _run_table(request, e: catalog.Entry, vals: dict, *, csv: bool = False):
 
 
 def _lookups(user) -> dict:
+    """The active company's branches and departments for a report's placement filter."""
     c = company_id_of(user)
-    return {'branches': rows('SELECT id, name_en FROM branch WHERE company_id = %s ORDER BY name_en', [c]),
-            'units': rows('SELECT id, name_en, kind FROM org_unit WHERE company_id = %s ORDER BY name_en', [c])}
+    return {'branches': list(Branch.objects.for_company(c).order_by('name_en').values('id', 'name_en')),
+            'units': list(OrgUnit.objects.for_company(c).order_by('name_en').values('id', 'name_en', 'kind'))}
 
 
 @require_GET
@@ -638,13 +632,9 @@ def builder_save(request):
         return render(request, 'insights/partials/builder_save.html', {
             'current': mine, 'definition': json.dumps(d), 'name': mine['name'] if mine else '',
             'description': (mine or {}).get('description') or '', 'shared': bool(mine and mine['shared'])})
-    try:
-        d = json.loads(request.POST.get('definition') or '{}')
-    except ValueError:
-        raise BadRequestError('definition is not valid')
-    body = {'name': (request.POST.get('name') or '').strip(), 'description': (request.POST.get('description') or '').strip() or None,
-            'shared': request.POST.get('shared') in ('1', 'on', 'true'), 'definition': d}
-    if mine and request.POST.get('as_new') != '1':
+    form = SaveReportForm(request.POST)
+    body = form.body()
+    if mine and not form.cleaned_data.get('as_new'):
         saved = reports.update_saved(user, mine['id'], body)
     else:
         saved = reports.create_saved(user, body)

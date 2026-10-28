@@ -17,6 +17,7 @@ from engines.bs_calendar import (
 )
 
 from hajiri.core.clock import NPT, now
+from hajiri.core.numbers import round_half_up, to_fixed  # noqa: F401  (to_fixed is used by other modules from here)
 
 NPT_OFFSET_MIN = 345
 DASH = '—'
@@ -165,15 +166,15 @@ def relative_time(value, at: datetime | None = None) -> str:
     if d is None:
         return DASH
     diff = ((at or now()) - d).total_seconds() * 1000
-    minutes = _round_half_up(diff / 60_000)
+    minutes = round_half_up(diff / 60_000)
     if minutes < 1:
         return 'just now'
     if minutes < 60:
         return f'{minutes} min ago'
-    h = _round_half_up(minutes / 60)
+    h = round_half_up(minutes / 60)
     if h < 48:
         return f'{h} h ago'
-    return f'{_round_half_up(h / 24)} d ago'
+    return f'{round_half_up(h / 24)} d ago'
 
 
 def greeting(at: datetime | None = None) -> str:
@@ -187,9 +188,6 @@ def add_days(ad, days: int) -> str:
 
 # ---------------------------------------------------------------- numbers
 
-def _round_half_up(x: float) -> int:
-    """Math.round: halves go up (towards +infinity)."""
-    return math.floor(x + 0.5)
 
 
 def group_digits(int_part: str, style: str = 'lakh') -> str:
@@ -244,7 +242,7 @@ def minutes_to_hm(minutes) -> str:
 
 
 def pct(n) -> str:
-    return DASH if n is None else f'{_round_half_up(float(n))}%'
+    return DASH if n is None else f'{round_half_up(float(n))}%'
 
 
 def truncate(s: str | None, n: int = 40) -> str:
@@ -257,10 +255,6 @@ def devanagari(s) -> str:
     return to_devanagari_numerals(str(s))
 
 
-def to_fixed(n: float, digits: int) -> str:
-    """JavaScript Number.prototype.toFixed: rounds the exact binary value half away from zero."""
-    q = Decimal(float(n)).quantize(Decimal(1).scaleb(-digits), rounding=ROUND_HALF_UP)
-    return f'{q:.{digits}f}'
 
 
 def compact(n: float, money: bool = False) -> str:
@@ -273,7 +267,7 @@ def compact(n: float, money: bool = False) -> str:
             return f'{to_fixed(n / 1e5, 0 if a >= 1e6 else 1)}L'
         if a >= 1e3:
             return f'{to_fixed(n / 1e3, 0)}K'
-        return str(_round_half_up(n))
+        return str(round_half_up(n))
     if a >= 1e6:
         return f'{to_fixed(n / 1e6, 1)}M'
     if a >= 1e4:

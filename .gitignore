@@ -1,18 +1,25 @@
-# dependencies and build output
-node_modules/
-dist/
-coverage/
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+server/staticfiles/
 
 # local configuration and secrets (never commit)
 .env
 .env.*
 !.env.example
+gateway.env
 
 # runtime
 .admin-credentials
 logs/
 .run/
 *.log
+server/data/
 
 # OS / editor
 .DS_Store
@@ -22,3 +29,4 @@ Thumbs.db
 
 # local infra data
 infra/pgdata/
+backups/

@@ -6,15 +6,23 @@ from django.contrib.postgres.fields import ArrayField, DateRangeField
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class Announcement(models.Model):
+    class AudienceKind(models.TextChoices):
+        ALL = 'all', 'All'
+        BRANCH = 'branch', 'Branch'
+        DEPARTMENT = 'department', 'Department'
+        REPORTS = 'reports', 'Reports'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('Company', models.DO_NOTHING)
-    author = models.ForeignKey('AppUser', models.DO_NOTHING)
-    author_employee = models.ForeignKey('Employee', models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('Company', models.DO_NOTHING, related_name='announcements')
+    author = models.ForeignKey('AppUser', models.DO_NOTHING, related_name='announcements_as_author')
+    author_employee = models.ForeignKey('Employee', models.DO_NOTHING, related_name='announcements_as_author', blank=True, null=True)
     title = models.TextField()
     body = models.TextField()
-    audience_kind = models.TextField(db_default='all')
+    audience_kind = models.TextField(choices=AudienceKind, db_default='all')
     audience_id = models.UUIDField(blank=True, null=True)
     pinned = models.BooleanField(db_default=False)
     requires_ack = models.BooleanField(db_default=False)
@@ -25,78 +33,137 @@ class Announcement(models.Model):
     popup = models.BooleanField(db_default=False)
     popup_until = models.DateField(blank=True, null=True)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'announcement'
+
+    def __str__(self):
+        return str(self.title)
 
 
 class AnnouncementAck(models.Model):
     pk = models.CompositePrimaryKey('announcement_id', 'user_id')
-    announcement = models.ForeignKey(Announcement, models.DO_NOTHING)
-    user = models.ForeignKey('AppUser', models.DO_NOTHING)
+    announcement = models.ForeignKey(Announcement, models.DO_NOTHING, related_name='announcement_acks')
+    user = models.ForeignKey('AppUser', models.DO_NOTHING, related_name='announcement_acks')
     acked_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'announcement__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'announcement_ack'
 
+    def __str__(self):
+        return f'AnnouncementAck {self.pk}'
+
 
 class AnnouncementPopupSeen(models.Model):
     pk = models.CompositePrimaryKey('announcement_id', 'user_id')
-    announcement = models.ForeignKey(Announcement, models.DO_NOTHING)
-    user = models.ForeignKey('AppUser', models.DO_NOTHING)
+    announcement = models.ForeignKey(Announcement, models.DO_NOTHING, related_name='announcement_popup_seens')
+    user = models.ForeignKey('AppUser', models.DO_NOTHING, related_name='announcement_popup_seens')
     seen_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'announcement__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'announcement_popup_seen'
 
+    def __str__(self):
+        return f'AnnouncementPopupSeen {self.pk}'
+
 
 class EngageComment(models.Model):
+    class TargetType(models.TextChoices):
+        KUDOS = 'kudos', 'Kudos'
+        ANNOUNCEMENT = 'announcement', 'Announcement'
+        CELEBRATION = 'celebration', 'Celebration'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    target_type = models.TextField()
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='engage_comments')
+    target_type = models.TextField(choices=TargetType)
     target_id = models.TextField()
-    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
+    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='engage_comments')
     body = models.TextField()
     created_at = models.DateTimeField(db_default=Now())
     deleted_at = models.DateTimeField(blank=True, null=True)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'engage_comment'
 
+    def __str__(self):
+        return f'EngageComment {self.id}'
+
 
 class EngagePref(models.Model):
-    employee = models.OneToOneField('hajiri.Employee', models.DO_NOTHING, primary_key=True)
+    employee = models.OneToOneField('hajiri.Employee', models.DO_NOTHING, related_name='engage_pref', primary_key=True)
     show_birthday = models.BooleanField(db_default=False)
     updated_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'engage_pref'
 
+    def __str__(self):
+        return f'EngagePref {self.employee_id}'
+
 
 class EngageReaction(models.Model):
+    class Emoji(models.TextChoices):
+        LIKE = 'like', 'Like'
+        LOVE = 'love', 'Love'
+        CLAP = 'clap', 'Clap'
+        CELEBRATE = 'celebrate', 'Celebrate'
+        LAUGH = 'laugh', 'Laugh'
+
+    class TargetType(models.TextChoices):
+        KUDOS = 'kudos', 'Kudos'
+        ANNOUNCEMENT = 'announcement', 'Announcement'
+        CELEBRATION = 'celebration', 'Celebration'
+
     pk = models.CompositePrimaryKey('company_id', 'target_type', 'target_id', 'user_id', 'emoji')
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    target_type = models.TextField()
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='engage_reactions')
+    target_type = models.TextField(choices=TargetType)
     target_id = models.TextField()
-    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
-    emoji = models.TextField()
+    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='engage_reactions')
+    emoji = models.TextField(choices=Emoji)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'engage_reaction'
 
+    def __str__(self):
+        return f'EngageReaction {self.pk}'
+
 
 class EngageSetting(models.Model):
-    company = models.OneToOneField('hajiri.Company', models.DO_NOTHING, primary_key=True)
+    company = models.OneToOneField('hajiri.Company', models.DO_NOTHING, related_name='engage_setting', primary_key=True)
     kudos_monthly_limit = models.SmallIntegerField(blank=True, null=True)
     updated_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'engage_setting'
 
+    def __str__(self):
+        return f'EngageSetting {self.company_id}'
+
 
 class EngageValue(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='engage_values')
     name = models.TextField()
     description = models.TextField(blank=True, null=True)
     emoji = models.TextField(db_default='⭐')
@@ -104,111 +171,200 @@ class EngageValue(models.Model):
     sort_order = models.SmallIntegerField(db_default=0)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'engage_value'
         unique_together = (('company', 'name'),)
 
+    def __str__(self):
+        return str(self.name)
+
 
 class Kudos(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    giver = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
-    giver_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    value = models.ForeignKey(EngageValue, models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='kudoses')
+    giver = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='kudoses_as_giver')
+    giver_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='kudoses_as_giver')
+    value = models.ForeignKey(EngageValue, models.DO_NOTHING, related_name='kudoses', blank=True, null=True)
     message = models.TextField()
     created_at = models.DateTimeField(db_default=Now())
     deleted_at = models.DateTimeField(blank=True, null=True)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'kudos'
+
+    def __str__(self):
+        return f'Kudos {self.id}'
 
 
 class KudosRecipient(models.Model):
     pk = models.CompositePrimaryKey('kudos_id', 'employee_id')
-    kudos = models.ForeignKey(Kudos, models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    kudos = models.ForeignKey(Kudos, models.DO_NOTHING, related_name='kudos_recipients')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='kudos_recipients')
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'kudos_recipient'
 
+    def __str__(self):
+        return f'KudosRecipient {self.pk}'
+
 
 class Suggestion(models.Model):
+    class Category(models.TextChoices):
+        GENERAL = 'general', 'General'
+        WORKPLACE = 'workplace', 'Workplace'
+        PROCESS = 'process', 'Process'
+        BENEFITS = 'benefits', 'Benefits'
+        CULTURE = 'culture', 'Culture'
+        OTHER = 'other', 'Other'
+
+    class Status(models.TextChoices):
+        NEW = 'new', 'New'
+        REVIEWED = 'reviewed', 'Reviewed'
+        ANSWERED = 'answered', 'Answered'
+        ARCHIVED = 'archived', 'Archived'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='gen_random_uuid', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    category = models.TextField(db_default='general')
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='suggestions')
+    category = models.TextField(choices=Category, db_default='general')
     body = models.TextField()
     received_on = models.DateField()
-    status = models.TextField(db_default='new')
+    status = models.TextField(choices=Status, db_default='new')
     reply = models.TextField(blank=True, null=True)
     is_public = models.BooleanField(db_default=False)
-    replied_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='replied_by', blank=True, null=True)
+    replied_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='suggestions_as_replied_by', db_column='replied_by', blank=True, null=True)
     replied_at = models.DateTimeField(blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'suggestion'
 
+    def __str__(self):
+        return f'Suggestion {self.id}'
+
 
 class Survey(models.Model):
+    class AudienceKind(models.TextChoices):
+        ALL = 'all', 'All'
+        BRANCH = 'branch', 'Branch'
+        DEPARTMENT = 'department', 'Department'
+
+    class Kind(models.TextChoices):
+        SURVEY = 'survey', 'Survey'
+        POLL = 'poll', 'Poll'
+
+    class Recurrence(models.TextChoices):
+        NONE = 'none', 'None'
+        WEEKLY = 'weekly', 'Weekly'
+        MONTHLY = 'monthly', 'Monthly'
+
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Draft'
+        PUBLISHED = 'published', 'Published'
+        CLOSED = 'closed', 'Closed'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    kind = models.TextField(db_default='survey')
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='surveys')
+    kind = models.TextField(choices=Kind, db_default='survey')
     title = models.TextField()
     description = models.TextField(blank=True, null=True)
     anonymous = models.BooleanField(db_default=True)
     min_group = models.SmallIntegerField(db_default=5)
-    audience_kind = models.TextField(db_default='all')
+    audience_kind = models.TextField(choices=AudienceKind, db_default='all')
     audience_id = models.UUIDField(blank=True, null=True)
-    status = models.TextField(db_default='draft')
+    status = models.TextField(choices=Status, db_default='draft')
     opens_on = models.DateField()
     closes_on = models.DateField()
-    recurrence = models.TextField(db_default='none')
+    recurrence = models.TextField(choices=Recurrence, db_default='none')
     series_id = models.UUIDField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='surveys_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     published_at = models.DateTimeField(blank=True, null=True)
     opened_notified_at = models.DateTimeField(blank=True, null=True)
     reminded_at = models.DateTimeField(blank=True, null=True)
     closed_at = models.DateTimeField(blank=True, null=True)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'survey'
+
+    def __str__(self):
+        return str(self.title)
 
 
 class SurveyAnswer(models.Model):
     pk = models.CompositePrimaryKey('response_id', 'question_id')
-    response = models.ForeignKey('SurveyResponse', models.DO_NOTHING)
-    question = models.ForeignKey('SurveyQuestion', models.DO_NOTHING)
+    response = models.ForeignKey('SurveyResponse', models.DO_NOTHING, related_name='survey_answers')
+    question = models.ForeignKey('SurveyQuestion', models.DO_NOTHING, related_name='survey_answers')
     value_num = models.SmallIntegerField(blank=True, null=True)
     choices = ArrayField(models.TextField(), blank=True, null=True)
     text_value = models.TextField(blank=True, null=True)
 
+    company_scope = 'question__survey__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'survey_answer'
 
+    def __str__(self):
+        return str(self.question)
+
 
 class SurveyQuestion(models.Model):
+    class Kind(models.TextChoices):
+        RATING = 'rating', 'Rating'
+        ENPS = 'enps', 'eNPS'
+        SINGLE = 'single', 'Single'
+        MULTI = 'multi', 'Multi'
+        TEXT = 'text', 'Text'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    survey = models.ForeignKey(Survey, models.DO_NOTHING)
+    survey = models.ForeignKey(Survey, models.DO_NOTHING, related_name='survey_questions')
     position = models.SmallIntegerField()
-    kind = models.TextField()
+    kind = models.TextField(choices=Kind)
     prompt = models.TextField()
     options = models.JSONField(db_default=[])
     required = models.BooleanField(db_default=True)
+
+    company_scope = 'survey__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'survey_question'
         unique_together = (('survey', 'position'),)
 
+    def __str__(self):
+        return f'SurveyQuestion {self.id}'
+
 
 class SurveyResponse(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='gen_random_uuid', output_field=models.UUIDField()))
-    survey = models.ForeignKey(Survey, models.DO_NOTHING)
+    survey = models.ForeignKey(Survey, models.DO_NOTHING, related_name='survey_responses')
     respondent_key = models.TextField()
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, blank=True, null=True)
-    org_unit = models.ForeignKey('hajiri.OrgUnit', models.DO_NOTHING, blank=True, null=True)
-    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, blank=True, null=True)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='survey_responses', blank=True, null=True)
+    org_unit = models.ForeignKey('hajiri.OrgUnit', models.DO_NOTHING, related_name='survey_responses', blank=True, null=True)
+    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, related_name='survey_responses', blank=True, null=True)
     submitted_on = models.DateField()
+
+    # Through the survey: anonymous responses have no employee.
+    company_scope = 'survey__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'survey_response'
         unique_together = (('survey', 'respondent_key'),)
+
+    def __str__(self):
+        return f'SurveyResponse {self.id}'

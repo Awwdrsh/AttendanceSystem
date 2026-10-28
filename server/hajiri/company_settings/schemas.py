@@ -1,10 +1,15 @@
-"""Company settings and their schemas (port of apps/api/src/modules/settings/schemas.ts)."""
+"""Company settings and their request contracts (port of apps/api/src/modules/settings/schemas.ts): one DRF serializer
+per setting key, with the TS defaults, bounds and messages. Validating `{}` gives a setting's defaults."""
 from __future__ import annotations
 
 import hashlib
 import json
 
-from hajiri.core.schema import Arr, Bool, Enum, Hhmm, Int, Num, Obj, Str
+from rest_framework import serializers
+
+from hajiri.core.validation import HhmmField
+
+from .fields import JsonBool, JsonNumber, JsonString
 
 # Statutory maxima (Labour Act 2074 Sec 30(1)) can be lowered by policy, never raised.
 OT_CAP_DAY_MIN = 240
@@ -12,65 +17,96 @@ OT_CAP_WEEK_MIN = 1440
 
 _LATE_PENALTY_DEFAULT = {'enabled': False, 'lateCount': 3, 'deductionDays': 0.5}
 
-SETTING_SCHEMAS: dict[str, Obj] = {
-    'attendance.policy': Obj({
-        'version': Str(optional=True),
-        'otMinThresholdMin': Int(min=0, max=240, default=30),
-        'otRoundingMin': Int(min=0, max=60, default=15),
-        'requirePreapproval': Bool(default=True),
-        'otCapDayMin': Int(min=0, default=OT_CAP_DAY_MIN, transform=lambda v: min(v, OT_CAP_DAY_MIN)),
-        'otCapWeekMin': Int(min=0, default=OT_CAP_WEEK_MIN, transform=lambda v: min(v, OT_CAP_WEEK_MIN)),
-        'holidayWork': Enum(('substitute_leave', 'pay', 'employee_choice'), default='substitute_leave'),
-        'nightWindowEnabled': Bool(default=False),
-        'nightPremiumRate': Num(min=0, max=1, default=0),
-        'autoClockOutAfterMin': Int(min=0, max=720, default=0),
-        'regularisationBackdateDays': Int(min=0, max=90, default=30),
-        'regularisationMonthlyCap': Int(min=0, max=31, default=5),
-        'wfhPhotoRequired': Bool(default=True),
-        'wfhPhotoRetentionDays': Int(min=7, max=365, default=90),
-        'latePenalty': Obj({'enabled': Bool(default=False), 'lateCount': Int(min=1, default=3),
-                            'deductionDays': Num(min=0, max=1, default=0.5)}, default=lambda: dict(_LATE_PENALTY_DEFAULT)),
-    }),
-    'leave.policy': Obj({
-        'leaveYear': Enum(('fiscal', 'anniversary'), default='fiscal'),
-        'sandwichRule': Bool(default=False),
-        'probationRestriction': Bool(default=True),
-        'maxContinuousDays': Int(min=1, max=365, default=30),
-    }),
-    'payroll.policy': Obj({
-        'prorationBasis': Enum(('bs_calendar_days', 'fixed_30', '26_day'), default='bs_calendar_days'),
-        'hourlyDivisor': Int(min=150, max=260, default=208),
-        'payDay': Int(min=1, max=32, default=25),
-        'rounding': Enum(('half_up_rupee', 'paisa'), default='half_up_rupee'),
-        'separateApprover': Bool(default=False),
-        'encashmentDivisor': Enum(('bs_days', 'fixed_30'), default='bs_days'),
-        'publishOnLock': Bool(default=False),
-    }),
-    'payslip.policy': Obj({
-        'language': Enum(('both', 'en', 'ne'), default='both'),
-        'numerals': Enum(('latin', 'devanagari'), default='latin'),
-        'passwordProtect': Bool(default=True),
-    }),
-    'notifications.policy': Obj({
-        'quietHoursStart': Hhmm(default='21:00'),
-        'quietHoursEnd': Hhmm(default='07:00'),
-        'slaHours': Int(min=1, max=168, default=24),
-        'escalationHours': Int(min=1, max=336, default=48),
-        'digestTime': Hhmm(default='10:45'),
-    }),
-    'company.profile': Obj({
-        'nameEn': Str(min=1, max=120),
-        'nameNe': Str(max=120, nullish=True),
-        'address': Str(max=300, nullish=True),
-        'pan': Str(regex=r'^\d{9}$', nullish=True),
-        'ssfEmployerId': Str(max=20, nullish=True),
-        'logoDataUrl': Str(max=200_000, regex=r'^data:image/(png|jpeg|svg\+xml);base64,', nullish=True),
-    }),
-    'security.policy': Obj({
-        # Roles that must use two-step sign-in; they are sent to set it up at their next sign-in.
-        'require2faRoles': Arr(Enum(('admin', 'hr', 'manager', 'employee')), max=4, default=list,
-                               transform=lambda a: list(dict.fromkeys(a))),
-    }),
+
+def _int(**kw) -> JsonNumber:
+    return JsonNumber(integer=True, **kw)
+
+
+class LatePenaltyIn(serializers.Serializer):
+    enabled = JsonBool(default=False)
+    lateCount = _int(min_value=1, default=3)
+    deductionDays = JsonNumber(min_value=0, max_value=1, default=0.5)
+
+
+class AttendancePolicyIn(serializers.Serializer):
+    version = JsonString(required=False)
+    otMinThresholdMin = _int(min_value=0, max_value=240, default=30)
+    otRoundingMin = _int(min_value=0, max_value=60, default=15)
+    requirePreapproval = JsonBool(default=True)
+    otCapDayMin = _int(min_value=0, clamp_max=OT_CAP_DAY_MIN, default=OT_CAP_DAY_MIN)
+    otCapWeekMin = _int(min_value=0, clamp_max=OT_CAP_WEEK_MIN, default=OT_CAP_WEEK_MIN)
+    holidayWork = serializers.ChoiceField(('substitute_leave', 'pay', 'employee_choice'), default='substitute_leave')
+    nightWindowEnabled = JsonBool(default=False)
+    nightPremiumRate = JsonNumber(min_value=0, max_value=1, default=0)
+    autoClockOutAfterMin = _int(min_value=0, max_value=720, default=0)
+    regularisationBackdateDays = _int(min_value=0, max_value=90, default=30)
+    regularisationMonthlyCap = _int(min_value=0, max_value=31, default=5)
+    wfhPhotoRequired = JsonBool(default=True)
+    wfhPhotoRetentionDays = _int(min_value=7, max_value=365, default=90)
+    latePenalty = LatePenaltyIn(default=lambda: dict(_LATE_PENALTY_DEFAULT))
+
+
+class LeavePolicyIn(serializers.Serializer):
+    leaveYear = serializers.ChoiceField(('fiscal', 'anniversary'), default='fiscal')
+    sandwichRule = JsonBool(default=False)
+    probationRestriction = JsonBool(default=True)
+    maxContinuousDays = _int(min_value=1, max_value=365, default=30)
+
+
+class PayrollPolicyIn(serializers.Serializer):
+    prorationBasis = serializers.ChoiceField(('bs_calendar_days', 'fixed_30', '26_day'), default='bs_calendar_days')
+    hourlyDivisor = _int(min_value=150, max_value=260, default=208)
+    payDay = _int(min_value=1, max_value=32, default=25)
+    rounding = serializers.ChoiceField(('half_up_rupee', 'paisa'), default='half_up_rupee')
+    separateApprover = JsonBool(default=False)
+    encashmentDivisor = serializers.ChoiceField(('bs_days', 'fixed_30'), default='bs_days')
+    publishOnLock = JsonBool(default=False)
+
+
+class PayslipPolicyIn(serializers.Serializer):
+    language = serializers.ChoiceField(('both', 'en', 'ne'), default='both')
+    numerals = serializers.ChoiceField(('latin', 'devanagari'), default='latin')
+    passwordProtect = JsonBool(default=True)
+
+
+class NotificationsPolicyIn(serializers.Serializer):
+    quietHoursStart = HhmmField(default='21:00')
+    quietHoursEnd = HhmmField(default='07:00')
+    slaHours = _int(min_value=1, max_value=168, default=24)
+    escalationHours = _int(min_value=1, max_value=336, default=48)
+    digestTime = HhmmField(default='10:45')
+
+
+def _nullish(max_length: int, **kw) -> JsonString:
+    return JsonString(max_length=max_length, required=False, allow_null=True, **kw)
+
+
+class CompanyProfileIn(serializers.Serializer):
+    nameEn = JsonString(min_length=1, max_length=120, allow_blank=False)
+    nameNe = _nullish(120)
+    address = _nullish(300)
+    pan = JsonString(pattern=r'^\d{9}$', required=False, allow_null=True)
+    ssfEmployerId = _nullish(20)
+    logoDataUrl = _nullish(200_000, pattern=r'^data:image/(png|jpeg|svg\+xml);base64,')
+
+
+class SecurityPolicyIn(serializers.Serializer):
+    # Roles that must use two-step sign-in; they are sent to set it up at their next sign-in.
+    require2faRoles = serializers.ListField(child=serializers.ChoiceField(('admin', 'hr', 'manager', 'employee')),
+                                            max_length=4, default=list)
+
+    def validate_require2faRoles(self, value):
+        return list(dict.fromkeys(value))
+
+
+SETTING_SCHEMAS: dict[str, type[serializers.Serializer]] = {
+    'attendance.policy': AttendancePolicyIn,
+    'leave.policy': LeavePolicyIn,
+    'payroll.policy': PayrollPolicyIn,
+    'payslip.policy': PayslipPolicyIn,
+    'notifications.policy': NotificationsPolicyIn,
+    'company.profile': CompanyProfileIn,
+    'security.policy': SecurityPolicyIn,
 }
 
 SETTING_KEYS: tuple[str, ...] = tuple(SETTING_SCHEMAS)
@@ -94,8 +130,10 @@ def _js_number(v):
 
 
 def _js_stringify_top_sorted(value: dict) -> str:
-    """JSON.stringify(rest, Object.keys(rest).sort()): the replacer array is an allow-list applied at every depth, so
-    nested objects keep only keys that are also top-level keys, written in the sorted order."""
+    """JSON.stringify(rest, Object.keys(rest).sort()), byte for byte: the policy version must match what the TS stack
+    computes for the same settings (attendance_day.inputs_hash includes it, and both stacks share the database). The
+    replacer array is an allow-list applied at every depth, so nested objects keep only keys that are also top-level
+    keys, written in the sorted order."""
     allow = sorted(value)
 
     def enc(v):

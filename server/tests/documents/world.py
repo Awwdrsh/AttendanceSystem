@@ -5,7 +5,7 @@ import base64
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.core.errors import HttpError
 from hajiri.documents import services as docs
 from hajiri.files import service as files

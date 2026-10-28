@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, HttpError, NotFoundError
 from hajiri.expenses import payroll as pay
 from hajiri.expenses import services as ex

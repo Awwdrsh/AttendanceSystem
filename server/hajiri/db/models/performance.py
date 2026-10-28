@@ -6,28 +6,45 @@ from django.contrib.postgres.fields import ArrayField, DateRangeField
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class LrnAttempt(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    enrollment = models.ForeignKey('LrnEnrollment', models.DO_NOTHING)
+    enrollment = models.ForeignKey('LrnEnrollment', models.DO_NOTHING, related_name='lrn_attempts')
     answers = models.JSONField()
     score = models.DecimalField(max_digits=5, decimal_places=2)
     passed = models.BooleanField()
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'enrollment__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'lrn_attempt'
 
+    def __str__(self):
+        return f'LrnAttempt {self.id}'
+
 
 class LrnCourse(models.Model):
+    class Delivery(models.TextChoices):
+        ONLINE = 'online', 'Online'
+        CLASSROOM = 'classroom', 'Classroom'
+        BLENDED = 'blended', 'Blended'
+
+    class Source(models.TextChoices):
+        INTERNAL = 'internal', 'Internal'
+        EXTERNAL = 'external', 'External'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='lrn_courses')
     code = models.TextField()
     title = models.TextField()
     description = models.TextField(blank=True, null=True)
     category = models.TextField(blank=True, null=True)
-    delivery = models.TextField(db_default='classroom')
-    source = models.TextField(db_default='internal')
+    delivery = models.TextField(choices=Delivery, db_default='classroom')
+    source = models.TextField(choices=Source, db_default='internal')
     provider = models.TextField(blank=True, null=True)
     duration_hours = models.DecimalField(max_digits=6, decimal_places=2, blank=True, null=True)
     url = models.TextField(blank=True, null=True)
@@ -39,88 +56,142 @@ class LrnCourse(models.Model):
     active = models.BooleanField(db_default=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'lrn_course'
         unique_together = (('company', 'code'),)
 
+    def __str__(self):
+        return str(self.title)
+
 
 class LrnEnrollment(models.Model):
+    class Source(models.TextChoices):
+        SELF = 'self', 'Self'
+        ASSIGNED = 'assigned', 'Assigned'
+        REVIEW = 'review', 'Review'
+        MANDATORY = 'mandatory', 'Mandatory'
+
+    class Status(models.TextChoices):
+        PENDING_APPROVAL = 'pending_approval', 'Pending approval'
+        ENROLLED = 'enrolled', 'Enrolled'
+        COMPLETED = 'completed', 'Completed'
+        REJECTED = 'rejected', 'Rejected'
+        CANCELLED = 'cancelled', 'Cancelled'
+        NO_SHOW = 'no_show', 'No show'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    course = models.ForeignKey(LrnCourse, models.DO_NOTHING)
-    session = models.ForeignKey('LrnSession', models.DO_NOTHING, blank=True, null=True)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    source = models.TextField()
-    status = models.TextField()
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='lrn_enrollments')
+    course = models.ForeignKey(LrnCourse, models.DO_NOTHING, related_name='lrn_enrollments')
+    session = models.ForeignKey('LrnSession', models.DO_NOTHING, related_name='lrn_enrollments', blank=True, null=True)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='lrn_enrollments')
+    source = models.TextField(choices=Source)
+    status = models.TextField(choices=Status)
     workflow_instance_id = models.UUIDField(blank=True, null=True)
-    review = models.ForeignKey('PerfReview', models.DO_NOTHING, blank=True, null=True)
+    review = models.ForeignKey('PerfReview', models.DO_NOTHING, related_name='lrn_enrollments', blank=True, null=True)
     reason = models.TextField(blank=True, null=True)
-    assigned_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='assigned_by', blank=True, null=True)
+    assigned_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='lrn_enrollments_as_assigned_by', db_column='assigned_by', blank=True, null=True)
     attended = models.BooleanField(blank=True, null=True)
     completed_at = models.DateTimeField(blank=True, null=True)
     score = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True)
     passed = models.BooleanField(blank=True, null=True)
     feedback_rating = models.SmallIntegerField(blank=True, null=True)
     feedback_comment = models.TextField(blank=True, null=True)
-    certificate_file = models.ForeignKey('StoredFile', models.DO_NOTHING, blank=True, null=True)
+    certificate_file = models.ForeignKey('StoredFile', models.DO_NOTHING, related_name='lrn_enrollments', blank=True, null=True)
     certificate_issued_on = models.DateField(blank=True, null=True)
     certificate_expires_on = models.DateField(blank=True, null=True)
     expiry_reminded_at = models.DateTimeField(blank=True, null=True)
     cost = models.DecimalField(max_digits=12, decimal_places=2, db_default=0)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'lrn_enrollment'
         unique_together = (('course', 'employee'),)
 
+    def __str__(self):
+        return f'LrnEnrollment {self.id}'
+
 
 class LrnQuestion(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    course = models.ForeignKey(LrnCourse, models.DO_NOTHING)
+    course = models.ForeignKey(LrnCourse, models.DO_NOTHING, related_name='lrn_questions')
     prompt = models.TextField()
     options = models.JSONField()
     correct_index = models.SmallIntegerField()
     sort = models.SmallIntegerField(db_default=0)
 
+    company_scope = 'course__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'lrn_question'
 
+    def __str__(self):
+        return f'LrnQuestion {self.id}'
+
 
 class LrnSession(models.Model):
+    class Status(models.TextChoices):
+        SCHEDULED = 'scheduled', 'Scheduled'
+        COMPLETED = 'completed', 'Completed'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    course = models.ForeignKey(LrnCourse, models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='lrn_sessions')
+    course = models.ForeignKey(LrnCourse, models.DO_NOTHING, related_name='lrn_sessions')
     starts_at = models.DateTimeField()
     ends_at = models.DateTimeField()
     venue = models.TextField(blank=True, null=True)
     trainer = models.TextField(blank=True, null=True)
     capacity = models.IntegerField(blank=True, null=True)
-    status = models.TextField(db_default='scheduled')
+    status = models.TextField(choices=Status, db_default='scheduled')
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'lrn_session'
 
+    def __str__(self):
+        return f'LrnSession {self.id}'
+
 
 class PerfCheckin(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    goal = models.ForeignKey('PerfGoal', models.DO_NOTHING)
-    key_result = models.ForeignKey('PerfKeyResult', models.DO_NOTHING, blank=True, null=True)
-    author = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, blank=True, null=True)
+    goal = models.ForeignKey('PerfGoal', models.DO_NOTHING, related_name='perf_checkins')
+    key_result = models.ForeignKey('PerfKeyResult', models.DO_NOTHING, related_name='perf_checkins', blank=True, null=True)
+    author = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='perf_checkins_as_author', blank=True, null=True)
     value = models.DecimalField(max_digits=16, decimal_places=2, blank=True, null=True)
     progress = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True)
     confidence = models.SmallIntegerField(blank=True, null=True)
     comment = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'goal__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'perf_checkin'
 
+    def __str__(self):
+        return f'PerfCheckin {self.id}'
+
 
 class PerfCompetency(models.Model):
+    class Kind(models.TextChoices):
+        KNOWLEDGE = 'knowledge', 'Knowledge'
+        SKILL = 'skill', 'Skill'
+        ATTITUDE = 'attitude', 'Attitude'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    kind = models.TextField()
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='perf_competencies')
+    kind = models.TextField(choices=Kind)
     name = models.TextField()
     description = models.TextField(blank=True, null=True)
     indicators = models.JSONField(db_default=[])
@@ -129,18 +200,33 @@ class PerfCompetency(models.Model):
     active = models.BooleanField(db_default=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'perf_competency'
         unique_together = (('company', 'name'),)
 
+    def __str__(self):
+        return str(self.name)
+
 
 class PerfCycle(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Draft'
+        SELF_REVIEW = 'self_review', 'Self review'
+        MANAGER_REVIEW = 'manager_review', 'Manager review'
+        PEER_REVIEW = 'peer_review', 'Peer review'
+        CALIBRATION = 'calibration', 'Calibration'
+        RELEASED = 'released', 'Released'
+        CLOSED = 'closed', 'Closed'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='perf_cycles')
     name = models.TextField()
     period_start = models.DateField()
     period_end = models.DateField()
-    status = models.TextField(db_default='draft')
+    status = models.TextField(choices=Status, db_default='draft')
     goals_weight = models.DecimalField(max_digits=5, decimal_places=2, db_default=60)
     competency_weight = models.DecimalField(max_digits=5, decimal_places=2, db_default=40)
     rating_labels = models.JSONField(db_default=['Needs improvement', 'Partly meets', 'Meets expectations', 'Exceeds expectations', 'Outstanding'])
@@ -151,73 +237,124 @@ class PerfCycle(models.Model):
     peer_due = models.DateField(blank=True, null=True)
     calibration_due = models.DateField(blank=True, null=True)
     filter = models.JSONField(db_default={})
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='perf_cycles_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     launched_at = models.DateTimeField(blank=True, null=True)
     released_at = models.DateTimeField(blank=True, null=True)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'perf_cycle'
 
+    def __str__(self):
+        return str(self.name)
+
 
 class PerfFeedback(models.Model):
+    class Status(models.TextChoices):
+        REQUESTED = 'requested', 'Requested'
+        GIVEN = 'given', 'Given'
+        DECLINED = 'declined', 'Declined'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    giver_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    subject_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perffeedback_subject_employee_set')
-    requester_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perffeedback_requester_employee_set', blank=True, null=True)
-    status = models.TextField(db_default='given')
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='perf_feedbacks')
+    giver_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perf_feedbacks_as_giver')
+    subject_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perf_feedbacks_as_subject')
+    requester_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perf_feedbacks_as_requester', blank=True, null=True)
+    status = models.TextField(choices=Status, db_default='given')
     prompt = models.TextField(blank=True, null=True)
     body = models.TextField(blank=True, null=True)
     private_to_manager = models.BooleanField(db_default=False)
     created_at = models.DateTimeField(db_default=Now())
     given_at = models.DateTimeField(blank=True, null=True)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'perf_feedback'
 
+    def __str__(self):
+        return f'PerfFeedback {self.id}'
+
 
 class PerfGoal(models.Model):
+    class Scope(models.TextChoices):
+        COMPANY = 'company', 'Company'
+        DEPARTMENT = 'department', 'Department'
+        INDIVIDUAL = 'individual', 'Individual'
+
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Draft'
+        ACTIVE = 'active', 'Active'
+        COMPLETED = 'completed', 'Completed'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    scope = models.TextField()
-    org_unit = models.ForeignKey('hajiri.OrgUnit', models.DO_NOTHING, blank=True, null=True)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, blank=True, null=True)
-    parent = models.ForeignKey('self', models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='perf_goals')
+    scope = models.TextField(choices=Scope)
+    org_unit = models.ForeignKey('hajiri.OrgUnit', models.DO_NOTHING, related_name='perf_goals', blank=True, null=True)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perf_goals', blank=True, null=True)
+    parent = models.ForeignKey('self', models.DO_NOTHING, related_name='children', blank=True, null=True)
     title = models.TextField()
     description = models.TextField(blank=True, null=True)
     weight = models.DecimalField(max_digits=5, decimal_places=2, db_default=0)
     start_date = models.DateField(blank=True, null=True)
     due_date = models.DateField(blank=True, null=True)
-    status = models.TextField(db_default='active')
+    status = models.TextField(choices=Status, db_default='active')
     progress = models.DecimalField(max_digits=5, decimal_places=2, db_default=0)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='perf_goals_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'perf_goal'
 
+    def __str__(self):
+        return str(self.title)
+
 
 class PerfJournal(models.Model):
+    class Tag(models.TextChoices):
+        POSITIVE = 'positive', 'Positive'
+        IMPROVEMENT = 'improvement', 'Improvement'
+        NEUTRAL = 'neutral', 'Neutral'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    author = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='perf_journals')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perf_journals')
+    author = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='perf_journals_as_author')
     note_date = models.DateField()
-    tag = models.TextField(db_default='neutral')
+    tag = models.TextField(choices=Tag, db_default='neutral')
     note = models.TextField()
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'perf_journal'
 
+    def __str__(self):
+        return f'PerfJournal {self.id}'
+
 
 class PerfKeyResult(models.Model):
+    class Measure(models.TextChoices):
+        NUMBER = 'number', 'Number'
+        PERCENT = 'percent', 'Percent'
+        CURRENCY = 'currency', 'Currency'
+        BOOLEAN = 'boolean', 'Boolean'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    goal = models.ForeignKey(PerfGoal, models.DO_NOTHING)
+    goal = models.ForeignKey(PerfGoal, models.DO_NOTHING, related_name='perf_key_results')
     title = models.TextField()
-    measure = models.TextField(db_default='number')
+    measure = models.TextField(choices=Measure, db_default='number')
     start_value = models.DecimalField(max_digits=16, decimal_places=2, db_default=0)
     target_value = models.DecimalField(max_digits=16, decimal_places=2, db_default=100)
     current_value = models.DecimalField(max_digits=16, decimal_places=2, db_default=0)
@@ -226,73 +363,130 @@ class PerfKeyResult(models.Model):
     sort = models.SmallIntegerField(db_default=0)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'goal__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'perf_key_result'
 
+    def __str__(self):
+        return str(self.title)
+
 
 class PerfKpi(models.Model):
+    class Measure(models.TextChoices):
+        NUMBER = 'number', 'Number'
+        PERCENT = 'percent', 'Percent'
+        CURRENCY = 'currency', 'Currency'
+        BOOLEAN = 'boolean', 'Boolean'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='perf_kpis')
     designation = models.TextField(blank=True, null=True)
     title = models.TextField()
     description = models.TextField(blank=True, null=True)
-    measure = models.TextField(db_default='number')
+    measure = models.TextField(choices=Measure, db_default='number')
     default_target = models.DecimalField(max_digits=16, decimal_places=2, db_default=100)
     unit = models.TextField(blank=True, null=True)
     active = models.BooleanField(db_default=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'perf_kpi'
 
+    def __str__(self):
+        return str(self.title)
+
 
 class PerfOneOnOne(models.Model):
+    class Cadence(models.TextChoices):
+        NONE = 'none', 'None'
+        WEEKLY = 'weekly', 'Weekly'
+        BIWEEKLY = 'biweekly', 'Biweekly'
+        MONTHLY = 'monthly', 'Monthly'
+
+    class Status(models.TextChoices):
+        SCHEDULED = 'scheduled', 'Scheduled'
+        DONE = 'done', 'Done'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    manager_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perfoneonone_employee_set')
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='perf_one_on_ones')
+    manager_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perf_one_on_ones_as_manager')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perf_one_on_ones')
     scheduled_at = models.DateTimeField()
-    cadence = models.TextField(db_default='none')
-    status = models.TextField(db_default='scheduled')
+    cadence = models.TextField(choices=Cadence, db_default='none')
+    status = models.TextField(choices=Status, db_default='scheduled')
     shared_notes = models.TextField(blank=True, null=True)
     manager_private_notes = models.TextField(blank=True, null=True)
     employee_private_notes = models.TextField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='perf_one_on_ones_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'perf_one_on_one'
 
+    def __str__(self):
+        return f'PerfOneOnOne {self.id}'
+
 
 class PerfOneOnOneItem(models.Model):
+    class Kind(models.TextChoices):
+        AGENDA = 'agenda', 'Agenda'
+        ACTION = 'action', 'Action'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    meeting = models.ForeignKey(PerfOneOnOne, models.DO_NOTHING)
-    kind = models.TextField()
+    meeting = models.ForeignKey(PerfOneOnOne, models.DO_NOTHING, related_name='perf_one_on_one_items')
+    kind = models.TextField(choices=Kind)
     text = models.TextField()
-    owner_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, blank=True, null=True)
+    owner_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perf_one_on_one_items_as_owner', blank=True, null=True)
     done = models.BooleanField(db_default=False)
-    added_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='added_by', blank=True, null=True)
+    added_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='perf_one_on_one_items_as_added_by', db_column='added_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'meeting__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'perf_one_on_one_item'
 
+    def __str__(self):
+        return f'PerfOneOnOneItem {self.id}'
+
 
 class PerfPeer(models.Model):
+    class Status(models.TextChoices):
+        NOMINATED = 'nominated', 'Nominated'
+        APPROVED = 'approved', 'Approved'
+        DECLINED = 'declined', 'Declined'
+        SUBMITTED = 'submitted', 'Submitted'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    review = models.ForeignKey('PerfReview', models.DO_NOTHING)
-    reviewer_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    status = models.TextField(db_default='nominated')
+    review = models.ForeignKey('PerfReview', models.DO_NOTHING, related_name='perf_peers')
+    reviewer_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perf_peers_as_reviewer')
+    status = models.TextField(choices=Status, db_default='nominated')
     rating = models.SmallIntegerField(blank=True, null=True)
     strengths = models.TextField(blank=True, null=True)
     improvements = models.TextField(blank=True, null=True)
-    nominated_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='nominated_by', blank=True, null=True)
+    nominated_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='perf_peers_as_nominated_by', db_column='nominated_by', blank=True, null=True)
     submitted_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'review__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'perf_peer'
         unique_together = (('review', 'reviewer_employee'),)
+
+    def __str__(self):
+        return f'PerfPeer {self.id}'
 
 
 class PerfReminderSent(models.Model):
@@ -302,13 +496,16 @@ class PerfReminderSent(models.Model):
     class Meta:
         db_table = 'perf_reminder_sent'
 
+    def __str__(self):
+        return str(self.key)
+
 
 class PerfReview(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    cycle = models.ForeignKey(PerfCycle, models.DO_NOTHING)
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    manager_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perfreview_manager_employee_set', blank=True, null=True)
+    cycle = models.ForeignKey(PerfCycle, models.DO_NOTHING, related_name='perf_reviews')
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='perf_reviews')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perf_reviews')
+    manager_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='perf_reviews_as_manager', blank=True, null=True)
     self_summary = models.TextField(blank=True, null=True)
     self_submitted_at = models.DateTimeField(blank=True, null=True)
     self_score = models.DecimalField(max_digits=4, decimal_places=2, blank=True, null=True)
@@ -317,22 +514,32 @@ class PerfReview(models.Model):
     manager_score = models.DecimalField(max_digits=4, decimal_places=2, blank=True, null=True)
     recommendation = models.JSONField(db_default={})
     final_rating = models.DecimalField(max_digits=4, decimal_places=2, blank=True, null=True)
-    calibrated_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='calibrated_by', blank=True, null=True)
+    calibrated_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='perf_reviews_as_calibrated_by', db_column='calibrated_by', blank=True, null=True)
     calibration_reason = models.TextField(blank=True, null=True)
     released_at = models.DateTimeField(blank=True, null=True)
     acknowledged_at = models.DateTimeField(blank=True, null=True)
     employee_comment = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'perf_review'
         unique_together = (('cycle', 'employee'),)
 
+    def __str__(self):
+        return f'PerfReview {self.id}'
+
 
 class PerfReviewItem(models.Model):
+    class ItemType(models.TextChoices):
+        GOAL = 'goal', 'Goal'
+        COMPETENCY = 'competency', 'Competency'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    review = models.ForeignKey(PerfReview, models.DO_NOTHING)
-    item_type = models.TextField()
+    review = models.ForeignKey(PerfReview, models.DO_NOTHING, related_name='perf_review_items')
+    item_type = models.TextField(choices=ItemType)
     ref_id = models.UUIDField()
     title = models.TextField()
     detail = models.TextField(blank=True, null=True)
@@ -342,6 +549,12 @@ class PerfReviewItem(models.Model):
     manager_rating = models.SmallIntegerField(blank=True, null=True)
     manager_comment = models.TextField(blank=True, null=True)
 
+    company_scope = 'review__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'perf_review_item'
         unique_together = (('review', 'item_type', 'ref_id'),)
+
+    def __str__(self):
+        return str(self.title)

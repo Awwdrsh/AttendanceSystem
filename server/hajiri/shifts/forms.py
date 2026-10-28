@@ -1,11 +1,16 @@
-"""Forms mirroring the zod bodies of the shifts routes (same limits and choices). Views turn cleaned data into the TS
-camelCase body and call the service, which validates again."""
+"""Page posts of the shifts screens. Each form knows the HTML side (number inputs, checkboxes, '' for empty) and
+builds the TS camelCase body the service validates again with its serializer (serializers.py), so pages and JSON
+clients share the rules and messages."""
 from django import forms
 
+from hajiri.core.errors import BadRequestError
+from hajiri.db.models import Holiday, Shift
+
 HHMM = r'^([01]\d|2[0-3]):[0-5]\d$'
-PAIRING = [('alternating', 'Alternating in/out'), ('strict_log_type', 'Use device direction'), ('first_last', 'First in to last out')]
-ROUNDING = [('nearest', 'Nearest'), ('down', 'Down'), ('up', 'Up')]
-SCOPE = [('all', 'Everyone'), ('female', 'Women only (Teej, Jitiya)')]
+PAIRING = [(Shift.PairingMode.ALTERNATING, 'Alternating in/out'), (Shift.PairingMode.STRICT_LOG_TYPE, 'Use device direction'),
+           (Shift.PairingMode.FIRST_LAST, 'First in to last out')]
+ROUNDING = [(Shift.RoundingDirection.NEAREST, 'Nearest'), (Shift.RoundingDirection.DOWN, 'Down'), (Shift.RoundingDirection.UP, 'Up')]
+SCOPE = [(Holiday.GenderScope.ALL, 'Everyone'), (Holiday.GenderScope.FEMALE, 'Women only (Teej, Jitiya)')]
 
 
 def _minutes(label, max_value, help_text=None):
@@ -72,3 +77,33 @@ class HolidayForm(forms.Form):
         d = self.cleaned_data
         return {'localDate': d['local_date'].isoformat(), 'nameEn': d['name_en'], 'nameNe': d['name_ne'] or '',
                 'genderScope': d['gender_scope'], 'optional': bool(d['optional'])}
+
+
+class HolidayImportForm(forms.Form):
+    """The 'Add public holidays' button: hx-vals bs_year (2083 when missing)."""
+    bs_year = forms.IntegerField(required=False)
+
+    def body(self) -> dict:
+        if not self.is_valid():
+            raise BadRequestError('bsYear: Expected number')
+        year = self.cleaned_data['bs_year']
+        return {'bsYear': 2083 if year is None else year}
+
+
+class RosterCellForm(forms.Form):
+    """One roster cell changed: value '' follows the normal shift, 'off' rosters the person off, else a shift id.
+    The ids are checked by the service (same messages as the JSON API)."""
+    employee_id = forms.CharField(required=False)
+    date = forms.CharField(required=False)
+    value = forms.CharField(required=False)
+
+    def is_clear(self) -> bool:
+        self.is_valid()
+        return self.cleaned_data.get('value', '') == ''
+
+    def clear_body(self) -> dict:
+        return {'employeeId': self.cleaned_data['employee_id'], 'localDate': self.cleaned_data['date']}
+
+    def save_body(self) -> dict:
+        value = self.cleaned_data['value']
+        return {'rows': [{**self.clear_body(), 'shiftId': None if value == 'off' else value}]}

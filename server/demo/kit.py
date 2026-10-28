@@ -8,16 +8,22 @@ transaction (savepoint), as a request did, so a refused call leaves nothing behi
 from __future__ import annotations
 
 import base64
+import json
+import re
+import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
 from django.db import OperationalError, transaction
+from django.db.models.functions import Now
 
 from hajiri.core.auth import AuthUser, resolve_session
-from hajiri.core.clock import NPT
+from hajiri.core.clock import NPT, now
 from hajiri.core.crypto import random_token, sha256_hex
-from hajiri.core.db import execute, one
 from hajiri.core.errors import HttpError
+from hajiri.db.models import AppUser, Session
+
+SEEDER_AGENT = 'demo-suite seeder'
 
 
 @dataclass
@@ -34,7 +40,6 @@ class ApiError(Exception):
 
     def __init__(self, status: int, body, route: str):
         self.status, self.body, self.route = status, body, route
-        import json
         text = body if isinstance(body, str) else json.dumps(body, default=str)
         super().__init__(f'{route} → {status} {text}')
 
@@ -46,19 +51,26 @@ class Kit:
     def start(self) -> None:
         self.tokens = []
 
-    def actor(self, user_id: str) -> Actor:
-        """A one-hour session for a user; revoked again by stop()."""
-        u = one('SELECT id, employee_id, name FROM app_user WHERE id = %s', [user_id])
-        if not u:
+    def actor(self, user_id: str, company_id: str | None = None) -> Actor:
+        """A one-hour session for a user, working in `company_id` (default: their home company); revoked again by
+        stop(). The actor's roles and employee record are those of that company, as after a company switch."""
+        u = AppUser.objects.filter(pk=user_id).only('id', 'name', 'company_id').first()
+        if u is None:
             raise RuntimeError(f'user {user_id} not found')
         token = random_token()
-        execute("""INSERT INTO session (token_hash, user_id, expires_at, user_agent)
-                   VALUES (%s, %s, now() + interval '1 hour', 'demo-suite seeder')""", [sha256_hex(token), user_id])
-        self.tokens.append(token)
+        home = u.company_id and str(u.company_id)
+        Session.objects.create(token_hash=sha256_hex(token), user_id=u.pk, expires_at=now() + timedelta(hours=1),
+                               user_agent=SEEDER_AGENT,
+                               active_company_id=None if not company_id or str(company_id) == home else company_id)
         user = resolve_session(token)
-        if user is None:
-            raise RuntimeError(f'user {user_id} cannot sign in (inactive, or left the company)')
-        return Actor(str(u['id']), str(u['employee_id']) if u['employee_id'] else None, u['name'], token, user)
+        refused = (f'user {user_id} cannot sign in (inactive, or left the company)' if user is None else
+                   f'user {user_id} has no access to company {company_id}' if company_id and user.company_id != str(company_id)
+                   else None)
+        if refused:
+            Session.objects.filter(token_hash=sha256_hex(token)).update(revoked_at=Now())
+            raise RuntimeError(refused)
+        self.tokens.append(token)
+        return Actor(str(u.pk), user.employee_id, u.name, token, user)
 
     def call(self, route: str, fn, *args, **kwargs):
         """Run one service call as its own unit of work. A refusal becomes ApiError(route, status, message); a busy
@@ -75,7 +87,6 @@ class Kit:
             except OperationalError:
                 if attempt >= 4 or not transaction.get_autocommit():
                     raise
-                import time
                 time.sleep(0.5 * 3 ** attempt)
 
     def upload_pdf(self, who: Actor, purpose: str, filename: str, title: str, lines: list[str] | None = None) -> str:
@@ -87,14 +98,13 @@ class Kit:
         return str(r['id'])
 
     def stop(self) -> None:
-        for t in self.tokens:
-            execute('UPDATE session SET revoked_at = now() WHERE token_hash = %s AND revoked_at IS NULL', [sha256_hex(t)])
+        if self.tokens:
+            Session.objects.filter(token_hash__in=[sha256_hex(t) for t in self.tokens], revoked_at__isnull=True).update(revoked_at=Now())
         self.tokens = []
 
 
 def make_pdf(title: str, lines: list[str] | None = None) -> bytes:
     """A small, valid one-page PDF with a title and a few lines of Helvetica text."""
-    import re
 
     def esc(s: str) -> str:
         return re.sub(r'([\\()])', r'\\\1', re.sub(r'[^\x20-\x7e]', '?', s))
@@ -137,22 +147,11 @@ def week_start(iso: str | date) -> str:
     return add_days_iso(d, -((d.weekday() + 1) % 7))
 
 
-def js_day(iso: str | date) -> int:
-    """JavaScript getUTCDay(): Sunday 0 ... Saturday 6."""
-    return (_d(iso).weekday() + 1) % 7
-
-
 def npt_instant(iso: str | date, hhmm: str) -> datetime:
     """An instant for a Nepal-time date and HH:MM."""
     h, m = (int(x) for x in hhmm.split(':'))
     d = _d(iso)
     return datetime(d.year, d.month, d.day, h, m, tzinfo=NPT)
-
-
-def iso_z(d: datetime) -> str:
-    """Date.prototype.toISOString(): UTC with milliseconds and a Z."""
-    u = d.astimezone(timezone.utc)
-    return u.strftime('%Y-%m-%dT%H:%M:%S.') + f'{u.microsecond // 1000:03d}Z'
 
 
 def base36(n: int) -> str:

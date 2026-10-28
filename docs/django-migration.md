@@ -1,7 +1,9 @@
 # Migration to Django
 
-Branch `django-rewrite`. The TypeScript stack stays in place and keeps working until the Django version passes the same
-checks; the new code lives in `server/`. Decisions taken at the start (26 Oct 2026):
+Branch `django-rewrite`. This is the record of the move from the TypeScript stack to Django. **The TypeScript stack
+was removed on 27 Oct 2026** (phase 9 below, ADR 0002): Django in `server/` is the only stack, and paths such as
+`apps/api/...` or `packages/...` below refer to code that is now only in git history (commit 1bbe88b and earlier).
+Decisions taken at the start (26 Oct 2026):
 
 - **Everything moves to Python**, including the web app: Django templates with HTMX for partial updates, replacing
   React and Mantine. The CoreValley visual identity, command palette, light and dark mode and BS dates are kept.
@@ -35,14 +37,17 @@ Each phase ends with its tests green and is committed on its own.
    keys need no migration ordering), adding array and range types and `db_default`s from the catalog. Migration
    `0001_initial` holds the models as state and, on the database side, runs `0001_schema.sql` (a `pg_dump
    --schema-only` of TS migration 0030) on an empty database, or adopts a database already at 0030 without touching
-   it. A database at an older TS migration is refused until `pnpm db:migrate` has run. A fresh Django database dumps
+   it. A database at an older TS migration is refused (it had to be brought to 0030 by the TS stack's `db:migrate`). A fresh Django database dumps
    byte-identical to the TS one (69 triggers, 409 checks, 799 indexes, exclusion constraints, punch partitions).
    Points to remember when writing services:
    - Foreign keys are `DO_NOTHING`; PostgreSQL applies the real `ON DELETE` rules.
    - A non-null text field with no database default is sent as `''` when left unset, and most of them have CHECK
      constraints, so set them explicitly.
-   - Raw SQL goes through `hajiri.core.db` (`rows`, `one`, `execute`), which decodes json/jsonb; a bare cursor
-     returns them as text.
+   - Queries use the ORM (docs/django-conventions.md sections 2 and 12). The few raw statements left use a cursor
+     with a `# Raw SQL:` comment; tests use `tests.support.sql` for independent checks of table contents.
+   - Migration `0002` is state only (TextChoices on every CHECK-constrained column, related names, company
+     managers): a fresh database dumps byte-identical to `hajiri_schema_ref` after it. Migration `0003` adds the
+     tables for groups of companies (below); the dump differs from the TS schema only by those additions.
    - Do not wrap a step that counts failures (logins, code attempts) in `transaction.atomic`: raising the error
      would roll the count back.
    - Monthly `punch_event` partitions are created by a job (ported in phase 3), not by migrations.
@@ -50,10 +55,13 @@ Each phase ends with its tests green and is committed on its own.
    and idle timeout, two-step sign-in (required per role), roles and scoping (company, team, department, branch),
    field encryption with the same ciphertext format (byte-compatible both ways, tested against the TS code),
    hash-chained audit log, file storage, notifications (SMTP or email webhook, SMS, push and generic webhooks), feature
-   switches. The background worker (`hajiri/worker`) is a database-backed queue with the TS cadences (recompute queue
-   every tick, delivery 30 s, offline devices 60 s, SLA 10 min, auto clock-out and digest 5 min, nightly sweep,
-   accrual and punch partitions at 00:30 NPT, then the 13 daily module jobs of `module-jobs.ts` plus the kiosk
-   heartbeat), so a single-machine install still needs only PostgreSQL. `RUN_WORKER=true` starts it in the web process.
+   switches. Background work runs on Django's task framework (`django.tasks` with the `django_tasks_db` database
+   backend): a scheduler enqueues `hajiri.worker.tasks.run_job` with the TS cadences (recompute queue every tick,
+   delivery 30 s, offline devices 60 s, SLA 10 min, auto clock-out and digest 5 min, nightly sweep, accrual, punch
+   partitions and task-result pruning at 00:30 NPT, then the 13 daily module jobs of `module-jobs.ts` plus the kiosk
+   heartbeat), so a single-machine install still needs only PostgreSQL. `manage.py run_worker` runs the scheduler and
+   a task worker; larger installs run `run_scheduler` plus `db_worker` processes. `RUN_WORKER=true` starts both in
+   the web process.
 4. **Gateway.** *Done.* ADMS and ISAPI endpoints byte-compatible with the terminals; signed idempotent ingest;
    reconcile and the simulator (`manage.py run_gateway`, `gateway_simulate`, `gateway_reconcile`).
 5. **Modules.** *Done.* Every TS module has a Django app with a service layer and pages; all 15 approval decision
@@ -62,11 +70,83 @@ Each phase ends with its tests green and is committed on its own.
    All 78 TS test files (806 cases, including the cross-cutting security, roles-flows, QA and fixes suites, the
    gateway suites and the web `lib/` tests) are ported; the Python suite has 2,006 tests.
 6. **Operations.** *Done except where noted below.* `scripts/*-django.sh` (setup, start/stop, run, boot service,
-   update), `infra/docker-django/` and `infra/docker-compose.django.yml`, `manage.py seed_demo` and
+   update), `infra/docker-django/` and `infra/docker-compose.django.yml` (renamed to the canonical `scripts/*.sh`,
+   `infra/docker/` and `infra/docker-compose.yml` in phase 9), `manage.py seed_demo` and
    `seed_demo_suite`, the CLI commands (`create_admin`, `reset_password`, `seed_defaults`, `seed_demo_suite`), PWA
    manifest and service worker, `check --deploy` clean with the production settings listed below.
-7. **Cutover.** *Not started.* Run both stacks against a copy of the live database and compare outputs (attendance
-   days, payroll runs, reports); then remove `apps/`, `packages/` and the Node toolchain.
+7. **Idiomatic Django.** *Done (27 Oct 2026).* The literal port is being turned
+   into idiomatic Django with standard libraries: ORM querysets with company scoping instead of raw SQL, DRF
+   serializers and Django forms instead of the zod clone (`hajiri.core.schema`), DRF views with the
+   project's authentication, permission and exception classes instead of `hajiri.core.http.api_view`,
+   TextChoices, django.tasks, pyuca collation, Pillow, Django's email backend, django-htmx, django-filter and
+   drf-spectacular (`/api/schema`, `/api/docs`). The rules are in docs/django-conventions.md; the help desk is the
+   fully converted reference module. Every slice is converted and reviewed; `hajiri.core.schema`, the custom
+   `api_view` (`hajiri.core.http`) and `hajiri.core.db` are deleted (the raw SQL test helpers moved to
+   `tests/support/sql.py`). Migration `0005` brings the model state in line with the database (partial unique
+   indexes as `UniqueConstraint(condition=...)` on ForeignKeys), lets `employee_exit.kind` be `transfer`, and makes
+   personal task boards one per person and company.
+   - Final review: raw SQL in `server/hajiri` is 14 statements, each with a `# Raw SQL:` reason (advisory locks,
+     recursive org and manager chains, punch partition DDL and the catalog check, the BS calendar upsert, the health
+     probe, and an optional install-specific column in Insights). Rounding and fixed-decimal display shared by pages,
+     reports and charts live in `hajiri.core.numbers` (`round_half_up`, `to_fixed`, `whole`), replacing five
+     hand-written copies; the file-type signature check is one function (`hajiri.files.store.has_signature`) used by
+     uploads and clock-in photos.
+8. **Groups of companies.** *Done (27 Oct 2026): switcher, group roles, /group dashboard, directory, consolidated
+   reports, group administration (companies, access, transfers, policy copy).* One install runs several
+   companies of a group from one sign-in. Tables: `company_group` and `company.group_id`; `company_membership`
+   (access to another company with its own roles and employee record, `is_default` for the company a sign-in
+   starts in); `group_member` (group roles: `group_admin`, `group_hr`, `group_executive`, which give admin, HR and
+   the read-only executive view in every company of the group, including companies added later);
+   `session.active_company_id`. Migrations `0003` and `0004` only add objects, so the TS stack keeps working on the
+   same database (it only ever sees the home company). `app_user.company_id`, `roles` and `employee_id` stay the
+   home company's.
+   - `resolve_session` works in the session's active company when the person may still work there, else at home;
+     `AuthUser.company_id`, `roles` and `employee_id` are the active company's, and `companies`, `group_id` and
+     `group_roles` describe the rest. Leavers lose access per company (a membership whose employee left, or the home
+     company and the group roles when the home employee left); they can still sign in while one company is left.
+   - The layout always shows the active company's name and code (sidebar and mobile top bar); people with more
+     than one company get a switcher that reloads the same page in the new company, or its hub's first page when
+     the page showed a record. The Group hub (`/group`) shows headline figures per company and the group admin's
+     group roles; admins add sister companies and give people of the group access to their company.
+   - JSON: `/api/v1/me/companies` (with `groupId`, `groupRoles`), `/api/v1/me/companies/switch`,
+     `/api/v1/group/overview`, `/api/v1/group/roles` (GET, POST) and `/api/v1/group/roles/<userId>` (DELETE).
+   - Apps `hajiri.group` (group-wide views) and `hajiri.group_admin` (group administration) are registered and
+     mounted before `hajiri.web`, ready for the group pages beyond the overview (combined payroll register,
+     cross-company headcount trends).
+   - `tests/multicompany` checks switching, roles on switch, leavers, group roles, and that ids of another company
+     are not found on 40 pages, partials and JSON endpoints across the apps.
+   - `tests/scenario/test_group_scenario.py` walks a holding group end to end through the JSON API and the pages: the
+     admin of a standalone company starts the group with two sister companies and names a group HR head; policies
+     (a shift, a leave type, a holiday) are set in one company, previewed and copied to the others; people are hired
+     into each company with salary assignments; one manager gets access to a second company with her employee record
+     there; last month's attendance is uploaded and recomputed and payroll is run, reviewed, approved and locked in
+     each company; an employee is transferred; the manager approves leave in both companies from one sign-in. Every
+     figure of the group dashboard and of the headcount, attendance, payroll and leave reports is then compared with
+     the company's own pages (employees, pay runs, Insights, approvals) and with what the scenario put in.
+   - Fixed by that walk (final review, 27 Oct 2026): `POST /api/v1/group/companies` now lets the admin of a company
+     outside any group start one, as the Group page already did (it answered 403); the dashboard's headcount (and the
+     old `/api/v1/group/overview`) counts people employed today, the definition the headcount report and Insights use,
+     instead of every record whose status is still active (after a back-dated transfer the dashboard showed the
+     person in both companies until the exit was completed).
+9. **TypeScript removal.** *Done (27 Oct 2026).* `apps/`, `packages/`, `node_modules/`, the pnpm workspace files,
+   `tsconfig.base.json`, the TS parity dump scripts, the TS scripts (`setup.sh`, `start.sh`, `stop.sh`, `run.sh`,
+   `update.sh`, `install-service.sh` and the Node helpers of `lib.sh`) and `infra/docker/` + `infra/docker-compose.yml`
+   of the TS stack are gone. The Django versions took the canonical names: `scripts/{setup,start,stop,run,update,
+   install-service}.sh` with one `lib.sh`, `infra/docker/` and `infra/docker-compose.yml`. Boot services, pid files and
+   logs lost their `django-` prefix (`com.hajiri.web`, `hajiri-web.service`, `.run/web.pid`, `logs/web.log`);
+   `install-service.sh` removes any other `com.hajiri.*` / `hajiri-*` unit (the TS `api` and `gateway` units and the
+   earlier `django-*` names), and `update.sh` reinstalls units found under an old name.
+   - Settings come only from `server/.env` (and `server/gateway.env` for the gateway); `config/settings.py` no longer
+     reads `apps/api/.env`. `setup.sh` copies `DATABASE_URL`, `DATA_ENCRYPTION_KEY` and `PASSWORD_PEPPER` from a
+     leftover `apps/api/.env`, and `PORT` and `GATEWAY_SIGNING_KEY` from `apps/gateway/.env`, into the server files
+     once (README, "Moving from the TypeScript stack"). The development install had its keys moved the same way and
+     the gateway's raw archive copied to `server/data/raw`.
+   - The crypto round-trip test that ran the TS code (`verify-crypto-parity.ts`) is gone; the fixtures recorded from
+     the TS code still check that Python reads what the TS API wrote. The engine parity fixtures are a fixed record.
+   - The default test database is `hajiri_test` (it was `hajiri_django_test` while the TS suite owned that name).
+   - `docs/api.md` is generated from the drf-spectacular schema (`docs/openapi.yaml`, live at `/api/docs`).
+   - Not done before the removal: the side-by-side comparison of both stacks against a copy of a live database.
+     Compare the first Django payroll cycles and attendance days of a live install with the previous month's results.
 
 ## Differences from the TS app and remaining gaps
 
@@ -74,16 +154,18 @@ Checked on 27 Oct 2026 by comparing README "What is included" row by row, every 
 handler's service calls, the React routes, tabs and buttons, the decision handlers, the worker jobs and the CLI against
 the Django code. Nothing in the capability list is missing. What still differs or is unverified:
 
-- **Not run on real infrastructure.** The Docker image and compose file, `install-service-django.sh` (launchd and
-  systemd units) and the Linux branches of `setup-django.sh` have not been run: there is no Docker on the development
+- **Not run on real infrastructure.** The Docker image and compose file, `install-service.sh` (launchd and
+  systemd units) and the Linux branches of `setup.sh` have not been run: there is no Docker on the development
   Mac and the service script installs real boot agents. Run them on a test machine before relying on them.
-- **Cutover (phase 7)** has not been done: no side-by-side comparison against a copy of a live database yet.
+- **Side-by-side comparison** against a copy of a live database was not done before the TS stack was removed
+  (phase 9).
 - **UI adaptations** (same data and actions, different controls): Mantine's searchable multi-select and dropdown
-  menus are checkbox lists or plain buttons; a few filters reload the whole page instead of one table; names sort
-  with Python `casefold()` rather than the browser's `localeCompare`, so the order of accented names can differ.
+  menus are checkbox lists or plain buttons; a few filters reload the whole page instead of one table. Names sort
+  with the Unicode Collation Algorithm (`hajiri.core.collation`, pyuca) like the browser's `localeCompare`; modules
+  that still use `casefold()` are converted with their slice.
 - **Profile photos** are shrunk in the browser to a 320 px square JPEG before upload, as `AvatarEditor.tsx` did
-  (`Hajiri.squareJpeg` in `static/js/app.js`). The server does not resize: an upload sent without the page (for
-  example with JavaScript off) is stored as sent, which the TS server also did. Server-side resizing would need Pillow.
+  (`Hajiri.squareJpeg` in `static/js/app.js`); `hajiri.core.images.square_jpeg` (Pillow) does the same on the
+  server for uploads sent without the page script (wired in by the people slice).
 - **BS calendar cross-check** against the `@remotemerge/nepali-date-converter` JS library is not run in Python; the
   day-by-day parity test against the TS table (which is cross-checked there) covers it.
 - **Smoke coverage:** a signed-in walk of 683 of the 758 URL patterns per role returned no 500s; the other 75 need
@@ -93,6 +175,47 @@ the Django code. Nothing in the capability list is missing. What still differs o
   edit/delete, asset edit and history, org-unit and branch edit through `/settings`) have services but no page,
   because the React app never offered them.
 - The statutory and hardware assumptions in README "Known gaps and assumptions" apply unchanged.
+
+### Remaining gaps after the final review (27 Oct 2026)
+
+State at the end of the review: 2,824 tests pass in six shards (`hajiri_t_critic_1..6`), `manage.py check` is
+clean and `makemigrations --check` finds no changes. Also fixed: the navigation's cached URL lookups are cleared when
+`ROOT_URLCONF` changes (a layout test with its own URLconf left `/group` without its tabs for later tests).
+
+Honest list of what is not idiomatic yet or not verified; none of it changes what the app does.
+
+- **Sign-in JSON.** `/login`, `/login/2fa` and `/change-password` serve both the page form and JSON clients from one
+  Django view, reading a JSON body by hand (`hajiri.web.views._json_body`) and validating with the page's Django
+  form; they are not DRF views.
+- **Output compatibility kept on purpose.** Some code still reproduces how the TypeScript app wrote values, because
+  stored data or terminals depend on it: the attendance policy version is `JSON.stringify` with sorted keys
+  (`company_settings.schemas`, part of `attendance_day.inputs_hash`); the gateway's `jsutil` matches what ZKTeco and
+  Hikvision terminals were answered; the audit log stores values as the TS code serialised them. Display rounding
+  (halves up) is now one helper, but `punch` and `performance` keep their own decimal rounding (it rounds the printed
+  value, 1.005 to 1.01, which their tests require).
+- **Per-item queries.** The Approvals badge (`workflow.inbox_count`) works out the approver of each pending item one
+  at a time (3 or 4 queries per item); batching it means rewriting the delegation, absence and HR-fallback rules.
+- **Shared validation fields.** Each slice still has its own strict JSON fields (StrictSerializer, JsonBool,
+  NumberField and similar); they are not merged into `hajiri.core.validation`. Not done either: `notify_many` and a
+  bulk `user_id_for_employee`, a multi-field `order_by` in `hajiri.web.tables`.
+- **Tests read tables in plain SQL** in about 99 files (`tests/support/sql.py`); application code does not.
+- **Attendance has no JSON endpoints** beyond the punch, kiosk, gateway and attendance-tools routes (as in phase 5,
+  only what non-browser clients call); recomputing a range or reading days is done from the pages, so the group
+  scenario test calls `hajiri.attendance.api.recompute_range` directly.
+- **Exits wait for clearance.** An accepted exit (including the source side of a transfer) keeps the employee's
+  status `active` until clearance is done and the nightly job or HR completes it, so the company's employee list
+  still shows the person, with the exit date, after the last working day. Headcounts (dashboard, reports, Insights)
+  already leave them out.
+- **The `group.policy` setting** (hide pay from executives in group views) is changed only on `/group` by an admin; it
+  is not on the general company settings pages or API.
+- **Smoke coverage:** about 100 record-level routes need data the demo group does not have (payroll runs, payslips,
+  holidays, overtime slips, grievances, approval flows, checklists) and are covered only by the test suite.
+- **Optional database checks not added:** that a `device_user_map` employee belongs to the device's company, a data
+  migration for old active devices with no company, and expression unique constraints on time-tracking clients,
+  projects and activities.
+- **Letters** escape apostrophes as `&#x27;` (Django's escaping) instead of `&#39;`; they look the same.
+- **Not run on real infrastructure** (Docker, boot services, Linux setup) and **no side-by-side comparison** with a
+  copy of a live database (above).
 
 ## Environment notes
 
@@ -112,6 +235,8 @@ the Django code. Nothing in the capability list is missing. What still differs o
 
 - Python 3.13. The Homebrew Python 3.14 on the development Mac has a broken `pyexpat` (built against a newer expat than
   the system one), which stops `venv` from installing pip.
-- Tests use their own database, `hajiri_django_test` (`DJANGO_TEST_DATABASE`); `hajiri_test` belongs to the TS suite.
+- Tests use their own database, `hajiri_test` by default (`DJANGO_TEST_DATABASE`).
+- Email goes through Django's email framework: `SMTP_URL` sets EMAIL_BACKEND (STARTTLS when offered), without it
+  the console backend logs messages. `TASKS_BACKEND` can point the task framework at another backend.
 - `hajiri_schema_ref` is a scratch database built by the TS migrations, used by `tools/gen_models.py`.
 - `cd server && python3.13 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`, then `.venv/bin/pytest`.

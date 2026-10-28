@@ -1,7 +1,7 @@
 """Announcements, kudos, surveys and suggestions (port of apps/api/src/db/demo-suite/engage.ts)."""
 from __future__ import annotations
 
-from hajiri.core.db import rows
+from hajiri.db.models import Announcement, Suggestion, SurveyQuestion
 from hajiri.engage import services as engage
 
 from .context import DemoContext, already_seeded
@@ -23,7 +23,7 @@ TEXTS = ['A quieter room for calls.', 'Faster laptop refresh for engineers.', 'M
 def seed_engage(ctx: DemoContext) -> None:
     """Announcements, kudos with reactions, birthdays shown by choice, a pulse survey with enough answers to show results, a poll and suggestions."""
     kit, hr, today = ctx.kit, ctx.hr, ctx.today
-    if already_seeded(ctx, 'engage', 'SELECT 1 FROM suggestion WHERE company_id = %s LIMIT 1', 'SELECT 1 FROM announcement WHERE company_id = %s LIMIT 1'):
+    if already_seeded(ctx, 'engage', Suggestion.objects.all(), Announcement.objects.all()):
         return
     n = len(ctx.employees)
 
@@ -75,16 +75,17 @@ def seed_engage(ctx: DemoContext) -> None:
         ],
     })['id'])
     kit.call(f'POST /engage/surveys/{s}/publish', engage.publish_survey, hr.user, s)
-    qs = rows('SELECT id, kind FROM survey_question WHERE survey_id = %s ORDER BY position', [s])
+    questions = SurveyQuestion.objects.for_company(ctx.company_id).filter(survey_id=s)
+    qs = list(questions.order_by('position').values('id', 'kind'))
     for i, e in enumerate(ctx.employees[:min(n - 2, 12)]):
         answers = []
         for q in qs:
             qid = str(q['id'])
-            if q['kind'] == 'enps':
+            if q['kind'] == SurveyQuestion.Kind.ENPS:
                 answers.append({'questionId': qid, 'value': pick([9, 10, 8, 7, 9, 6, 10, 9, 3, 8], i)})
-            elif q['kind'] == 'rating':
+            elif q['kind'] == SurveyQuestion.Kind.RATING:
                 answers.append({'questionId': qid, 'value': pick([4, 5, 3, 4, 4, 2, 5], i + len(qid))})
-            elif q['kind'] == 'single':
+            elif q['kind'] == SurveyQuestion.Kind.SINGLE:
                 answers.append({'questionId': qid, 'choices': [pick(['About right', 'About right', 'Too heavy', 'About right', 'Too light'], i)]})
             elif pick(TEXTS, i):
                 answers.append({'questionId': qid, 'text': pick(TEXTS, i)})
@@ -94,7 +95,7 @@ def seed_engage(ctx: DemoContext) -> None:
         'questions': [{'kind': 'single', 'prompt': 'Where should we go for the team outing?', 'options': ['Nagarkot hike', 'Bhaktapur heritage walk', 'Futsal and dinner']}],
     })['id'])
     kit.call(f'POST /engage/surveys/{poll}/publish', engage.publish_survey, hr.user, poll)
-    pq = str(rows('SELECT id FROM survey_question WHERE survey_id = %s', [poll])[0]['id'])
+    pq = str(SurveyQuestion.objects.for_company(ctx.company_id).filter(survey_id=poll).values_list('id', flat=True)[0])
     for i, e in enumerate(ctx.employees[:7]):
         kit.call(f'POST /engage/surveys/{poll}/respond', engage.respond, ctx.as_(e).user, poll,
                  {'answers': [{'questionId': pq, 'choices': [pick(['Nagarkot hike', 'Futsal and dinner', 'Nagarkot hike', 'Bhaktapur heritage walk'], i)]}]})

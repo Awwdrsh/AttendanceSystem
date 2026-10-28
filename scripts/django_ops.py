@@ -1,18 +1,19 @@
-"""Small helpers the Django-stack scripts need, so they depend on nothing but the server's Python (no node, no psql).
+"""Small helpers the shell scripts need, so they depend on nothing but the server's Python (no psql).
 
     server/.venv/bin/python scripts/django_ops.py <command> [args]
 
-    secret N                    N random bytes, base64 (DATA_ENCRYPTION_KEY is 32, PASSWORD_PEPPER 24, as setup.sh made them)
+    secret N                    N random bytes, base64 (DATA_ENCRYPTION_KEY is 32, PASSWORD_PEPPER 24)
     django-secret               a DJANGO_SECRET_KEY
     signing-key                 a new GATEWAY_SIGNING_KEY (base64 Ed25519 PKCS#8 DER)
     password                    a temporary admin password (12 random bytes, base64url)
     wait-db [SECONDS]           wait until the configured database answers (default 30 s); exit 1 if it never does
     db-name                     the configured database name (seed_demo wants it as --database-name)
-    ensure-company CODE NAME    create the company and its HQ branch if missing (what setup.sh did with psql)
+    ensure-company CODE NAME    create the company and its HQ branch if missing
     has-user EMAIL              exit 0 when a user with this email exists, 1 otherwise
     has-company CODE            exit 0 when the company exists, 1 otherwise
     health                      container health check: GET /health of this container's service (HAJIRI_SERVICE=web
-                                on PORT, gateway on GATEWAY_PORT); for the worker, that the database answers
+                                on PORT, gateway on GATEWAY_PORT); for the worker, scheduler and task workers, that
+                                the database answers
 """
 from __future__ import annotations
 
@@ -71,17 +72,35 @@ def ensure_company(code: str, name: str) -> str:
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,20}', code):
         raise SystemExit('--company must be 1-20 letters, digits, _ or -')
     _django()
-    from hajiri.core.db import execute, one
-    execute('INSERT INTO company (code, name_en) VALUES (%s, %s) ON CONFLICT (code) DO NOTHING', [code, name])
-    execute("""INSERT INTO branch (company_id, code, name_en) SELECT id, 'HQ', 'Head Office' FROM company WHERE code = %s
-               ON CONFLICT DO NOTHING""", [code])
-    return str(one('SELECT id FROM company WHERE code = %s', [code])['id'])
+    from django.db import transaction
+    from hajiri.db.models import Branch, Company
+    with transaction.atomic():
+        company, _ = Company.objects.get_or_create(code=code, defaults={'name_en': name})
+        Branch.objects.for_company(company.pk).get_or_create(code='HQ', defaults={'company': company, 'name_en': 'Head Office'})
+    return str(company.pk)
+
+
+def has_user(email: str) -> bool:
+    _django()
+    from django.db.models import Value
+    from django.db.models.functions import Lower
+    from hajiri.db.models import AppUser
+    return AppUser.objects.filter(email=Lower(Value(email))).exists()
+
+
+def has_company(code: str) -> bool:
+    _django()
+    from hajiri.db.models import Company
+    return Company.objects.filter(code=code).exists()
+
+
+BACKGROUND_SERVICES = ('worker', 'scheduler', 'tasks')
 
 
 def health() -> int:
     import urllib.request
     svc = os.environ.get('HAJIRI_SERVICE', 'web')
-    if svc == 'worker':
+    if svc in BACKGROUND_SERVICES:
         return 0 if wait_db(3) else 1
     port = os.environ.get('GATEWAY_PORT', '8080') if svc == 'gateway' else os.environ.get('PORT', '3000')
     try:
@@ -121,10 +140,8 @@ def main(argv: list[str]) -> int:
         if len(args) != 1:
             print(f'usage: {cmd} VALUE', file=sys.stderr)
             return 1
-        _django()
-        from hajiri.core.db import one
-        sql = 'SELECT 1 AS x FROM app_user WHERE email = lower(%s)' if cmd == 'has-user' else 'SELECT 1 AS x FROM company WHERE code = %s'
-        return 0 if one(sql, [args[0]]) else 1
+        found = has_user(args[0]) if cmd == 'has-user' else has_company(args[0])
+        return 0 if found else 1
     else:
         print(f'unknown command {cmd}\n\n{__doc__.strip()}', file=sys.stderr)
         return 1

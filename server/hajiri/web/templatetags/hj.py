@@ -359,8 +359,8 @@ def bs_month_input(name_year='bs_year', name_month='bs_month', year=None, month=
             'months': list(enumerate(BS_MONTH_NAMES_EN, start=1)), 'years': list(range(MAX_YEAR, MIN_YEAR - 1, -1))}
 
 
-@register.inclusion_tag('components/employee_picker.html')
-def employee_picker(name='employee_id', value=None, label='Employee', required=False, status='active', error=None,
+@register.inclusion_tag('components/employee_picker.html', takes_context=True)
+def employee_picker(context, name='employee_id', value=None, label='Employee', required=False, status='active', error=None,
                     placeholder='Search by name or code', id=None, selected_label=None):
     """
     Searchable employee selector (EmployeePicker.tsx): options read "Name (code)", searched over HTMX at
@@ -368,8 +368,14 @@ def employee_picker(name='employee_id', value=None, label='Employee', required=F
     """
     label_text = selected_label
     if value and not label_text:
-        from hajiri.core.db import one
-        r = one('SELECT name_en, emp_code FROM employee WHERE id = %s', [str(value)])
+        from hajiri.core.scoping import is_uuid
+        from hajiri.db.models import Employee
+        # Only the active company's employees: an id from another company of a group shows no name.
+        request = context.get('request')
+        user = getattr(request, 'hajiri_user', None)
+        cid = getattr(user, 'company_id', None)
+        r = (Employee.objects.for_company(cid).filter(pk=str(value)).values('name_en', 'emp_code').first()
+             if cid and is_uuid(value) else None)
         label_text = f'{r["name_en"]} ({r["emp_code"]})' if r else ''
     return {'name': name, 'value': value or '', 'label': label, 'required': required, 'status': status,
             'error': error, 'placeholder': placeholder, 'id': id or f'f-{name}', 'selected_label': label_text or ''}

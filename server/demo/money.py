@@ -1,16 +1,17 @@
 """Expense claims, trips and tax-saving declarations (port of apps/api/src/db/demo-suite/money.ts)."""
 from __future__ import annotations
 
-import base64
 import re
+from datetime import timedelta
 
-from hajiri.core.db import execute, one, rows
+from django.db.models.functions import Now
+
+from hajiri.db.models import ExpenseClaim, TaxDeclarationRequest, TravelRequest
 from hajiri.expenses import services as expenses
-from hajiri.files.service import upload
 from hajiri.payroll import tax_savings
 
 from .context import DemoContext, already_seeded
-from .kit import Actor, ApiError, add_days_iso, make_pdf
+from .kit import Actor, ApiError, add_days_iso
 
 CLAIMS = [
     {'who': 1, 'title': 'Client visit to Nabil Bank', 'items': [(-6, 'LOCAL_TRAVEL', 'Taxi to Kamaladi and back', '850.00'),
@@ -28,8 +29,7 @@ CLAIMS = [
 def seed_expenses(ctx: DemoContext) -> None:
     """Expense claims and trips in every state: draft, waiting for the manager, approved for payroll, a trip with an advance and its settlement."""
     kit, hr = ctx.kit, ctx.hr
-    if already_seeded(ctx, 'expenses', "SELECT 1 FROM travel_request WHERE company_id = %s AND destination = 'Biratnagar'",
-                      'SELECT 1 FROM expense_claim WHERE company_id = %s LIMIT 1'):
+    if already_seeded(ctx, 'expenses', TravelRequest.objects.filter(destination='Biratnagar'), ExpenseClaim.objects.all()):
         return
     policy = kit.call('GET /expenses/policy', expenses.get_policy, hr.user)
 
@@ -48,10 +48,8 @@ def seed_expenses(ctx: DemoContext) -> None:
         pass
 
     def receipt(who: Actor, what: str, amount: str) -> str:
-        pdf = make_pdf(f'Receipt: {what}', [f'Amount: NPR {amount}', 'Paid in cash', 'Thank you'])
-        filename = re.sub(r'\W+', '-', what.lower()) + '.pdf'
-        return str(kit.call('POST /files', upload, who.user, {'purpose': 'expense_receipt', 'filename': filename,
-                                                             'dataUrl': f'data:application/pdf;base64,{base64.b64encode(pdf).decode()}'})['id'])
+        return kit.upload_pdf(who, 'expense_receipt', re.sub(r'\W+', '-', what.lower()) + '.pdf', f'Receipt: {what}',
+                              [f'Amount: NPR {amount}', 'Paid in cash', 'Thank you'])
 
     people = [e for e in ctx.employees if e.manager_id]
     for c in CLAIMS:
@@ -75,8 +73,8 @@ def seed_expenses(ctx: DemoContext) -> None:
                      {'decision': 'approve'} if c['then'] == 'approve'
                      else {'decision': 'reject', 'reason': 'Team lunches are covered by the team budget, not personal claims.'})
             if c['then'] == 'approve':
-                st = one('SELECT status FROM expense_claim WHERE id = %s', [cid])
-                if st and st['status'] in ('submitted', 'pending'):
+                st = ExpenseClaim.objects.for_company(ctx.company_id).filter(pk=cid).values_list('status', flat=True).first()
+                if st == ExpenseClaim.Status.PENDING:      # still waiting for the next approver (HR)
                     kit.call(f'POST /expenses/claims/{cid}/review', expenses.review_claim, hr.user, cid, {'decision': 'approve'})
 
     # A trip to Pokhara approved with an advance and settled, and a trip to Biratnagar waiting for approval.
@@ -89,12 +87,11 @@ def seed_expenses(ctx: DemoContext) -> None:
     tid = str(trip['id'])
     mgr1 = ctx.manager_of(t1e)
     kit.call(f'POST /expenses/travel/{tid}/review', expenses.review_trip, mgr1.user, tid, {'decision': 'approve'})
-    ts = one('SELECT status FROM travel_request WHERE id = %s', [tid])
-    if not ts or ts['status'] != 'approved':
+    trips = TravelRequest.objects.for_company(ctx.company_id).filter(pk=tid)
+    if trips.values_list('status', flat=True).first() != TravelRequest.Status.APPROVED:
         kit.call(f'POST /expenses/travel/{tid}/review', expenses.review_trip, hr.user, tid, {'decision': 'approve', 'advanceApproved': '8000.00'})
     # The demo needs a finished trip: requests can only be raised for the future, so move this one back two weeks.
-    execute("UPDATE travel_request SET from_date = %s, to_date = %s, created_at = now() - interval '16 days' WHERE id = %s",
-            [add_days_iso(ctx.today, -12), add_days_iso(ctx.today, -10), tid])
+    trips.update(from_date=add_days_iso(ctx.today, -12), to_date=add_days_iso(ctx.today, -10), created_at=Now() - timedelta(days=16))
     bus = receipt(t1, 'Bus tickets Kathmandu-Pokhara', '2400.00')
     hotel = receipt(t1, 'Hotel Lakeside, two nights', '6000.00')
     kit.call(f'POST /expenses/travel/{tid}/settlement', expenses.settle_trip, t1.user, tid,
@@ -112,7 +109,7 @@ def seed_expenses(ctx: DemoContext) -> None:
 def seed_tax_savings(ctx: DemoContext) -> None:
     """Two employees declared their insurance and CIT for this fiscal year; HR has not checked them yet."""
     kit = ctx.kit
-    if rows('SELECT 1 FROM tax_declaration_request WHERE company_id = %s LIMIT 1', [ctx.company_id]):
+    if TaxDeclarationRequest.objects.for_company(ctx.company_id).exists():
         return
     fy = tax_savings.current_fiscal_year_start()
     for k, e in enumerate(ctx.employees[3:5]):

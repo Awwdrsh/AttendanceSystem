@@ -3,7 +3,7 @@ import re
 
 import pytest
 
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.leave.accrual import allocate_annual_leave
 from hajiri.leave.service import ledger_balance
 

@@ -1,19 +1,21 @@
 """
 Overtime pages: the Overtime review tab of the Attendance hub (/attendance/overtime, OtSlipsPage.tsx) with its approve,
 reject and comp-off actions and the register CSV; overtime pre-approval request fragments (request, list, cancel)
-under /_/ot/...; and the JSON API under /api/v1/ot/... with the TS paths and shapes for Bearer-token integrations.
+under /_/ot/.... The JSON API under /api/v1/ot/... is in api.py.
 """
 from __future__ import annotations
 
+import re
+
+from django.db.models import F
 from django.http import HttpResponse
 from django.shortcuts import render
 from django.utils.html import format_html
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from hajiri.core.auth import company_id_of, has_module, has_role
-from hajiri.core.db import one
-from hajiri.core.errors import NotFoundError
-from hajiri.core.http import api_view, json_response, read_json
+from hajiri.core.scoping import get_or_404
+from hajiri.db.models import OtRequest, OtSlip
 from hajiri.web import format as fmt
 from hajiri.web.decorators import login_required, require_module, require_role
 from hajiri.web.htmx import close_modal, refresh, toast
@@ -22,14 +24,15 @@ from hajiri.web.tables import Column, Table, table_response
 from . import services
 from .forms import ApproveSlipForm, OtRequestForm, RejectSlipForm
 
-STATUS_OPTS = [('detected', 'Needs review'), ('approved', 'Approved'), ('rejected', 'Rejected'),
-               ('posted', 'Posted to payroll'), ('comp_off', 'Comp-off')]
-REQUEST_STATUS_OPTS = [('pending', 'Pending'), ('approved', 'Approved'), ('rejected', 'Rejected'), ('cancelled', 'Cancelled')]
+# The status filter's labels on the Overtime review page (OtSlipsPage.tsx), which differ from the model's.
+STATUS_OPTS = [(OtSlip.Status.DETECTED, 'Needs review'), (OtSlip.Status.APPROVED, 'Approved'),
+               (OtSlip.Status.REJECTED, 'Rejected'), (OtSlip.Status.POSTED, 'Posted to payroll'),
+               (OtSlip.Status.COMP_OFF, 'Comp-off')]
+REQUEST_STATUS_OPTS = OtRequest.Status.choices
 
 
 def day_type_label(t: str | None) -> str:
     """OtSlipsPage dayType: 'weekly_off' -> 'Weekly off', 'publicHoliday' -> 'Public holiday'."""
-    import re
     s = re.sub(r'([a-z])([A-Z])', r'\1 \2', (t or '').replace('_', ' ')).lower()
     return s[:1].upper() + s[1:]
 
@@ -95,13 +98,9 @@ def register_csv(request):
     return resp
 
 
-def _slip_row(user, slip_id) -> dict:
-    s = one("""SELECT s.id, s.employee_id, s.local_date, s.detected_min, s.approved_min, s.status, e.name_en
-                 FROM ot_slip s JOIN employee e ON e.id = s.employee_id WHERE s.id = %s AND e.company_id = %s""",
-            [str(slip_id), company_id_of(user)])
-    if not s:
-        raise NotFoundError('OT slip not found')
-    return s
+def _slip_row(user, slip_id) -> OtSlip:
+    """The slip a modal is drawn for, loaded in the active company first (another company's id is not found)."""
+    return get_or_404(OtSlip.objects.annotate(name_en=F('employee__name_en')), company_id_of(user), 'OT slip not found', pk=slip_id)
 
 
 def _done(request, message: str) -> HttpResponse:
@@ -116,9 +115,9 @@ def _done(request, message: str) -> HttpResponse:
 def slip_approve(request, id):
     """Approve overtime modal: minutes capped at the detected minutes and the 4 h daily cap."""
     s = _slip_row(request.hajiri_user, id)
-    cap = min(services.CAP_DAY_MIN, s['detected_min'])
+    cap = min(services.CAP_DAY_MIN, s.detected_min)
     if request.method == 'GET':
-        return render(request, 'ot/partials/approve.html', {'s': s, 'cap': cap, 'value': s['detected_min']})
+        return render(request, 'ot/partials/approve.html', {'s': s, 'cap': cap, 'value': s.detected_min})
     form = ApproveSlipForm(request.POST)
     if not form.is_valid():
         return render(request, 'ot/partials/approve.html', {'s': s, 'cap': cap, 'value': request.POST.get('approved_min'),
@@ -205,49 +204,3 @@ def request_new(request):
 def request_cancel(request, id):
     services.cancel_request(request.hajiri_user, str(id))
     return toast(request, refresh(HttpResponse(status=204), 'ot-requests'), 'Overtime request cancelled.')
-
-
-# ================================================================ JSON API (/api/v1/ot, TS paths and shapes)
-
-def _q(request, keys) -> dict:
-    return {k: request.GET[k] for k in keys if k in request.GET}
-
-
-@api_view(methods=('GET', 'POST'))
-def api_requests(request):
-    if request.method == 'GET':
-        return {'requests': services.list_requests(request.hajiri_user, _q(request, ('employeeId', 'status', 'from', 'to', 'scope')))}
-    return json_response(services.create_request(request.hajiri_user, read_json(request)), status=201)
-
-
-@api_view(methods=('POST',))
-def api_request_cancel(request, id):
-    return services.cancel_request(request.hajiri_user, id)
-
-
-@api_view(methods=('GET',))
-def api_slips(request):
-    return {'slips': services.list_slips(request.hajiri_user, _q(request, ('employeeId', 'from', 'to', 'status')))}
-
-
-@api_view(methods=('POST',))
-def api_slip_approve(request, id):
-    return services.approve_slip(request.hajiri_user, id, read_json(request) or {})
-
-
-@api_view(methods=('POST',))
-def api_slip_reject(request, id):
-    return services.reject_slip(request.hajiri_user, id, read_json(request))
-
-
-@api_view(methods=('POST',))
-def api_slip_comp_off(request, id):
-    return services.comp_off_slip(request.hajiri_user, id)
-
-
-@api_view(methods=('GET',))
-def api_register(request):
-    format_, data = services.register(request.hajiri_user, _q(request, ('from', 'to', 'format')))
-    if format_ == 'csv':
-        return HttpResponse(services.register_csv(data), content_type='text/csv; charset=utf-8')
-    return {'register': data}

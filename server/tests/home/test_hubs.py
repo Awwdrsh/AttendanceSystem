@@ -68,7 +68,10 @@ def test_every_hub_has_the_ts_tabs_in_order(db):
         got.setdefault(it.hub, []).append((nav.url_of(it.url_name), it.label))
     for hub, tabs in HUB_TABS.items():
         assert got.get(hub) == tabs, hub
-    assert set(got) == set(HUB_TABS)
+    # The Group hub (groups of companies) is new in the Django app; it opens on its overview, and the group slices
+    # add their own tabs after it.
+    assert got.get('group', [])[:1] == [('/group', 'Overview')]
+    assert set(got) == set(HUB_TABS) | {'group'}
     for it in items:
         assert it.feature == FEATURES.get(nav.url_of(it.url_name)), it.label
 

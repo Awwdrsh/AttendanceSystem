@@ -11,7 +11,9 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 
 from hajiri.core.auth import company_id_of
 from hajiri.core.clock import npt_today
-from hajiri.core.db import rows
+from django.db.models import F
+
+from hajiri.db.models import Branch, Payslip, Shift
 from hajiri.core.errors import NotFoundError
 from hajiri.web.decorators import require_role
 from hajiri.web.format import fmt_date
@@ -20,6 +22,7 @@ from hajiri.web.nav import url_of
 from hajiri.web.tables import Column, Table, table_response
 
 from . import service as svc
+from .forms import EmployeeForm, ImportForm
 
 DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 EMPLOYMENT = {'regular': 'Regular', 'work_based': 'Work-based', 'time_based': 'Time-based', 'casual': 'Casual', 'part_time': 'Part-time'}
@@ -69,7 +72,7 @@ COLUMNS = [
 @require_role('hr')
 def employee_list(request):
     status = 'exited' if request.GET.get('status') == 'exited' else 'active'
-    data = svc.list_employees(request.hajiri_user, {'status': status})
+    data = svc.employees_queryset(request.hajiri_user, {'status': status})
     table = Table(request, data, COLUMNS, id='employees', search=('name_en', 'emp_code', 'name_ne'), search_placeholder='Search by name or code',
                   default_sort='emp_code', export='employees', row_url=lambda r: reverse('employees:detail', args=[r['id']]),
                   empty_title='No exited employees' if status == 'exited' else 'No employees yet',
@@ -77,48 +80,25 @@ def employee_list(request):
                               else 'Add your first employee, or import a CSV with emp_code and name_en columns.'),
                   empty_search_title='No employees match your search', empty_search_hint='Try a different name or code.',
                   extra_params={'status': status})
-    n = len(data)
+    n = data.count()
     return table_response(request, table, 'employees/list.html', {'table': table, 'status': status,
                                                                   'count': f"{n} {'person' if n == 1 else 'people'}"})
 
 
 def _form_options(user) -> dict:
     company = company_id_of(user)
-    branches = [(str(b['id']), f"{b['name_en']} ({b['code']})") for b in rows('SELECT id, code, name_en FROM branch WHERE company_id = %s ORDER BY code', [company])]
-    shifts = [(str(s['id']), f"{s['code']}, {s['start_time'].strftime('%H:%M')} to {s['end_time'].strftime('%H:%M')}")
-              for s in rows('SELECT id, code, start_time, end_time FROM shift WHERE company_id = %s ORDER BY code', [company])]
+    branches = [(str(b.id), f'{b.name_en} ({b.code})') for b in Branch.objects.for_company(company).order_by('code')]
+    shifts = [(str(s.id), f"{s.code}, {s.start_time.strftime('%H:%M')} to {s.end_time.strftime('%H:%M')}")
+              for s in Shift.objects.for_company(company).order_by('code')]
     return {'branches': branches, 'shifts': shifts, 'dow': list(enumerate(DAY_NAMES)), 'months': list(enumerate(FISCAL_MONTHS, start=1)),
             'banks': BANKS, 'employment': EMPLOYMENT_FORM}
-
-
-def employee_body(post, initial: dict | None = None) -> dict:
-    """EmployeeForm.tsx submit(): empty values are left out; switches are always sent; a cleared exit date becomes null."""
-    out: dict = {}
-    text = ['empCode', 'nameEn', 'email', 'phone', 'gender', 'dob', 'maritalStatus', 'designation', 'grade', 'joinDate', 'probationEnd',
-            'employmentType', 'branchId', 'exitDate', 'shiftId', 'regime', 'ssfId', 'pfId', 'citId', 'pan', 'remoteAreaClass', 'bankCode',
-            'bankBranch', 'bankAccount']
-    for k in text:
-        v = (post.get(k) or '').strip()
-        if v:
-            out[k] = v
-    for k in ('workFromHome', 'otEligible', 'isResident', 'disability'):
-        out[k] = post.get(k) in ('on', 'true', '1')
-    if post.get('festivalMonth'):
-        try:
-            out['festivalMonth'] = int(post['festivalMonth'])
-        except ValueError:
-            out['festivalMonth'] = post['festivalMonth']
-    out['weeklyOffDays'] = sorted(int(x) for x in post.getlist('weeklyOffDays') if x.isdigit())
-    if initial and 'exitDate' not in out and initial.get('exit_date'):
-        out['exitDate'] = None
-    return out
 
 
 @require_http_methods(['GET', 'POST'])
 @require_role('hr')
 def employee_new(request):
     if request.method == 'POST':
-        new_id = svc.create_employee(request.hajiri_user, employee_body(request.POST))
+        new_id = svc.create_employee(request.hajiri_user, EmployeeForm(request.POST).body())
         resp = hx_redirect(request, reverse('employees:detail', args=[new_id]))
         from hajiri.web.htmx import flash
         return flash(resp, 'Employee added.')
@@ -133,7 +113,7 @@ def employee_edit(request, id):
     user = request.hajiri_user
     e = svc.get_employee(user, str(id))
     if request.method == 'POST':
-        svc.update_employee(user, str(id), employee_body(request.POST, e))
+        svc.update_employee(user, str(id), EmployeeForm(request.POST, initial_row=e).body())
         # The TS page reloads the employee, so the header (name, designation, status) changes too: reload the page,
         # staying on the tab the person was on.
         from urllib.parse import urlsplit
@@ -151,10 +131,9 @@ def employee_edit(request, id):
 def employee_import(request):
     if request.method == 'GET':
         return render(request, 'employees/partials/import.html', {'csv': '', 'result': None})
-    text = request.POST.get('csv') or ''
-    if 'file' in request.FILES:
-        text = request.FILES['file'].read().decode('utf-8-sig', errors='replace')
-    dry = request.POST.get('action') != 'import'
+    form = ImportForm(request.POST, request.FILES)
+    text = form.text()
+    dry = form.dry_run
     from hajiri.core.errors import HttpError
     try:
         status, body = svc.import_csv(request.hajiri_user, text, dry_run=dry)
@@ -229,9 +208,10 @@ def _tab_ctx(request, e: dict, tab: str) -> dict:
             a['type'] = EMPLOYMENT.get(a['employment_type'], humanize(a['employment_type']))
         return {'assignments': out}
     if tab == 'pay':
-        slips = rows("""SELECT s.id, s.net, s.published_at, r.run_type, p.bs_year, p.bs_month FROM payslip s JOIN payroll_run r ON r.id = s.run_id
-                          JOIN payroll_period p ON p.id = r.period_id WHERE s.employee_id = %s AND r.company_id = %s
-                         ORDER BY p.bs_year DESC, p.bs_month DESC, s.created_at DESC""", [eid, user.company_id])
+        slips = list(Payslip.objects.filter(employee_id=eid, run__company_id=company_id_of(user))
+                     .annotate(run_type=F('run__run_type'), bs_year=F('run__period__bs_year'), bs_month=F('run__period__bs_month'))
+                     .order_by('-bs_year', '-bs_month', '-created_at')
+                     .values('id', 'net', 'published_at', 'run_type', 'bs_year', 'bs_month'))
         for s in slips:
             s['extra'] = humanize(s['run_type']) if s['run_type'] and s['run_type'] != 'regular' else ''
         return {'payslips': slips}

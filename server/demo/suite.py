@@ -6,14 +6,13 @@ section that fails leaves nothing behind. Payroll runs are never touched.
 """
 from __future__ import annotations
 
-import json
 import traceback
 from dataclasses import dataclass, field
 from typing import Callable
 
 from django.db import transaction
 
-from hajiri.core.db import execute, one
+from hajiri.core.settings_store import get_setting, put_setting
 from hajiri.features.service import feature_on
 
 from .context import DemoContext, build_context
@@ -44,6 +43,7 @@ SECTIONS: list[tuple[str, Callable[[DemoContext], None]]] = [
     ('engage', seed_engage),
 ]
 DEMO_SUITE_SECTIONS = [name for name, _ in SECTIONS]
+DEMO_SUITE_KEY = 'demo.suite'      # company_setting: the sections done, in order
 
 # A module switched off under Settings, Features answers 404 "feature off", as its API routes did for the TS seeder
 # (app.ts featureGate). Only gated routes count: the roster section uses /shifts and /field/swaps, which the field gate
@@ -70,9 +70,8 @@ def seed_demo_suite(*, company: str, only: list[str] | None = None, log: Callabl
     out = SuiteResult()
     try:
         ctx = build_context(kit, company, log)
-        mark = one("SELECT value FROM company_setting WHERE company_id = %s AND key = 'demo.suite'", [ctx.company_id])
-        finished = set(((mark or {}).get('value') or {}).get('done') or [])
-        order = list(((mark or {}).get('value') or {}).get('done') or [])
+        order = list((get_setting(ctx.company_id, DEMO_SUITE_KEY) or {}).get('done') or [])
+        finished = set(order)
         for name, fn in SECTIONS:
             if only and name not in only:
                 continue
@@ -87,9 +86,7 @@ def seed_demo_suite(*, company: str, only: list[str] | None = None, log: Callabl
                     fn(ctx)
                     finished.add(name)
                     order.append(name)
-                    execute("""INSERT INTO company_setting (company_id, key, value) VALUES (%s, 'demo.suite', %s)
-                               ON CONFLICT (company_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()""",
-                            [ctx.company_id, json.dumps({'done': order})])
+                    put_setting(ctx.company_id, DEMO_SUITE_KEY, {'done': order})
                 out.done.append(name)
                 log(f'  ✓ {name}')
             except Exception as e:  # noqa: BLE001 - every section failure is reported, then the next section runs

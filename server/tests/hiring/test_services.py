@@ -1,7 +1,7 @@
 """Port of apps/api/test/hiring.test.ts ('hiring and applicant tracking'). Each test replays the story up to its step."""
 import pytest
 
-from hajiri.core.db import rows
+from tests.support.sql import rows
 from hajiri.core.errors import BadRequestError
 from hajiri.hiring import services as hiring
 from hajiri.hiring.services import clean_answers, score_application

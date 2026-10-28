@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 
 from django import template
 
-from hajiri.performance.common import fmt_number, js_round, label_of_rating, num
+from hajiri.performance.common import fmt_number, round_half_up, label_of_rating, num
 from hajiri.web.format import fmt_date_short, fmt_money, fmt_time, today_npt
 
 register = template.Library()
@@ -39,12 +39,12 @@ def rating_label(n, labels):
 
 @register.filter
 def pct_round(v):
-    return js_round(num(v))
+    return round_half_up(num(v))
 
 
 @register.filter
 def progress_tone(v):
-    v = js_round(num(v))
+    v = round_half_up(num(v))
     return 'ok' if v >= 100 else 'info' if v >= 60 else 'warn' if v >= 30 else 'bad'
 
 

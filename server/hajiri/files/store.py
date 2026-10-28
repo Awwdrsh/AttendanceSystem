@@ -11,15 +11,18 @@ import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
+from django.db import transaction
+from django.db.models.functions import Coalesce, Now
 from django.http import HttpResponse
 
 from hajiri.core.clock import now as _now
 from hajiri.core.crypto import field_cipher
-from hajiri.core.db import execute, one
 from hajiri.core.errors import BadRequestError, ForbiddenError, NotFoundError
+from hajiri.core.scoping import as_uuid
+from hajiri.db.models import StoredFile
 
 FILE_MAX_BYTES = 4 * 1024 * 1024
 DOCUMENT_MIMES = ('application/pdf', 'image/jpeg', 'image/png', 'image/webp')
@@ -32,7 +35,16 @@ _SIGNATURES = {
     'image/webp': lambda b: len(b) > 12 and b[:4] == b'RIFF' and b[8:12] == b'WEBP',
 }
 
-_COLS = 'id, company_id, purpose, filename, mime, bytes, sha256, uploaded_by, attached_to, deleted_at, created_at'
+
+
+def has_signature(mime: str, data: bytes) -> bool:
+    """Whether the bytes start the way a file of that type does (its magic number); False for other types."""
+    check = _SIGNATURES.get(mime)
+    return bool(check and check(data))
+
+
+_FIELDS = ('id', 'company_id', 'purpose', 'filename', 'mime', 'bytes', 'sha256', 'uploaded_by_id', 'attached_to',
+           'deleted_at', 'created_at')
 
 
 @dataclass(frozen=True)
@@ -91,30 +103,37 @@ def _aad(company_id: str, file_id: str) -> str:
     return f'stored_file:{company_id}:{file_id}'
 
 
+def _files(company_id: str):
+    """Live (not deleted) uploads of one company."""
+    return StoredFile.objects.for_company(company_id).filter(deleted_at__isnull=True)
+
+
 def _row(r: dict | None) -> dict | None:
+    """The row as the modules read it: ids as strings, `uploaded_by` the user id."""
     if r is None:
         return None
+    r['uploaded_by'] = r.pop('uploaded_by_id', None)
     for k in ('id', 'company_id', 'uploaded_by'):
         if r.get(k) is not None:
             r[k] = str(r[k])
     return r
 
 
+@transaction.atomic
 def save_file(*, company_id: str, purpose: str, filename: str, file: ParsedFile, uploaded_by: str | None,
               attached_to: str | None = None) -> dict:
-    file_id = str(one('SELECT uuidv7() AS id')['id'])
-    blob = field_cipher().encrypt(base64.b64encode(file.data).decode(), _aad(company_id, file_id))
-    return _row(one(f"""
-        INSERT INTO stored_file (id, company_id, purpose, filename, mime, bytes, sha256, data_enc, uploaded_by, attached_to, attached_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::text, CASE WHEN %s::text IS NULL THEN NULL ELSE now() END)
-        RETURNING {_COLS}""",
-        [file_id, company_id, purpose, clean_filename(filename), file.mime, len(file.data),
-         hashlib.sha256(file.data).hexdigest(), blob, uploaded_by, attached_to, attached_to]))
+    # The cipher binds the bytes to the row id, which the database assigns (uuidv7): insert, then store the blob.
+    f = StoredFile.objects.create(company_id=company_id, purpose=purpose, filename=clean_filename(filename), mime=file.mime,
+                                  bytes=len(file.data), sha256=hashlib.sha256(file.data).hexdigest(),
+                                  uploaded_by_id=uploaded_by, attached_to=attached_to,
+                                  attached_at=Now() if attached_to is not None else None)
+    blob = field_cipher().encrypt(base64.b64encode(file.data).decode(), _aad(str(company_id), str(f.pk)))
+    StoredFile.objects.filter(pk=f.pk).update(data_enc=blob)
+    return _row(StoredFile.objects.filter(pk=f.pk).values(*_FIELDS).first())
 
 
 def file_meta(company_id: str, file_id: str) -> dict | None:
-    return _row(one(f'SELECT {_COLS} FROM stored_file WHERE id = %s AND company_id = %s AND deleted_at IS NULL',
-                    [file_id, company_id]))
+    return _row(_files(company_id).filter(pk=as_uuid(file_id)).values(*_FIELDS).first())
 
 
 def attach_file(*, company_id: str, file_id: str, user_id: str, purpose: str | list[str] | tuple[str, ...],
@@ -131,24 +150,22 @@ def attach_file(*, company_id: str, file_id: str, user_id: str, purpose: str | l
         raise BadRequestError('This file is already attached to another record.')
     if meta['uploaded_by'] != str(user_id):
         raise ForbiddenError('You can only attach files you uploaded.')
-    execute('UPDATE stored_file SET attached_to = %s, attached_at = coalesce(attached_at, now()) WHERE id = %s',
-            [attached_to, file_id])
+    StoredFile.objects.filter(pk=meta['id']).update(attached_to=attached_to, attached_at=Coalesce('attached_at', Now()))
     return {**meta, 'attached_to': attached_to}
 
 
 def read_file(company_id: str, file_id: str) -> dict:
-    r = one(f'SELECT {_COLS}, data_enc FROM stored_file WHERE id = %s AND company_id = %s AND deleted_at IS NULL',
-            [file_id, company_id])
+    r = _files(company_id).filter(pk=as_uuid(file_id)).values(*_FIELDS, 'data_enc').first()
     if not r or r['data_enc'] is None:
         raise NotFoundError('file not found')
     enc = r.pop('data_enc')
-    data = base64.b64decode(field_cipher().decrypt(bytes(enc), _aad(company_id, str(file_id))))
+    data = base64.b64decode(field_cipher().decrypt(bytes(enc), _aad(str(company_id), str(file_id))))
     return {**_row(r), 'data': data}
 
 
 def delete_file(company_id: str, file_id: str) -> None:
     """Soft delete: the bytes are wiped, the row stays as a record that a file existed."""
-    execute('UPDATE stored_file SET data_enc = NULL, deleted_at = now() WHERE id = %s AND company_id = %s', [file_id, company_id])
+    StoredFile.objects.for_company(company_id).filter(pk=file_id).update(data_enc=None, deleted_at=Now())
 
 
 def stored_file_response(f: dict, *, download: bool = False) -> HttpResponse:
@@ -167,6 +184,5 @@ def stored_file_response(f: dict, *, download: bool = False) -> HttpResponse:
 def purge_unattached_files(at: datetime | None = None) -> int:
     """Nightly: drop uploads never attached to anything within a day."""
     at = at or _now()
-    return execute("""UPDATE stored_file SET data_enc = NULL, deleted_at = %s
-                       WHERE attached_to IS NULL AND deleted_at IS NULL AND created_at < %s::timestamptz - interval '1 day'""",
-                   [at, at])
+    return StoredFile.objects.filter(attached_to__isnull=True, deleted_at__isnull=True,
+                                     created_at__lt=at - timedelta(days=1)).update(data_enc=None, deleted_at=at)

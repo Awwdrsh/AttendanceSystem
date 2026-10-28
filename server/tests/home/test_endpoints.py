@@ -8,7 +8,7 @@ import json
 import pytest
 from django.test import Client
 
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.core.errors import BadRequestError, ForbiddenError, NotFoundError, ValidationError
 from tests.web.factories import bearer, htmx
 

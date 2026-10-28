@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from decimal import Decimal
 
 from hajiri.core.clock import NPT
 from hajiri.web.format import fmt_date_short, fmt_money, fmt_time
@@ -32,8 +33,8 @@ def label(table: dict, key) -> tuple[str, str]:
 
 
 def _n(x) -> str:
-    f = float(x)
-    return str(int(f)) if f.is_integer() else repr(f)
+    """3 not 3.0, 2.5 as 2.5."""
+    return format(Decimal(str(x)).normalize(), 'f')
 
 
 def experience_text(mn, mx) -> str | None:

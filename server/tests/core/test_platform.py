@@ -10,12 +10,11 @@ from django.db import IntegrityError, transaction
 
 from hajiri.core import auth
 from hajiri.core.bsdate import bs_label, bs_month_name, bs_range
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.core.errors import (
     BadRequestError, ConflictError, ForbiddenError, NotFoundError, ValidationError, error_body, from_db_error,
 )
-from hajiri.core.http import ApiEncoder
-from hajiri.core.schema import Arr, Bool, Enum, Int, IsoDate, Obj, Str, Uuid, parse
+from hajiri.core.api import ApiEncoder
 from hajiri.core.users import admin_create_user, admin_update_user, list_users, reset_password
 from tests.core.fixtures import PW
 
@@ -114,34 +113,25 @@ def test_reset_password_clears_lockout_and_sessions(demo):
         reset_password('nobody@test.local', 'brand-new-passphrase')
 
 
-# ---------------------------------------------------------------- schema library
+# ---------------------------------------------------------------- request validation (DRF serializers)
 
-def test_schema_defaults_optional_strict_and_issues():
-    s = Obj({'a': Int(min=1, default=5), 'b': Str(optional=True), 'c': Str(nullish=True), 'd': Bool(default=False),
-             'e': Arr(Enum(('x', 'y')), max=2, default=list)}, strict=True)
-    assert parse(s, {}) == {'a': 5, 'd': False, 'e': []}
-    assert parse(s, {'c': None, 'b': 'z', 'a': 2.0}) == {'a': 2, 'b': 'z', 'c': None, 'd': False, 'e': []}
+def test_validation_defaults_issues_dates_and_uuids():
+    from rest_framework import serializers
+    from hajiri.core.validation import IsoDateField, parse_uuid, validate
+
+    class S(serializers.Serializer):
+        a = serializers.IntegerField(min_value=1, default=5)
+        b = serializers.CharField(required=False)
+        d = IsoDateField(required=False)
+
+    assert validate(S, {}) == {'a': 5}
+    assert validate(S, {'b': 'z', 'd': '2026-02-28'})['d'] == '2026-02-28'
     with pytest.raises(ValidationError) as e:
-        parse(s, {'a': 0, 'e': ['x', 'q'], 'zz': 1})
-    paths = {i['path'] for i in e.value.issues}
-    assert paths == {'', 'a', 'e.1'}
-    assert parse(Obj({'k': Str()}), {'k': 'v', 'extra': 1}) == {'k': 'v'}  # unknown keys are stripped
+        validate(S, {'a': 0, 'd': '2026-02-30'})
+    assert {i['path'] for i in e.value.issues} == {'a', 'd'}
+    assert parse_uuid('00000000-0000-7000-8000-00000000AAAA') == '00000000-0000-7000-8000-00000000aaaa'
     with pytest.raises(ValidationError):
-        parse(Int(), True)  # a boolean is not a number
-    with pytest.raises(ValidationError):
-        parse(Int(), 1.5)
-
-
-def test_schema_dates_and_uuids():
-    assert parse(IsoDate(), '2026-02-28') == '2026-02-28'
-    for bad in ('2026-13-40', '2026-02-30', '26-01-01', 20260101):
-        with pytest.raises(ValidationError):
-            parse(IsoDate(), bad)
-    assert parse(Uuid(), '00000000-0000-7000-8000-00000000AAAA') == '00000000-0000-7000-8000-00000000aaaa'
-    with pytest.raises(ValidationError):
-        parse(Uuid(), 'nope')
-    assert parse(Int(coerce=True), '42') == 42
-    assert parse(Str(trim=True, min=1), '  x ') == 'x'
+        parse_uuid('nope')
 
 
 def test_error_bodies_and_database_errors(db):

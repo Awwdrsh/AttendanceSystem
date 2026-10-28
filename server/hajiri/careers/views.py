@@ -1,25 +1,36 @@
 """
-Public careers site: /careers lists open jobs, /careers/<job id> shows one with the application form (CareersPage.tsx).
-No sign-in. The JSON endpoints under /api/v1/public/careers/ stay for company websites and job boards that list or
-post to the careers page from elsewhere (the TS routes, same shapes).
+Public careers site, one per company: /careers/<code> lists a company's open jobs and /careers/<code>/<job id> shows
+one with the application form (CareersPage.tsx). The TS addresses keep working: /careers?company=CODE, /careers for
+an install with one company, and /careers/<job id>. No sign-in.
+
+The JSON endpoints under /api/v1/public/careers/ are for company websites and job boards that list or post to a
+careers page from elsewhere (the TS routes and shapes, plus /api/v1/public/careers/companies/<code>/jobs... naming
+the company). They are DRF views without authentication: anyone may call them, no session is read and no CSRF
+token is needed, since nothing they do acts as a signed-in person.
 """
 from __future__ import annotations
 
-import base64
-from urllib.parse import quote
-
 from django.shortcuts import render
+from django.urls import reverse
 from django.views.decorators.http import require_GET, require_POST
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from hajiri.core.errors import HttpError, NotFoundError
-from hajiri.core.http import api_view, json_response, read_json
+from hajiri.core.scoping import is_uuid
+from hajiri.files.parsers import json_parser
+from hajiri.hiring.serializers import ApplyIn, CareersQueryIn
 from hajiri.hiring.labels import EMPLOYMENT, WORK_MODE, experience_text, prose_blocks, salary_text
-from hajiri.web.htmx import is_htmx
+from hajiri.web.htmx import htmx_target, is_htmx
 from hajiri.web.middleware import error_message
 
 from . import services
+from .forms import ApplicationForm
 
-CV_MAX = 4 * 1024 * 1024
+APPLY_MAX_BYTES = 6 * 1024 * 1024   # a 4 MB PDF as base64 JSON (the TS API's express.json({ limit: '6mb' }))
 
 
 def _ip(request) -> str:
@@ -33,20 +44,56 @@ def _no_store(res):
 
 # ---------------------------------------------------------------- JSON (public)
 
-@api_view(methods=('GET',), auth=False)
-def api_jobs(request):
-    return _no_store(json_response(services.list_jobs(request.GET.dict())))
+class PublicView(APIView):
+    """No authentication and no CSRF: the public careers API answers anyone the same way."""
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
 
 
-@api_view(methods=('GET',), auth=False)
-def api_job(request, job_id):
-    return _no_store(json_response(services.get_job(job_id)))
+class JobListApi(PublicView):
+    @extend_schema(summary='Open jobs of a careers page (?company=CODE when several companies share the install)',
+                   tags=['careers'], operation_id='careers_jobs', parameters=[CareersQueryIn],
+                   responses={200: OpenApiTypes.OBJECT})
+    def get(self, request, code=None):
+        return _no_store(Response(services.list_jobs(request.query_params.dict(), code)))
 
 
-@api_view(methods=('POST',), auth=False)
-def api_apply(request, job_id):
-    body = read_json(request, max_bytes=6 * 1024 * 1024)
-    return json_response(services.apply(job_id, body, _ip(request)), status=201)
+class JobApi(PublicView):
+    @extend_schema(summary='One open job with its questions', tags=['careers'], operation_id='careers_job',
+                   responses={200: OpenApiTypes.OBJECT})
+    def get(self, request, job_id, code=None):
+        return _no_store(Response(services.get_job(job_id, code)))
+
+
+class ApplyApi(PublicView):
+    parser_classes = [json_parser(APPLY_MAX_BYTES)]
+
+    @extend_schema(summary='Apply for an open job (CV as a PDF data URL)', tags=['careers'], operation_id='careers_apply',
+                   request=ApplyIn, responses={201: OpenApiTypes.OBJECT})
+    def post(self, request, job_id, code=None):
+        return Response(services.apply(job_id, request.data, _ip(request), code), status=201)
+
+
+# The same endpoints under the company's code (/api/v1/public/careers/companies/<code>/jobs...).
+class CompanyJobListApi(JobListApi):
+    @extend_schema(summary="Open jobs of a company's careers page", tags=['careers'], operation_id='careers_company_jobs',
+                   parameters=[CareersQueryIn], responses={200: OpenApiTypes.OBJECT})
+    def get(self, request, code=None):
+        return super().get(request, code)
+
+
+class CompanyJobApi(JobApi):
+    @extend_schema(summary='One open job of the company', tags=['careers'], operation_id='careers_company_job',
+                   responses={200: OpenApiTypes.OBJECT})
+    def get(self, request, job_id, code=None):
+        return super().get(request, job_id, code)
+
+
+class CompanyApplyApi(ApplyApi):
+    @extend_schema(summary='Apply for an open job of the company', tags=['careers'], operation_id='careers_company_apply',
+                   request=ApplyIn, responses={201: OpenApiTypes.OBJECT})
+    def post(self, request, job_id, code=None):
+        return super().post(request, job_id, code)
 
 
 # ---------------------------------------------------------------- pages
@@ -57,38 +104,64 @@ def _meta(job: dict) -> dict:
             'salary': salary_text(job.get('salary_min'), job.get('salary_max'))}
 
 
-def _suffix(code: str | None) -> str:
-    return f'?company={quote(code, safe="")}' if code else ''
+def _home(code: str | None) -> str:
+    """The careers page of a company, or of the install when it has one company."""
+    return reverse('careers:detail', args=[code]) if code else reverse('careers:list')
 
 
-@require_GET
-def job_list(request):
-    code = request.GET.get('company') or None
-    query = {'company': code, 'q': (request.GET.get('q') or '').strip() or None,
+def _job_url(code: str | None, job_id: str) -> str:
+    return reverse('careers:company_job', args=[code, job_id]) if code else reverse('careers:detail', args=[job_id])
+
+
+MODES = [('all', 'Any'), ('onsite', 'On site'), ('hybrid', 'Hybrid'), ('remote', 'Remote')]
+
+
+def _list(request, code: str | None):
+    query = {'q': (request.GET.get('q') or '').strip() or None,
              'workMode': request.GET.get('mode') if request.GET.get('mode') in WORK_MODE else None,
              'category': request.GET.get('category') or None}
-    ctx = {'code': code, 'suffix': _suffix(code), 'mode': query['workMode'] or 'all', 'q': query['q'] or '',
-           'category': query['category'] or '', 'modes': [('all', 'Any'), ('onsite', 'On site'), ('hybrid', 'Hybrid'), ('remote', 'Remote')]}
+    ctx = {'code': code, 'home': _home(code), 'mode': query['workMode'] or 'all', 'q': query['q'] or '',
+           'category': query['category'] or '', 'modes': MODES}
     status = 200
     try:
-        data = services.list_jobs({k: v for k, v in query.items() if v is not None})
+        data = services.list_jobs({k: v for k, v in query.items() if v is not None}, code)
         for j in data['jobs']:
             j['meta'] = _meta(j)
             j['sub'] = ' · '.join(x for x in (j.get('department'), j.get('category')) if x)
+            j['url'] = _job_url(data['company']['code'] if code else None, j['id'])
         ctx.update(data=data, company=data['company']['name'])
     except HttpError as e:
         ctx.update(data=None, error=error_message(e))
         status = 404 if isinstance(e, NotFoundError) else e.status
-    if is_htmx(request) and request.headers.get('HX-Target') == 'careers-jobs':
-        return _no_store(render(request, 'careers/partials/jobs.html', ctx, status=200 if status == 404 else status))
-    return _no_store(render(request, 'careers/list.html', ctx, status=status))
+    if is_htmx(request) and htmx_target(request) == 'careers-jobs':
+        return _no_store(render(request, 'careers/partials/site_jobs.html', ctx, status=200 if status == 404 else status))
+    return _no_store(render(request, 'careers/site_list.html', ctx, status=status))
 
 
-def _detail_ctx(request, job_id: str) -> tuple[dict, int]:
-    code = request.GET.get('company') or None
-    ctx = {'code': code, 'back': f'/careers{_suffix(code)}', 'job_id': job_id}
+@require_GET
+def job_list(request):
+    """/careers, or /careers?company=CODE as the TS app linked it."""
+    return _list(request, request.GET.get('company') or None)
+
+
+@require_GET
+def entry(request, key):
+    """/careers/<code>: a company's careers page; /careers/<job id>: one job (the job names its company)."""
+    if is_uuid(key):
+        return _detail(request, key, request.GET.get('company') or None)
+    return _list(request, key)
+
+
+@require_GET
+def company_job(request, code, job_id):
+    """/careers/<code>/<job id>: a job of that company only."""
+    return _detail(request, str(job_id), code)
+
+
+def _detail_ctx(job_id: str, code: str | None) -> tuple[dict, int]:
+    ctx = {'code': code, 'back': _home(code), 'job_id': job_id}
     try:
-        data = services.get_job(job_id)
+        data = services.get_job(job_id, code)
     except NotFoundError:
         return {**ctx, 'job': None}, 404
     job = data['job']
@@ -99,61 +172,24 @@ def _detail_ctx(request, job_id: str) -> tuple[dict, int]:
     return ctx, 200
 
 
-@require_GET
-def job_detail(request, job_id):
-    ctx, status = _detail_ctx(request, job_id)
+def _detail(request, job_id: str, code: str | None):
+    ctx, status = _detail_ctx(job_id, code)
     return _no_store(render(request, 'careers/detail.html', {**ctx, 'form': {}, 'answers': {}}, status=status))
-
-
-def _num(v: str):
-    v = (v or '').strip()
-    if v == '':
-        return None
-    try:
-        f = float(v)
-    except ValueError:
-        return v   # the schema reports it
-    return int(f) if f.is_integer() else f
 
 
 @require_POST
 def apply(request, job_id):
-    """The application form (HTMX, multipart): the confirmation, or the form again with the problem shown above Submit."""
-    ctx, status = _detail_ctx(request, job_id)
+    """The application form (HTMX, multipart): the confirmation, or the form again with the problem shown above Submit.
+    ?company=CODE keeps the application to that company's job."""
+    code = request.GET.get('company') or None
+    ctx, _ = _detail_ctx(job_id, code)
     if not ctx.get('job'):
         return render(request, 'careers/partials/apply.html', {**ctx, 'error': services.GONE}, status=422)
-    job = ctx['job']
-    p = request.POST
-    answers = {}
-    for q in job['questions']:
-        raw = p.get(f"answer_{q['id']}", '')
-        if q['kind'] == 'number':
-            v = _num(raw)
-            if v is not None:
-                answers[q['id']] = v
-        elif raw.strip() != '':
-            answers[q['id']] = raw
-    form = {k: p.get(k, '') for k in ('name', 'email', 'phone', 'experienceYears', 'currentEmployer', 'coverNote')}
-    ctx.update(form=form, answers=answers, consent=p.get('consent') == '1')
-    cv = request.FILES.get('cv')
+    form = ApplicationForm(request.POST, request.FILES, ctx['job']['questions'])
+    ctx.update(form=form.typed(), answers=form.answers(), consent=form.consented)
     try:
-        if not cv:
-            raise HttpError('Please attach your CV as a PDF.')
-        if cv.size > CV_MAX:
-            raise HttpError('Your CV is larger than 4 MB. Please send a smaller PDF.')
-        if cv.content_type != 'application/pdf':
-            raise HttpError('Please attach your CV as a PDF.')
-        body = {
-            'name': form['name'].strip(), 'email': form['email'].strip(), 'phone': form['phone'].strip(),
-            'experienceYears': _num(form['experienceYears']), 'currentEmployer': form['currentEmployer'].strip() or None,
-            'coverNote': form['coverNote'].strip() or None, 'answers': answers, 'cvFilename': cv.name,
-            'cvDataUrl': f"data:application/pdf;base64,{base64.b64encode(cv.read()).decode()}",
-            'consent': p.get('consent') == '1',
-        }
-        if p.get('website'):
-            body['website'] = p['website']
-        r = services.apply(job_id, body, _ip(request))
+        filename, cv = form.cv_upload()
+        r = services.apply(job_id, form.body(filename), _ip(request), code, cv_upload=cv)
     except HttpError as e:
         return render(request, 'careers/partials/apply.html', {**ctx, 'error': error_message(e)}, status=422)
     return render(request, 'careers/partials/apply.html', {**ctx, 'done': r['message']})
-

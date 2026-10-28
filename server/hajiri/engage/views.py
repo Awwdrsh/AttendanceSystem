@@ -4,7 +4,6 @@ Engage hub pages (/engage, /engage/surveys, /engage/suggestions) and their HTMX 
 """
 from __future__ import annotations
 
-import json
 import re
 from datetime import date, timedelta
 from functools import wraps
@@ -14,13 +13,14 @@ from django.shortcuts import render
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from hajiri.core.auth import has_role
-from hajiri.core.errors import BadRequestError, HttpError
+from hajiri.core.errors import ForbiddenError, HttpError, NotFoundError
 from hajiri.web.decorators import login_required, require_feature, require_role
 from hajiri.web.format import bs_month_label
 from hajiri.web.htmx import close_modal, is_htmx, refresh, toast, trigger
 from hajiri.web.middleware import error_message
 from hajiri.web.nav import feature_on
 
+from . import forms as F
 from . import services as S
 from .services import REACTIONS
 
@@ -66,10 +66,6 @@ def toast_errors(title: str):
 
 def dom_id(*parts) -> str:
     return re.sub(r'[^a-zA-Z0-9]+', '-', '-'.join(str(p) for p in parts)).strip('-')
-
-
-def _bool(v) -> bool:
-    return str(v or '').lower() in ('1', 'true', 'on', 'yes')
 
 
 def _social(target_type: str, target_id: str, reactions: dict, mine: list, comments: int, compact: bool = False) -> dict:
@@ -173,7 +169,7 @@ def celebrations_panel(request):
 @login_required
 @toast_errors('Not saved')
 def save_prefs(request):
-    S.save_prefs(request.hajiri_user, {'showBirthday': _bool(request.POST.get('show_birthday'))})
+    S.save_prefs(request.hajiri_user, F.PrefsForm(request.POST).prefs())
     return _ok(request, None, 'engage-celebrations')
 
 
@@ -200,9 +196,11 @@ def suggestion_panel(request):
 @login_required
 @toast_errors('Not saved')
 def react(request):
-    p = request.POST
-    r = S.react(request.hajiri_user, {'targetType': p.get('target_type'), 'targetId': p.get('target_id'), 'emoji': p.get('emoji')})
-    s = _social(p['target_type'], p['target_id'], r['reactions'], r['mine'], r['comments'], compact=_bool(p.get('compact')))
+    form = F.ReactForm(request.POST)
+    body = form.body()
+    r = S.react(request.hajiri_user, body)
+    s = _social(body['targetType'], body['targetId'], r['reactions'], r['mine'], r['comments'],
+                compact=form.cleaned_data['compact'])
     return render(request, 'engage/partials/reactions.html', {'s': s})
 
 
@@ -230,8 +228,7 @@ def comments(request):
 
 @toast_errors('Not saved')
 def _add_comment(request):
-    p = request.POST
-    c = S.add_comment(request.hajiri_user, {'targetType': p.get('target_type'), 'targetId': p.get('target_id'), 'body': p.get('body', '')})
+    c = S.add_comment(request.hajiri_user, F.CommentForm(request.POST).comment())
     return _thread(request, c['targetType'], c['targetId'])
 
 
@@ -252,9 +249,7 @@ def comment_delete(request, id):
 def kudos_new(request):
     user = request.hajiri_user
     if request.method == 'POST':
-        p = request.POST
-        S.give_kudos(user, {'recipientIds': p.getlist('recipient_ids'), 'valueId': p.get('value_id') or None,
-                            'message': p.get('message', '').strip()})
+        S.give_kudos(user, F.KudosForm(request.POST).kudos())
         return _ok(request, 'Kudos sent. They have been notified.', 'engage-feed', 'engage-leaderboard', close=True)
     people = [c for c in S.colleagues(user) if c['id'] != user.employee_id]
     values = [v for v in S.list_values(user)['values'] if v['active']]
@@ -285,9 +280,7 @@ def values_manager(request):
 @require_feature('kudos')
 @toast_errors('Not saved')
 def value_new(request):
-    p = request.POST
-    S.create_value(request.hajiri_user, {'name': p.get('name', '').strip(), 'emoji': p.get('emoji', '').strip(),
-                                         'description': p.get('description', '').strip() or None})
+    S.create_value(request.hajiri_user, F.ValueForm(request.POST).value())
     return _values_fragment(request)
 
 
@@ -304,7 +297,6 @@ def value_toggle(request, id):
     user = request.hajiri_user
     v = next((v for v in S.list_values(user)['values'] if v['id'] == str(id)), None)
     if not v:
-        from hajiri.core.errors import NotFoundError
         raise NotFoundError('value not found')
     S.update_value(user, str(id), {'active': not v['active']})
     return _values_fragment(request)
@@ -314,12 +306,7 @@ def value_toggle(request, id):
 @require_role('hr')
 @toast_errors('Not saved')
 def save_settings(request):
-    raw = (request.POST.get('kudos_monthly_limit') or '').strip()
-    try:
-        limit = int(raw) if raw else None
-    except ValueError:
-        raise BadRequestError('kudosMonthlyLimit: Expected number, received string')
-    S.save_settings(request.hajiri_user, {'kudosMonthlyLimit': limit})
+    S.save_settings(request.hajiri_user, F.SettingsForm(request.POST).settings())
     return _ok(request, 'Saved.')
 
 
@@ -332,18 +319,10 @@ def announcement_new(request):
     user = request.hajiri_user
     hr = has_role(user, 'hr')
     if request.method == 'POST':
-        p = request.POST
-        body = {'title': p.get('title', '').strip(), 'body': p.get('body', '').strip(),
-                'audienceKind': p.get('audience_kind') or ('all' if hr else 'reports'),
-                'audienceId': p.get('audience_id') or None, 'pinned': _bool(p.get('pinned')),
-                'requiresAck': _bool(p.get('requires_ack')), 'expiresOn': p.get('expires_on') or None}
-        if hr:
-            body['popup'] = _bool(p.get('popup'))
-        r = S.post_announcement(user, body)
+        r = S.post_announcement(user, F.AnnouncementForm(request.POST).announcement(hr=hr))
         n = r['notified']
         return _ok(request, f"Posted. {n} {'person was' if n == 1 else 'people were'} notified.", 'engage-feed', close=True)
     if not has_role(user, 'hr', 'manager'):
-        from hajiri.core.errors import ForbiddenError
         raise ForbiddenError('only HR and managers post announcements')
     today = S.npt_today()
     return render(request, 'engage/partials/announcement_form.html', {
@@ -355,7 +334,7 @@ def announcement_new(request):
 @login_required
 @toast_errors('Not saved')
 def announcement_pin(request, id):
-    S.edit_announcement(request.hajiri_user, str(id), {'pinned': _bool(request.POST.get('pinned'))})
+    S.edit_announcement(request.hajiri_user, str(id), F.PinForm(request.POST).patch())
     return _ok(request, None, 'engage-feed')
 
 
@@ -456,27 +435,6 @@ TEMPLATES = {
 }
 
 
-def _builder_body(request) -> dict:
-    p = request.POST
-    try:
-        questions = json.loads(p.get('questions_json') or '[]')
-    except ValueError:
-        raise BadRequestError('questions: Expected array, received string')
-    if isinstance(questions, list):
-        questions = [{**q, 'prompt': str(q.get('prompt', '')).strip(),
-                      'options': [str(o).strip() for o in q.get('options') or [] if str(o).strip()]}
-                     if isinstance(q, dict) else q for q in questions]
-    try:
-        min_group = int(p.get('min_group') or 5)
-    except ValueError:
-        min_group = p.get('min_group')
-    body = {'kind': p.get('kind') or 'survey', 'title': p.get('title', '').strip(),
-            'description': p.get('description', '').strip() or None, 'anonymous': _bool(p.get('anonymous')),
-            'minGroup': min_group, 'audienceKind': p.get('audience_kind') or 'all', 'audienceId': p.get('audience_id') or None,
-            'opensOn': p.get('opens_on') or '', 'closesOn': p.get('closes_on') or '',
-            'recurrence': p.get('recurrence') or 'none', 'questions': questions}
-    return body
-
 
 def _builder(request, editing: dict | None):
     user = request.hajiri_user
@@ -506,7 +464,7 @@ def _builder(request, editing: dict | None):
 @toast_errors('Not saved')
 def survey_new(request):
     if request.method == 'POST':
-        S.create_survey(request.hajiri_user, _builder_body(request))
+        S.create_survey(request.hajiri_user, F.SurveyForm(request.POST).survey())
         return _ok(request, 'Saved as a draft. Publish it when you are ready.', 'engage-surveys', close=True)
     return _builder(request, None)
 
@@ -517,7 +475,7 @@ def survey_new(request):
 @toast_errors('Not saved')
 def survey_edit(request, id):
     if request.method == 'POST':
-        S.update_survey(request.hajiri_user, str(id), _builder_body(request))
+        S.update_survey(request.hajiri_user, str(id), F.SurveyForm(request.POST).survey())
         return _ok(request, 'Saved as a draft. Publish it when you are ready.', 'engage-surveys', close=True)
     return _builder(request, S.get_survey(request.hajiri_user, str(id)))
 
@@ -554,30 +512,9 @@ def survey_delete(request, id):
 @require_feature('surveys')
 @toast_errors('Not saved')
 def survey_extend(request, id):
-    S.update_survey(request.hajiri_user, str(id), {'closesOn': request.POST.get('closes_on') or ''})
+    S.update_survey(request.hajiri_user, str(id), F.ExtendForm(request.POST).patch())
     return _ok(request, 'Saved.', 'engage-surveys', close=True)
 
-
-def _answers_from_post(questions: list[dict], post) -> list[dict]:
-    out = []
-    for q in questions:
-        key = f"q-{q['id']}"
-        if q['kind'] in ('rating', 'enps'):
-            raw = (post.get(key) or '').strip()
-            if raw:
-                try:
-                    out.append({'questionId': q['id'], 'value': int(raw)})
-                except ValueError:
-                    raise BadRequestError(f"Pick a score for: {q['prompt']}")
-        elif q['kind'] in ('single', 'multi'):
-            c = [x for x in post.getlist(key) if x]
-            if c:
-                out.append({'questionId': q['id'], 'choices': c})
-        else:
-            t = (post.get(key) or '').strip()
-            if t:
-                out.append({'questionId': q['id'], 'text': t})
-    return out
 
 
 def _results_ctx(survey: dict, results: dict) -> dict:
@@ -598,7 +535,7 @@ def survey_answer(request, id):
     user = request.hajiri_user
     data = S.get_survey(user, str(id))
     if request.method == 'POST':
-        r = S.respond(user, str(id), {'answers': _answers_from_post(data['questions'], request.POST)})
+        r = S.respond(user, str(id), {'answers': F.answers_form(data['questions'], request.POST)})
         msg = 'Vote counted.' if data['survey']['kind'] == 'poll' else 'Thanks, your answers are in.'
         if r.get('results'):
             resp = render(request, 'engage/partials/results.html', _results_ctx(data['survey'], r['results']))
@@ -644,8 +581,7 @@ def survey_extend_form(request, id):
 @toast_errors('Not sent')
 def suggestion_new(request):
     if request.method == 'POST':
-        S.suggest(request.hajiri_user, {'category': request.POST.get('category') or 'general',
-                                        'body': request.POST.get('body', '').strip()})
+        S.suggest(request.hajiri_user, F.SuggestionForm(request.POST).suggestion())
         return _ok(request, 'Sent anonymously. Thank you.', close=True)
     return render(request, 'engage/partials/suggestion_form.html', {'categories': CATEGORIES})
 
@@ -679,12 +615,7 @@ def suggestions_page(request):
 @require_feature('suggestions')
 @toast_errors('Not saved')
 def suggestion_update(request, id):
-    p = request.POST
-    body: dict = {}
-    if p.get('status'):
-        body['status'] = p['status']
-    if 'is_public' in p:
-        body['isPublic'] = _bool(p['is_public'])
+    body = F.SuggestionUpdateForm(request.POST).patch()
     S.update_suggestion(request.hajiri_user, str(id), body)
     msg = ('Marked as reviewed.' if body.get('status') == 'reviewed' else 'Archived.' if body.get('status') == 'archived'
            else 'Shared with everyone.' if body.get('isPublic') else 'No longer shared.')
@@ -699,8 +630,7 @@ def suggestion_reply(request, id):
     user = request.hajiri_user
     s = S.get_suggestion(user, str(id))
     if request.method == 'POST':
-        S.update_suggestion(user, str(id), {'reply': request.POST.get('reply', '').strip(),
-                                            'isPublic': _bool(request.POST.get('is_public'))})
+        S.update_suggestion(user, str(id), F.ReplyForm(request.POST).patch())
         return _ok(request, 'Reply saved.', 'engage-suggestions', close=True)
     # SuggestionsPage: setShare(s.isPublic ?? true); is_public is never null, so the switch starts as it is stored.
     return render(request, 'engage/partials/suggestion_reply.html',

@@ -13,15 +13,19 @@ from django.urls import reverse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from hajiri.core.auth import has_role
-from hajiri.core.errors import BadRequestError
+from hajiri.core.clock import NPT
+from hajiri.core.collation import sorted_by_name
+from hajiri.core.errors import ForbiddenError, NotFoundError
 from hajiri.web.decorators import login_required, require_feature, require_role
-from hajiri.web.format import add_days, fmt_date_short, today_npt
+from hajiri.web.format import add_days, today_npt
 from hajiri.web.htmx import close_modal, refresh, toast, trigger
 from hajiri.web.middleware import _hub_redirect
 from hajiri.web.nav import feature_on
 
+from . import forms as f
 from . import services as perf
-from .common import fmt_number, js_round, num
+from .common import fmt_number, num, round_half_up
+from .reviews import PHASE_LABEL, next_phase
 
 MAIN = 'perf-main'
 DEFAULT_LABELS = ['Needs improvement', 'Partly meets', 'Meets expectations', 'Exceeds expectations', 'Outstanding']
@@ -61,42 +65,7 @@ def staff(key):
     return deco
 
 
-# ---------------------------------------------------------------- request helpers
-
-def s(p, k):
-    """A posted text value, or None when blank."""
-    v = p.get(k)
-    if v is None:
-        return None
-    v = v.strip()
-    return v or None
-
-
-def put(body: dict, k: str, v):
-    if v is not None:
-        body[k] = v
-    return body
-
-
-def as_bool(p, k) -> bool:
-    return p.get(k) in ('on', 'true', '1', 'yes')
-
-
-def as_int(v):
-    if v in (None, ''):
-        return None
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        raise BadRequestError('enter a whole number')
-
-
-def npt_instant(d: str | None, t: str | None) -> str | None:
-    """A Nepal-time date and HH:MM as an ISO instant (parts.tsx nptInstant)."""
-    if not d or not t:
-        return None
-    return f"{d}T{t if len(t) > 5 else t + ':00'}+05:45"
-
+# ---------------------------------------------------------------- response helpers
 
 def done(request, message: str, *, close: bool = False, extra: tuple[str, ...] = (), html: str | None = None, status: int = 200):
     resp = HttpResponse(html, status=status) if html is not None else HttpResponse(status=204)
@@ -123,7 +92,7 @@ def _goal_stats(goals: list[dict]) -> list[dict]:
     mine = [g for g in goals if g['status'] == 'active']
     if not mine:
         return []
-    avg = js_round(sum(num(g['progress']) for g in mine) / len(mine))
+    avg = round_half_up(sum(num(g['progress']) for g in mine) / len(mine))
     weight = sum(num(g['weight']) for g in mine)
     wstr = f'{weight:g}%'
     return [{'label': 'Active goals', 'value': len(mine)}, {'label': 'Average progress', 'value': f'{avg}%'},
@@ -165,8 +134,8 @@ def team_goals(request):
         groups: dict[str, list] = {}
         for g in shown:
             groups.setdefault(g['employee_name'] or '', []).append(g)
-        ctx['groups'] = [{'name': n, 'goals': gs, 'avg': js_round(sum(num(g['progress']) for g in gs) / len(gs))}
-                         for n, gs in sorted(groups.items(), key=lambda x: x[0].casefold())]
+        ctx['groups'] = [{'name': n, 'goals': gs, 'avg': round_half_up(sum(num(g['progress']) for g in gs) / len(gs))}
+                         for n, gs in sorted_by_name(groups.items(), key=lambda x: x[0])]
         without = [t['name_en'] for t in team if not any(g['employee_id'] == t['id'] and g['status'] == 'active' for g in goals)]
         ctx['without'] = (', '.join(without[:8]) + (f' and {len(without) - 8} more' if len(without) > 8 else '')) if without and not person else ''
         ctx['any_goals'] = bool(shown)
@@ -193,28 +162,7 @@ def goal_new(request):
             'mode': mode, 'employees': employees, 'default_employee': request.GET.get('employee') or '',
             'parents': perf.list_goals(user, {'scope': 'company'}),
             'departments': perf.departments(user) if mode == 'company' else []})
-    p = request.POST
-    scope = p.get('scope') or 'individual'
-    body = {'scope': scope, 'title': p.get('title', ''), 'description': s(p, 'description'),
-            'weight': s(p, 'weight') or 0, 'dueDate': s(p, 'due_date'), 'parentId': s(p, 'parent_id')}
-    if scope == 'individual' and s(p, 'employee_id'):
-        body['employeeId'] = s(p, 'employee_id')
-    if scope == 'department':
-        put(body, 'orgUnitId', s(p, 'org_unit_id'))
-    krs = []
-    for i, title in enumerate(p.getlist('kr_title')):
-        if not title.strip():
-            continue
-        m = p.getlist('kr_measure')[i] if i < len(p.getlist('kr_measure')) else 'number'
-        kr = {'title': title, 'measure': m}
-        if m != 'boolean':
-            kr['startValue'] = (p.getlist('kr_start')[i:i + 1] or ['0'])[0] or 0
-            kr['targetValue'] = (p.getlist('kr_target')[i:i + 1] or ['100'])[0] or 0
-            unit = (p.getlist('kr_unit')[i:i + 1] or [''])[0].strip()
-            kr['unit'] = unit or None
-        krs.append(kr)
-    body['keyResults'] = krs
-    perf.create_goal(user, body)
+    perf.create_goal(user, f.GoalForm(request.POST).body())
     return done(request, 'Goal saved.', close=True)
 
 
@@ -232,25 +180,8 @@ def goal_detail(request, id):
 @require_POST
 @feature('performance')
 def goal_checkin(request, id):
-    p = request.POST
-    d = perf.goal_detail(request.hajiri_user, str(id))
-    g = d['goal']
-    body: dict = {}
-    kr_id = s(p, 'key_result_id')
-    if kr_id:
-        body['keyResultId'] = kr_id
-        kr = next((k for k in g['key_results'] if k['id'] == kr_id), None)
-        if kr and kr['measure'] == 'boolean':
-            # parts.tsx sends a yes/no value only once the switch was touched; a comment alone leaves it as it is.
-            if p.get('done_touched') == '1':
-                body['value'] = 1 if as_bool(p, 'done') else 0
-        elif s(p, 'value') is not None:
-            body['value'] = s(p, 'value')
-    if not g['key_results'] and s(p, 'progress') is not None:
-        body['progress'] = s(p, 'progress')
-    body['confidence'] = s(p, 'confidence') or 3
-    put(body, 'comment', s(p, 'comment'))
-    perf.checkin(request.hajiri_user, str(id), body)
+    goal = perf.goal_detail(request.hajiri_user, str(id))['goal']
+    perf.checkin(request.hajiri_user, str(id), f.CheckinForm(request.POST).body(goal))
     resp = _goal_drawer(request, str(id))
     return done(request, 'Check-in saved.', html=resp.content)
 
@@ -258,7 +189,7 @@ def goal_checkin(request, id):
 @require_POST
 @feature('performance')
 def goal_status(request, id):
-    status = request.POST.get('status')
+    status = f.GoalStatusForm(request.POST).cleaned()['status']
     perf.update_goal(request.hajiri_user, str(id), {'status': status})
     resp = _goal_drawer(request, str(id))
     return done(request, 'Marked complete.' if status == 'completed' else 'Reopened.', html=resp.content)
@@ -280,14 +211,8 @@ def kpi_apply(request):
         return render(request, 'performance/partials/kpi_apply.html', {
             'kpis': kpis, 'employee': request.GET.get('employee') or '',
             'kpi_info': {str(k['id']): {'d': k['description'] or '', 't': fmt_number(k['default_target'])} for k in kpis}})
-    p = request.POST
-    kpi = s(p, 'kpi_id')
-    if not kpi:
-        raise BadRequestError('choose a KPI')
-    body = {'weight': s(p, 'weight') or 0, 'dueDate': s(p, 'due_date')}
-    put(body, 'employeeId', s(p, 'employee_id'))
-    put(body, 'target', s(p, 'target'))
-    perf.apply_kpi(user, kpi, body)
+    form = f.KpiApplyForm(request.POST)
+    perf.apply_kpi(user, form.kpi(), form.body())
     return done(request, 'Goal added.', close=True)
 
 
@@ -296,15 +221,9 @@ def kpi_apply(request):
 def kpi_edit(request, id=None):
     user = request.hajiri_user
     if request.method == 'GET':
-        kpi = next((k for k in perf.list_kpis(user) if str(k['id']) == str(id)), None) if id else None
-        if id and not kpi:
-            from hajiri.core.errors import NotFoundError
-            raise NotFoundError('KPI not found')
+        kpi = perf.get_kpi(user, str(id)) if id else None
         return render(request, 'performance/partials/kpi_form.html', {'kpi': kpi or {'measure': 'number', 'default_target': 100, 'active': True}})
-    p = request.POST
-    body = {'designation': s(p, 'designation'), 'title': p.get('title', ''), 'description': s(p, 'description'),
-            'measure': p.get('measure') or 'number', 'defaultTarget': s(p, 'default_target') or 100, 'unit': s(p, 'unit'),
-            'active': as_bool(p, 'active')}
+    body = f.KpiForm(request.POST).body()
     if id:
         perf.update_kpi(user, str(id), body)
     else:
@@ -317,9 +236,7 @@ def kpi_edit(request, id=None):
 @require_POST
 @staff('performance')
 def journal_add(request):
-    p = request.POST
-    perf.add_journal(request.hajiri_user, {'employeeId': p.get('employee_id', ''), 'noteDate': p.get('note_date', ''),
-                                           'tag': p.get('tag') or 'neutral', 'note': p.get('note', '')})
+    perf.add_journal(request.hajiri_user, f.JournalForm(request.POST).body())
     return done(request, 'Note saved.')
 
 
@@ -351,8 +268,7 @@ def feedback_give(request):
     if request.method == 'GET':
         return render(request, 'performance/partials/feedback_give.html', {
             'colleagues': [c for c in perf.colleagues(user) if c['id'] != user.employee_id], 'request_': None})
-    p = request.POST
-    perf.give_feedback(user, {'toEmployeeId': p.get('to_employee_id', ''), 'body': p.get('body', ''), 'privateToManager': as_bool(p, 'private')})
+    perf.give_feedback(user, f.FeedbackForm(request.POST).give())
     return done(request, 'Feedback sent.', close=True)
 
 
@@ -362,8 +278,7 @@ def feedback_answer(request, id):
     user = request.hajiri_user
     if request.method == 'GET':
         return render(request, 'performance/partials/feedback_give.html', {'request_': perf.get_feedback_request(user, str(id))})
-    p = request.POST
-    perf.answer_feedback(user, str(id), {'body': p.get('body', ''), 'privateToManager': as_bool(p, 'private')})
+    perf.answer_feedback(user, str(id), f.FeedbackForm(request.POST).answer())
     return done(request, 'Feedback sent.', close=True)
 
 
@@ -381,10 +296,7 @@ def feedback_ask(request):
     if request.method == 'GET':
         return render(request, 'performance/partials/feedback_ask.html',
                       {'colleagues': [c for c in perf.colleagues(user) if c['id'] != user.employee_id]})
-    p = request.POST
-    body = {'fromEmployeeIds': p.getlist('from_employee_ids')}
-    put(body, 'prompt', s(p, 'prompt'))
-    perf.request_feedback(user, body)
+    perf.request_feedback(user, f.FeedbackAskForm(request.POST).body())
     resp = done(request, 'Request sent.', close=True)
     resp.headers['HX-Redirect'] = reverse('performance:feedback') + '?box=requests'
     return resp
@@ -412,12 +324,7 @@ def meeting_new(request):
         d = perf.meetings(user)
         people = ([{**d['manager'], 'rel': 'Your manager'}] if d['manager'] else []) + [{**r, 'rel': 'Reports to you'} for r in d['reports']]
         return render(request, 'performance/partials/meeting_form.html', {'people': people, 'date': add_days(today_npt(), 1)})
-    p = request.POST
-    at = npt_instant(s(p, 'date'), s(p, 'time'))
-    if not at:
-        raise BadRequestError('choose the date and time')
-    mid = perf.create_meeting(user, {'withEmployeeId': p.get('with_employee_id', ''), 'scheduledAt': at, 'cadence': p.get('cadence') or 'none',
-                                     'agenda': [x.strip() for x in (p.get('agenda') or '').split('\n') if x.strip()]})
+    mid = perf.create_meeting(user, f.MeetingForm(request.POST).body())
     resp = _meeting_drawer(request, mid)
     resp = done(request, '1-on-1 scheduled.', html=resp.content)
     resp.headers['HX-Retarget'] = '#hj-drawer-body'
@@ -429,7 +336,6 @@ def meeting_new(request):
 def _meeting_drawer(request, mid, status=200):
     d = perf.meeting_detail(request.hajiri_user, mid)
     m = d['meeting']
-    from hajiri.core.clock import NPT
     local = m['scheduled_at'].astimezone(NPT)
     return render(request, 'performance/partials/meeting_detail.html', {
         'd': d, 'm': m, 'other': m['employee_name'] if m['side'] == 'manager' else m['manager_name'],
@@ -447,25 +353,22 @@ def meeting_detail(request, id):
 @feature('performance')
 def meeting_update(request, id):
     user = request.hajiri_user
-    p = request.POST
-    action = p.get('action') or 'notes'
+    form = f.MeetingUpdateForm(request.POST)
+    action = form.action_name()
     mid = str(id)
     if action == 'cancel':
         perf.update_meeting(user, mid, {'status': 'cancelled'})
         msg = 'Cancelled.'
     elif action == 'reschedule':
-        at = npt_instant(s(p, 'date'), s(p, 'time'))
-        if not at:
-            raise BadRequestError('choose the date and time')
-        perf.update_meeting(user, mid, {'scheduledAt': at})
+        perf.update_meeting(user, mid, {'scheduledAt': form.scheduled_at()})
         msg = 'Rescheduled.'
     elif action == 'done':
-        nxt = perf.update_meeting(user, mid, {'status': 'done', 'sharedNotes': s(p, 'shared_notes'), 'privateNotes': s(p, 'private_notes')})
+        nxt = perf.update_meeting(user, mid, {'status': 'done', **form.notes()})
         if nxt:
             return done(request, 'Done. The next one is scheduled.', html=_meeting_drawer(request, nxt).content)
         msg = 'Marked done.'
     else:
-        perf.update_meeting(user, mid, {'sharedNotes': s(p, 'shared_notes'), 'privateNotes': s(p, 'private_notes')})
+        perf.update_meeting(user, mid, form.notes())
         msg = 'Notes saved.'
     return done(request, msg, html=_meeting_drawer(request, mid).content)
 
@@ -473,17 +376,14 @@ def meeting_update(request, id):
 @require_POST
 @feature('performance')
 def meeting_item_add(request, id):
-    p = request.POST
-    kind = p.get('kind') or 'agenda'
-    perf.add_meeting_item(request.hajiri_user, str(id), {'kind': kind, 'text': p.get('text', ''),
-                                                         'ownerEmployeeId': s(p, 'owner_employee_id') if kind == 'action' else None})
+    perf.add_meeting_item(request.hajiri_user, str(id), f.MeetingItemForm(request.POST).body())
     return done(request, '', html=_meeting_drawer(request, str(id)).content)
 
 
 @require_POST
 @feature('performance')
 def meeting_item_toggle(request, id):
-    m = perf.update_meeting_item(request.hajiri_user, str(id), {'done': as_bool(request.POST, 'done')})
+    m = perf.update_meeting_item(request.hajiri_user, str(id), {'done': f.DoneForm(request.POST).cleaned()['done']})
     return done(request, '', html=_meeting_drawer(request, m['id']).content)
 
 
@@ -549,45 +449,31 @@ def review_detail(request, id):
     return _review_drawer(request, str(id))
 
 
-def _ratings(p, items) -> list[dict]:
-    out = []
-    for i in items:
-        r = as_int(p.get(f"rating_{i['id']}"))
-        out.append({'id': i['id'], 'rating': r, 'comment': s(p, f"comment_{i['id']}")})
-    return out
-
-
 @require_POST
 @feature('performance')
 def review_save(request, id):
     user = request.hajiri_user
-    p = request.POST
     d = perf.review_detail(user, str(id))
-    submit = p.get('submit') == '1'
-    body = {'items': _ratings(p, d['items']), 'summary': s(p, 'summary'), 'submit': submit}
+    form = f.ReviewForm(request.POST, d['items'])
+    submit = form.submitting()
     if d['role'] == 'self':
-        perf.save_self(user, str(id), body)
+        perf.save_self(user, str(id), form.body(manager=False))
     else:
-        inc = s(p, 'increment_pct')
-        body['recommendation'] = {'incrementPct': inc, 'promotion': as_bool(p, 'promotion'), 'pip': as_bool(p, 'pip'),
-                                  'trainingCourseIds': p.getlist('training_course_ids'), 'notes': s(p, 'notes')}
-        perf.save_manager(user, str(id), body)
+        perf.save_manager(user, str(id), form.body(manager=True))
     return done(request, 'Review submitted.' if submit else 'Draft saved.', html=_review_drawer(request, str(id)).content)
 
 
 @require_POST
 @feature('performance')
 def review_calibrate(request, id):
-    p = request.POST
-    perf.calibrate(request.hajiri_user, str(id), {'finalRating': p.get('final_rating', ''), 'reason': p.get('reason', '')})
+    perf.calibrate(request.hajiri_user, str(id), f.CalibrateForm(request.POST).body())
     return done(request, 'Final rating set.', html=_review_drawer(request, str(id)).content)
 
 
 @require_POST
 @feature('performance')
 def review_acknowledge(request, id):
-    body = put({}, 'comment', s(request.POST, 'comment'))
-    perf.acknowledge(request.hajiri_user, str(id), body)
+    perf.acknowledge(request.hajiri_user, str(id), f.AcknowledgeForm(request.POST).body())
     return done(request, 'Thanks, acknowledged.', html=_review_drawer(request, str(id)).content)
 
 
@@ -596,7 +482,7 @@ def review_acknowledge(request, id):
 def review_peers(request, id):
     user = request.hajiri_user
     rv_role = perf.review_detail(user, str(id))['role']
-    perf.nominate_peers(user, str(id), {'employeeIds': request.POST.getlist('employee_ids')})
+    perf.nominate_peers(user, str(id), f.PeersForm(request.POST).body())
     return done(request, 'Sent to your manager for approval.' if rv_role == 'self' else 'Peer reviewers added.',
                 html=_review_drawer(request, str(id)).content)
 
@@ -604,7 +490,7 @@ def review_peers(request, id):
 @require_POST
 @feature('performance')
 def peer_decide(request, id):
-    approve = request.POST.get('approve') == '1'
+    approve = f.DecideForm(request.POST).approved()
     rv = perf.decide_peer(request.hajiri_user, str(id), {'approve': approve})
     return done(request, 'Approved.' if approve else 'Declined.', html=_review_drawer(request, rv['id']).content)
 
@@ -623,12 +509,10 @@ def peer_respond(request, id):
     if request.method == 'GET':
         req = next((r for r in perf.peer_requests(user) if r['id'] == str(id) and r['status'] == 'approved'), None)
         if not req:
-            from hajiri.core.errors import NotFoundError
             raise NotFoundError('peer review not found')
         labels = req['rating_labels'] or DEFAULT_LABELS
         return render(request, 'performance/partials/peer_form.html', {'req': req, 'levels': [(n, labels[n - 1]) for n in range(1, 6)]})
-    p = request.POST
-    perf.submit_peer(user, str(id), {'rating': as_int(p.get('rating')), 'strengths': s(p, 'strengths'), 'improvements': s(p, 'improvements')})
+    perf.submit_peer(user, str(id), f.PeerResponseForm(request.POST).body())
     return done(request, 'Thanks, feedback sent.', close=True)
 
 
@@ -679,7 +563,6 @@ def _cycle_page(request, cycle_id):
                       'confirm': 'Launch', 'message': 'Everyone in scope is notified and the setup is locked.'}
         elif c['status'] in NEXT_LABEL:
             label = ('Start calibration' if not c['peer_enabled'] else 'Open peer review') if c['status'] == 'manager_review' else NEXT_LABEL[c['status']]
-            from .reviews import PHASE_LABEL, next_phase
             action = {'url': reverse('performance:cycle_advance', args=[c['id']]), 'label': label, 'title': f'Move to {PHASE_LABEL[next_phase(c)]}?',
                       'confirm': 'Continue',
                       'message': ('Employees will see their final ratings and manager comments. Training needs become enrolments.'
@@ -702,36 +585,17 @@ def cycle_edit(request, id=None):
     user = request.hajiri_user
     existing = perf.load_cycle(user.company_id, str(id)) if id else None
     if existing and not has_role(user, 'hr'):
-        from hajiri.core.errors import ForbiddenError
         raise ForbiddenError('requires role hr')
     draft = not existing or existing['status'] == 'draft'
     if request.method == 'GET':
         if not has_role(user, 'hr'):
-            from hajiri.core.errors import ForbiddenError
             raise ForbiddenError('requires role hr')
         c = existing or {'name': '', 'goals_weight': 60, 'competency_weight': 40, 'peer_enabled': False, 'peer_min': 3, 'filter': {},
                          'rating_labels': DEFAULT_LABELS}
         return render(request, 'performance/partials/cycle_form.html', {
             'c': c, 'existing': existing, 'draft': draft, 'locked': not draft, 'departments': perf.departments(user), 'today': today_npt(),
             'org_units': set((c.get('filter') or {}).get('orgUnitIds') or []), 'labels': list(enumerate(c['rating_labels'] or DEFAULT_LABELS, 1))})
-    p = request.POST
-    deadlines = {'name': p.get('name', ''), 'selfDue': s(p, 'self_due'), 'managerDue': s(p, 'manager_due'), 'peerDue': s(p, 'peer_due'),
-                 'calibrationDue': s(p, 'calibration_due'), 'peerMin': s(p, 'peer_min') or 3}
-    if draft:
-        gw = s(p, 'goals_weight') or '0'
-        try:
-            cw = 100 - float(gw)
-        except ValueError:
-            cw = gw
-        body = {**deadlines, 'periodStart': p.get('period_start', ''), 'periodEnd': p.get('period_end', ''), 'goalsWeight': gw,
-                'competencyWeight': cw, 'peerEnabled': as_bool(p, 'peer_enabled'),
-                'ratingLabels': [p.get(f'label_{i}', '') for i in range(1, 6)], 'filter': {}}
-        if p.getlist('org_unit_ids'):
-            body['filter']['orgUnitIds'] = p.getlist('org_unit_ids')
-        if s(p, 'joined_before'):
-            body['filter']['joinedBefore'] = s(p, 'joined_before')
-    else:
-        body = deadlines
+    body = f.CycleForm(request.POST).body(draft)
     if existing:
         perf.update_cycle(user, existing['id'], body)
     else:
@@ -757,7 +621,6 @@ def cycle_launch(request, id):
 @require_POST
 @staff('performance')
 def cycle_advance(request, id):
-    from .reviews import PHASE_LABEL
     to = perf.advance_cycle(request.hajiri_user, str(id))
     return done(request, f'Moved to {PHASE_LABEL[to]}.')
 
@@ -770,23 +633,15 @@ def competency_edit(request, id=None):
         if id:
             c = perf.get_competency(user, str(id))
         else:
-            from .reviews import _require_hr
-            _require_hr(user)
+            if not has_role(user, 'hr'):
+                raise ForbiddenError('requires role hr')
             c = {'kind': 'skill', 'indicators': [], 'designations': [], 'grades': [], 'active': True}
         ind = {i['level']: i['text'] for i in c['indicators']}
         return render(request, 'performance/partials/competency_form.html', {'c': c, 'levels': [(n, ind.get(n, '')) for n in range(1, 6)]})
-    p = request.POST
-    def split(key):
-        # One value per tag (tags_field.html); a comma-separated value is split too.
-        return list(dict.fromkeys(x.strip() for v in p.getlist(key) for x in (v or '').split(',') if x.strip()))
-    body = {'kind': p.get('kind') or 'skill', 'name': p.get('name', ''), 'description': s(p, 'description'),
-            'indicators': [{'level': n, 'text': p.get(f'level_{n}', '').strip()} for n in range(1, 6) if p.get(f'level_{n}', '').strip()],
-            'designations': split('designations'), 'grades': split('grades'), 'active': as_bool(p, 'active')}
+    body = f.CompetencyForm(request.POST).body()
     if id:
         perf.update_competency(user, str(id), body)
     else:
         perf.create_competency(user, body)
     return done(request, 'Competency saved.', close=True)
 
-
-_ = fmt_date_short

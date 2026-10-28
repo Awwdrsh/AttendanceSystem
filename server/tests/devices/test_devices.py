@@ -8,7 +8,7 @@ from django.test import Client
 
 from hajiri.attendance.service import list_days, recompute_day
 from hajiri.core import auth
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError, ValidationError
 from hajiri.devices import services as dev
 from tests.core.fixtures import PW

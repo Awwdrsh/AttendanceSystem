@@ -41,7 +41,7 @@ def current() -> Gateway:
 
 def build_gateway(env: dict | None = None, *, memory: bool = False) -> Gateway:
     """Build the gateway from `env`, or by default from the process environment plus the gateway's own env file
-    (apps/gateway/.env, see config.gateway_environ)."""
+    (server/gateway.env, see config.gateway_environ)."""
     if env is None:
         env, origin = gateway_environ()
     else:
@@ -67,8 +67,7 @@ def build_gateway(env: dict | None = None, *, memory: bool = False) -> Gateway:
         store = PostgresStore(**opts)
     raw_dir = Path(cfg.GATEWAY_RAW_DIR)
     if not raw_dir.is_absolute():
-        # Relative to the env file that set it (apps/gateway/.env meant apps/gateway/data/raw, as the TS ran there),
-        # otherwise to server/.
+        # Relative to the env file that set it, otherwise to server/.
         raw_dir = Path(origin.get('GATEWAY_RAW_DIR') or settings.BASE_DIR) / raw_dir
     return Gateway(store=store, signer=signer, cipher=cipher, archive=RawArchive(str(raw_dir.resolve())),
                    max_clock_skew_min=cfg.GATEWAY_MAX_CLOCK_SKEW_MIN)

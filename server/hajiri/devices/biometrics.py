@@ -8,15 +8,19 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.db import transaction
+from django.db.models import BooleanField, Count, Exists, ExpressionWrapper, F, OuterRef, Q, QuerySet, TextField, Value
+from django.db.models.functions import Cast, Coalesce, Now
 
+from hajiri.attendance.repo import latest_days
 from hajiri.core.audit import audit
 from hajiri.core.auth import AuthUser, has_role
 from hajiri.core.clock import now, npt_today
-from hajiri.core.db import execute, one, rows
 from hajiri.core.errors import ForbiddenError, NotFoundError
-from hajiri.core.schema import Enum, Int, Obj, Str, Uuid, parse
+from hajiri.core.validation import parse_uuid, plain, validate
+from hajiri.db.models import (BiometricTemplate, ConsentRecord, Employee, LeaveLedger, LeaveRequest,
+                              NotificationOutbox, OtRequest, PunchEvent, RegularisationRequest)
 
-MODALITIES = ('face', 'fingerprint', 'palm', 'card')
+from .serializers import MODALITIES, ConsentIn, EmployeeQuery, RetentionRunIn  # noqa: F401
 
 RETENTION = {
     'templates': {'en': 'Biometric templates: until 30 days after exit, then cryptographically shredded', 'ne': 'बायोमेट्रिक टेम्प्लेट: बहिर्गमनको ३० दिन पछिसम्म, त्यसपछि नष्ट'},
@@ -43,23 +47,26 @@ TRANSPARENCY = {
     'legalBasis': {'en': 'Privacy Act 2075 s.23 (consent and notice), s.25 (security), s.28 (correction)', 'ne': 'गोपनीयता ऐन २०७५ दफा २३, २५, २८'},
 }
 
-CONSENT = Obj({'employeeId': Uuid(), 'purpose': Str(min=1, max=200, default='attendance'), 'modality': Enum(MODALITIES),
-               'noticeVersion': Str(min=1, max=40), 'signature': Str(max=4000, optional=True)})
-EMPLOYEE_QUERY = Obj({'employeeId': Uuid()})
-RETENTION_RUN = Obj({'templateGraceDays': Int(min=0, max=365, default=30)})
-
 
 def _require(user: AuthUser, *roles: str) -> None:
     if not has_role(user, *roles):
         raise ForbiddenError(f'requires role {" or ".join(roles)}')
 
 
-def _shred(where: str, params: list) -> int:
-    return execute(f"UPDATE biometric_template SET ciphertext = '\\x'::bytea, shredded_at = now() WHERE shredded_at IS NULL AND {where}", params)
+def _shred(templates: QuerySet) -> int:
+    """Crypto-shredding: the ciphertext is emptied and the row kept as a record that it existed."""
+    return templates.filter(shredded_at__isnull=True).update(ciphertext=b'', shredded_at=Now())
+
+
+def _company_templates(company_id: str | None) -> QuerySet:
+    """Templates of the company's employees, plus unmapped ones enrolled on the company's devices."""
+    if company_id is None:
+        return BiometricTemplate.objects.none()
+    return BiometricTemplate.objects.filter(Q(employee__company_id=company_id) | Q(enrolled_on_device__company_id=company_id))
 
 
 def _in_company(employee_id: str, company_id: str | None) -> bool:
-    return one('SELECT 1 AS x FROM employee WHERE id = %s AND company_id = %s', [employee_id, company_id]) is not None
+    return Employee.objects.for_company(company_id).filter(pk=employee_id).exists()
 
 
 def assert_self_or_hr(user: AuthUser, employee_id: str) -> None:
@@ -74,43 +81,47 @@ def assert_self_or_hr(user: AuthUser, employee_id: str) -> None:
     raise ForbiddenError('not allowed to access this employee')
 
 
+def _employee_query(user: AuthUser, query: dict) -> str:
+    eid = str(validate(EmployeeQuery, query)['employeeId'])
+    assert_self_or_hr(user, eid)
+    return eid
+
+
 def transparency() -> dict:
     return TRANSPARENCY
 
 
 def grant_consent(user: AuthUser, body: dict) -> dict:
-    b = parse(CONSENT, body)
+    b = plain(validate(ConsentIn, body))
     assert_self_or_hr(user, b['employeeId'])
     with transaction.atomic():
-        r = one("""INSERT INTO consent_record (employee_id, purpose, modality, notice_version, signature, recorded_by)
-                   VALUES (%s, %s, %s, %s, %s, %s) RETURNING id, granted_at""",
-                [b['employeeId'], b['purpose'], b['modality'], b['noticeVersion'], b.get('signature'), user.id])
-        audit('consent_granted', 'consent_record', actor_id=user.id, row_id=str(r['id']),
+        c = ConsentRecord.objects.create(employee_id=b['employeeId'], purpose=b['purpose'], modality=b['modality'],
+                                         notice_version=b['noticeVersion'], signature=b.get('signature'),
+                                         recorded_by_id=user.id)
+        audit('consent_granted', 'consent_record', actor_id=user.id, row_id=str(c.id),
               after={'employeeId': b['employeeId'], 'modality': b['modality'], 'noticeVersion': b['noticeVersion']})
-    return {'consent': {'id': str(r['id']), 'grantedAt': r['granted_at']}}
+    return {'consent': {'id': str(c.id), 'grantedAt': c.granted_at}}
 
 
 def consents(user: AuthUser, query: dict) -> list[dict]:
-    q = parse(EMPLOYEE_QUERY, query)
-    assert_self_or_hr(user, q['employeeId'])
-    return rows("""SELECT c.id, c.purpose, c.modality, c.notice_version, c.granted_at, c.revoked_at
-                     FROM consent_record c JOIN employee e ON e.id = c.employee_id
-                    WHERE c.employee_id = %s AND e.company_id = %s ORDER BY c.granted_at DESC""", [q['employeeId'], user.company_id])
+    eid = _employee_query(user, query)
+    return list(ConsentRecord.objects.for_company(user.company_id).filter(employee_id=eid).order_by('-granted_at')
+                .values('id', 'purpose', 'modality', 'notice_version', 'granted_at', 'revoked_at'))
 
 
 def revoke_consent(user: AuthUser, consent_id) -> dict:
     """Withdrawal shreds that modality's templates immediately (plan §12.11 crypto-shredding)."""
-    cid = parse(Uuid(), str(consent_id))
-    row = one("""SELECT c.employee_id, c.modality, c.revoked_at FROM consent_record c JOIN employee e ON e.id = c.employee_id
-                  WHERE c.id = %s AND e.company_id = %s""", [cid, user.company_id])
+    cid = parse_uuid(str(consent_id))
+    row = (ConsentRecord.objects.for_company(user.company_id).filter(pk=cid)
+           .values('employee_id', 'modality', 'revoked_at').first())
     if not row:
         raise NotFoundError('consent not found')
     emp = str(row['employee_id'])
     assert_self_or_hr(user, emp)
     with transaction.atomic():
         if not row['revoked_at']:
-            execute('UPDATE consent_record SET revoked_at = now() WHERE id = %s', [cid])
-        shredded = _shred('employee_id = %s AND modality = %s', [emp, row['modality']])
+            ConsentRecord.objects.filter(pk=cid).update(revoked_at=Now())
+        shredded = _shred(BiometricTemplate.objects.filter(employee_id=emp, modality=row['modality']))
         audit('consent_revoked', 'consent_record', actor_id=user.id, row_id=cid,
               after={'employeeId': emp, 'modality': row['modality'], 'templatesShredded': shredded})
     return {'ok': True, 'templatesShredded': shredded}
@@ -118,33 +129,30 @@ def revoke_consent(user: AuthUser, consent_id) -> dict:
 
 def templates(user: AuthUser, query: dict) -> list[dict]:
     """Metadata only; ciphertext is never returned."""
-    q = parse(EMPLOYEE_QUERY, query)
-    assert_self_or_hr(user, q['employeeId'])
-    return rows("""SELECT t.id, t.modality, t.vendor_format, t.device_user_pin, d.serial_no AS device_sn, t.key_version, t.consent_id,
-                          t.created_at, t.shredded_at
-                     FROM biometric_template t JOIN employee e ON e.id = t.employee_id LEFT JOIN device d ON d.id = t.enrolled_on_device_id
-                    WHERE t.employee_id = %s AND e.company_id = %s ORDER BY t.created_at DESC""", [q['employeeId'], user.company_id])
+    eid = _employee_query(user, query)
+    return list(BiometricTemplate.objects.for_company(user.company_id).filter(employee_id=eid).order_by('-created_at')
+                .values('id', 'modality', 'vendor_format', 'device_user_pin', 'key_version', 'consent_id', 'created_at',
+                        'shredded_at', device_sn=F('enrolled_on_device__serial_no')))
 
 
 def unmapped_templates(user: AuthUser) -> list[dict]:
     """Templates uploaded for a device PIN that is not mapped yet (so HR can map or shred them)."""
     _require(user, 'hr')
-    return rows("""SELECT t.id, t.modality, t.vendor_format, t.device_user_pin, d.serial_no AS device_sn, t.created_at
-                     FROM biometric_template t JOIN device d ON d.id = t.enrolled_on_device_id
-                    WHERE t.employee_id IS NULL AND t.shredded_at IS NULL AND d.company_id = %s ORDER BY t.created_at DESC LIMIT 500""",
-                [user.company_id])
+    return list(BiometricTemplate.objects
+                .filter(employee__isnull=True, shredded_at__isnull=True, enrolled_on_device__company_id=user.company_id)
+                .order_by('-created_at')
+                .values('id', 'modality', 'vendor_format', 'device_user_pin', 'created_at',
+                        device_sn=F('enrolled_on_device__serial_no'))[:500])
 
 
 def shred_template(user: AuthUser, template_id) -> dict:
     _require(user, 'hr')
-    tid = parse(Uuid(), str(template_id))
-    t = one("""SELECT t.employee_id FROM biometric_template t LEFT JOIN employee e ON e.id = t.employee_id
-                 LEFT JOIN device d ON d.id = t.enrolled_on_device_id
-                WHERE t.id = %s AND (e.company_id = %s OR d.company_id = %s)""", [tid, user.company_id, user.company_id])
+    tid = parse_uuid(str(template_id))
+    t = _company_templates(user.company_id).filter(pk=tid).values('employee_id').first()
     if not t:
         raise NotFoundError('template not found')
     with transaction.atomic():
-        n = _shred('id = %s', [tid])
+        n = _shred(BiometricTemplate.objects.filter(pk=tid))
         audit('template_shred', 'biometric_template', actor_id=user.id, row_id=tid,
               after={'employeeId': t['employee_id'] and str(t['employee_id'])})
     return {'ok': True, 'shredded': n}
@@ -152,40 +160,62 @@ def shred_template(user: AuthUser, template_id) -> dict:
 
 def shred_all(user: AuthUser, employee_id) -> dict:
     _require(user, 'hr')
-    eid = parse(Uuid(), str(employee_id))
+    eid = parse_uuid(str(employee_id))
     if not _in_company(eid, user.company_id):
         raise NotFoundError('employee not found')
     with transaction.atomic():
-        n = _shred('employee_id = %s', [eid])
-        execute('UPDATE consent_record SET revoked_at = coalesce(revoked_at, now()) WHERE employee_id = %s', [eid])
+        n = _shred(BiometricTemplate.objects.filter(employee_id=eid))
+        ConsentRecord.objects.filter(employee_id=eid).update(revoked_at=Coalesce('revoked_at', Now()))
         audit('template_shred_all', 'biometric_template', actor_id=user.id, row_id=eid, after={'shredded': n})
     return {'ok': True, 'shredded': n}
 
 
+DSAR_EMPLOYEE_FIELDS = (
+    'id', 'emp_code', 'name_en', 'name_ne', 'gender', 'dob', 'marital_status', 'join_date', 'exit_date', 'designation',
+    'grade', 'phone', 'email', 'ot_eligible', 'weekly_off_days', 'status', 'regime', 'ssf_id', 'pf_id', 'cit_id',
+    'bank_code', 'bank_branch', 'bank_account_last4', 'is_resident', 'remote_area_class', 'disability')
+
+
+def _requests(eid: str) -> list[dict]:
+    """Every leave, correction and overtime request of the employee, oldest first: one UNION ALL query. Every part
+    selects the same columns in the same order (status, reason, created_at, then the annotations kind, from, to)."""
+    def part(model, kind, start, end):
+        return model.objects.filter(employee_id=eid).values(
+            'status', 'reason', 'created_at', kind_t=Value(kind, output_field=TextField()),
+            from_t=Cast(start, TextField()), to_t=Cast(end, TextField()))
+    union = part(LeaveRequest, 'leave', 'from_date', 'to_date').union(
+        part(RegularisationRequest, 'regularisation', 'local_date', 'local_date'),
+        part(OtRequest, 'overtime', 'local_date', 'local_date'), all=True).order_by('created_at')
+    return [{'kind': r['kind_t'], 'from_date': r['from_t'], 'to_date': r['to_t'], 'status': r['status'],
+             'reason': r['reason'], 'created_at': r['created_at']} for r in union]
+
+
 def dsar(user: AuthUser, query: dict) -> dict:
     """Data-subject access request export: the employee's own data, nothing else (plan §12.11 DSAR)."""
-    q = parse(EMPLOYEE_QUERY, query)
-    eid = q['employeeId']
-    assert_self_or_hr(user, eid)
-    emp = one("""SELECT id, emp_code, name_en, name_ne, gender, dob, marital_status, join_date, exit_date, designation, grade, phone, email,
-                        ot_eligible, weekly_off_days, status, regime, ssf_id, pf_id, cit_id, bank_code, bank_branch, bank_account_last4,
-                        is_resident, remote_area_class, disability, (pan_enc IS NOT NULL) AS has_pan
-                   FROM employee WHERE id = %s AND company_id = %s""", [eid, user.company_id])
+    eid = _employee_query(user, query)
+    emp = (Employee.objects.for_company(user.company_id).filter(pk=eid)
+           .values(*DSAR_EMPLOYEE_FIELDS, has_pan=ExpressionWrapper(Q(pan_enc__isnull=False), output_field=BooleanField()))
+           .first())
     if not emp:
         raise NotFoundError('employee not found')
+    # The employee was checked to be in the active company above, so their own rows below are this company's.
     out = {
         'generatedAt': now(),
         'employee': emp,
-        'consents': rows('SELECT id, purpose, modality, notice_version, granted_at, revoked_at FROM consent_record WHERE employee_id = %s ORDER BY granted_at', [eid]),
-        'templates': rows('SELECT id, modality, vendor_format, device_user_pin, created_at, shredded_at FROM biometric_template WHERE employee_id = %s ORDER BY created_at', [eid]),
-        'attendance': rows('SELECT local_date, bs_date, status, first_in, last_out, worked_min, late_min, early_min, ot_min, flags FROM v_attendance_latest WHERE employee_id = %s ORDER BY local_date', [eid]),
-        'punches': rows('SELECT punched_at, local_date, direction, verify_mode, source, device_sn FROM punch_event WHERE employee_id = %s ORDER BY punched_at', [eid]),
-        'leaveLedger': rows('SELECT effective_date, delta_days, reason, note, leave_type_id FROM leave_ledger WHERE employee_id = %s ORDER BY effective_date', [eid]),
-        'requests': rows("""SELECT 'leave' AS kind, from_date::text AS from_date, to_date::text AS to_date, status, reason, created_at FROM leave_request WHERE employee_id = %(e)s
-                            UNION ALL SELECT 'regularisation', local_date::text, local_date::text, status, reason, created_at FROM regularisation_request WHERE employee_id = %(e)s
-                            UNION ALL SELECT 'overtime', local_date::text, local_date::text, status, reason, created_at FROM ot_request WHERE employee_id = %(e)s
-                            ORDER BY created_at""", {'e': eid}),
-        'notifications': rows('SELECT created_at, channel, template, title, body FROM notification_outbox WHERE employee_id = %s ORDER BY created_at', [eid]),
+        'consents': list(ConsentRecord.objects.filter(employee_id=eid).order_by('granted_at')
+                         .values('id', 'purpose', 'modality', 'notice_version', 'granted_at', 'revoked_at')),
+        'templates': list(BiometricTemplate.objects.filter(employee_id=eid).order_by('created_at')
+                          .values('id', 'modality', 'vendor_format', 'device_user_pin', 'created_at', 'shredded_at')),
+        'attendance': list(latest_days().filter(employee_id=eid).order_by('local_date')
+                           .values('local_date', 'bs_date', 'status', 'first_in', 'last_out', 'worked_min', 'late_min',
+                                   'early_min', 'ot_min', 'flags')),
+        'punches': list(PunchEvent.objects.filter(employee_id=eid).order_by('punched_at')
+                        .values('punched_at', 'local_date', 'direction', 'verify_mode', 'source', 'device_sn')),
+        'leaveLedger': list(LeaveLedger.objects.filter(employee_id=eid).order_by('effective_date')
+                            .values('effective_date', 'delta_days', 'reason', 'note', 'leave_type_id')),
+        'requests': _requests(eid),
+        'notifications': list(NotificationOutbox.objects.filter(employee_id=eid).order_by('created_at')
+                              .values('created_at', 'channel', 'template', 'title', 'body')),
         'retention': RETENTION,
     }
     audit('dsar_export', 'employee', actor_id=user.id, row_id=eid)
@@ -197,15 +227,13 @@ def run_retention(user: AuthUser | None, body: dict | None = None, *, company_id
     if user is not None:
         _require(user, 'hr', 'admin')
         company_id = user.company_id
-    b = parse(RETENTION_RUN, body or {})
+    b = validate(RetentionRunIn, body or {})
     cutoff = npt_today() - timedelta(days=b['templateGraceDays'])
-    exited = rows("""SELECT e.id FROM employee e WHERE e.company_id = %s AND e.exit_date IS NOT NULL AND e.exit_date < %s::date
-                        AND EXISTS (SELECT 1 FROM biometric_template t WHERE t.employee_id = e.id AND t.shredded_at IS NULL)""",
-                  [company_id, cutoff])
+    live = BiometricTemplate.objects.filter(employee=OuterRef('pk'), shredded_at__isnull=True)
+    exited = list(Employee.objects.for_company(company_id).filter(exit_date__isnull=False, exit_date__lt=cutoff)
+                  .filter(Exists(live)).values_list('id', flat=True))
     with transaction.atomic():
-        shredded = 0
-        for e in exited:
-            shredded += _shred('employee_id = %s', [e['id']])
+        shredded = _shred(BiometricTemplate.objects.filter(employee_id__in=exited)) if exited else 0
         audit('retention_run', 'biometric_template', actor_id=user.id if user else None,
               after={'employees': len(exited), 'shredded': shredded, 'photosDeleted': 0})
     return {'employees': len(exited), 'templatesShredded': shredded, 'photosDeleted': 0}
@@ -213,9 +241,8 @@ def run_retention(user: AuthUser | None, body: dict | None = None, *, company_id
 
 def stats(user: AuthUser) -> list[dict]:
     _require(user, 'hr')
-    return rows("""SELECT t.modality, count(*) FILTER (WHERE t.shredded_at IS NULL)::int AS active,
-                          count(*) FILTER (WHERE t.shredded_at IS NOT NULL)::int AS shredded,
-                          count(*) FILTER (WHERE t.employee_id IS NULL AND t.shredded_at IS NULL)::int AS unmapped
-                     FROM biometric_template t LEFT JOIN employee e ON e.id = t.employee_id LEFT JOIN device d ON d.id = t.enrolled_on_device_id
-                    WHERE e.company_id = %s OR d.company_id = %s GROUP BY t.modality ORDER BY t.modality""",
-                [user.company_id, user.company_id])
+    live = Q(shredded_at__isnull=True)
+    return list(_company_templates(user.company_id).values('modality')
+                .annotate(active=Count('id', filter=live), shredded=Count('id', filter=~live),
+                          unmapped=Count('id', filter=live & Q(employee__isnull=True)))
+                .order_by('modality'))

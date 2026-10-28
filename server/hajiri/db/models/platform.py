@@ -6,16 +6,32 @@ from django.contrib.postgres.fields import ArrayField, DateRangeField
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import AppUserQuerySet, CompanyManager, CompanyQuerySet
+
 
 class AppUser(models.Model):
+    class Role(models.TextChoices):
+        ADMIN = 'admin', 'Admin'
+        HR = 'hr', 'HR'
+        MANAGER = 'manager', 'Manager'
+        EMPLOYEE = 'employee', 'Employee'
+        PAYROLL_ADMIN = 'payroll_admin', 'Payroll admin'
+        ATTENDANCE_ADMIN = 'attendance_admin', 'Attendance admin'
+        RECRUITER = 'recruiter', 'Recruiter'
+        EXECUTIVE = 'executive', 'Executive'
+
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        DISABLED = 'disabled', 'Disabled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('Company', models.DO_NOTHING, blank=True, null=True)
-    employee = models.OneToOneField('Employee', models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('Company', models.DO_NOTHING, related_name='app_users', blank=True, null=True)
+    employee = models.OneToOneField('Employee', models.DO_NOTHING, related_name='app_user', blank=True, null=True)
     email = models.TextField(unique=True)
     name = models.TextField()
     password_hash = models.TextField()
-    roles = ArrayField(models.TextField(), db_default=['employee'])
-    status = models.TextField(db_default='active')
+    roles = ArrayField(models.TextField(choices=Role), db_default=['employee'])
+    status = models.TextField(choices=Status, db_default='active')
     must_change_password = models.BooleanField(db_default=False)
     failed_logins = models.IntegerField(db_default=0)
     locked_until = models.DateTimeField(blank=True, null=True)
@@ -26,8 +42,14 @@ class AppUser(models.Model):
     totp_enabled_at = models.DateTimeField(blank=True, null=True)
     totp_last_step = models.BigIntegerField(blank=True, null=True)
 
+    company_scope = 'company'
+    objects = AppUserQuerySet.as_manager()
+
     class Meta:
         db_table = 'app_user'
+
+    def __str__(self):
+        return str(self.name)
 
 
 class AuditLog(models.Model):
@@ -45,6 +67,9 @@ class AuditLog(models.Model):
     class Meta:
         db_table = 'audit_log'
 
+    def __str__(self):
+        return f'AuditLog {self.id}'
+
 
 class Company(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
@@ -52,59 +77,159 @@ class Company(models.Model):
     name_en = models.TextField()
     name_ne = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+    # The group of companies this one belongs to (several companies run from one Hajiri install); None: standalone.
+    group = models.ForeignKey('CompanyGroup', models.DO_NOTHING, related_name='companies', blank=True, null=True)
+
+    objects = CompanyManager()
 
     class Meta:
         db_table = 'company'
 
+    def __str__(self):
+        return str(self.name_en)
+
+
+class CompanyGroup(models.Model):
+    """A group that owns several companies; its admins and HR can work in each company from one sign-in."""
+    id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
+    code = models.TextField(unique=True)
+    name_en = models.TextField()
+    created_at = models.DateTimeField(db_default=Now())
+
+    class Meta:
+        db_table = 'company_group'
+
+    def __str__(self):
+        return str(self.name_en)
+
+
+class CompanyMembership(models.Model):
+    """Access to a company other than the account's home company (app_user.company_id), with the roles and the
+    employee record the person has there. The active company of a session decides which one applies."""
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        DISABLED = 'disabled', 'Disabled'
+
+    pk = models.CompositePrimaryKey('user_id', 'company_id')
+    user = models.ForeignKey('AppUser', models.DO_NOTHING, related_name='memberships')
+    company = models.ForeignKey(Company, models.DO_NOTHING, related_name='memberships')
+    employee = models.OneToOneField('Employee', models.DO_NOTHING, related_name='membership', blank=True, null=True)
+    roles = ArrayField(models.TextField(choices=AppUser.Role), db_default=['employee'])
+    status = models.TextField(choices=Status, db_default='active')
+    created_at = models.DateTimeField(db_default=Now())
+    created_by = models.ForeignKey('AppUser', models.DO_NOTHING, db_column='created_by',
+                                   related_name='memberships_granted', blank=True, null=True)
+    # A fresh sign-in starts in this company (at most one per person; none: the home company).
+    is_default = models.BooleanField(db_default=False)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
+    class Meta:
+        db_table = 'company_membership'
+
+    def __str__(self):
+        return f'{self.user_id} in {self.company_id}'
+
+
+class GroupMember(models.Model):
+    """Roles over a whole group of companies. Each group role stands for a company role in EVERY company of the group
+    (GROUP_ROLE_GRANTS): group_admin is admin everywhere and manages group roles, group_hr is HR everywhere,
+    group_executive has the read-only executive view everywhere."""
+    class Role(models.TextChoices):
+        GROUP_ADMIN = 'group_admin', 'Group admin'
+        GROUP_HR = 'group_hr', 'Group HR'
+        GROUP_EXECUTIVE = 'group_executive', 'Group executive'
+
+    # The company role each group role gives in every company of the group.
+    GROUP_ROLE_GRANTS = {'group_admin': 'admin', 'group_hr': 'hr', 'group_executive': 'executive'}
+
+    pk = models.CompositePrimaryKey('user_id', 'group_id')
+    user = models.ForeignKey('AppUser', models.DO_NOTHING, related_name='group_memberships')
+    group = models.ForeignKey(CompanyGroup, models.DO_NOTHING, related_name='group_members')
+    roles = ArrayField(models.TextField(choices=Role))
+    created_at = models.DateTimeField(db_default=Now())
+    created_by = models.ForeignKey('AppUser', models.DO_NOTHING, db_column='created_by',
+                                   related_name='group_members_granted', blank=True, null=True)
+
+    class Meta:
+        db_table = 'group_member'
+
+    def __str__(self):
+        return f'{self.user_id} in group {self.group_id}'
+
 
 class CompanyPolicy(models.Model):
+    class Audience(models.TextChoices):
+        ALL = 'all', 'All'
+        BRANCH = 'branch', 'Branch'
+        DEPARTMENT = 'department', 'Department'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey(Company, models.DO_NOTHING)
+    company = models.ForeignKey(Company, models.DO_NOTHING, related_name='company_policies')
     title = models.TextField()
     description = models.TextField(blank=True, null=True)
-    file = models.ForeignKey('StoredFile', models.DO_NOTHING)
-    audience = models.TextField(db_default='all')
+    file = models.ForeignKey('StoredFile', models.DO_NOTHING, related_name='company_policies')
+    audience = models.TextField(choices=Audience, db_default='all')
     audience_ids = ArrayField(models.UUIDField(), db_default=[])
     requires_ack = models.BooleanField(db_default=True)
     published_at = models.DateTimeField(db_default=Now())
     archived_at = models.DateTimeField(blank=True, null=True)
-    created_by = models.ForeignKey(AppUser, models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey(AppUser, models.DO_NOTHING, related_name='company_policies_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'company_policy'
 
+    def __str__(self):
+        return str(self.title)
+
 
 class CompanySetting(models.Model):
     pk = models.CompositePrimaryKey('company_id', 'key')
-    company = models.ForeignKey(Company, models.DO_NOTHING)
+    company = models.ForeignKey(Company, models.DO_NOTHING, related_name='company_settings')
     key = models.TextField()
     value = models.JSONField()
     updated_at = models.DateTimeField(db_default=Now())
-    updated_by = models.ForeignKey(AppUser, models.DO_NOTHING, db_column='updated_by', blank=True, null=True)
+    updated_by = models.ForeignKey(AppUser, models.DO_NOTHING, related_name='company_settings_as_updated_by', db_column='updated_by', blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'company_setting'
 
+    def __str__(self):
+        return str(self.key)
+
 
 class ConsentRecord(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey('Employee', models.DO_NOTHING)
+    employee = models.ForeignKey('Employee', models.DO_NOTHING, related_name='consent_records')
     purpose = models.TextField()
     modality = models.TextField()
     notice_version = models.TextField()
     signature = models.TextField(blank=True, null=True)
     granted_at = models.DateTimeField(db_default=Now())
     revoked_at = models.DateTimeField(blank=True, null=True)
-    recorded_by = models.ForeignKey(AppUser, models.DO_NOTHING, db_column='recorded_by', blank=True, null=True)
+    recorded_by = models.ForeignKey(AppUser, models.DO_NOTHING, related_name='consent_records_as_recorded_by', db_column='recorded_by', blank=True, null=True)
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'consent_record'
 
+    def __str__(self):
+        return f'ConsentRecord {self.id}'
+
 
 class LoginChallenge(models.Model):
     token_hash = models.TextField(primary_key=True)
-    user = models.ForeignKey(AppUser, models.DO_NOTHING)
+    user = models.ForeignKey(AppUser, models.DO_NOTHING, related_name='login_challenges')
     expires_at = models.DateTimeField()
     attempts = models.IntegerField(db_default=0)
     used_at = models.DateTimeField(blank=True, null=True)
@@ -112,21 +237,39 @@ class LoginChallenge(models.Model):
     user_agent = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'user__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'login_challenge'
 
+    def __str__(self):
+        return f'LoginChallenge {self.token_hash}'
+
 
 class NotificationOutbox(models.Model):
+    class Channel(models.TextChoices):
+        IN_APP = 'in_app', 'In app'
+        EMAIL = 'email', 'Email'
+        SMS = 'sms', 'SMS'
+        PUSH = 'push', 'Push'
+        WEBHOOK = 'webhook', 'Webhook'
+
+    class Status(models.TextChoices):
+        QUEUED = 'queued', 'Queued'
+        SENT = 'sent', 'Sent'
+        FAILED = 'failed', 'Failed'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey(Company, models.DO_NOTHING, blank=True, null=True)
-    user = models.ForeignKey(AppUser, models.DO_NOTHING, blank=True, null=True)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, blank=True, null=True)
-    channel = models.TextField()
+    company = models.ForeignKey(Company, models.DO_NOTHING, related_name='notification_outboxes', blank=True, null=True)
+    user = models.ForeignKey(AppUser, models.DO_NOTHING, related_name='notification_outboxes', blank=True, null=True)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='notification_outboxes', blank=True, null=True)
+    channel = models.TextField(choices=Channel)
     template = models.TextField()
     title = models.TextField()
     body = models.TextField()
     payload = models.JSONField(db_default={})
-    status = models.TextField(db_default='queued')
+    status = models.TextField(choices=Status, db_default='queued')
     attempts = models.IntegerField(db_default=0)
     last_error = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
@@ -135,28 +278,40 @@ class NotificationOutbox(models.Model):
     next_attempt_at = models.DateTimeField(db_default=Now())
     to_email = models.TextField(blank=True, null=True)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'notification_outbox'
+
+    def __str__(self):
+        return str(self.title)
 
 
 class SavedReport(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey(Company, models.DO_NOTHING)
+    company = models.ForeignKey(Company, models.DO_NOTHING, related_name='saved_reports')
     name = models.TextField()
     description = models.TextField(blank=True, null=True)
     shared = models.BooleanField(db_default=False)
     definition = models.JSONField()
-    created_by = models.ForeignKey(AppUser, models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey(AppUser, models.DO_NOTHING, related_name='saved_reports_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'saved_report'
 
+    def __str__(self):
+        return str(self.name)
+
 
 class Session(models.Model):
     token_hash = models.TextField(primary_key=True)
-    user = models.ForeignKey(AppUser, models.DO_NOTHING)
+    user = models.ForeignKey(AppUser, models.DO_NOTHING, related_name='sessions')
     created_at = models.DateTimeField(db_default=Now())
     last_seen_at = models.DateTimeField(db_default=Now())
     expires_at = models.DateTimeField()
@@ -165,36 +320,53 @@ class Session(models.Model):
     user_agent = models.TextField(blank=True, null=True)
     id = models.UUIDField(unique=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
     two_factor = models.BooleanField(db_default=False)
+    # The company this session works in (switchable among the user's companies); None: the home company.
+    active_company = models.ForeignKey(Company, models.DO_NOTHING, related_name='active_sessions', blank=True, null=True)
 
     class Meta:
         db_table = 'session'
 
+    def __str__(self):
+        return f'Session {self.token_hash}'
+
 
 class StoredFile(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey(Company, models.DO_NOTHING)
+    company = models.ForeignKey(Company, models.DO_NOTHING, related_name='stored_files')
     purpose = models.TextField()
     filename = models.TextField()
     mime = models.TextField()
     bytes = models.IntegerField()
     sha256 = models.TextField()
     data_enc = models.BinaryField(blank=True, null=True)
-    uploaded_by = models.ForeignKey(AppUser, models.DO_NOTHING, db_column='uploaded_by', blank=True, null=True)
+    uploaded_by = models.ForeignKey(AppUser, models.DO_NOTHING, related_name='stored_files_as_uploaded_by', db_column='uploaded_by', blank=True, null=True)
     attached_to = models.TextField(blank=True, null=True)
     attached_at = models.DateTimeField(blank=True, null=True)
     deleted_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'stored_file'
+
+    def __str__(self):
+        return str(self.filename)
 
 
 class UserRecoveryCode(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    user = models.ForeignKey(AppUser, models.DO_NOTHING)
+    user = models.ForeignKey(AppUser, models.DO_NOTHING, related_name='user_recovery_codes')
     code_hash = models.TextField()
     used_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'user__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'user_recovery_code'
+
+    def __str__(self):
+        return f'UserRecoveryCode {self.id}'

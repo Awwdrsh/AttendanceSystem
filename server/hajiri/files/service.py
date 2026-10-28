@@ -2,29 +2,33 @@
 record with store.attach_file and from then on serves it with its own access rules."""
 from __future__ import annotations
 
+from datetime import timedelta
+
+from django.db.models import Count, Q, Sum
+from django.db.models.functions import Coalesce
+
 from hajiri.core.auth import AuthUser, company_id_of, has_role
-from hajiri.core.db import one
+from hajiri.core.clock import now as _now
 from hajiri.core.errors import BadRequestError, ForbiddenError, NotFoundError, TooManyRequestsError
-from hajiri.core.schema import Enum, Obj, Str, parse
+from hajiri.core.validation import validate
+from hajiri.db.models import StoredFile
 
-from .store import DOCUMENT_MIMES, IMAGE_MIMES, parse_upload, parse_uploaded_file, read_file, save_file, file_meta
+from .serializers import UPLOAD_PURPOSES, UploadIn
+from .store import DOCUMENT_MIMES, IMAGE_MIMES, file_meta, parse_upload, parse_uploaded_file, read_file, save_file
 
-UPLOAD_PURPOSES = ('employee_document', 'company_document', 'expense_receipt', 'travel_bill', 'helpdesk_attachment',
-                   'training_certificate', 'profile_change', 'hiring_cv', 'avatar', 'tax_proof', 'grievance_attachment',
-                   'task_attachment')
+__all__ = ['UPLOAD_PURPOSES', 'UPLOADS_PER_HOUR', 'UNATTACHED_BYTES_MAX', 'upload', 'upload_file', 'open_unattached']
+
 UPLOADS_PER_HOUR = 300
 UNATTACHED_BYTES_MAX = 40 * 1024 * 1024
 
-UPLOAD_BODY = Obj({'purpose': Enum(UPLOAD_PURPOSES), 'filename': Str(min=1, max=200), 'dataUrl': Str(min=10)})
-
 
 def _check_quota(user: AuthUser) -> None:
-    # Unattached uploads are only purged after a day, so cap what one person can park in the meantime.
-    recent = one("""SELECT count(*)::int AS n FROM stored_file WHERE uploaded_by = %s AND created_at > now() - interval '1 hour'""",
-                 [user.id])
-    parked = one("""SELECT coalesce(sum(bytes), 0)::bigint AS bytes FROM stored_file
-                     WHERE uploaded_by = %s AND attached_to IS NULL AND deleted_at IS NULL""", [user.id])
-    if recent['n'] >= UPLOADS_PER_HOUR or int(parked['bytes']) >= UNATTACHED_BYTES_MAX:
+    # Unattached uploads are only purged after a day, so cap what one person can park in the meantime (in every
+    # company they work in: the cap is per person).
+    q = StoredFile.objects.filter(uploaded_by_id=user.id).aggregate(
+        recent=Count('id', filter=Q(created_at__gt=_now() - timedelta(hours=1))),
+        parked=Coalesce(Sum('bytes', filter=Q(attached_to__isnull=True, deleted_at__isnull=True)), 0))
+    if q['recent'] >= UPLOADS_PER_HOUR or q['parked'] >= UNATTACHED_BYTES_MAX:
         raise TooManyRequestsError('Too many uploads. Finish the forms you have open or try again later.')
 
 
@@ -34,7 +38,7 @@ def _public(row: dict) -> dict:
 
 def upload(user: AuthUser, body: dict) -> dict:
     """JSON upload ({purpose, filename, dataUrl}); returns {id, filename, mime, bytes, purpose}."""
-    b = parse(UPLOAD_BODY, body)
+    b = validate(UploadIn, body)
     _check_quota(user)
     allowed = IMAGE_MIMES if b['purpose'] == 'avatar' else DOCUMENT_MIMES
     f = parse_upload(b['dataUrl'], allowed=allowed)
@@ -56,7 +60,8 @@ def upload_file(user: AuthUser, purpose: str, uploaded, filename: str | None = N
 
 
 def open_unattached(user: AuthUser, file_id: str) -> dict:
-    """An upload not yet attached, for its uploader (or HR); attached files are served by their module."""
+    """An upload not yet attached, for its uploader (or HR) in the active company; attached files are served by their
+    module."""
     company_id = company_id_of(user)
     meta = file_meta(company_id, file_id)
     if not meta:

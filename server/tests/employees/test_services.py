@@ -2,7 +2,7 @@
 import pytest
 
 from hajiri.core.clock import npt_today
-from hajiri.core.db import one, rows
+from tests.support.sql import one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError, ValidationError
 from hajiri.employees import service as emp
 from tests.people.conftest import build_world

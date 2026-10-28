@@ -8,7 +8,7 @@ import pytest
 from django.db import DatabaseError, transaction
 
 from hajiri.core.clock import now as clock_now
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.core.errors import BadRequestError
 from hajiri.documents import services as docs
 from hajiri.documents.letters import npt_today, render_body, unknown_placeholders

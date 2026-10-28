@@ -1,3 +1,6 @@
 {% if row.is_admin_view %}
+<div class="hj-row nowrap hj-gap-xs" style="justify-content:flex-end">
 <button type="button" class="hj-btn subtle xs{% if row.status == 'active' %} danger{% else %} gray{% endif %}" hx-post="{% url 'home:user_update' row.id %}" hx-vals='{"status": "{% if row.status == 'active' %}disabled{% else %}active{% endif %}"}' hx-swap="none">{% if row.status == 'active' %}Disable{% else %}Activate{% endif %}</button>
+{% if row.membership and not row.is_me %}<button type="button" class="hj-btn subtle xs danger" hx-post="{% url 'home:user_access_revoke' row.id %}" {% with msg="Remove "|add:row.name|add:"'s access to this company? Their own account is not changed." %}{% confirm_attrs msg title="Remove access?" label="Remove access" %}{% endwith %} hx-swap="none">Remove access</button>{% endif %}
+</div>
 {% endif %}

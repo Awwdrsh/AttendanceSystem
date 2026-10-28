@@ -1,6 +1,8 @@
 """
 Biometric terminals: activation, keys, PIN mappings, unmapped punches and the command queue (port of
-apps/api/src/modules/devices/routes.ts). HR and admin only; every query is scoped to the user's company.
+apps/api/src/modules/devices/routes.ts). HR and admin only; every query is scoped to the user's active company.
+A terminal that has not been claimed yet (company_id NULL, status pending) is visible to every company's HR so it
+can be activated; once claimed it belongs to that company only.
 """
 from __future__ import annotations
 
@@ -9,33 +11,27 @@ import re
 import secrets
 from datetime import date, timedelta
 
-from django.db import transaction
+from django.db import connection, transaction
+from django.db.backends.postgresql.psycopg_any import DateRange
+from django.contrib.postgres.fields import DateRangeField
+from django.db.models import (BooleanField, Count, Exists, ExpressionWrapper, F, Func, IntegerField, OuterRef, Q,
+                              QuerySet, Subquery, TextField, Value)
+from django.db.models.functions import Cast, Coalesce, Now
 
 from hajiri.attendance.service import recompute_day
 from hajiri.core.audit import audit
 from hajiri.core.auth import AuthUser, company_id_of, has_role
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute, one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
-from hajiri.core.schema import Bool, Enum, IsoDate, Obj, Str, Uuid, parse
+from hajiri.core.validation import parse_uuid, plain, validate
+from hajiri.db.models import Branch, Device, DeviceCommand, DeviceUserMap, Employee, PunchEvent
 
-ROLES = ('hr', 'admin')
-PSEUDO_VENDORS = ('mobile', 'kiosk', 'manual')
-COMMANDS = ('CHECK', 'INFO', 'REBOOT', 'LOG', 'DATA QUERY USERINFO', 'CLEAR LOG')
-# The command picker on the Devices page offers these (CLEAR LOG stays API-only, as in the TS page).
-PAGE_COMMANDS = ('CHECK', 'INFO', 'LOG', 'REBOOT', 'DATA QUERY USERINFO')
-VENDOR = {'zkteco': 'ZKTeco', 'hikvision': 'Hikvision', 'suprema': 'Suprema'}
-PROTOCOL = {'adms': 'ADMS push', 'isapi': 'ISAPI'}
+from .constants import (COMMANDS, OFFLINE_AFTER_SECONDS, PAGE_COMMANDS, PIN_MESSAGE, PIN_RE, PROTOCOL,  # noqa: F401
+                        PSEUDO_VENDORS, ROLES, VENDOR)
+from .serializers import ActivateIn, CommandIn, MapIn
 
-# Terminal PINs are plain digits/letters; anything else could smuggle extra fields or commands into the device
-# protocol. \Z, not $: Python's $ also matches before a trailing newline.
-PIN_RE = re.compile(r'^[A-Za-z0-9]{1,24}\Z')
-PIN_MESSAGE = 'PIN must be 1 to 24 letters or digits'
-
-ACTIVATE = Obj({'branchId': Uuid(optional=True), 'name': Str(max=120, optional=True)})
-MAP = Obj({'pin': Str(regex=PIN_RE.pattern, regex_message=PIN_MESSAGE), 'employeeId': Uuid(), 'from': IsoDate(),
-           'syncToDevice': Bool(default=True), 'replace': Bool(default=False)})
-COMMAND = Obj({'command': Enum(COMMANDS)})
+DEVICE_FIELDS = ('id', 'company_id', 'branch_id', 'serial_no', 'vendor', 'protocol', 'name', 'status', 'fw_version',
+                 'push_version', 'tz_offset_min', 'last_handshake_at', 'last_seen_at', 'created_at')
 
 
 def _require(user: AuthUser) -> str:
@@ -45,26 +41,13 @@ def _require(user: AuthUser) -> str:
 
 
 def _id(v) -> str:
-    return parse(Uuid(), str(v))
-
-
-def _js_slice(s: str, n: int) -> str:
-    """String.prototype.slice(0, n): counts UTF-16 code units."""
-    out, units = [], 0
-    for ch in s:
-        w = 2 if ord(ch) > 0xFFFF else 1
-        if units + w > n:
-            break
-        out.append(ch)
-        units += w
-    return ''.join(out)
+    return parse_uuid(str(v))
 
 
 def device_name(name: str) -> str:
     """Terminal user names travel in a tab-separated, newline-delimited command: strip every control character."""
     s = re.sub(r'[\x00-\x1f\x7f]', ' ', name or '')
-    s = re.sub(r'\s+', ' ', s).strip()
-    return _js_slice(s, 24)
+    return re.sub(r'\s+', ' ', s).strip()[:24]
 
 
 def userinfo_command(pin: str, name: str) -> str:
@@ -73,65 +56,95 @@ def userinfo_command(pin: str, name: str) -> str:
 
 def live_status(d: dict) -> str:
     """Active devices are shown as online/offline; pending and disabled keep their lifecycle status."""
-    if d.get('status') != 'active':
+    if d.get('status') != Device.Status.ACTIVE:
         return d.get('status') or ''
     return 'offline' if d.get('offline') else 'online'
 
 
+# ---------------------------------------------------------------- querysets
+
+def count_of(qs: QuerySet, group: str) -> Coalesce:
+    """A correlated `(SELECT count(*) ...)` for an annotation; `group` is the column the subquery is tied to."""
+    sub = qs.order_by().values(group).annotate(n=Count('*')).values('n')
+    return Coalesce(Subquery(sub, output_field=IntegerField()), 0)
+
+
+def offline_q() -> Q:
+    return Q(last_seen_at__isnull=True) | Q(last_seen_at__lt=Now() - timedelta(seconds=OFFLINE_AFTER_SECONDS))
+
+
+def terminals(cid: str) -> QuerySet:
+    """Devices of the company plus terminals nobody has claimed yet."""
+    return Device.objects.filter(Q(company_id=cid) | Q(company__isnull=True))
+
+
+def superseded() -> Exists:
+    """punch_event is append-only: a punch that a later row supersedes is no longer current."""
+    return Exists(PunchEvent.objects.filter(supersedes_id=OuterRef('id')))
+
+
+def unmapped_punch_queryset(cid: str) -> QuerySet:
+    """Current punches from the company's devices whose PIN is not mapped to an employee."""
+    return PunchEvent.objects.filter(employee__isnull=True, device__company_id=cid).exclude(superseded())
+
+
 # ---------------------------------------------------------------- reads
 
+def _devices(cid: str) -> QuerySet:
+    today = npt_today()
+    mapped = DeviceUserMap.objects.filter(device=OuterRef('pk'), valid__contains=today)
+    queued = DeviceCommand.objects.filter(device=OuterRef('pk'), status=DeviceCommand.Status.QUEUED)
+    return (terminals(cid)
+            .annotate(offline=ExpressionWrapper(offline_q(), output_field=BooleanField()),
+                      mapped_users=count_of(mapped, 'device'), queued_commands=count_of(queued, 'device'))
+            .values(*DEVICE_FIELDS, 'offline', 'mapped_users', 'queued_commands')
+            .order_by('status', '-created_at'))
+
+
 def list_devices(user: AuthUser) -> list[dict]:
-    cid = _require(user)
-    return rows("""
-        SELECT d.id, d.company_id, d.branch_id, d.serial_no, d.vendor, d.protocol, d.name, d.status, d.fw_version, d.push_version,
-               d.tz_offset_min, d.last_handshake_at, d.last_seen_at, d.created_at,
-               (d.last_seen_at IS NULL OR d.last_seen_at < now() - interval '120 seconds') AS offline,
-               (SELECT count(*) FROM device_user_map m WHERE m.device_id = d.id AND m.valid @> %s::date) AS mapped_users,
-               (SELECT count(*) FROM device_command c WHERE c.device_id = d.id AND c.status = 'queued') AS queued_commands
-          FROM device d WHERE d.company_id = %s OR d.company_id IS NULL ORDER BY d.status, d.created_at DESC""",
-        [npt_today(), cid])
+    return list(_devices(_require(user)))
 
 
 def get_device(user: AuthUser, device_id) -> dict:
     """One device as list_devices shows it (pending devices with no company included), or 404."""
-    did = _id(device_id)
-    for d in list_devices(user):
-        if str(d['id']) == did:
-            return d
-    raise NotFoundError('device not found')
+    cid = _require(user)
+    d = _devices(cid).filter(pk=_id(device_id)).first()
+    if d is None:
+        raise NotFoundError('device not found')
+    return d
 
 
 def mappings(user: AuthUser, device_id) -> list[dict]:
     cid = _require(user)
-    return rows("""
-        SELECT m.device_user_pin, m.employee_id, e.emp_code, e.name_en, m.valid::text AS valid
-          FROM device_user_map m JOIN employee e ON e.id = m.employee_id JOIN device d ON d.id = m.device_id
-         WHERE m.device_id = %s AND d.company_id = %s ORDER BY m.device_user_pin, lower(m.valid)""", [_id(device_id), cid])
+    qs = (DeviceUserMap.objects.filter(device_id=_id(device_id), device__company_id=cid)
+          .order_by('device_user_pin', 'valid__startswith')
+          .values('device_user_pin', 'employee_id', emp_code=F('employee__emp_code'), name_en=F('employee__name_en'),
+                  valid_text=Cast('valid', TextField())))
+    return [{'device_user_pin': m['device_user_pin'], 'employee_id': m['employee_id'], 'emp_code': m['emp_code'],
+             'name_en': m['name_en'], 'valid': m['valid_text']} for m in qs]
 
 
 def commands(user: AuthUser, device_id) -> list[dict]:
     cid = _require(user)
-    return rows("""
-        SELECT c.id, c.command, c.status, c.return_code, c.queued_at, c.sent_at, c.acked_at
-          FROM device_command c JOIN device d ON d.id = c.device_id
-         WHERE c.device_id = %s AND d.company_id = %s ORDER BY c.id DESC LIMIT 100""", [_id(device_id), cid])
+    return list(DeviceCommand.objects.filter(device_id=_id(device_id), device__company_id=cid).order_by('-id')
+                .values('id', 'command', 'status', 'return_code', 'queued_at', 'sent_at', 'acked_at')[:100])
 
 
 def unmapped_punches(user: AuthUser) -> list[dict]:
     """Punches from active devices whose PIN is not mapped to an employee (HR queue, plan §5.2)."""
     cid = _require(user)
-    return rows("""
-        SELECT p.id, p.device_id, p.device_sn, p.device_user_pin, p.punched_at, p.local_date, p.verify_mode,
-               (SELECT count(*) FROM punch_event q WHERE q.device_id = p.device_id AND q.device_user_pin = p.device_user_pin
-                  AND q.employee_id IS NULL) AS total_for_pin
-          FROM punch_event p JOIN device d ON d.id = p.device_id
-         WHERE p.employee_id IS NULL AND d.company_id = %s AND NOT EXISTS (SELECT 1 FROM punch_event s WHERE s.supersedes_id = p.id)
-         ORDER BY p.ingested_at DESC LIMIT 500""", [cid])
+    same_pin = PunchEvent.objects.filter(device_id=OuterRef('device_id'), device_user_pin=OuterRef('device_user_pin'),
+                                         employee__isnull=True)
+    return list(unmapped_punch_queryset(cid)
+                .annotate(total_for_pin=count_of(same_pin, 'device_id'))
+                .order_by('-ingested_at')
+                .values('id', 'device_id', 'device_sn', 'device_user_pin', 'punched_at', 'local_date', 'verify_mode',
+                        'total_for_pin')[:500])
 
 
 def branches(user: AuthUser) -> list[dict]:
     cid = _require(user)
-    return rows('SELECT id, code, name_en FROM branch WHERE company_id = %s ORDER BY code', [cid])
+    return list(Branch.objects.for_company(cid).order_by('code').values('id', 'code', 'name_en'))
 
 
 # ---------------------------------------------------------------- lifecycle
@@ -140,16 +153,20 @@ def activate(user: AuthUser, device_id, body: dict) -> dict:
     """Approve a pending device for this company (only active devices may push punches)."""
     cid = _require(user)
     did = _id(device_id)
-    b = parse(ACTIVATE, body)
-    if b.get('branchId') and not one('SELECT 1 AS x FROM branch WHERE id = %s AND company_id = %s', [b['branchId'], cid]):
+    b = validate(ActivateIn, body)
+    if b.get('branchId') and not Branch.objects.for_company(cid).filter(pk=b['branchId']).exists():
         raise NotFoundError('branch not found')
     with transaction.atomic():
-        r = one("""UPDATE device SET status = 'active', company_id = %s, branch_id = coalesce(%s::uuid, branch_id), name = coalesce(%s, name)
-                    WHERE id = %s AND (company_id IS NULL OR company_id = %s) RETURNING id, serial_no, status""",
-                [cid, b.get('branchId'), b.get('name'), did, cid])
-        if not r:
+        d = terminals(cid).select_for_update().filter(pk=did).first()
+        if d is None:
             raise NotFoundError('device not found')
-        r = {**r, 'id': str(r['id'])}
+        d.status, d.company_id = Device.Status.ACTIVE, cid
+        if b.get('branchId'):
+            d.branch_id = b['branchId']
+        if b.get('name') is not None:
+            d.name = b['name']
+        d.save(update_fields=['status', 'company', 'branch', 'name'])
+        r = {'id': str(d.id), 'serial_no': d.serial_no, 'status': d.status}
         audit('activate', 'device', actor_id=user.id, row_id=did, after=r)
     return r
 
@@ -162,14 +179,14 @@ def issue_key(user: AuthUser, device_id) -> dict:
     """
     cid = _require(user)
     did = _id(device_id)
-    d = one('SELECT protocol FROM device WHERE id = %s AND company_id = %s', [did, cid])
-    if not d:
+    protocol = Device.objects.for_company(cid).filter(pk=did).values_list('protocol', flat=True).first()
+    if protocol is None:
         raise NotFoundError('device not found')
-    if d['protocol'] == 'adms':
+    if protocol == Device.Protocol.ADMS:
         raise BadRequestError('ZKTeco ADMS terminals cannot send a device key; keep them on the office network')
     key = secrets.token_urlsafe(24)
     with transaction.atomic():
-        execute('UPDATE device SET comm_key_hash = %s WHERE id = %s', [hashlib.sha256(key.encode()).hexdigest(), did])
+        Device.objects.filter(pk=did).update(comm_key_hash=hashlib.sha256(key.encode()).hexdigest())
         audit('rotate_key', 'device', actor_id=user.id, row_id=did)
     return {'key': key}
 
@@ -178,23 +195,25 @@ def disable(user: AuthUser, device_id) -> dict:
     cid = _require(user)
     did = _id(device_id)
     with transaction.atomic():
-        r = one("""UPDATE device SET status = 'disabled' WHERE id = %s AND company_id = %s AND vendor NOT IN ('mobile', 'kiosk', 'manual')
-                   RETURNING id, serial_no, status""", [did, cid])
-        if not r:
+        d = (Device.objects.for_company(cid).exclude(vendor__in=PSEUDO_VENDORS).select_for_update()
+             .filter(pk=did).first())
+        if d is None:
             raise NotFoundError('device not found')
+        d.status = Device.Status.DISABLED
+        d.save(update_fields=['status'])
         audit('disable', 'device', actor_id=user.id, row_id=did)
-    return {**r, 'id': str(r['id'])}
+    return {'id': str(d.id), 'serial_no': d.serial_no, 'status': d.status}
 
 
 # ---------------------------------------------------------------- PIN mapping
 
-_MOVING = """SELECT p.* FROM punch_event p
-              WHERE p.device_id = %(d)s AND p.device_user_pin = %(pin)s AND p.employee_id IS DISTINCT FROM %(e)s::uuid
-                AND p.local_date >= %(f)s::date AND NOT EXISTS (SELECT 1 FROM punch_event s WHERE s.supersedes_id = p.id)"""
-
-
 def _day(d: str, n: int) -> str:
     return (date.fromisoformat(d) + timedelta(days=n)).isoformat()
+
+
+def _reattributed_key(p: PunchEvent) -> str:
+    """The superseding row's idempotency key: unique per original punch, the same for the same punch."""
+    return hashlib.sha256(f'{p.idempotency_key}:reattributed:{p.id}'.encode()).hexdigest()
 
 
 def map_pin(user: AuthUser, device_id, body: dict) -> dict:
@@ -206,58 +225,59 @@ def map_pin(user: AuthUser, device_id, body: dict) -> dict:
     """
     cid = _require(user)
     did = _id(device_id)
-    b = parse(MAP, body)
-    dev = one('SELECT serial_no, vendor FROM device WHERE id = %s AND company_id = %s', [did, cid])
+    b = plain(validate(MapIn, body))
+    dev = Device.objects.for_company(cid).filter(pk=did).values('serial_no', 'vendor').first()
     if not dev:
         raise NotFoundError('device not found')
-    emp = one('SELECT emp_code, name_en FROM employee WHERE id = %s AND company_id = %s', [b['employeeId'], cid])
+    emp = Employee.objects.for_company(cid).filter(pk=b['employeeId']).values('emp_code', 'name_en').first()
     if not emp:
         raise NotFoundError('employee not found')
-    p = {'d': did, 'pin': b['pin'], 'e': b['employeeId'], 'f': b['from']}
+    pin, eid, start = b['pin'], b['employeeId'], date.fromisoformat(b['from'])
+    pin_maps = DeviceUserMap.objects.filter(device_id=did, device_user_pin=pin)
     with transaction.atomic():
-        execute('SELECT pg_advisory_xact_lock(hashtext(%s))', [f"pinmap:{did}:{b['pin']}"])
-        holders = rows("""
-            SELECT DISTINCT m.employee_id, e.emp_code, e.name_en FROM device_user_map m JOIN employee e ON e.id = m.employee_id
-             WHERE m.device_id = %(d)s AND m.device_user_pin = %(pin)s AND m.valid && daterange(%(f)s::date, NULL)
-               AND m.employee_id <> %(e)s::uuid""", p)
+        with connection.cursor() as cur:
+            # Raw SQL: a transaction-scoped advisory lock serialises two mappings of the same PIN (no ORM API).
+            cur.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', [f'pinmap:{did}:{pin}'])
+        holders = list(pin_maps.filter(valid__overlap=DateRange(start, None)).exclude(employee_id=eid)
+                       .values('employee_id', emp_code=F('employee__emp_code'), name_en=F('employee__name_en'))
+                       .order_by('employee_id').distinct())
         if holders and not b['replace']:
             who = ', '.join(f"{h['name_en']} ({h['emp_code']})" for h in holders)
-            raise ConflictError(f"PIN {b['pin']} on this device is already mapped to {who}. Confirm the replacement to move "
+            raise ConflictError(f"PIN {pin} on this device is already mapped to {who}. Confirm the replacement to move "
                                 f"their punches since {b['from']} to {emp['name_en']}.")
         # Close any open mapping for this PIN, then open the new one.
-        execute("""UPDATE device_user_map SET valid = daterange(lower(valid), %(f)s::date)
-                    WHERE device_id = %(d)s AND device_user_pin = %(pin)s AND upper_inf(valid) AND lower(valid) < %(f)s::date""", p)
-        execute('DELETE FROM device_user_map WHERE device_id = %(d)s AND device_user_pin = %(pin)s AND lower(valid) >= %(f)s::date', p)
-        execute("INSERT INTO device_user_map (device_id, device_user_pin, employee_id, valid) VALUES (%(d)s, %(pin)s, %(e)s, daterange(%(f)s::date, NULL))", p)
+        pin_maps.filter(valid__upper_inf=True, valid__startswith__lt=start).update(
+            valid=Func(Func(F('valid'), function='lower'), Value(start), function='daterange',
+                       output_field=DateRangeField()))
+        pin_maps.filter(valid__startswith__gte=start).delete()
+        DeviceUserMap.objects.create(device_id=did, device_user_pin=pin, employee_id=eid, valid=DateRange(start, None))
         # Current (not yet superseded) punches for this PIN since `from` that are not already this employee's.
-        previous = rows(f'SELECT DISTINCT employee_id, local_date::text AS local_date FROM ({_MOVING}) m WHERE employee_id IS NOT NULL', p)
-        re_rows = rows(f"""
-            WITH moving AS ({_MOVING})
-            INSERT INTO punch_event (device_id, device_sn, vendor, device_user_pin, employee_id, punched_at, device_local_time, local_date,
-                                     direction, verify_mode, source, raw, gateway_signature, idempotency_key, supersedes_id)
-            SELECT device_id, device_sn, vendor, device_user_pin, %(e)s::uuid, punched_at, device_local_time, local_date, direction,
-                   verify_mode, source, raw, gateway_signature,
-                   encode(sha256(convert_to(idempotency_key || ':reattributed:' || id::text, 'UTF8')), 'hex'), id
-              FROM moving RETURNING local_date::text AS local_date""", p)
-        dates = list(dict.fromkeys(r['local_date'] for r in re_rows))
-        if b['syncToDevice'] and dev['vendor'] == 'zkteco':
-            execute('INSERT INTO device_command (device_id, command) VALUES (%s, %s)', [did, userinfo_command(b['pin'], emp['name_en'])])
+        moving = list(PunchEvent.objects.filter(device_id=did, device_user_pin=pin, local_date__gte=start)
+                      .exclude(employee_id=eid).exclude(superseded()).order_by('punched_at', 'id'))
+        previous = list(dict.fromkeys((str(p.employee_id), p.local_date.isoformat()) for p in moving if p.employee_id))
+        PunchEvent.objects.bulk_create([PunchEvent(
+            device_id=p.device_id, device_sn=p.device_sn, vendor=p.vendor, device_user_pin=p.device_user_pin, employee_id=eid,
+            punched_at=p.punched_at, device_local_time=p.device_local_time, local_date=p.local_date, direction=p.direction,
+            verify_mode=p.verify_mode, source=p.source, raw=p.raw, gateway_signature=p.gateway_signature,
+            idempotency_key=_reattributed_key(p), supersedes_id=p.id) for p in moving])
+        dates = list(dict.fromkeys(p.local_date.isoformat() for p in moving))
+        if b['syncToDevice'] and dev['vendor'] == Device.Vendor.ZKTECO:
+            DeviceCommand.objects.create(device_id=did, command=userinfo_command(pin, emp['name_en']))
         audit('map_pin', 'device_user_map', actor_id=user.id, row_id=did,
-              after={'pin': b['pin'], 'employeeId': b['employeeId'], 'from': b['from'], 'reattributed': len(re_rows),
+              after={'pin': pin, 'employeeId': eid, 'from': b['from'], 'reattributed': len(moving),
                      'replaced': [str(h['employee_id']) for h in holders]})
 
     # Recompute both sides; a morning punch can belong to the previous day's shift.
     work: dict[tuple[str, str], None] = {}
     for d in dates:
-        work[(b['employeeId'], _day(d, -1))] = None
-        work[(b['employeeId'], d)] = None
-    for pr in previous:
-        e = str(pr['employee_id'])
-        work[(e, _day(pr['local_date'], -1))] = None
-        work[(e, pr['local_date'])] = None
+        work[(eid, _day(d, -1))] = None
+        work[(eid, d)] = None
+    for e, d in previous:
+        work[(e, _day(d, -1))] = None
+        work[(e, d)] = None
     for e, d in work:
         recompute_day(e, d)
-    moved_from = list(dict.fromkeys(str(pr['employee_id']) for pr in previous))
+    moved_from = list(dict.fromkeys(e for e, _ in previous))
     return {'ok': True, 'reattributed': len(dates), 'dates': dates, 'movedFrom': moved_from}
 
 
@@ -267,25 +287,23 @@ def queue_command(user: AuthUser, device_id, body: dict) -> dict:
     """Queue a command for the terminal (allow-listed verbs only; SHELL is impossible by DB constraint)."""
     cid = _require(user)
     did = _id(device_id)
-    b = parse(COMMAND, body)
-    if not one('SELECT 1 AS x FROM device WHERE id = %s AND company_id = %s', [did, cid]):
+    b = validate(CommandIn, body)
+    if not Device.objects.for_company(cid).filter(pk=did).exists():
         raise NotFoundError('device not found')
     with transaction.atomic():
-        r = one('INSERT INTO device_command (device_id, command) VALUES (%s, %s) RETURNING id', [did, b['command']])
-        audit('device_command', 'device_command', actor_id=user.id, row_id=str(r['id']), after=b)
-    return {'id': int(r['id'])}
+        c = DeviceCommand.objects.create(device_id=did, command=b['command'])
+        audit('device_command', 'device_command', actor_id=user.id, row_id=str(c.id), after=b)
+    return {'id': int(c.id)}
 
 
 def sync_users(user: AuthUser, device_id) -> dict:
     """Push all current PIN mappings to the device as USERINFO updates."""
     cid = _require(user)
     did = _id(device_id)
-    found = rows("""
-        SELECT m.device_user_pin, e.name_en FROM device_user_map m JOIN employee e ON e.id = m.employee_id JOIN device d ON d.id = m.device_id
-         WHERE m.device_id = %s AND d.company_id = %s AND m.valid @> %s::date AND e.status = 'active'""", [did, cid, npt_today()])
+    found = list(DeviceUserMap.objects.filter(device_id=did, device__company_id=cid, valid__contains=npt_today(),
+                                              employee__status=Employee.Status.ACTIVE)
+                 .values_list('device_user_pin', 'employee__name_en'))
     with transaction.atomic():
-        for m in found:
-            if not PIN_RE.match(m['device_user_pin']):
-                continue
-            execute('INSERT INTO device_command (device_id, command) VALUES (%s, %s)', [did, userinfo_command(m['device_user_pin'], m['name_en'])])
+        DeviceCommand.objects.bulk_create([DeviceCommand(device_id=did, command=userinfo_command(pin, name))
+                                           for pin, name in found if PIN_RE.match(pin)])
     return {'queued': len(found)}

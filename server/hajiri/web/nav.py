@@ -19,6 +19,7 @@ from importlib import import_module
 from typing import Callable
 
 from django.apps import apps
+from django.core.signals import setting_changed
 from django.urls import NoReverseMatch, Resolver404, resolve, reverse
 
 from hajiri.core.auth import MODULE_ROLES, AuthUser, has_role
@@ -29,6 +30,12 @@ STAFF_ROLES = ('manager', 'hr', 'payroll_admin', 'attendance_admin', 'recruiter'
 ROLE_LABEL = {
     'admin': 'Admin', 'hr': 'HR', 'manager': 'Manager', 'employee': 'Employee', 'payroll_admin': 'Payroll admin',
     'attendance_admin': 'Attendance admin', 'recruiter': 'Recruiter', 'executive': 'Executive',
+    'group_admin': 'Group admin', 'group_hr': 'Group HR', 'group_executive': 'Group executive',
+}
+GROUP_ROLE_HELP = {
+    'group_admin': 'Admin in every company of the group; adds companies and gives group roles',
+    'group_hr': 'HR in every company of the group',
+    'group_executive': 'Read-only overview, insights and dashboards of every company of the group',
 }
 ROLE_HELP = {
     'admin': 'Everything, including users, roles and statutory rules',
@@ -60,6 +67,8 @@ class NavItem:
     keywords: tuple[str, ...] = field(default=())  # extra words for the command palette
     employee_only: bool = False    # only for accounts linked to an employee (hubs.tsx `show: !!user.employeeId`)
     palette_label: str | None = None  # label in the command palette when it should differ from the tab label
+    # Extra visibility rule, e.g. group roles (hajiri.core.companies.can_open_group): shown only when it is true.
+    visible: Callable[[AuthUser], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +100,9 @@ HUBS: tuple[Hub, ...] = (
     Hub('help', 'Help desk', 'me', '/me/help', 'lifebuoy', employee_only=True, features=('helpdesk',), keywords=('ticket', 'question', 'hr help', 'resign', 'grievance', 'complaint')),
     Hub('people', 'People', 'company', '/people', 'address-book', keywords=('directory', 'org chart', 'colleagues')),
     Hub('engage', 'Engage', 'company', '/engage', 'confetti', keywords=('kudos', 'announcements', 'birthdays', 'surveys', 'polls')),
+    # Groups of companies: the group overview and group administration (hajiri.group, hajiri.group_admin); its tabs
+    # decide who sees it (group roles, or figures of several companies).
+    Hub('group', 'Group', 'manage', '/group', 'building-community', keywords=('companies', 'sister company', 'group overview', 'switch company')),
     Hub('overview', 'Overview', 'manage', '/overview', 'layout-dashboard', roles=('hr', 'executive'), keywords=('dashboard',)),
     Hub('approvals', 'Approvals', 'manage', '/approvals', 'list-check', roles=STAFF_ROLES, badge='approvals', keywords=('approve', 'requests', 'inbox')),
     Hub('employees', 'Employees', 'manage', '/employees', 'users', roles=('hr',), keywords=('staff', 'people', 'add employee', 'onboarding', 'exit', 'documents', 'letters')),
@@ -186,9 +198,8 @@ def disabled_features(company_id: str | None) -> set[str]:
             return set(fn(company_id))
     except ModuleNotFoundError:
         pass
-    from hajiri.core.db import one
-    r = one("SELECT value FROM company_setting WHERE company_id = %s AND key = 'features'", [company_id])
-    val = (r or {}).get('value') or {}
+    from hajiri.core.settings_store import get_setting
+    val = get_setting(company_id, 'features', {}) or {}
     raw = val.get('off') if isinstance(val, dict) else None
     return {k for k in raw if isinstance(k, str) and k in FEATURE_KEYS} if isinstance(raw, list) else set()
 
@@ -234,6 +245,8 @@ def item_visible(user: AuthUser, it: NavItem, off: set[str]) -> bool:
     if it.module and not has_role(user, *MODULE_ROLES[it.module]):
         return False
     if it.roles and not has_role(user, *it.roles):
+        return False
+    if it.visible is not None and not it.visible(user):
         return False
     return True
 
@@ -368,3 +381,14 @@ def build(user: AuthUser, path: str, *, items: list[NavItem] | None = None, off:
         add(a['url'], a['label'], 'Account', a['icon'])
 
     return Navigation(groups, settings, account, current, current_tab, palette, badges.get('notifications', 0))
+
+
+def _clear_url_caches(*, setting, **kwargs) -> None:
+    """URL lookups are cached per process; drop them when the URLconf changes (override_settings in tests), as
+    Django does for its own resolver cache."""
+    if setting == 'ROOT_URLCONF':
+        url_of.cache_clear()
+        _resolves.cache_clear()
+
+
+setting_changed.connect(_clear_url_caches, dispatch_uid='hajiri.web.nav.url_caches')

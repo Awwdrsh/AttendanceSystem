@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import views
+from . import api, views
 
 urlpatterns = [
     # pages (React routes)
@@ -30,11 +30,11 @@ urlpatterns = [
     path('_/workflow/<uuid:id>', views.detail, name='detail'),
     path('_/workflow/<uuid:id>/approve', views.approve, name='approve'),
     path('_/workflow/<uuid:id>/reject', views.reject, name='reject'),
-    # JSON for Bearer clients (TS paths)
-    path('api/v1/workflow/inbox', views.api_inbox, name='api_inbox'),
-    path('api/v1/workflow/preview', views.api_preview, name='api_preview'),
-    path('api/v1/workflow/bulk-approve', views.api_bulk_approve, name='api_bulk_approve'),
-    path('api/v1/workflow/<str:id>', views.api_detail, name='api_detail'),
-    path('api/v1/workflow/<str:id>/approve', views.api_approve, name='api_approve'),
-    path('api/v1/workflow/<str:id>/reject', views.api_reject, name='api_reject'),
+    # JSON for Bearer clients (TS paths; DRF views in api.py)
+    path('api/v1/workflow/inbox', api.InboxView.as_view(), name='api_inbox'),
+    path('api/v1/workflow/preview', api.PreviewView.as_view(), name='api_preview'),
+    path('api/v1/workflow/bulk-approve', api.BulkApproveView.as_view(), name='api_bulk_approve'),
+    path('api/v1/workflow/<str:id>', api.DetailView.as_view(), name='api_detail'),
+    path('api/v1/workflow/<str:id>/approve', api.ApproveView.as_view(), name='api_approve'),
+    path('api/v1/workflow/<str:id>/reject', api.RejectView.as_view(), name='api_reject'),
 ]

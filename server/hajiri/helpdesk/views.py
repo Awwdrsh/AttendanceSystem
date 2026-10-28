@@ -11,37 +11,21 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 
 from hajiri.core.auth import has_role
 from hajiri.core.clock import now
-from hajiri.core.schema import is_uuid
+from hajiri.core.scoping import is_uuid
 from hajiri.files.store import stored_file_response
 from hajiri.web.decorators import login_required, require_feature, require_role
 from hajiri.web.htmx import close_modal, htmx_target, hx_redirect, is_htmx, refresh, toast
 from hajiri.web.nav import url_of
 
 from . import services
-from .services import ACTIVE, PRIORITIES, PRIORITY_LABEL, STATUS_LABEL, STATUSES
+from .forms import CategoryForm, MessageForm, QueueFilterForm, RateForm, SettingsForm, TicketForm, TicketUpdateForm
+from .services import ACTIVE, PRIORITY_LABEL, STATUS_LABEL, STATUSES
 
 PRIORITY_TONE = {'low': 'idle', 'normal': 'info', 'high': 'warn', 'urgent': 'bad'}
 STATUS_TONE = {'open': 'info', 'in_progress': 'accent', 'waiting': 'warn', 'resolved': 'ok', 'closed': 'idle'}
 QUEUE_STATUSES = (('active', 'Open'), ('resolved', 'Resolved'), ('closed', 'Closed'))
 # The page the lifecycle app may provide for the "Leaving the company" block on /me/help (MyTicketsPage Leaving).
 LEAVING_URL_NAME = 'lifecycle:my_leaving'
-
-
-def _int(v):
-    """A number field as the JSON body would carry it; anything else is left for the schema to refuse."""
-    s = (v or '').strip() if isinstance(v, str) else v
-    try:
-        return int(s)
-    except (TypeError, ValueError):
-        return s
-
-
-def _file_ids(request) -> list[str]:
-    return [x for x in request.POST.getlist('file_ids') if x.strip()]
-
-
-def _checked(request, name: str) -> bool:
-    return request.POST.get(name) in ('on', '1', 'true')
 
 
 def _open_ticket(request) -> str | None:
@@ -83,10 +67,7 @@ def mine(request):
 def new_ticket(request):
     user = request.hajiri_user
     if request.method == 'POST':
-        body = {'categoryId': request.POST.get('category_id', ''), 'subject': request.POST.get('subject', ''),
-                'body': request.POST.get('body', ''), 'priority': request.POST.get('priority') or 'normal',
-                'fileIds': _file_ids(request)}
-        r = services.create_ticket(user, body)
+        r = services.create_ticket(user, TicketForm(request.POST).ticket())
         resp = hx_redirect(request, f"{reverse('helpdesk:mine')}?ticket={r['id']}")
         return toast(request, resp, f"Ticket #{r['number']} raised. We will get back to you.")
     cats = [c for c in services.list_categories(user) if c['active']]
@@ -96,18 +77,6 @@ def new_ticket(request):
 
 
 # ---------------------------------------------------------------- HR: /helpdesk
-
-def _queue_filters(request) -> dict:
-    g = request.GET
-    f = {'status': g.get('status') or 'active'}
-    for key, name in (('assignee', 'assignee'), ('categoryId', 'category'), ('search', 'search')):
-        v = (g.get(name) or '').strip()
-        if v:
-            f[key] = v
-    if g.get('overdue') in ('1', 'on', 'true'):
-        f['breached'] = '1'
-    return f
-
 
 @require_GET
 @require_role('hr')
@@ -122,7 +91,7 @@ def queue(request):
         if target == 'hd-topics':
             return render(request, 'helpdesk/partials/topics.html', ctx)
         return render(request, 'helpdesk/queue.html', ctx)
-    filters = _queue_filters(request)
+    filters = QueueFilterForm(request.GET).filters()
     tickets = [_decorate(t) for t in services.queue(user, filters)]
     ctx = {'tab': tab, 'tickets': tickets, 'filters': filters, 'statuses': QUEUE_STATUSES,
            'empty_title': 'No open tickets' if filters['status'] == 'active' else 'Nothing here'}
@@ -149,18 +118,8 @@ def queue(request):
 @require_role('hr')
 @require_feature('helpdesk')
 def save_settings(request):
-    p = request.POST
-    body = {'slaHours': {k: _int(p.get(f'sla_{k}')) for k in PRIORITIES}, 'autoCloseDays': _int(p.get('auto_close_days')),
-            'reopenDays': _int(p.get('reopen_days'))}
-    services.put_settings(request.hajiri_user, body)
+    services.put_settings(request.hajiri_user, SettingsForm(request.POST).policy())
     return toast(request, HttpResponse(status=204), 'Settings saved.')
-
-
-def _category_body(request) -> dict:
-    p = request.POST
-    return {'name': p.get('name', '').strip(), 'description': p.get('description') or None,
-            'confidential': _checked(request, 'confidential'), 'ownerUserId': p.get('owner_user_id') or None,
-            'sort': _int(p.get('sort') or '0'), 'active': _checked(request, 'active')}
 
 
 @require_http_methods(['GET', 'POST'])
@@ -169,7 +128,7 @@ def _category_body(request) -> dict:
 def category_new(request):
     user = request.hajiri_user
     if request.method == 'POST':
-        services.create_category(user, _category_body(request))
+        services.create_category(user, CategoryForm(request.POST).category())
         return _topic_saved(request)
     return render(request, 'helpdesk/partials/category_form.html',
                   {'category': {'name': '', 'active': True, 'confidential': False, 'sort': 0}, 'agents': services.list_agents(user)})
@@ -181,7 +140,7 @@ def category_new(request):
 def category_edit(request, category_id):
     user = request.hajiri_user
     if request.method == 'POST':
-        services.update_category(user, category_id, _category_body(request))
+        services.update_category(user, category_id, CategoryForm(request.POST).category())
         return _topic_saved(request)
     return render(request, 'helpdesk/partials/category_form.html',
                   {'category': services.get_category(user, category_id), 'agents': services.list_agents(user)})
@@ -236,26 +195,16 @@ def ticket(request, ticket_id):
 @login_required
 @require_feature('helpdesk')
 def reply(request, ticket_id):
-    internal = _checked(request, 'internal')
-    services.add_message(request.hajiri_user, ticket_id,
-                         {'body': request.POST.get('body', ''), 'internal': internal, 'fileIds': _file_ids(request)})
-    return _changed(request, ticket_id, 'Note added.' if internal else 'Message sent.')
+    message = MessageForm(request.POST).message()
+    services.add_message(request.hajiri_user, ticket_id, message)
+    return _changed(request, ticket_id, 'Note added.' if message['internal'] else 'Message sent.')
 
 
 @require_POST
 @login_required
 @require_feature('helpdesk')
 def update(request, ticket_id):
-    p = request.POST
-    body: dict = {}
-    if 'status' in p:
-        body['status'] = p['status']
-    if 'priority' in p:
-        body['priority'] = p['priority']
-    if 'assignee_user_id' in p:
-        body['assigneeUserId'] = p['assignee_user_id'] or None
-    if 'category_id' in p:
-        body['categoryId'] = p['category_id']
+    body = TicketUpdateForm(request.POST).patch()
     services.update_ticket(request.hajiri_user, ticket_id, body)
     if 'assigneeUserId' in body:
         msg = 'Assigned.' if body['assigneeUserId'] else 'Unassigned.'
@@ -286,9 +235,7 @@ def close(request, ticket_id):
 @login_required
 @require_feature('helpdesk')
 def rate(request, ticket_id):
-    comment = (request.POST.get('comment') or '').strip()
-    body = {'rating': _int(request.POST.get('rating')), **({'comment': comment} if comment else {})}
-    services.rate_ticket(request.hajiri_user, ticket_id, body)
+    services.rate_ticket(request.hajiri_user, ticket_id, RateForm(request.POST).rating_body())
     return _changed(request, ticket_id, 'Thanks for the feedback.')
 
 

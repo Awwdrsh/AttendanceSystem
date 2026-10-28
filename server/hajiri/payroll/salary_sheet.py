@@ -6,55 +6,65 @@ record of what each person is owed; nothing here talks to a bank or an accountin
 """
 from __future__ import annotations
 
+import csv
+import io
 from datetime import datetime, timedelta, timezone
 from decimal import localcontext
-from functools import cmp_to_key
+
+from django.db.models import Exists, F, OuterRef
+from django.utils.html import escape
 
 from engines.payroll import amount_in_words_en, format_npr
 from engines.payroll.numeric import ENGINE_CONTEXT, D, js_str, to_fixed
 
 from hajiri.core.bsdate import bs_label, bs_month_name
-from hajiri.web.csv import csv_cell
+from hajiri.core.collation import collate_key
+from hajiri.db.models import Employee, PayrollHold, PayrollRun, Payslip, PayslipLine
+from hajiri.web.csv import cell_text
 
-from ._db import q, q1
-from .compliance import esc
+from .numbers import iso, iso_ms
+from .queries import department_on
+
+
+def esc(s) -> str:
+    """HTML-escaped text ('' for None)."""
+    return escape('' if s is None else str(s))
+
+
+def csv_text(rows, *, bom: bool = False) -> str:
+    """RFC 4180 rows with CRLF line ends (the csv module), formula-protected cells; a BOM so Excel reads UTF-8."""
+    buf = io.StringIO()
+    if bom:
+        buf.write('\ufeff')
+    w = csv.writer(buf, lineterminator='\r\n')
+    for row in rows:
+        w.writerow([cell_text(v) for v in row])
+    return buf.getvalue()
 
 RUN_TYPE = {'regular': 'Regular', 'supplementary': 'Supplementary', 'arrears': 'Arrears', 'off_cycle': 'Off-cycle',
             'final_settlement': 'Final settlement', 'bonus': 'Bonus'}
 TYPES = ('earning', 'deduction', 'employer_contribution')
 
 
-def _iso_ms(d: datetime | None) -> str | None:
-    if d is None:
-        return None
-    d = d.astimezone(timezone.utc)
-    return d.strftime('%Y-%m-%dT%H:%M:%S.') + f'{d.microsecond // 1000:03d}Z'
-
-
-def _locale_cmp(a: str, b: str) -> int:
-    from engines.payroll.compute import _collation_key
-    ka, kb = _collation_key(a), _collation_key(b)
-    return (ka > kb) - (ka < kb)
-
-
 def salary_sheet(company_id: str, run_id: str) -> dict | None:
-    h = q1("""SELECT r.id, r.run_type, r.status, r.locked_at, r.approved_at, c.name_en AS company, p.bs_year, p.bs_month, p.start_ad::text, p.end_ad::text, p.days,
-                     mk.name AS maker, ck.name AS checker
-                FROM payroll_run r JOIN payroll_period p ON p.id = r.period_id JOIN company c ON c.id = r.company_id
-                LEFT JOIN app_user mk ON mk.id = r.maker_id LEFT JOIN app_user ck ON ck.id = r.checker_id
-               WHERE r.id = $1 AND r.company_id = $2""", [str(run_id), str(company_id)])
+    h = (PayrollRun.objects.for_company(company_id).filter(pk=run_id)
+         .values('id', 'run_type', 'status', 'locked_at', 'approved_at', 'period__bs_year', 'period__bs_month', 'period__start_ad',
+                 'period__end_ad', 'period__days', company_name=F('company__name_en'), maker_name=F('maker__name'),
+                 checker_name=F('checker__name'))
+         .first())
     if not h:
         return None
-    slips = q("""
-        SELECT ps.id, ps.employee_id, e.emp_code, e.name_en, e.designation,
-               (SELECT ou.name_en FROM employee_assignment a LEFT JOIN org_unit ou ON ou.id = a.org_unit_id WHERE a.employee_id = e.id AND a.valid @> $2::date LIMIT 1) AS department,
-               ps.paid_days::text, ps.lop_days::text, ps.ot_hours::text, ps.gross::text, ps.total_deductions::text, ps.net::text, ps.employer_statutory::text,
-               e.bank_code, e.bank_branch, e.bank_account_last4,
-               CASE WHEN EXISTS (SELECT 1 FROM payroll_hold h WHERE h.run_id = ps.run_id AND h.employee_id = ps.employee_id AND h.status <> 'cancelled')
-                    THEN ps.flags || '["PayHeld"]'::jsonb ELSE ps.flags END AS flags
-          FROM payslip ps JOIN employee e ON e.id = ps.employee_id WHERE ps.run_id = $1 ORDER BY e.emp_code""", [str(run_id), h['end_ad']])
-    lines = q("""SELECT l.payslip_id, l.component_code, l.type, l.name_en, l.amount::text, l.sort_order FROM payslip_line l JOIN payslip ps ON ps.id = l.payslip_id
-                  WHERE ps.run_id = $1 AND l.type <> 'statistical' ORDER BY l.sort_order, l.component_code""", [str(run_id)])
+    end_ad = h['period__end_ad']
+    held = PayrollHold.objects.filter(run_id=OuterRef('run_id'), employee_id=OuterRef('employee_id')).exclude(
+        status=PayrollHold.Status.CANCELLED)
+    slips = (Payslip.objects.filter(run_id=run_id).order_by('employee__emp_code')
+             .annotate(department=department_on(end_ad, 'employee_id'), held=Exists(held))
+             .values('id', 'employee_id', 'paid_days', 'lop_days', 'ot_hours', 'gross', 'total_deductions', 'net', 'employer_statutory',
+                     'flags', 'department', 'held', emp_code=F('employee__emp_code'), name_en=F('employee__name_en'),
+                     designation=F('employee__designation'), bank_code=F('employee__bank_code'),
+                     bank_branch=F('employee__bank_branch'), bank_account_last4=F('employee__bank_account_last4')))
+    lines = (PayslipLine.objects.filter(payslip__run_id=run_id).exclude(type=PayslipLine.Type.STATISTICAL)
+             .order_by('sort_order', 'component_code').values('payslip_id', 'component_code', 'type', 'name_en', 'amount', 'sort_order'))
     cols: dict[str, dict[str, dict]] = {t: {} for t in TYPES}
     byslip: dict[str, dict[str, dict[str, str]]] = {}
     rounding: dict[str, str] = {}
@@ -72,7 +82,7 @@ def salary_sheet(company_id: str, run_id: str) -> dict | None:
 
         def lst(t):
             items = list(cols[t].items())
-            items.sort(key=cmp_to_key(lambda a, b: (a[1]['order'] - b[1]['order']) or _locale_cmp(a[0], b[0])))
+            items.sort(key=lambda kv: (kv[1]['order'], collate_key(kv[0])))
             return [{'code': c, 'name': v['name']} for c, v in items]
         columns = {'earnings': lst('earning'), 'deductions': lst('deduction'), 'employer': lst('employer_contribution'), 'rounding': bool(rounding)}
 
@@ -95,7 +105,7 @@ def salary_sheet(company_id: str, run_id: str) -> dict | None:
                 'costToCompany': to_fixed(D(sl['gross']) + employer_total, 2),
                 'bank': ', '.join(x for x in (sl['bank_code'], sl['bank_branch']) if x) or None,
                 'bankAccount': f"****{sl['bank_account_last4']}" if sl['bank_account_last4'] else None,
-                'flags': sl['flags'] if isinstance(sl['flags'], list) else [],
+                'flags': [*(sl['flags'] if isinstance(sl['flags'], list) else []), *(['PayHeld'] if sl['held'] else [])],
             })
 
         def total(pick):
@@ -117,11 +127,12 @@ def salary_sheet(company_id: str, run_id: str) -> dict | None:
             'costToCompany': to_fixed(total(lambda r: r['costToCompany']), 2),
         }
     return {
-        'company': h['company'],
-        'period': {'label': bs_month_name(h['bs_year'], h['bs_month']), 'bsYear': h['bs_year'], 'bsMonth': h['bs_month'], 'from': h['start_ad'],
-                   'to': h['end_ad'], 'days': h['days']},
-        'run': {'id': str(h['id']), 'type': h['run_type'], 'status': h['status'], 'final': h['locked_at'] is not None, 'preparedBy': h['maker'],
-                'approvedBy': h['checker'], 'approvedAt': _iso_ms(h['approved_at']), 'lockedAt': _iso_ms(h['locked_at'])},
+        'company': h['company_name'],
+        'period': {'label': bs_month_name(h['period__bs_year'], h['period__bs_month']), 'bsYear': h['period__bs_year'],
+                   'bsMonth': h['period__bs_month'], 'from': iso(h['period__start_ad']), 'to': iso(end_ad), 'days': h['period__days']},
+        'run': {'id': str(h['id']), 'type': h['run_type'], 'status': h['status'], 'final': h['locked_at'] is not None,
+                'preparedBy': h['maker_name'], 'approvedBy': h['checker_name'], 'approvedAt': iso_ms(h['approved_at']),
+                'lockedAt': iso_ms(h['locked_at'])},
         'columns': columns, 'rows': out_rows, 'totals': totals,
     }
 
@@ -148,7 +159,7 @@ def salary_sheet_csv(s: dict) -> str:
             *[t['employer'][x['code']] for x in emp], t['employerTotal'], t['costToCompany'], '', '']
     title = [f"{s['company']} salary sheet, {s['period']['label']} ({bs_label(s['period']['from'])} to {bs_label(s['period']['to'])})"
              f"{'' if s['run']['final'] else ', DRAFT'}"]
-    return '﻿' + '\r\n'.join(','.join(csv_cell(v) for v in row) for row in [title, header, *body, foot]) + '\r\n'
+    return csv_text([title, header, *body, foot], bom=True)
 
 
 SHEET_CSS = """@page{size:A4 landscape;margin:10mm}
@@ -228,15 +239,18 @@ def salary_sheet_html(s: dict) -> str:
 
 def ssf_sheet_csv(run_id: str) -> str:
     """SSF monthly contribution sheet (plan §11.5, §11.10): per contributor basic, 11%, 20%, scheme allocation, 31% total."""
-    r = q("""SELECT e.emp_code, e.name_en, e.ssf_id,
-                    coalesce((SELECT l.amount FROM payslip_line l WHERE l.payslip_id = ps.id AND l.component_code = 'BASIC'), 0)::text AS basic,
-                    ps.employee_statutory::text AS ee, ps.employer_statutory::text AS er, ps.inputs_snapshot->'result'->'ssfAllocation' AS alloc
-               FROM payslip ps JOIN employee e ON e.id = ps.employee_id WHERE ps.run_id = $1 AND e.regime = 'ssf' ORDER BY e.emp_code""", [str(run_id)])
+    basic = PayslipLine.objects.filter(payslip_id=OuterRef('pk'), component_code='BASIC')
+    from .queries import sum_of
+    r = (Payslip.objects.filter(run_id=run_id, employee__regime=Employee.Regime.SSF).order_by('employee__emp_code')
+         .annotate(basic=sum_of(basic, 'amount', group='payslip_id'))
+         .values('basic', 'employee_statutory', 'employer_statutory', emp_code=F('employee__emp_code'), name_en=F('employee__name_en'),
+                 ssf_id=F('employee__ssf_id'), alloc=F('inputs_snapshot__result__ssfAllocation')))
     rows = [['emp_code', 'ssf_id', 'name', 'basic', 'employee_11pct', 'employer_20pct', 'medical_1pct', 'accident_1_40pct', 'dependent_0_27pct',
              'old_age_28_33pct', 'total_31pct']]
     with localcontext(ENGINE_CONTEXT):
         for x in r:
             a = x['alloc'] or {}
-            rows.append([x['emp_code'], x['ssf_id'] or '', x['name_en'], to_fixed(D(x['basic']), 2), to_fixed(D(x['ee']), 2), to_fixed(D(x['er']), 2),
-                         a.get('medical', ''), a.get('accident', ''), a.get('dependent', ''), a.get('old_age', ''), to_fixed(D(x['ee']) + D(x['er']), 2)])
-    return '\r\n'.join(','.join(csv_cell(v) for v in row) for row in rows) + '\r\n'
+            ee, er = D(x['employee_statutory']), D(x['employer_statutory'])
+            rows.append([x['emp_code'], x['ssf_id'] or '', x['name_en'], to_fixed(D(x['basic']), 2), to_fixed(ee, 2), to_fixed(er, 2),
+                         a.get('medical', ''), a.get('accident', ''), a.get('dependent', ''), a.get('old_age', ''), to_fixed(ee + er, 2)])
+    return csv_text(rows)

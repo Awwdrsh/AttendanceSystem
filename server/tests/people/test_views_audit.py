@@ -9,7 +9,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 
 from hajiri.core.clock import npt_today
-from hajiri.core.db import one
+from tests.support.sql import one
 from hajiri.people import service as ppl
 from hajiri.people.views import SOURCE_LABEL, cap
 from tests.core.punches import insert_punch
@@ -27,7 +27,7 @@ def client_for(user):
 def test_clock_in_log_uses_the_ts_source_and_method_labels(world):
     w = world
     today = npt_today().isoformat()
-    from hajiri.core.db import execute
+    from tests.support.sql import execute
     from tests.core.punches import DEVICE
     execute("INSERT INTO device (id, company_id, serial_no, vendor, protocol, status) VALUES (%s, %s, 'DEMO-01', 'zkteco', 'adms', 'active')",
             [DEVICE, w.company.id])
@@ -69,7 +69,7 @@ def test_error_toasts_carry_the_ts_titles(world):
     assert r.status_code == 204 and toasts(r)[0]['message'] == 'Bank account updated for Sita Sharma.'
     # A unit people are assigned to cannot be deleted ('Not deleted').
     unit = ppl.create_unit(w.hr, {'kind': 'department', 'code': 'ENG', 'nameEn': 'Engineering'})
-    from hajiri.core.db import execute
+    from tests.support.sql import execute
     execute('UPDATE employee_assignment SET org_unit_id = %s WHERE employee_id = %s', [unit['id'], w.sita_id])
     r = client_for(w.hr).post(f"/_/people/structure/unit/{unit['id']}/delete", **htmx())
     assert r.status_code == 409

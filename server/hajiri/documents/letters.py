@@ -8,18 +8,26 @@ employee's name can never inject markup into a printed letter.
 from __future__ import annotations
 
 import base64
+import html as _html
 import re
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
 from django.conf import settings
+from django.db import transaction
+from django.db.models import BooleanField, ExpressionWrapper, F, Q
+from django.utils.html import strip_tags
 
 from engines.bs_calendar import ad_to_bs
 from engines.payroll import amount_in_words_en, format_npr
 from hajiri.core.bsdate import bs_label
 from hajiri.core.clock import npt_today as _npt_today
-from hajiri.core.db import execute, one
+from hajiri.core.settings_store import get_setting
+from hajiri.db.models import (
+    Company, DocumentCategory, Employee, EmployeeAssignment, LetterSequence, LetterTemplate, SalaryAssignment,
+    WorkflowDefinition,
+)
 
 PLACEHOLDERS: list[dict[str, str]] = [
     {'key': 'employee.name', 'label': 'Employee full name'},
@@ -76,11 +84,9 @@ def unknown_placeholders(*texts: str) -> list[str]:
     return list(bad)
 
 
-_ESC = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}
-
-
 def esc(s: str) -> str:
-    return re.sub(r'[&<>"\']', lambda m: _ESC[m[0]], s)
+    """HTML-escape text, quotes included (the standard library's html.escape)."""
+    return _html.escape(s, quote=True)
 
 
 def _inline(s: str) -> str:
@@ -153,10 +159,8 @@ def render_subject(subject: str, values: dict, missing: dict, mark: bool = False
 
 
 def subject_text(subject_html: str) -> str:
-    s = re.sub(r'<[^>]+>', '', subject_html)
-    for a, b in (('&#42;', '*'), ('&quot;', '"'), ('&#39;', "'"), ('&lt;', '<'), ('&gt;', '>'), ('&amp;', '&')):
-        s = s.replace(a, b)
-    return s
+    """The subject as plain text (the register, notifications): tags dropped, entities decoded."""
+    return _html.unescape(strip_tags(subject_html))
 
 
 # ---------------------------------------------------------------- letterhead
@@ -222,19 +226,21 @@ def render_letter_html(*, company: dict, ref_no: str, date_bs: str, subject_html
 DEFAULT_LETTER_SETTINGS = {'signatoryName': None, 'signatoryTitle': 'Human Resources', 'refPrefix': 'HR'}
 
 
+SETTINGS_KEY = 'documents.letters'
+
+
 def letter_settings(company_id: str) -> dict:
-    r = one("SELECT value FROM company_setting WHERE company_id = %s AND key = 'documents.letters'", [company_id])
-    v = r['value'] if r and isinstance(r['value'], dict) else {}
-    return {**DEFAULT_LETTER_SETTINGS, **v}
+    v = get_setting(company_id, SETTINGS_KEY)
+    return {**DEFAULT_LETTER_SETTINGS, **(v if isinstance(v, dict) else {})}
 
 
 def company_head(company_id: str) -> dict:
-    r = one("""SELECT c.name_en, s.value FROM company c
-                 LEFT JOIN company_setting s ON s.company_id = c.id AND s.key = 'company.profile' WHERE c.id = %s""",
-            [company_id])
-    p = (r['value'] if r and isinstance(r.get('value'), dict) else None) or {}
-    return {'name': p.get('nameEn') or (r['name_en'] if r else None) or 'Company', 'address': p.get('address'),
-            'pan': p.get('pan'), 'logoDataUrl': p.get('logoDataUrl')}
+    """The letterhead: the company profile setting, falling back to the company's name."""
+    name = Company.objects.for_company(company_id).values_list('name_en', flat=True).first()
+    p = get_setting(company_id, 'company.profile')
+    p = p if isinstance(p, dict) else {}
+    return {'name': p.get('nameEn') or name or 'Company', 'address': p.get('address'), 'pan': p.get('pan'),
+            'logoDataUrl': p.get('logoDataUrl')}
 
 
 TYPE_LABEL = {'regular': 'regular', 'work_based': 'work-based', 'time_based': 'time-based', 'casual': 'casual',
@@ -267,39 +273,59 @@ def _money(d: Decimal) -> str:
     return str(d.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 
+def _iso(d) -> str | None:
+    return d.isoformat() if d else None
+
+
+def _covers(day: date) -> ExpressionWrapper:
+    """True for a range row that contains `day` (ORDER BY (valid @> day) DESC puts it first)."""
+    return ExpressionWrapper(Q(valid__contains=day), output_field=BooleanField())
+
+
+def current_assignment(employee_id: str, today: date) -> dict:
+    """The assignment in force today, else the latest one (open-ended first); {} when there is none."""
+    return (EmployeeAssignment.objects.filter(employee_id=employee_id)
+            .order_by(_covers(today).desc(), F('valid__endswith').desc(nulls_first=True))
+            .values('employment_type', 'probation_end', dept=F('org_unit__name_en'), branch_name=F('branch__name_en'),
+                    manager_name=F('manager__name_en'))
+            .first()) or {}
+
+
+def monthly_gross(employee_id: str, today: date) -> str | None:
+    """The sum of the base amounts of the salary in force today (else the latest one), as '12345.00'."""
+    amounts = (SalaryAssignment.objects.filter(employee_id=employee_id)
+               .order_by(_covers(today).desc(), F('valid__startswith').desc())
+               .values_list('base_amounts', flat=True).first())
+    if amounts is None:
+        return None
+    t = Decimal(0)
+    for v in (amounts or {}).values():
+        try:
+            t += Decimal(str(v))
+        except (InvalidOperation, ValueError):
+            pass  # skip non-numeric
+    return _money(t) if t.is_finite() and t > 0 else None
+
+
 def employee_letter_values(company_id: str, employee_id: str, *, ref_no: str | None = None, purpose: str | None = None,
                            addressed_to: str | None = None) -> dict | None:
     """Every placeholder value for an employee (company-scoped; None if the employee is not in the company)."""
-    today = npt_today()
-    e = one("""
-        SELECT e.name_en, e.emp_code, e.gender, e.email, e.phone, e.designation, e.grade, e.join_date::text AS join_date,
-               e.exit_date::text AS exit_date, coalesce(a.probation_end, e.probation_end)::text AS probation_end,
-               ou.name_en AS dept, b.name_en AS branch, m.name_en AS manager, a.employment_type
-          FROM employee e
-          LEFT JOIN LATERAL (SELECT * FROM employee_assignment x WHERE x.employee_id = e.id
-                              ORDER BY (x.valid @> %s::date) DESC, upper(x.valid) DESC NULLS FIRST LIMIT 1) a ON true
-          LEFT JOIN org_unit ou ON ou.id = a.org_unit_id
-          LEFT JOIN branch b ON b.id = a.branch_id
-          LEFT JOIN employee m ON m.id = a.manager_id
-         WHERE e.id = %s AND e.company_id = %s""", [today, employee_id, company_id])
+    today_d = _npt_today()
+    today = today_d.isoformat()
+    e = (Employee.objects.for_company(company_id).filter(pk=employee_id)
+         .values('name_en', 'emp_code', 'gender', 'email', 'phone', 'designation', 'grade', 'join_date', 'exit_date',
+                 'probation_end').first())
     if not e:
         return None
-    sal = one("""SELECT base_amounts FROM salary_assignment WHERE employee_id = %s
-                  ORDER BY (valid @> %s::date) DESC, lower(valid) DESC LIMIT 1""", [employee_id, today])
-    gross: str | None = None
-    if sal:
-        t = Decimal(0)
-        for v in (sal['base_amounts'] or {}).values():
-            try:
-                t += Decimal(str(v))
-            except (InvalidOperation, ValueError):
-                pass  # skip non-numeric
-        if t.is_finite() and t > 0:
-            gross = _money(t)
+    a = current_assignment(employee_id, today_d)
+    gross = monthly_gross(employee_id, today_d)
     head = company_head(company_id)
     s = letter_settings(company_id)
     name = e['name_en']
-    end = e['exit_date'] if e['exit_date'] and e['exit_date'] < today else today
+    join, exit_ = _iso(e['join_date']), _iso(e['exit_date'])
+    probation = _iso(a.get('probation_end') or e['probation_end'])
+    employment_type = a.get('employment_type')
+    end = exit_ if exit_ and exit_ < today else today
     return {
         'employee.name': name,
         'employee.first_name': re.split(r'\s+', name)[0],
@@ -309,14 +335,14 @@ def employee_letter_values(company_id: str, employee_id: str, *, ref_no: str | N
         'employee.phone': e['phone'],
         'designation': e['designation'],
         'grade': e['grade'],
-        'department': e['dept'],
-        'branch': e['branch'],
-        'manager.name': e['manager'],
-        'employment_type': TYPE_LABEL.get(e['employment_type'], e['employment_type']) if e['employment_type'] else None,
-        'join_date': bs_label(e['join_date']) if e['join_date'] else None,
-        'exit_date': bs_label(e['exit_date']) if e['exit_date'] else None,
-        'probation_end': bs_label(e['probation_end']) if e['probation_end'] else None,
-        'service_period': service_period(e['join_date'], end),
+        'department': a.get('dept'),
+        'branch': a.get('branch_name'),
+        'manager.name': a.get('manager_name'),
+        'employment_type': TYPE_LABEL.get(employment_type, employment_type) if employment_type else None,
+        'join_date': bs_label(join) if join else None,
+        'exit_date': bs_label(exit_) if exit_ else None,
+        'probation_end': bs_label(probation) if probation else None,
+        'service_period': service_period(join, end),
         'salary.gross': f'NPR {format_npr(gross, "latin")}' if gross else None,
         'salary.gross_words': amount_in_words_en(gross) if gross else None,
         'salary.annual': f'NPR {format_npr(_money(Decimal(gross) * 12), "latin")}' if gross else None,
@@ -435,31 +461,37 @@ DEFAULT_CATEGORIES: list[dict] = [
 
 
 def seed_document_defaults(company_id: str) -> dict:
-    """Idempotent per-company defaults: document categories, built-in letter templates and the letter-request workflow."""
-    categories = templates = 0
-    for i, c in enumerate(DEFAULT_CATEGORIES):
-        categories += execute(
-            """INSERT INTO document_category (company_id, code, name, employee_can_upload, expiry_required, visible_to_employee, sort_order)
-               VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (company_id, code) DO NOTHING""",
-            [company_id, c['code'], c['name'], c['employeeCanUpload'], c['expiryRequired'], c['visible'], i])
-    for t in BUILTIN_TEMPLATES:
-        templates += execute(
-            """INSERT INTO letter_template (company_id, code, name, subject, body, requestable, is_builtin)
-               VALUES (%s, %s, %s, %s, %s, %s, true) ON CONFLICT (company_id, code) DO NOTHING""",
-            [company_id, t['code'], t['name'], t['subject'], t['body'], t['requestable']])
-    execute("""INSERT INTO workflow_definition (company_id, object_type, steps) VALUES (%s, 'letter_request', '[{"role":"hr"}]')
-               ON CONFLICT (company_id, object_type) DO NOTHING""", [company_id])
-    return {'categories': categories, 'templates': templates}
+    """Idempotent per-company defaults: document categories, built-in letter templates and the letter-request workflow.
+    Codes the company already has are left alone (HR may have renamed or switched them off). Returns how many rows
+    were added."""
+    have = set(DocumentCategory.objects.for_company(company_id).values_list('code', flat=True))
+    cats = [DocumentCategory(company_id=company_id, code=c['code'], name=c['name'],
+                             employee_can_upload=c['employeeCanUpload'], expiry_required=c['expiryRequired'],
+                             visible_to_employee=c['visible'], sort_order=i)
+            for i, c in enumerate(DEFAULT_CATEGORIES) if c['code'] not in have]
+    DocumentCategory.objects.bulk_create(cats, ignore_conflicts=True)
+    have = set(LetterTemplate.objects.for_company(company_id).values_list('code', flat=True))
+    tpls = [LetterTemplate(company_id=company_id, code=t['code'], name=t['name'], subject=t['subject'], body=t['body'],
+                           requestable=t['requestable'], is_builtin=True)
+            for t in BUILTIN_TEMPLATES if t['code'] not in have]
+    LetterTemplate.objects.bulk_create(tpls, ignore_conflicts=True)
+    WorkflowDefinition.objects.get_or_create(company_id=company_id, object_type='letter_request',
+                                             defaults={'steps': [{'role': 'hr'}]})
+    return {'categories': len(cats), 'templates': len(tpls)}
 
 
 def next_ref_no(company_id: str, prefix: str, today: str | None = None) -> str:
-    """Next reference number for the company and BS year, e.g. HR/2083/0001. Call inside the issuing transaction."""
+    """Next reference number for the company and BS year, e.g. HR/2083/0001. Call inside the issuing transaction: the
+    increment keeps the counter row locked until it commits, so two letters never share a number."""
     year = bs_year_of(today or npt_today())
-    r = one("""INSERT INTO letter_sequence (company_id, bs_year, last_no) VALUES (%s, %s, 1)
-               ON CONFLICT (company_id, bs_year) DO UPDATE SET last_no = letter_sequence.last_no + 1 RETURNING last_no""",
-            [company_id, year])
+    with transaction.atomic():
+        LetterSequence.objects.bulk_create([LetterSequence(company_id=company_id, bs_year=year, last_no=0)],
+                                           ignore_conflicts=True)
+        seq = LetterSequence.objects.for_company(company_id).filter(bs_year=year)
+        seq.update(last_no=F('last_no') + 1)
+        last_no = seq.values_list('last_no', flat=True).get()
     clean = re.sub(r'/+$', '', re.sub(r'[^A-Za-z0-9/_-]', '', prefix)) or 'HR'
-    return f"{clean}/{year}/{str(r['last_no']).zfill(4)}"
+    return f'{clean}/{year}/{str(last_no).zfill(4)}'
 
 
 __all__ = ['PLACEHOLDERS', 'KEYS', 'LABEL', 'unknown_placeholders', 'esc', 'render_body', 'render_subject', 'subject_text',

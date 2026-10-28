@@ -22,7 +22,7 @@ from datetime import date, timedelta
 from django.test import Client
 
 from hajiri.core import auth
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 
 PW = 'correct-horse-battery-staple'
 _seq = itertools.count(1)
@@ -130,7 +130,7 @@ def require_two_factor_for(company, *roles: str) -> None:
 
 
 def audit_actions(row_id=None) -> list[str]:
-    from hajiri.core.db import rows
+    from tests.support.sql import rows
     q = 'SELECT action FROM audit_log' + (' WHERE row_id = %s' if row_id else '') + ' ORDER BY id'
     return [r['action'] for r in rows(q, [str(row_id)] if row_id else [])]
 

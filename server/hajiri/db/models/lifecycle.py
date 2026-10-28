@@ -5,191 +5,326 @@ Foreign keys use DO_NOTHING: the database enforces ON DELETE (cascade, set null 
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class Asset(models.Model):
+    class Condition(models.TextChoices):
+        NEW = 'new', 'New'
+        GOOD = 'good', 'Good'
+        FAIR = 'fair', 'Fair'
+        POOR = 'poor', 'Poor'
+        DAMAGED = 'damaged', 'Damaged'
+        LOST = 'lost', 'Lost'
+
+    class Status(models.TextChoices):
+        AVAILABLE = 'available', 'Available'
+        ASSIGNED = 'assigned', 'Assigned'
+        RETIRED = 'retired', 'Retired'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('Company', models.DO_NOTHING)
-    type = models.ForeignKey('AssetType', models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('Company', models.DO_NOTHING, related_name='assets')
+    type = models.ForeignKey('AssetType', models.DO_NOTHING, related_name='assets', blank=True, null=True)
     tag = models.TextField()
     name = models.TextField()
     serial = models.TextField(blank=True, null=True)
-    condition = models.TextField(db_default='good')
-    status = models.TextField(db_default='available')
+    condition = models.TextField(choices=Condition, db_default='good')
+    status = models.TextField(choices=Status, db_default='available')
     purchase_date = models.DateField(blank=True, null=True)
     cost = models.DecimalField(max_digits=14, decimal_places=2, blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'asset'
         unique_together = (('company', 'tag'),)
 
+    def __str__(self):
+        return str(self.name)
+
 
 class AssetAssignment(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    asset = models.OneToOneField(Asset, models.DO_NOTHING)
-    company = models.ForeignKey('Company', models.DO_NOTHING)
-    employee = models.ForeignKey('Employee', models.DO_NOTHING)
+    asset = models.ForeignKey(Asset, models.DO_NOTHING, related_name='asset_assignments')
+    company = models.ForeignKey('Company', models.DO_NOTHING, related_name='asset_assignments')
+    employee = models.ForeignKey('Employee', models.DO_NOTHING, related_name='asset_assignments')
     assigned_on = models.DateField()
     returned_on = models.DateField(blank=True, null=True)
     condition_out = models.TextField(blank=True, null=True)
     condition_in = models.TextField(blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
-    assigned_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='assigned_by', blank=True, null=True)
-    returned_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='returned_by', related_name='assetassignment_returned_by_set', blank=True, null=True)
+    assigned_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='asset_assignments_as_assigned_by', db_column='assigned_by', blank=True, null=True)
+    returned_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='asset_assignments_as_returned_by', db_column='returned_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'asset_assignment'
+        constraints = [models.UniqueConstraint(fields=['asset'], condition=models.Q(returned_on__isnull=True), name='asset_assignment_open_idx')]
+
+    def __str__(self):
+        return f'AssetAssignment {self.id}'
 
 
 class AssetType(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('Company', models.DO_NOTHING)
+    company = models.ForeignKey('Company', models.DO_NOTHING, related_name='asset_types')
     name = models.TextField()
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'asset_type'
         unique_together = (('company', 'name'),)
 
+    def __str__(self):
+        return str(self.name)
+
 
 class ExitInterview(models.Model):
-    exit = models.OneToOneField('hajiri.EmployeeExit', models.DO_NOTHING, primary_key=True)
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    exit = models.OneToOneField('hajiri.EmployeeExit', models.DO_NOTHING, related_name='exit_interview', primary_key=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='exit_interviews')
     answers_enc = models.BinaryField()
     by_employee = models.BooleanField()
-    recorded_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='recorded_by')
+    recorded_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='exit_interviews_as_recorded_by', db_column='recorded_by')
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'exit_interview'
 
+    def __str__(self):
+        return f'ExitInterview {self.exit_id}'
+
 
 class ExitInterviewQuestion(models.Model):
+    class Kind(models.TextChoices):
+        TEXT = 'text', 'Text'
+        RATING = 'rating', 'Rating'
+        CHOICE = 'choice', 'Choice'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='exit_interview_questions')
     sort = models.SmallIntegerField(db_default=0)
     question = models.TextField()
-    kind = models.TextField()
+    kind = models.TextField(choices=Kind)
     options = models.JSONField(db_default=[])
     active = models.BooleanField(db_default=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'exit_interview_question'
 
+    def __str__(self):
+        return str(self.question)
+
 
 class LifecycleCase(models.Model):
+    class Kind(models.TextChoices):
+        ONBOARDING = 'onboarding', 'Onboarding'
+        OFFBOARDING = 'offboarding', 'Offboarding'
+
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        COMPLETED = 'completed', 'Completed'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    kind = models.TextField()
-    template = models.ForeignKey('LifecycleTemplate', models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='lifecycle_cases')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='lifecycle_cases')
+    kind = models.TextField(choices=Kind)
+    template = models.ForeignKey('LifecycleTemplate', models.DO_NOTHING, related_name='lifecycle_cases', blank=True, null=True)
     anchor_date = models.DateField()
-    status = models.TextField(db_default='active')
+    status = models.TextField(choices=Status, db_default='active')
     exit_id = models.UUIDField(blank=True, null=True)
-    started_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='started_by', blank=True, null=True)
+    started_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='lifecycle_cases_as_started_by', db_column='started_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     completed_at = models.DateTimeField(blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'lifecycle_case'
         unique_together = (('employee', 'kind'),)
 
+    def __str__(self):
+        return f'LifecycleCase {self.id}'
+
 
 class LifecycleReminder(models.Model):
     pk = models.CompositePrimaryKey('kind', 'ref_id', 'key')
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='lifecycle_reminders')
     kind = models.TextField()
     ref_id = models.UUIDField()
     key = models.TextField()
     sent_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'lifecycle_reminder'
 
+    def __str__(self):
+        return str(self.key)
+
 
 class LifecycleTask(models.Model):
+    class AssigneeType(models.TextChoices):
+        HR = 'hr', 'HR'
+        MANAGER = 'manager', 'Manager'
+        EMPLOYEE = 'employee', 'Employee'
+        USER = 'user', 'User'
+
+    class Status(models.TextChoices):
+        OPEN = 'open', 'Open'
+        DONE = 'done', 'Done'
+        SKIPPED = 'skipped', 'Skipped'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    case = models.ForeignKey(LifecycleCase, models.DO_NOTHING)
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    case = models.ForeignKey(LifecycleCase, models.DO_NOTHING, related_name='lifecycle_tasks')
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='lifecycle_tasks')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='lifecycle_tasks')
     sort = models.SmallIntegerField(db_default=0)
     title = models.TextField()
     description = models.TextField(blank=True, null=True)
     department = models.TextField(blank=True, null=True)
-    assignee_type = models.TextField()
-    assignee_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, blank=True, null=True)
+    assignee_type = models.TextField(choices=AssigneeType)
+    assignee_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='lifecycle_tasks_as_assignee', blank=True, null=True)
     due_date = models.DateField(blank=True, null=True)
     link = models.TextField(blank=True, null=True)
-    status = models.TextField(db_default='open')
+    status = models.TextField(choices=Status, db_default='open')
     note = models.TextField(blank=True, null=True)
-    done_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='done_by', related_name='lifecycletask_done_by_set', blank=True, null=True)
+    done_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='lifecycle_tasks_as_done_by', db_column='done_by', blank=True, null=True)
     done_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'lifecycle_task'
 
+    def __str__(self):
+        return str(self.title)
+
 
 class LifecycleTaskComment(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    task = models.ForeignKey(LifecycleTask, models.DO_NOTHING)
-    author = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
+    task = models.ForeignKey(LifecycleTask, models.DO_NOTHING, related_name='lifecycle_task_comments')
+    author = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='lifecycle_task_comments_as_author')
     body = models.TextField()
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'author__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'lifecycle_task_comment'
 
+    def __str__(self):
+        return f'LifecycleTaskComment {self.id}'
+
 
 class LifecycleTemplate(models.Model):
+    class Kind(models.TextChoices):
+        ONBOARDING = 'onboarding', 'Onboarding'
+        OFFBOARDING = 'offboarding', 'Offboarding'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    kind = models.TextField()
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='lifecycle_templates')
+    kind = models.TextField(choices=Kind)
     name = models.TextField()
     description = models.TextField(blank=True, null=True)
-    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, blank=True, null=True)
-    org_unit = models.ForeignKey('OrgUnit', models.DO_NOTHING, blank=True, null=True)
+    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, related_name='lifecycle_templates', blank=True, null=True)
+    org_unit = models.ForeignKey('OrgUnit', models.DO_NOTHING, related_name='lifecycle_templates', blank=True, null=True)
     is_default = models.BooleanField(db_default=False)
     active = models.BooleanField(db_default=True)
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'lifecycle_template'
         unique_together = (('company', 'kind', 'name'),)
 
+    def __str__(self):
+        return str(self.name)
+
 
 class LifecycleTemplateTask(models.Model):
+    class AssigneeType(models.TextChoices):
+        HR = 'hr', 'HR'
+        MANAGER = 'manager', 'Manager'
+        EMPLOYEE = 'employee', 'Employee'
+        USER = 'user', 'User'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    template = models.ForeignKey(LifecycleTemplate, models.DO_NOTHING)
+    template = models.ForeignKey(LifecycleTemplate, models.DO_NOTHING, related_name='lifecycle_template_tasks')
     sort = models.SmallIntegerField(db_default=0)
     title = models.TextField()
     description = models.TextField(blank=True, null=True)
     department = models.TextField(blank=True, null=True)
-    assignee_type = models.TextField()
-    assignee_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, blank=True, null=True)
+    assignee_type = models.TextField(choices=AssigneeType)
+    assignee_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='lifecycle_template_tasks_as_assignee', blank=True, null=True)
     due_offset_days = models.SmallIntegerField(db_default=0)
     link = models.TextField(blank=True, null=True)
+
+    company_scope = 'template__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'lifecycle_template_task'
 
+    def __str__(self):
+        return str(self.title)
+
 
 class ProbationReview(models.Model):
+    class Recommendation(models.TextChoices):
+        CONFIRM = 'confirm', 'Confirm'
+        EXTEND = 'extend', 'Extend'
+        TERMINATE = 'terminate', 'Terminate'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.OneToOneField('hajiri.Employee', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='probation_reviews')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='probation_reviews')
     probation_end = models.DateField(blank=True, null=True)
     rating = models.SmallIntegerField()
-    recommendation = models.TextField()
+    recommendation = models.TextField(choices=Recommendation)
     extend_to = models.DateField(blank=True, null=True)
     last_working_day = models.DateField(blank=True, null=True)
     comments = models.TextField()
-    submitted_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='submitted_by')
-    status = models.TextField(db_default='pending')
+    submitted_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='probation_reviews_as_submitted_by', db_column='submitted_by')
+    status = models.TextField(choices=Status, db_default='pending')
     decided_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'probation_review'
+        constraints = [models.UniqueConstraint(fields=['employee'], condition=models.Q(status='pending'), name='probation_review_pending_idx')]
+
+    def __str__(self):
+        return f'ProbationReview {self.id}'

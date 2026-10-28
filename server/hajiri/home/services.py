@@ -14,6 +14,9 @@ from hajiri.core.errors import HttpError
 from hajiri.web.format import fmt_date_long, fmt_time, minutes_to_hm
 from hajiri.web.templatetags.hj import live_status
 
+# The tabs' post bodies are built by their forms; kept here under the names the page code and tests used.
+from .forms import ATTENDANCE_NUMBERS, attendance_body, generic_body  # noqa: F401
+
 # ---------------------------------------------------------------- Home: today card
 
 DIRECTION_LABEL = {'in': 'Clocked in', 'out': 'Clocked out'}
@@ -171,7 +174,7 @@ def setup_counts(user: AuthUser) -> dict:
     from hajiri.shifts.services import holidays, shifts
 
     try:
-        from hajiri.payroll.api import list_components
+        from hajiri.payroll.services import list_components
         comps = len(list_components(user)['components'])
     except HttpError:
         comps = 0
@@ -279,68 +282,6 @@ SECURITY_ROLES = [
     ('manager', 'Managers', 'Approve leave and attendance for their team.'),
     ('employee', 'Everyone else', 'Their own attendance, leave and payslips.'),
 ]
-
-
-def js_number(raw: str | None) -> float | int:
-    """Mantine NumberInput onChange -> Number(v): an empty box is 0; whole numbers stay ints."""
-    s = (raw or '').strip()
-    if not s:
-        return 0
-    try:
-        v = float(s)
-    except ValueError:
-        return float('nan')
-    return int(v) if v.is_integer() else v
-
-
-def generic_body(fields: list[dict], stored: dict, post) -> dict:
-    """GenericSettings: the stored value with the edited fields, leaving out '' and missing values."""
-    p = dict(stored or {})
-    for f in fields:
-        k = f['key']
-        # A value the stored setting does not have yet is only sent once its control is changed (the TS state `p`):
-        # an untouched empty box or an unticked switch is left out, so the server applies its default.
-        if f['type'] == 'boolean':
-            on = post.get(k) in ('on', 'true', '1')
-            if on or k in p:
-                p[k] = on
-        elif f['type'] == 'number':
-            raw = (post.get(k) or '').strip()
-            if raw or k in p:
-                p[k] = js_number(raw)
-        else:
-            p[k] = post.get(k, '')
-    return {k: v for k, v in p.items() if v != ''}
-
-
-ATTENDANCE_NUMBERS = ('otMinThresholdMin', 'otRoundingMin', 'nightPremiumRate', 'autoClockOutAfterMin',
-                      'regularisationBackdateDays', 'regularisationMonthlyCap', 'wfhPhotoRetentionDays')
-
-
-def attendance_body(stored: dict, post) -> dict:
-    """AttendanceRules state `p`: the stored policy with every control's value."""
-    p = dict(stored or {})
-    for k in ATTENDANCE_NUMBERS:
-        # Every box is posted by the page; a field left out keeps its stored value. An empty box for a value the stored
-        # policy does not have is left out too, so the server applies its default, as the TS state did.
-        if k in post and ((post.get(k) or '').strip() or k in p):
-            p[k] = js_number(post.get(k))
-    # Switches: a value the stored policy lacks is sent only when it differs from what the page showed (off, except
-    # the photo switch, which shows on unless stored as false).
-    for k, shown in (('requirePreapproval', False), ('nightWindowEnabled', False), ('wfhPhotoRequired', True)):
-        on = post.get(k) in ('on', 'true', '1')
-        if k in p or on != shown:
-            p[k] = on
-    hw = post.get('holidayWork')
-    if hw and ('holidayWork' in p or hw != 'substitute_leave'):  # the select shows substitute_leave when unset
-        p['holidayWork'] = hw
-    pen = dict(p.get('latePenalty') or {'enabled': False, 'lateCount': 3, 'deductionDays': 0.5})
-    pen['enabled'] = post.get('latePenalty.enabled') in ('on', 'true', '1')
-    if pen['enabled']:  # disabled inputs are not posted: keep the stored numbers
-        pen['lateCount'] = js_number(post.get('latePenalty.lateCount'))
-        pen['deductionDays'] = js_number(post.get('latePenalty.deductionDays'))
-    p['latePenalty'] = pen
-    return p
 
 
 def affects_me(user: AuthUser, roles: list[str]) -> bool:

@@ -7,40 +7,54 @@ Route functions take (user, query/body) and return the TS response bodies.
 from __future__ import annotations
 
 import base64
+import csv
+import io
 import re
+from datetime import date
 from decimal import localcontext
 from pathlib import Path
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Case, Exists, F, IntegerField, OuterRef, Q, Subquery, Sum, When
+from django.db.models.fields.json import KT
+from django.db.models.functions import Now
 
 from engines.bs_calendar import BS_MONTH_NAMES_EN, ad_to_bs, bs_month_bounds, fiscal_year, fiscal_year_of
 from engines.payroll import amount_in_words_en, format_npr, optimum_cit
 from engines.payroll.numeric import ENGINE_CONTEXT, D, js_str, to_dp, to_fixed
 
 from hajiri.core.audit import audit
-from hajiri.core.auth import AuthUser, company_id_of, has_module
+from hajiri.core.auth import MODULE_ROLES, AuthUser, company_id_of, has_module
 from hajiri.core.bsdate import bs_label
 from hajiri.core.clock import npt_today
 from hajiri.core.crypto import field_cipher
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
-from hajiri.core.schema import Bool, Enum, Int, IsoDate, Money, Obj, Str, Uuid, parse
+from hajiri.core.scoping import as_uuid
+from hajiri.core.settings_store import get_setting
+from hajiri.core.validation import parse_uuid, plain, validate
+from hajiri.db.models import (Company, Employee, LeaveLedger, PayrollHold, PayrollOpeningBalance, PayrollPeriod, PayrollRun, Payslip,
+                              PayslipLine, SalaryAssignment, SalaryComponent, TaxDeclaration)
 from hajiri.notifications.service import notify, user_id_for_employee
 
-from ._db import fx, q, q1, x
-from .compliance_service import effective_cit
-from .tax_savings import current_fiscal_year_start, estimate_input, fy_label, fy_param
+from .compliance_service import OPENING_AMOUNTS, effective_cit
+from .filters import HoldFilter
+from .numbers import fx, iso
+from .queries import department_on, locked_payslips
+from .salary_sheet import esc
+from .serializers import (AnnualQueryIn, ApplyCitIn, CertificateQueryIn, HoldIn, HoldsQueryIn, LiabilityQueryIn, MonthQueryIn,
+                          OpeningIn, OpeningsQueryIn, ReleaseIn, VarianceQueryIn)
+from .tax_savings import current_fiscal_year_start, estimate_input, fy_label
 
-_AMOUNT = lambda **kw: Money(refine=(lambda v: not v.startswith('-'), 'must not be negative'), **kw)  # noqa: E731
+Status = PayrollHold.Status
+RunStatus = PayrollRun.Status
+PAID_LINE_TYPES = (PayslipLine.Type.EARNING, PayslipLine.Type.DEDUCTION, PayslipLine.Type.EMPLOYER_CONTRIBUTION)
+FUND_CODES = ('SSF_EE', 'SSF_ER', 'PF_EE', 'PF_ER', 'GRATUITY', 'CIT')
 
 
 def npr(v) -> str:
     with localcontext(ENGINE_CONTEXT):
         return format_npr(to_fixed(D(v if v is not None else 0), 2), 'latin')
-
-
-def esc(s) -> str:
-    return re.sub(r'[&<>"]', lambda m: {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[m.group(0)], '' if s is None else str(s))
 
 
 def fy_month(bs_month: int) -> int:
@@ -53,7 +67,7 @@ def _today() -> str:
 
 
 def assert_employee(company_id: str, employee_id: str) -> dict:
-    r = q1('SELECT id, emp_code, name_en FROM employee WHERE id = $1 AND company_id = $2', [employee_id, company_id])
+    r = Employee.objects.for_company(company_id).filter(pk=as_uuid(employee_id)).values('id', 'emp_code', 'name_en').first()
     if not r:
         raise NotFoundError('employee not found')
     return r
@@ -85,41 +99,44 @@ _LINE_KEY = {'SSF_EE': 'ssfEe', 'SSF_ER': 'ssfEr', 'PF_EE': 'pfEe', 'PF_ER': 'pf
 def annual_summaries(company_id: str, fiscal_year_start: int, employee_ids: list[str] | None, *, reveal_ids: bool = False,
                      published_only: bool = False) -> list[dict]:
     fy = fiscal_year(fiscal_year_start)
-    emps = q("""
-        SELECT e.id, e.emp_code, e.name_en, e.designation, e.join_date::text, e.exit_date::text, e.pan_enc, e.ssf_id, e.pf_id, e.cit_id,
-               (SELECT ou.name_en FROM employee_assignment a LEFT JOIN org_unit ou ON ou.id = a.org_unit_id WHERE a.employee_id = e.id ORDER BY lower(a.valid) DESC LIMIT 1) AS department
-          FROM employee e
-         WHERE e.company_id = $1 AND ($2::uuid[] IS NULL OR e.id = ANY($2::uuid[]))
-           AND (EXISTS (SELECT 1 FROM payslip ps JOIN payroll_run r ON r.id = ps.run_id JOIN payroll_period p ON p.id = r.period_id
-                         WHERE ps.employee_id = e.id AND r.locked_at IS NOT NULL AND p.start_ad BETWEEN $3::date AND $4::date)
-                OR EXISTS (SELECT 1 FROM payroll_opening_balance o WHERE o.employee_id = e.id AND o.fiscal_year_start = $5)
-                OR $2::uuid[] IS NOT NULL)
-         ORDER BY e.emp_code""", [str(company_id), employee_ids, fy.start_ad, fy.end_ad, fiscal_year_start])
+    year_slips = locked_payslips().filter(run__company_id=company_id, run__period__start_ad__range=(fy.start_ad, fy.end_ad))
+    emps = Employee.objects.for_company(company_id).order_by('emp_code')
+    if employee_ids is not None:
+        emps = emps.filter(pk__in=[as_uuid(i) for i in employee_ids])
+    else:
+        opened = PayrollOpeningBalance.objects.filter(employee_id=OuterRef('pk'), fiscal_year_start=fiscal_year_start)
+        emps = emps.filter(Exists(year_slips.filter(employee_id=OuterRef('pk'))) | Exists(opened))
+    emps = list(emps.annotate(department=department_on()).values(
+        'id', 'emp_code', 'name_en', 'designation', 'join_date', 'exit_date', 'pan_enc', 'ssf_id', 'pf_id', 'cit_id', 'department'))
     if not emps:
         return []
-    ids = [str(e['id']) for e in emps]
-    slips = q("""
-        SELECT ps.id, ps.employee_id, p.bs_year, p.bs_month, ps.gross::text, ps.taxable::text, ps.tds::text, ps.inputs_snapshot->'result'->'tax' AS tax, p.start_ad::text
-          FROM payslip ps JOIN payroll_run r ON r.id = ps.run_id JOIN payroll_period p ON p.id = r.period_id
-         WHERE ps.employee_id = ANY($1::uuid[]) AND r.company_id = $2 AND r.locked_at IS NOT NULL AND p.start_ad BETWEEN $3::date AND $4::date
-           AND (NOT $5::boolean OR ps.published_at IS NOT NULL)
-         ORDER BY p.start_ad, r.locked_at""", [ids, str(company_id), fy.start_ad, fy.end_ad, published_only])
-    lines = q("""SELECT l.payslip_id, l.component_code, l.type, l.name_en, l.amount::text, l.sort_order FROM payslip_line l
-                  WHERE l.payslip_id = ANY($1::uuid[]) AND l.type IN ('earning', 'deduction', 'employer_contribution')""",
-              [[str(sl['id']) for sl in slips]])
-    taxable_code = {c['code']: c['taxable'] for c in q('SELECT code, taxable FROM salary_component WHERE company_id = $1', [str(company_id)])}
+    ids = [e['id'] for e in emps]
+    slips_qs = year_slips.filter(employee_id__in=ids)
+    if published_only:
+        slips_qs = slips_qs.filter(published_at__isnull=False)
+    slips = list(slips_qs.order_by('run__period__start_ad', 'run__locked_at').values(
+        'id', 'employee_id', 'gross', 'taxable', 'tds', bs_year=F('run__period__bs_year'), bs_month=F('run__period__bs_month'),
+        tax=F('inputs_snapshot__result__tax'), start_ad=F('run__period__start_ad')))
+    lines = (PayslipLine.objects.filter(payslip_id__in=[sl['id'] for sl in slips], type__in=PAID_LINE_TYPES)
+             .values('payslip_id', 'component_code', 'type', 'name_en', 'amount', 'sort_order'))
+    taxable_code = dict(SalaryComponent.objects.for_company(company_id).values_list('code', 'taxable'))
     byslip: dict[str, list[dict]] = {}
+    slips_of: dict[str, list[dict]] = {}
+    for sl in slips:
+        slips_of.setdefault(str(sl['employee_id']), []).append(sl)
     for ln in lines:
         byslip.setdefault(str(ln['payslip_id']), []).append(ln)
-    opening = {str(o['employee_id']): o for o in q("""
-        SELECT employee_id, gross::text, taxable::text, tds_paid::text, retirement_employee::text, retirement_employer::text, source
-          FROM payroll_opening_balance WHERE employee_id = ANY($1::uuid[]) AND fiscal_year_start = $2""", [ids, fiscal_year_start])}
+    opening = {str(o['employee_id']): o for o in PayrollOpeningBalance.objects.filter(employee_id__in=ids, fiscal_year_start=fiscal_year_start)
+               .values('employee_id', 'source', *OPENING_AMOUNTS)}
+    for o in opening.values():
+        for k in OPENING_AMOUNTS:
+            o[k] = str(o[k])
     complete_from = bs_month_bounds(fiscal_year_start + 1, 3)['startAd']
     out = []
     with localcontext(ENGINE_CONTEXT):
         for e in emps:
             eid = str(e['id'])
-            mine = [sl for sl in slips if str(sl['employee_id']) == eid]
+            mine = slips_of.get(eid, [])
             months: dict[str, dict] = {}
             heads: dict[str, dict] = {}
             for sl in mine:
@@ -136,7 +153,7 @@ def annual_summaries(company_id: str, fiscal_year_start: int, employee_ids: list
                     k = _LINE_KEY.get(ln['component_code'])
                     if k:
                         add(k, ln['amount'])
-                    if ln['type'] == 'earning' and ln['component_code'] != 'ROUNDING':
+                    if ln['type'] == PayslipLine.Type.EARNING and ln['component_code'] != 'ROUNDING':
                         h = heads.get(ln['component_code']) or {'code': ln['component_code'], 'name': ln['name_en'], 'amount': D(0),
                                                                 'taxable': taxable_code.get(ln['component_code'], True), 'order': ln['sort_order']}
                         h['amount'] = h['amount'] + D(ln['amount'])
@@ -152,7 +169,7 @@ def annual_summaries(company_id: str, fiscal_year_start: int, employee_ids: list
             ob = opening.get(eid)
             last = mine[-1] if mine else None
             last_tax = (last or {}).get('tax')
-            complete = bool(last) and last['start_ad'] >= complete_from
+            complete = bool(last) and iso(last['start_ad']) >= complete_from
             tax = None
             if last_tax:
                 g = lambda k, d='0': str(last_tax.get(k) if last_tax.get(k) is not None else d)  # noqa: E731
@@ -170,7 +187,7 @@ def annual_summaries(company_id: str, fiscal_year_start: int, employee_ids: list
                 pan = full if reveal_ids else f'*****{full[-4:]}'
             out.append({
                 'employee': {'id': eid, 'code': e['emp_code'], 'name': e['name_en'], 'designation': e['designation'], 'department': e['department'],
-                             'joinDate': e['join_date'], 'exitDate': e['exit_date'], 'pan': pan, 'ssfId': e['ssf_id'], 'pfId': e['pf_id'],
+                             'joinDate': iso(e['join_date']), 'exitDate': iso(e['exit_date']), 'pan': pan, 'ssfId': e['ssf_id'], 'pfId': e['pf_id'],
                              'citId': e['cit_id']},
                 'fiscalYearStart': fiscal_year_start, 'months': month_list,
                 'incomeHeads': [{'code': h['code'], 'name': h['name'], 'amount': to_fixed(h['amount'], 2), 'taxable': h['taxable']}
@@ -208,13 +225,12 @@ def brand_logo() -> str | None:
 
 
 def company_profile(company_id: str) -> dict:
-    c = q1("""SELECT c.name_en, s.value FROM company c LEFT JOIN company_setting s ON s.company_id = c.id AND s.key = 'company.profile'
-               WHERE c.id = $1""", [str(company_id)]) or {}
-    v = c.get('value') or {}
+    name = Company.objects.for_company(company_id).values_list('name_en', flat=True).first()
+    v = get_setting(company_id, 'company.profile', {}) or {}
     logo = v.get('logoDataUrl')
     if not (isinstance(logo, str) and re.fullmatch(r'data:image/(png|jpeg|svg\+xml);base64,[A-Za-z0-9+/=]+', logo)):
         logo = brand_logo()
-    return {'name': v.get('nameEn') or c.get('name_en') or 'Company', 'address': v.get('address'), 'pan': v.get('pan'), 'logo': logo}
+    return {'name': v.get('nameEn') or name or 'Company', 'address': v.get('address'), 'pan': v.get('pan'), 'logo': logo}
 
 
 PAGE_CSS = ('body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:12.5px;color:#17191e;margin:24px auto;max-width:820px;line-height:1.5;padding:0 24px}\n'
@@ -322,73 +338,52 @@ def salary_certificate_html(co: dict, s: dict, current: dict | None, issued_on: 
 
 def last_payslip(employee_id: str, published_only: bool = False) -> dict | None:
     """The latest locked regular payslip (for the salary certificate's current salary)."""
-    ps = q1("""SELECT ps.id, ps.gross::text, ps.net::text, p.bs_year, p.bs_month FROM payslip ps JOIN payroll_run r ON r.id = ps.run_id
-                 JOIN payroll_period p ON p.id = r.period_id
-                WHERE ps.employee_id = $1 AND r.locked_at IS NOT NULL AND r.run_type = 'regular' AND (NOT $2::boolean OR ps.published_at IS NOT NULL)
-                ORDER BY p.start_ad DESC LIMIT 1""", [employee_id, published_only])
+    qs = locked_payslips().filter(employee_id=employee_id, run__run_type=PayrollRun.RunType.REGULAR)
+    if published_only:
+        qs = qs.filter(published_at__isnull=False)
+    ps = (qs.order_by('-run__period__start_ad')
+          .values('id', 'gross', 'net', bs_year=F('run__period__bs_year'), bs_month=F('run__period__bs_month')).first())
     if not ps:
         return None
-    lines = q("""SELECT name_en, amount::text, type FROM payslip_line WHERE payslip_id = $1 AND type IN ('earning', 'deduction')
-                  AND component_code <> 'ROUNDING' ORDER BY sort_order""", [ps['id']])
-    return {'lines': [{'name': ln['name_en'], 'amount': ln['amount'], 'type': ln['type']} for ln in lines], 'gross': ps['gross'], 'net': ps['net'],
-            'label': f"{BS_MONTH_NAMES_EN[ps['bs_month'] - 1]} {ps['bs_year']}"}
+    lines = (PayslipLine.objects.filter(payslip_id=ps['id'], type__in=(PayslipLine.Type.EARNING, PayslipLine.Type.DEDUCTION))
+             .exclude(component_code='ROUNDING').order_by('sort_order').values('name_en', 'amount', 'type'))
+    return {'lines': [{'name': ln['name_en'], 'amount': str(ln['amount']), 'type': ln['type']} for ln in lines], 'gross': str(ps['gross']),
+            'net': str(ps['net']), 'label': f"{BS_MONTH_NAMES_EN[ps['bs_month'] - 1]} {ps['bs_year']}"}
 
 
 # ---------------------------------------------------------------- opening balances
 
-def opening_schema() -> Obj:
-    return Obj({
-        'employeeId': Uuid(), 'fiscalYearStart': fy_param(),
-        'gross': _AMOUNT(default='0'), 'taxable': _AMOUNT(default='0'), 'tdsPaid': _AMOUNT(default='0'),
-        'retirementEmployee': _AMOUNT(default='0'), 'retirementEmployer': _AMOUNT(default='0'),
-        'festivalPaid': Bool(default=False), 'months': Int(min=0, max=12, default=0),
-        'source': Enum(['previous_employer', 'go_live', 'other'], default='previous_employer'),
-        'note': Str(trim=True, max=500, nullish=True),
-    })
-
-
-_OPENING_REFINE = 'taxable income cannot be more than gross plus the employer contribution'
-
-
 def parse_opening(body: dict) -> dict:
-    from hajiri.core.errors import ValidationError
-    b = parse(opening_schema(), body)
-    with localcontext(ENGINE_CONTEXT):
-        if not D(b['taxable']) <= D(b['gross']) + D(b['retirementEmployer']):
-            raise ValidationError([{'path': 'taxable', 'message': _OPENING_REFINE}])
-    return b
+    return plain(validate(OpeningIn, body))
 
 
 def save_opening(company_id: str, actor_id: str, b: dict) -> None:
-    x("""INSERT INTO payroll_opening_balance (company_id, employee_id, fiscal_year_start, gross, taxable, tds_paid, retirement_employee, retirement_employer,
-                                             festival_paid, months, source, note, updated_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-         ON CONFLICT (employee_id, fiscal_year_start) DO UPDATE SET gross = EXCLUDED.gross, taxable = EXCLUDED.taxable, tds_paid = EXCLUDED.tds_paid,
-           retirement_employee = EXCLUDED.retirement_employee, retirement_employer = EXCLUDED.retirement_employer, festival_paid = EXCLUDED.festival_paid,
-           months = EXCLUDED.months, source = EXCLUDED.source, note = EXCLUDED.note, updated_by = EXCLUDED.updated_by, updated_at = now()""",
-      [str(company_id), b['employeeId'], b['fiscalYearStart'], b['gross'], b['taxable'], b['tdsPaid'], b['retirementEmployee'],
-       b['retirementEmployer'], b['festivalPaid'], b['months'], b['source'], b.get('note'), actor_id])
+    PayrollOpeningBalance.objects.update_or_create(
+        employee_id=b['employeeId'], fiscal_year_start=b['fiscalYearStart'],
+        defaults={'company_id': company_id, 'gross': b['gross'], 'taxable': b['taxable'], 'tds_paid': b['tdsPaid'],
+                  'retirement_employee': b['retirementEmployee'], 'retirement_employer': b['retirementEmployer'],
+                  'festival_paid': b['festivalPaid'], 'months': b['months'], 'source': b['source'], 'note': b.get('note'),
+                  'updated_by_id': actor_id, 'updated_at': Now()})
     audit('upsert', 'payroll_opening_balance', actor_id=actor_id, row_id=b['employeeId'],
           after={'fiscalYearStart': b['fiscalYearStart'], 'gross': b['gross'], 'taxable': b['taxable'], 'tdsPaid': b['tdsPaid']})
 
 
 def _require_hr(user: AuthUser) -> None:
     if not has_module(user, 'payroll'):
-        from hajiri.core.auth import MODULE_ROLES
         raise ForbiddenError(f"requires role {' or '.join(MODULE_ROLES['payroll'])}")
 
 
 def list_openings(user: AuthUser, query: dict) -> dict:
     _require_hr(user)
-    qy = parse(Obj({'fiscalYearStart': fy_param(optional=True)}), query)
+    qy = validate(OpeningsQueryIn, query)
     fy = qy.get('fiscalYearStart') or current_fiscal_year_start()
-    r = q("""SELECT o.id, o.employee_id, e.emp_code, e.name_en, o.fiscal_year_start, o.gross::text, o.taxable::text, o.tds_paid::text,
-                    o.retirement_employee::text, o.retirement_employer::text, o.festival_paid, o.months, o.source, o.note, o.updated_at,
-                    u.name AS updated_by_name
-               FROM payroll_opening_balance o JOIN employee e ON e.id = o.employee_id LEFT JOIN app_user u ON u.id = o.updated_by
-              WHERE o.company_id = $1 AND o.fiscal_year_start = $2 ORDER BY e.emp_code""", [company_id_of(user), fy])
+    r = list(PayrollOpeningBalance.objects.for_company(company_id_of(user)).filter(fiscal_year_start=fy).order_by('employee__emp_code')
+             .values('id', 'employee_id', 'fiscal_year_start', *OPENING_AMOUNTS, 'festival_paid', 'months', 'source', 'note', 'updated_at',
+                     emp_code=F('employee__emp_code'), name_en=F('employee__name_en'), updated_by_name=F('updated_by__name')))
     for o in r:
         o['id'], o['employee_id'] = str(o['id']), str(o['employee_id'])
+        for k in OPENING_AMOUNTS:
+            o[k] = str(o[k])
     return {'fiscalYearStart': fy, 'balances': r}
 
 
@@ -405,10 +400,12 @@ def put_opening(user: AuthUser, body: dict) -> dict:
 @transaction.atomic
 def delete_opening(user: AuthUser, id_: str) -> dict:
     _require_hr(user)
-    oid = parse(Uuid(), id_)
-    d = q1('DELETE FROM payroll_opening_balance WHERE id = $1 AND company_id = $2 RETURNING employee_id, fiscal_year_start', [oid, company_id_of(user)])
+    oid = parse_uuid(id_)
+    d = (PayrollOpeningBalance.objects.for_company(company_id_of(user)).select_for_update().filter(pk=oid)
+         .values('employee_id', 'fiscal_year_start').first())
     if not d:
         raise NotFoundError('opening balance not found')
+    PayrollOpeningBalance.objects.filter(pk=oid).delete()
     audit('delete', 'payroll_opening_balance', actor_id=user.id, row_id=oid,
           before={'employee_id': str(d['employee_id']), 'fiscal_year_start': d['fiscal_year_start']})
     return {'ok': True}
@@ -417,12 +414,11 @@ def delete_opening(user: AuthUser, id_: str) -> dict:
 def import_openings(user: AuthUser, text: str | None) -> dict:
     """CSV: emp_code, fiscal_year_start, gross, taxable, tds_paid, ... All rows or none. Raises BadRequestError with
     details {errors: [{row, message}]} when any row is wrong."""
-    from hajiri.employees.service import parse_csv
     from hajiri.core.errors import ValidationError
     _require_hr(user)
     if not text:
         raise BadRequestError('send CSV as text/csv body or {"csv": "..."}')
-    rws = parse_csv(text.lstrip('﻿'))
+    rws = list(csv.reader(io.StringIO(text.lstrip('﻿'))))
     if len(rws) < 2:
         raise BadRequestError('CSV needs a header row and at least one data row')
     if len(rws) > 5001:
@@ -432,7 +428,7 @@ def import_openings(user: AuthUser, text: str | None) -> dict:
         if h not in header:
             raise BadRequestError(f'missing column {h}')
     company_id = company_id_of(user)
-    by_code = {c['emp_code'].lower(): str(c['id']) for c in q('SELECT id, emp_code FROM employee WHERE company_id = $1', [company_id])}
+    by_code = {code.lower(): str(eid) for eid, code in Employee.objects.for_company(company_id).values_list('id', 'emp_code')}
     errors: list[dict] = []
     valid: list[dict] = []
     for i in range(1, len(rws)):
@@ -446,17 +442,9 @@ def import_openings(user: AuthUser, text: str | None) -> dict:
 
         def num(k):
             return str(rec[k]).replace(',', '') if rec.get(k) else '0'
-        months_raw = rec.get('months')
-        months: object = 0
-        if months_raw:
-            try:
-                fm = float(months_raw)
-                months = int(fm) if fm.is_integer() else fm
-            except ValueError:
-                months = float('nan')
         candidate = {'employeeId': employee_id, 'fiscalYearStart': rec.get('fiscal_year_start'), 'gross': num('gross'), 'taxable': num('taxable'),
                      'tdsPaid': num('tds_paid'), 'retirementEmployee': num('retirement_employee'), 'retirementEmployer': num('retirement_employer'),
-                     'festivalPaid': str(rec.get('festival_paid') or '').lower() in ('true', '1', 'yes'), 'months': months}
+                     'festivalPaid': str(rec.get('festival_paid') or '').lower() in ('true', '1', 'yes'), 'months': rec.get('months') or 0}
         if rec.get('source'):
             candidate['source'] = rec['source']
         if rec.get('note'):
@@ -493,16 +481,19 @@ def optimum_all(user: AuthUser) -> dict:
     _require_hr(user)
     company_id = company_id_of(user)
     fy = current_fiscal_year_start()
-    emps = q("""SELECT e.id, e.emp_code, e.name_en FROM employee e WHERE e.company_id = $1 AND e.status = 'active' AND (e.exit_date IS NULL OR e.exit_date >= $2::date)
-                  AND EXISTS (SELECT 1 FROM salary_assignment a WHERE a.employee_id = e.id) ORDER BY e.emp_code LIMIT 2000""", [company_id, _today()])
-    out = [{'employeeId': str(e['id']), 'empCode': e['emp_code'], 'name': e['name_en'], **optimum_for(company_id, str(e['id']), fy)} for e in emps]
+    today = _today()
+    emps = (Employee.objects.for_company(company_id)
+            .filter(Q(exit_date__isnull=True) | Q(exit_date__gte=today), Exists(SalaryAssignment.objects.filter(employee_id=OuterRef('pk'))),
+                    status=Employee.Status.ACTIVE)
+            .order_by('emp_code').values_list('id', 'emp_code', 'name_en')[:2000])
+    out = [{'employeeId': str(eid), 'empCode': code, 'name': name, **optimum_for(company_id, str(eid), fy)} for eid, code, name in emps]
     return {'fiscalYearStart': fy, 'employees': out}
 
 
 def apply_cit(user: AuthUser, body: dict) -> dict:
     """HR applies a monthly CIT amount from a month of the current fiscal year; earlier months keep the amount they had."""
     _require_hr(user)
-    b = parse(Obj({'employeeId': Uuid(), 'monthlyCit': _AMOUNT(), 'fromBsMonth': Int(min=1, max=12, optional=True)}), body)
+    b = plain(validate(ApplyCitIn, body))
     company_id = company_id_of(user)
     emp = assert_employee(company_id, b['employeeId'])
     fy = current_fiscal_year_start()
@@ -511,15 +502,15 @@ def apply_cit(user: AuthUser, body: dict) -> dict:
     if from_index < fy_month(today.month):
         raise BadRequestError('choose this month or a later month of the fiscal year')
     with transaction.atomic():
-        cur = q1("""SELECT cit_monthly::text, cit_from_month, cit_prev_monthly::text FROM tax_declaration
-                     WHERE employee_id = $1 AND fiscal_year_start = $2 AND status = 'verified' FOR UPDATE""", [b['employeeId'], fy])
+        cur = (TaxDeclaration.objects.select_for_update()
+               .filter(employee_id=b['employeeId'], fiscal_year_start=fy, status=TaxDeclaration.Status.VERIFIED)
+               .values('cit_monthly', 'cit_from_month', 'cit_prev_monthly').first())
         # The amount in force just before the new start month.
         before = effective_cit(cur, max(1, from_index - 1)) if cur else '0.00'
-        x("""INSERT INTO tax_declaration (employee_id, fiscal_year_start, cit_monthly, cit_from_month, cit_prev_monthly, status, verified_by, verified_at)
-             VALUES ($1, $2, $3, $4, $5, 'verified', $6, now())
-             ON CONFLICT (employee_id, fiscal_year_start) DO UPDATE SET cit_monthly = EXCLUDED.cit_monthly, cit_from_month = EXCLUDED.cit_from_month,
-               cit_prev_monthly = EXCLUDED.cit_prev_monthly, status = 'verified', verified_by = EXCLUDED.verified_by, verified_at = now(), updated_at = now()""",
-          [b['employeeId'], fy, b['monthlyCit'], None if from_index == 1 else from_index, before, user.id])
+        TaxDeclaration.objects.update_or_create(
+            employee_id=b['employeeId'], fiscal_year_start=fy,
+            defaults={'cit_monthly': b['monthlyCit'], 'cit_from_month': None if from_index == 1 else from_index, 'cit_prev_monthly': before,
+                      'status': TaxDeclaration.Status.VERIFIED, 'verified_by_id': user.id, 'verified_at': Now(), 'updated_at': Now()})
         audit('apply_cit', 'tax_declaration', actor_id=user.id, row_id=b['employeeId'],
               after={'fiscalYearStart': fy, 'monthlyCit': b['monthlyCit'], 'fromMonthIndex': from_index, 'before': before})
         month_name = BS_MONTH_NAMES_EN[(from_index + 2) % 12]
@@ -532,21 +523,17 @@ def apply_cit(user: AuthUser, body: dict) -> dict:
 
 # ---------------------------------------------------------------- held pay
 
-HOLD_STATUS = ('held', 'releasing', 'released', 'cancelled', 'open')
-
-
 def list_holds(user: AuthUser, query: dict) -> dict:
     _require_hr(user)
-    qy = parse(Obj({'status': Enum(HOLD_STATUS, default='open')}), query)
-    r = q("""
-        SELECT h.id, h.employee_id, e.emp_code, e.name_en, h.run_id, r.run_type, r.status AS run_status, p.bs_year, p.bs_month, h.amount::text, h.reason,
-               h.status, h.release_mode, h.release_run_id, rp.bs_year AS release_bs_year, rp.bs_month AS release_bs_month, h.release_note, h.held_at,
-               hb.name AS held_by_name, h.released_at
-          FROM payroll_hold h JOIN employee e ON e.id = h.employee_id JOIN payroll_run r ON r.id = h.run_id JOIN payroll_period p ON p.id = r.period_id
-          LEFT JOIN payroll_run rr ON rr.id = h.release_run_id LEFT JOIN payroll_period rp ON rp.id = rr.period_id LEFT JOIN app_user hb ON hb.id = h.held_by
-         WHERE h.company_id = $1 AND ($2 = 'open' AND h.status IN ('held', 'releasing') OR h.status = $2)
-         ORDER BY h.held_at DESC LIMIT 500""", [company_id_of(user), qy['status']])
+    qy = validate(HoldsQueryIn, query)
+    r = list(HoldFilter(qy, queryset=holds(company_id_of(user))).qs.order_by('-held_at')
+             .values('id', 'employee_id', 'run_id', 'amount', 'reason', 'status', 'release_mode', 'release_run_id', 'release_note', 'held_at',
+                     'released_at', emp_code=F('employee__emp_code'), name_en=F('employee__name_en'), run_type=F('run__run_type'),
+                     run_status=F('run__status'), bs_year=F('run__period__bs_year'), bs_month=F('run__period__bs_month'),
+                     release_bs_year=F('release_run__period__bs_year'), release_bs_month=F('release_run__period__bs_month'),
+                     held_by_name=F('held_by__name'))[:500])
     for h in r:
+        h['amount'] = str(h['amount'])
         for k in ('id', 'employee_id', 'run_id', 'release_run_id'):
             if h[k] is not None:
                 h[k] = str(h[k])
@@ -554,85 +541,85 @@ def list_holds(user: AuthUser, query: dict) -> dict:
 
 
 def hold_pay(user: AuthUser, run_id: str, body: dict) -> dict:
-    from .service import get_run
+    from .runs import get_run
     _require_hr(user)
-    rid = parse(Uuid(), run_id)
-    b = parse(Obj({'employeeId': Uuid(), 'reason': Str(trim=True, min=3, max=500)}), body)
+    rid = parse_uuid(run_id)
+    b = plain(validate(HoldIn, body))
     company_id = company_id_of(user)
     with transaction.atomic():
         run = get_run(company_id, rid)
-        if run['status'] not in ('computed', 'reviewed', 'approved'):
-            raise ConflictError('this run is locked and paid; pay can only be held before the run is locked' if run['status'] == 'locked'
+        if run['status'] not in (RunStatus.COMPUTED, RunStatus.REVIEWED, RunStatus.APPROVED):
+            raise ConflictError('this run is locked and paid; pay can only be held before the run is locked' if run['status'] == RunStatus.LOCKED
                                 else "calculate the run before holding anyone's pay")
         if b['employeeId'] == user.employee_id:
             raise ForbiddenError('someone else must hold or release your own pay')
-        ps = q1('SELECT net::text FROM payslip WHERE run_id = $1 AND employee_id = $2', [rid, b['employeeId']])
-        if not ps:
+        net = Payslip.objects.filter(run_id=rid, employee_id=b['employeeId']).values_list('net', flat=True).first()
+        if net is None:
             raise NotFoundError('this employee has no payslip in the run')
-        if not D(ps['net']) > 0:
+        if not D(net) > 0:
             raise ConflictError('there is no net pay to hold')
-        existing = q1('SELECT id, status FROM payroll_hold WHERE run_id = $1 AND employee_id = $2', [rid, b['employeeId']])
-        if existing and existing['status'] != 'cancelled':
+        existing = holds(company_id).select_for_update().filter(run_id=rid, employee_id=b['employeeId']).values_list('status', flat=True).first()
+        if existing and existing != Status.CANCELLED:
             raise ConflictError('pay is already held for this employee in this run')
-        row = q1("""INSERT INTO payroll_hold (company_id, employee_id, run_id, amount, reason, held_by) VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (run_id, employee_id) DO UPDATE SET amount = EXCLUDED.amount, reason = EXCLUDED.reason, held_by = EXCLUDED.held_by, held_at = now(),
-                      status = 'held', release_mode = NULL, release_run_id = NULL, release_note = NULL, released_by = NULL, released_at = NULL
-                    RETURNING id""", [company_id, b['employeeId'], rid, ps['net'], b['reason'], user.id])
-        audit('hold', 'payroll_hold', actor_id=user.id, row_id=str(row['id']),
-              after={'runId': rid, 'employeeId': b['employeeId'], 'amount': ps['net'], 'reason': b['reason']})
-    return {'id': str(row['id']), 'amount': ps['net']}
+        row, _ = PayrollHold.objects.update_or_create(
+            run_id=rid, employee_id=b['employeeId'],
+            defaults={'company_id': company_id, 'amount': net, 'reason': b['reason'], 'held_by_id': user.id, 'held_at': Now(),
+                      'status': Status.HELD, 'release_mode': None, 'release_run': None, 'release_note': None, 'released_by': None,
+                      'released_at': None})
+        audit('hold', 'payroll_hold', actor_id=user.id, row_id=str(row.pk),
+              after={'runId': rid, 'employeeId': b['employeeId'], 'amount': str(net), 'reason': b['reason']})
+    return {'id': str(row.pk), 'amount': str(net)}
 
 
 def release_hold(user: AuthUser, hold_id: str, body: dict) -> dict:
     """Release held pay: through the next pay run as a non-taxable line, or record that it was paid outside payroll."""
-    from .service import get_run
+    from .runs import get_run
     _require_hr(user)
-    hid = parse(Uuid(), hold_id)
-    b = parse(Obj({'mode': Enum(['payroll', 'outside']), 'note': Str(trim=True, max=500, optional=True)}), body)
+    hid = parse_uuid(hold_id)
+    b = plain(validate(ReleaseIn, body))
     company_id = company_id_of(user)
     with transaction.atomic():
-        hold = q1('SELECT status, run_id, employee_id, amount::text FROM payroll_hold WHERE id = $1 AND company_id = $2', [hid, company_id])
+        hold = holds(company_id).select_for_update().filter(pk=hid).values('status', 'run_id', 'employee_id', 'amount').first()
         if not hold:
             raise NotFoundError('hold not found')
-        if hold['status'] != 'held':
+        if hold['status'] != Status.HELD:
             raise ConflictError(f"this pay is already {hold['status']}")
         if str(hold['employee_id']) == user.employee_id:
             raise ForbiddenError('someone else must hold or release your own pay')
         run = get_run(company_id, str(hold['run_id']))
         if not run['locked_at']:
             raise ConflictError('lock the pay run first, or cancel the hold to pay normally in this run')
-        if b['mode'] == 'outside':
-            x("""UPDATE payroll_hold SET status = 'released', release_mode = 'outside', release_note = $2, released_by = $3, released_at = now()
-                  WHERE id = $1""", [hid, b.get('note'), user.id])
-        else:
-            x("UPDATE payroll_hold SET status = 'releasing', release_mode = 'payroll', release_note = $2, released_by = $3 WHERE id = $1",
-              [hid, b.get('note'), user.id])
-        audit('release_hold', 'payroll_hold', actor_id=user.id, row_id=hid, after={'mode': b['mode'], 'amount': hold['amount']})
+        outside = b['mode'] == PayrollHold.ReleaseMode.OUTSIDE
+        holds(company_id).filter(pk=hid).update(
+            status=Status.RELEASED if outside else Status.RELEASING, release_mode=b['mode'], release_note=b.get('note'),
+            released_by_id=user.id, **({'released_at': Now()} if outside else {}))
+        amount = str(hold['amount'])
+        audit('release_hold', 'payroll_hold', actor_id=user.id, row_id=hid, after={'mode': b['mode'], 'amount': amount})
         emp = str(hold['employee_id'])
         notify(company_id=company_id, user_id=user_id_for_employee(emp), employee_id=emp, template='payroll.hold_released',
                title='Held pay released',
-               body=(f"NPR {npr(hold['amount'])} that was on hold will be paid with your next salary." if b['mode'] == 'payroll'
-                     else f"NPR {npr(hold['amount'])} that was on hold has been paid."),
+               body=(f'NPR {npr(amount)} that was on hold has been paid.' if outside
+                     else f'NPR {npr(amount)} that was on hold will be paid with your next salary.'),
                payload={'holdId': hid}, channels=('push',))
     return {'ok': True}
 
 
 def cancel_hold(user: AuthUser, hold_id: str) -> dict:
     """Undo a hold (made by mistake) while its run is not locked: the employee is paid normally in that run."""
-    from .service import get_run
+    from .runs import get_run
     _require_hr(user)
-    hid = parse(Uuid(), hold_id)
+    hid = parse_uuid(hold_id)
     company_id = company_id_of(user)
     with transaction.atomic():
-        h = q1('SELECT status, run_id FROM payroll_hold WHERE id = $1 AND company_id = $2', [hid, company_id])
+        h = holds(company_id).select_for_update().filter(pk=hid).values('status', 'run_id').first()
         if not h:
             raise NotFoundError('hold not found')
-        if h['status'] != 'held':
+        if h['status'] != Status.HELD:
             raise ConflictError(f"this pay is already {h['status']}")
         run = get_run(company_id, str(h['run_id']))
         if run['locked_at']:
             raise ConflictError('the run is locked: release the pay instead')
-        x("UPDATE payroll_hold SET status = 'cancelled' WHERE id = $1", [hid])
+        holds(company_id).filter(pk=hid).update(status=Status.CANCELLED)
         audit('cancel_hold', 'payroll_hold', actor_id=user.id, row_id=hid)
     return {'ok': True}
 
@@ -641,10 +628,9 @@ def cancel_hold(user: AuthUser, hold_id: str) -> dict:
 
 def certificate(user: AuthUser, employee: str, query: dict) -> str:
     """The certificate page HTML (tax or salary). People outside payroll only see pay HR has published."""
-    qy = parse(Obj({'fiscalYearStart': fy_param(optional=True), 'kind': Enum(['tax', 'salary'], default='tax'),
-                    'purpose': Str(trim=True, max=120, optional=True)}), query)
+    qy = validate(CertificateQueryIn, query)
     company_id = company_id_of(user)
-    employee_id = user.employee_id if employee == 'me' else parse(Uuid(), employee)
+    employee_id = user.employee_id if employee == 'me' else parse_uuid(employee)
     if not employee_id:
         raise BadRequestError('this account is not linked to an employee')
     own = employee_id == user.employee_id
@@ -677,13 +663,12 @@ ANNUAL_COLUMNS = [
     {'key': 'annualTax', 'header': 'Tax liability'}, {'key': 'sst', 'header': 'SST deducted'}, {'key': 'tds', 'header': 'TDS deducted'},
     {'key': 'balance', 'header': 'Balance'}, {'key': 'complete', 'header': 'Year complete'}, {'key': 'opening', 'header': 'Opening balance'},
 ]
-FORMAT = lambda: Enum(['json', 'csv'], default='json')  # noqa: E731
 
 
 def annual_tax(user: AuthUser, query: dict) -> dict:
     """{'format', 'filename', 'columns', 'rows'}: JSON answers {columns, rows}, CSV a download."""
     _require_hr(user)
-    qy = parse(Obj({'fiscalYearStart': fy_param(optional=True), 'format': FORMAT()}), query)
+    qy = validate(AnnualQueryIn, query)
     fy = qy.get('fiscalYearStart') or current_fiscal_year_start()
     lst = annual_summaries(company_id_of(user), fy, None, reveal_ids=qy['format'] == 'csv')
     if qy['format'] == 'csv':
@@ -698,7 +683,7 @@ def annual_tax(user: AuthUser, query: dict) -> dict:
 
 
 def _month_query(query: dict) -> dict:
-    return parse(Obj({'bsYear': Int(min=2070, max=2200, coerce=True), 'bsMonth': Int(min=1, max=12, coerce=True), 'format': FORMAT()}), query)
+    return validate(MonthQueryIn, query)
 
 
 TAX_DEPOSIT_COLUMNS = [
@@ -713,10 +698,9 @@ def tax_deposit(user: AuthUser, query: dict) -> dict:
     _require_hr(user)
     qy = _month_query(query)
     company_id = company_id_of(user)
-    r = q("""SELECT ps.employee_id, e.emp_code, e.name_en, e.pan_enc, ps.taxable::text, ps.tds::text, ps.inputs_snapshot->'result'->'tax' AS tax
-               FROM payslip ps JOIN employee e ON e.id = ps.employee_id JOIN payroll_run r ON r.id = ps.run_id JOIN payroll_period p ON p.id = r.period_id
-              WHERE r.company_id = $1 AND p.bs_year = $2 AND p.bs_month = $3 AND r.locked_at IS NOT NULL ORDER BY e.emp_code, r.locked_at""",
-          [company_id, qy['bsYear'], qy['bsMonth']])
+    r = (_month_slips(company_id, qy).order_by('employee__emp_code', 'run__locked_at')
+         .values('employee_id', 'taxable', 'tds', emp_code=F('employee__emp_code'), name_en=F('employee__name_en'),
+                 pan_enc=F('employee__pan_enc'), tax=F('inputs_snapshot__result__tax')))
     by: dict[str, dict] = {}
     with localcontext(ENGINE_CONTEXT):
         for row in r:
@@ -749,17 +733,14 @@ def retirement_deposit(user: AuthUser, query: dict) -> dict:
     """SSF, PF, gratuity and CIT per employee in a BS month, to deposit with each fund."""
     _require_hr(user)
     qy = _month_query(query)
-    r = q("""SELECT e.emp_code, e.name_en, e.ssf_id, e.pf_id, e.cit_id, l.component_code AS code, sum(l.amount)::text AS amount
-               FROM payslip ps JOIN employee e ON e.id = ps.employee_id JOIN payroll_run r ON r.id = ps.run_id JOIN payroll_period p ON p.id = r.period_id
-               JOIN payslip_line l ON l.payslip_id = ps.id AND l.component_code IN ('SSF_EE', 'SSF_ER', 'PF_EE', 'PF_ER', 'GRATUITY', 'CIT')
-              WHERE r.company_id = $1 AND p.bs_year = $2 AND p.bs_month = $3 AND r.locked_at IS NOT NULL
-              GROUP BY e.emp_code, e.name_en, e.ssf_id, e.pf_id, e.cit_id, l.component_code ORDER BY e.emp_code""",
-          [company_id_of(user), qy['bsYear'], qy['bsMonth']])
+    r = (PayslipLine.objects.filter(payslip__in=_month_slips(company_id_of(user), qy), component_code__in=FUND_CODES)
+         .values(emp_code=F('payslip__employee__emp_code'), employee_name=F('payslip__employee__name_en'), ssf_id=F('payslip__employee__ssf_id'),
+                 pf_id=F('payslip__employee__pf_id'), cit_id=F('payslip__employee__cit_id'), code=F('component_code'))
+         .annotate(amount=Sum('amount')).order_by('emp_code'))
     by: dict[str, dict] = {}
     for row in r:
-        cur = by.get(row['emp_code']) or {'empCode': row['emp_code'], 'name': row['name_en'], 'ssfId': row['ssf_id'] or '', 'pfId': row['pf_id'] or '',
-                                          'citId': row['cit_id'] or '', 'SSF_EE': '0.00', 'SSF_ER': '0.00', 'PF_EE': '0.00', 'PF_ER': '0.00',
-                                          'GRATUITY': '0.00', 'CIT': '0.00'}
+        cur = by.get(row['emp_code']) or {'empCode': row['emp_code'], 'name': row['employee_name'], 'ssfId': row['ssf_id'] or '', 'pfId': row['pf_id'] or '',
+                                          'citId': row['cit_id'] or '', **{code: '0.00' for code in FUND_CODES}}
         cur[row['code']] = fx(D(cur.get(row['code']) or 0) + D(row['amount']))
         by[row['emp_code']] = cur
     out = [{**v, 'ssfTotal': fx(D(v['SSF_EE']) + D(v['SSF_ER'])), 'pfTotal': fx(D(v['PF_EE']) + D(v['PF_ER']) + D(v['GRATUITY']))} for v in by.values()]
@@ -775,23 +756,25 @@ VARIANCE_COLUMNS = [
 
 def pay_variance(user: AuthUser, query: dict) -> dict:
     """Per employee: this regular run's net against the previous locked regular run, with the reasons it changed."""
-    from .service import get_run
+    from .runs import get_run, previous_regular_run
     _require_hr(user)
-    qy = parse(Obj({'runId': Uuid(), 'format': FORMAT()}), query)
+    qy = plain(validate(VarianceQueryIn, query))
     company_id = company_id_of(user)
     run = get_run(company_id, qy['runId'])
-    if run['run_type'] != 'regular':
+    if run['run_type'] != PayrollRun.RunType.REGULAR:
         raise BadRequestError('pay variance compares regular monthly runs')
-    prev_run = q1("""SELECT r.id, p.bs_year, p.bs_month FROM payroll_run r JOIN payroll_period p ON p.id = r.period_id
-                      WHERE r.company_id = $1 AND r.run_type = 'regular' AND r.locked_at IS NOT NULL AND r.id <> $2
-                        AND (p.bs_year, p.bs_month) < (SELECT bs_year, bs_month FROM payroll_period WHERE id = $3)
-                      ORDER BY p.bs_year DESC, p.bs_month DESC LIMIT 1""", [company_id, run['id'], run['period_id']])
+    prev_run = (previous_regular_run(company_id, run).order_by('-created_at')
+                .values('id', bs_year=F('period__bs_year'), bs_month=F('period__bs_month')).first())
 
     def load(rid):
-        return q("""SELECT ps.employee_id, e.emp_code, e.name_en, ps.net::text, ps.gross::text, ps.tds::text, ps.lop_days::text, ps.ot_hours::text,
-                           ps.inputs_snapshot->'input'->'baseAmounts'->>'BASIC' AS basic,
-                           jsonb_array_length(coalesce(ps.inputs_snapshot->'input'->'inputs', '[]'::jsonb)) AS inputs, ps.flags
-                      FROM payslip ps JOIN employee e ON e.id = ps.employee_id WHERE ps.run_id = $1""", [str(rid)])
+        rows = list(Payslip.objects.filter(run_id=rid).values(
+            'employee_id', 'net', 'gross', 'tds', 'lop_days', 'ot_hours', 'flags', emp_code=F('employee__emp_code'),
+            name_en=F('employee__name_en'), basic=KT('inputs_snapshot__input__baseAmounts__BASIC'),
+            one_offs=F('inputs_snapshot__input__inputs')))
+        for sl in rows:
+            sl['net'] = str(sl['net'])
+            sl['inputs'] = len(sl.pop('one_offs') or [])
+        return rows
     cur = load(run['id'])
     prev = {str(sl['employee_id']): sl for sl in load(prev_run['id'])} if prev_run else {}
     seen: set[str] = set()
@@ -842,22 +825,22 @@ LIABILITY_COLUMNS = [
 def leave_liability(user: AuthUser, query: dict) -> dict:
     """What the encashable leave balances are worth as of a date: balance × last basic ÷ the encashment divisor."""
     _require_hr(user)
-    qy = parse(Obj({'asOf': IsoDate(optional=True), 'format': FORMAT()}), query)
+    qy = validate(LiabilityQueryIn, query)
     company_id = company_id_of(user)
     as_of = qy.get('asOf') or _today()
-    pol = q1("SELECT value FROM company_setting WHERE company_id = $1 AND key = 'payroll.policy'", [company_id])
+    pol = get_setting(company_id, 'payroll.policy', {}) or {}
     bs = ad_to_bs(as_of)
-    divisor = 30 if ((pol or {}).get('value') or {}).get('encashmentDivisor') == 'fixed_30' else bs_month_bounds(bs.year, bs.month)['days']
-    r = q("""
-        SELECT e.id AS employee_id, e.emp_code, e.name_en,
-               (SELECT ou.name_en FROM employee_assignment a LEFT JOIN org_unit ou ON ou.id = a.org_unit_id WHERE a.employee_id = e.id AND a.valid @> $2::date LIMIT 1) AS department,
-               lt.code AS leave_code, lt.name_en AS leave_name, sum(ll.delta_days)::text AS balance,
-               (SELECT sa.base_amounts->>'BASIC' FROM salary_assignment sa WHERE sa.employee_id = e.id AND sa.valid @> $2::date LIMIT 1) AS basic
-          FROM employee e JOIN leave_ledger ll ON ll.employee_id = e.id AND ll.effective_date <= $2::date
-          JOIN leave_type lt ON lt.id = ll.leave_type_id AND lt.encashable
-         WHERE e.company_id = $1 AND e.status = 'active' AND (e.exit_date IS NULL OR e.exit_date >= $2::date)
-         GROUP BY e.id, e.emp_code, e.name_en, lt.code, lt.name_en, lt.sort_order HAVING sum(ll.delta_days) > 0 ORDER BY e.emp_code, lt.sort_order""",
-          [company_id, as_of])
+    divisor = 30 if pol.get('encashmentDivisor') == 'fixed_30' else bs_month_bounds(bs.year, bs.month)['days']
+    on = date.fromisoformat(as_of)
+    basic = SalaryAssignment.objects.filter(employee_id=OuterRef('employee_id'), valid__contains=on).values(b=KT('base_amounts__BASIC'))[:1]
+    r = (LeaveLedger.objects.for_company(company_id)
+         .filter(Q(employee__exit_date__isnull=True) | Q(employee__exit_date__gte=as_of), effective_date__lte=as_of,
+                 leave_type__encashable=True, employee__status=Employee.Status.ACTIVE)
+         .values('employee_id', emp_code=F('employee__emp_code'), name_en=F('employee__name_en'), leave_code=F('leave_type__code'),
+                 leave_name=F('leave_type__name_en'), leave_order=F('leave_type__sort_order'))
+         .annotate(balance=Sum('delta_days')).filter(balance__gt=0)
+         .annotate(department=department_on(on, 'employee_id'), basic=Subquery(basic))
+         .order_by('emp_code', 'leave_order'))
     out = []
     with localcontext(ENGINE_CONTEXT):
         for row in r:
@@ -882,10 +865,10 @@ def leave_liability(user: AuthUser, query: dict) -> dict:
 def compliance_years(user: AuthUser) -> dict:
     """Fiscal years with data, for the pickers."""
     _require_hr(user)
-    r = q("""SELECT DISTINCT CASE WHEN p.bs_month >= 4 THEN p.bs_year ELSE p.bs_year - 1 END AS fy FROM payroll_period p
-              WHERE p.company_id = $1 ORDER BY fy DESC""", [company_id_of(user)])
+    fiscal = Case(When(bs_month__gte=4, then=F('bs_year')), default=F('bs_year') - 1, output_field=IntegerField())
+    r = PayrollPeriod.objects.for_company(company_id_of(user)).annotate(fy=fiscal).values_list('fy', flat=True).distinct()
     cur = current_fiscal_year_start()
-    years = sorted({cur, *[int(x_['fy']) for x_ in r]}, reverse=True)
+    years = sorted({cur, *[int(y) for y in r]}, reverse=True)
     t = ad_to_bs(_today())
     return {'current': cur, 'years': years, 'currentMonth': {'year': t.year, 'month': t.month, 'day': t.day},
             'fiscalYearOf': fiscal_year_of(t).start_year}
@@ -895,3 +878,12 @@ __all__ = ['annual_summaries', 'tax_certificate_html', 'salary_certificate_html'
            'delete_opening', 'import_openings', 'optimum_me', 'optimum_all', 'apply_cit', 'list_holds', 'hold_pay', 'release_hold',
            'cancel_hold', 'certificate', 'annual_tax', 'tax_deposit', 'retirement_deposit', 'pay_variance', 'leave_liability',
            'compliance_years']
+
+
+def holds(company_id: str):
+    return PayrollHold.objects.for_company(company_id)
+
+
+def _month_slips(company_id: str, qy: dict):
+    """Locked payslips of the company in a BS month (every run of the period)."""
+    return locked_payslips().filter(run__company_id=company_id, run__period__bs_year=qy['bsYear'], run__period__bs_month=qy['bsMonth'])

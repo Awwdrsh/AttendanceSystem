@@ -1,7 +1,7 @@
 """The expenses pages and HTMX fragments through django.test.Client (the TS test cases that went through the API)."""
 from __future__ import annotations
 
-from hajiri.core.db import one, rows
+from tests.support.sql import one, rows
 from hajiri.expenses import services as ex
 from tests.web.factories import htmx, hx_triggers, set_features_off, toasts
 

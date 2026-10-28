@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 
 from hajiri.core import auth
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.core.errors import BadRequestError, ForbiddenError, UnauthorizedError
 from hajiri.core.totp import totp_at, TOTP_STEP_SECONDS
 

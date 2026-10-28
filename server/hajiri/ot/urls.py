@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import views
+from . import api, views
 
 urlpatterns = [
     # pages (React routes); /hr/ot-slips redirects here from hajiri.web
@@ -13,12 +13,12 @@ urlpatterns = [
     path('_/ot/requests', views.requests_list, name='requests'),
     path('_/ot/requests/new', views.request_new, name='request_new'),
     path('_/ot/requests/<uuid:id>/cancel', views.request_cancel, name='request_cancel'),
-    # JSON API (TS paths)
-    path('api/v1/ot/requests', views.api_requests, name='api_requests'),
-    path('api/v1/ot/requests/<str:id>/cancel', views.api_request_cancel, name='api_request_cancel'),
-    path('api/v1/ot/slips', views.api_slips, name='api_slips'),
-    path('api/v1/ot/slips/<str:id>/approve', views.api_slip_approve, name='api_slip_approve'),
-    path('api/v1/ot/slips/<str:id>/reject', views.api_slip_reject, name='api_slip_reject'),
-    path('api/v1/ot/slips/<str:id>/comp-off', views.api_slip_comp_off, name='api_slip_comp_off'),
-    path('api/v1/ot/register', views.api_register, name='api_register'),
+    # JSON API (TS paths; DRF views in api.py)
+    path('api/v1/ot/requests', api.RequestsView.as_view(), name='api_requests'),
+    path('api/v1/ot/requests/<str:id>/cancel', api.RequestCancelView.as_view(), name='api_request_cancel'),
+    path('api/v1/ot/slips', api.SlipsView.as_view(), name='api_slips'),
+    path('api/v1/ot/slips/<str:id>/approve', api.SlipApproveView.as_view(), name='api_slip_approve'),
+    path('api/v1/ot/slips/<str:id>/reject', api.SlipRejectView.as_view(), name='api_slip_reject'),
+    path('api/v1/ot/slips/<str:id>/comp-off', api.SlipCompOffView.as_view(), name='api_slip_comp_off'),
+    path('api/v1/ot/register', api.RegisterView.as_view(), name='api_register'),
 ]

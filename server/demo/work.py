@@ -2,21 +2,21 @@
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 
 from hajiri.core.clock import now
-from hajiri.core.db import execute, one, rows
+from hajiri.db.models import FieldVisit, Kiosk, Shift, TimeClient, Timesheet, WorkBreak
 from hajiri.field import services as field
 from hajiri.shifts import services as shifts
 from hajiri.timesheets import services as time_svc
 from hajiri.workflow import service as workflow
 
-from .context import DemoContext, already_seeded
-from .kit import Actor, add_days_iso, js_day, npt_instant, pick, week_start
+from .context import DemoContext, already_seeded, instance_of
+from .kit import Actor, add_days_iso, npt_instant, pick, week_start
 
 
 def is_workday(iso: str) -> bool:
-    return js_day(iso) != 6  # Saturday is the weekly off
+    return date.fromisoformat(iso).weekday() != 5  # Saturday is the weekly off
 
 
 def approve(ctx: DemoContext, who: Actor, instance_id: str | None, reason: str | None = None) -> None:
@@ -25,15 +25,10 @@ def approve(ctx: DemoContext, who: Actor, instance_id: str | None, reason: str |
         ctx.kit.call(f'POST /workflow/{instance_id}/approve', workflow.decide, who.user, instance_id, 'approve', reason=reason)
 
 
-def instance_of(object_type: str, object_id: str) -> str | None:
-    r = one('SELECT id FROM workflow_instance WHERE object_type = %s AND object_id = %s', [object_type, object_id])
-    return str(r['id']) if r else None
-
-
 def seed_time(ctx: DemoContext) -> None:
     """Clients, projects and activities; two weeks of time for the engineering and growth teams; timesheets in every state."""
     kit, hr = ctx.kit, ctx.hr
-    if already_seeded(ctx, 'time', 'SELECT 1 FROM timesheet WHERE company_id = %s LIMIT 1', 'SELECT 1 FROM time_client WHERE company_id = %s LIMIT 1'):
+    if already_seeded(ctx, 'time', Timesheet.objects.all(), TimeClient.objects.all()):
         return
     nabil = kit.call('POST /time/clients', time_svc.create_client, hr.user, {'name': 'Nabil Bank', 'notes': 'GPU cluster for fraud models.'})
     kathmandu = kit.call('POST /time/clients', time_svc.create_client, hr.user, {'name': 'Kathmandu University AI Lab', 'notes': 'Research compute partnership.'})
@@ -82,9 +77,9 @@ def seed_time(ctx: DemoContext) -> None:
         t2 = str(kit.call('POST /time/timesheets', time_svc.submit_timesheet, me.user,
                           {'weekStart': weeks[1], 'note': 'Worked late on Thursday for the Nabil cut-over.' if i % 3 == 0 else None}))
         mgr = ctx.manager_of(e)
-        approve(ctx, mgr, instance_of('timesheet', t1))
+        approve(ctx, mgr, instance_of(ctx, 'timesheet', t1))
         if i % 3 != 0:
-            approve(ctx, mgr, instance_of('timesheet', t2), 'Looks right, thanks.')
+            approve(ctx, mgr, instance_of(ctx, 'timesheet', t2), 'Looks right, thanks.')
 
 
 PLACES = [
@@ -100,7 +95,7 @@ PLACES = [
 def seed_field(ctx: DemoContext) -> None:
     """Office location with a geofence, a reception kiosk, field staff with client visits, and breaks."""
     kit, hr = ctx.kit, ctx.hr
-    if already_seeded(ctx, 'field', 'SELECT 1 FROM work_break WHERE company_id = %s LIMIT 1', 'SELECT 1 FROM kiosk WHERE company_id = %s LIMIT 1'):
+    if already_seeded(ctx, 'field', WorkBreak.objects.all(), Kiosk.objects.all()):
         return
     locs = kit.call('GET /field/locations', field.locations, hr.user)['locations']
     hq = str(locs[0]['id']) if locs else None
@@ -117,6 +112,7 @@ def seed_field(ctx: DemoContext) -> None:
     for e in field_staff:
         kit.call(f'PUT /field/staff/{e.id}', field.update_staff, hr.user, e.id, {'fieldWork': True})
     current = now()
+    visits: list[FieldVisit] = []
     for i, e in enumerate(field_staff):
         for back in range(1, 7):
             day = add_days_iso(ctx.today, -back)
@@ -125,12 +121,13 @@ def seed_field(ctx: DemoContext) -> None:
             place, purpose, lat, lng, outcome = pick(PLACES, i + back)
             start = npt_instant(day, pick(['10:15', '11:00', '14:00', '15:30'], i + back))
             end = start + timedelta(minutes=75 + ((i * 17 + back * 13) % 90))
-            execute("""INSERT INTO field_visit (company_id, employee_id, local_date, place, purpose, started_at, start_lat, start_lng, start_accuracy_m,
-                                                ended_at, end_lat, end_lng, end_accuracy_m, outcome)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    [ctx.company_id, e.id, day, place, purpose, start, lat + 0.0003, lng - 0.0002, 12 + i, end, lat, lng, 9 + back, outcome])
+            visits.append(FieldVisit(company_id=ctx.company_id, employee_id=e.id, local_date=day, place=place, purpose=purpose,
+                                     started_at=start, start_lat=lat + 0.0003, start_lng=lng - 0.0002, start_accuracy_m=12 + i,
+                                     ended_at=end, end_lat=lat, end_lng=lng, end_accuracy_m=9 + back, outcome=outcome))
+    FieldVisit.objects.bulk_create(visits)
     # Breaks over the last few days (one ran over its limit), recorded as the app would.
     office = [e for e in ctx.employees if e not in field_staff][:8]
+    breaks: list[WorkBreak] = []
     for i, e in enumerate(office):
         for back in range(4):
             day = add_days_iso(ctx.today, -back)
@@ -140,26 +137,28 @@ def seed_field(ctx: DemoContext) -> None:
             lunch_min = 72 if back == 0 and i == 2 else 35 + ((i + back) % 4) * 5
             if back == 0 and npt_instant(day, '14:30') > current:
                 continue
-            execute("""INSERT INTO work_break (company_id, employee_id, local_date, kind, paid, max_min, started_at, ended_at, minutes, over_limit, source)
-                       VALUES (%s, %s, %s, 'lunch', false, 60, %s, %s, %s, %s, 'web')""",
-                    [ctx.company_id, e.id, day, lunch_start, lunch_start + timedelta(minutes=lunch_min), lunch_min, lunch_min > 60])
+            breaks.append(WorkBreak(company_id=ctx.company_id, employee_id=e.id, local_date=day, kind=WorkBreak.Kind.LUNCH, paid=False,
+                                    max_min=60, started_at=lunch_start, ended_at=lunch_start + timedelta(minutes=lunch_min),
+                                    minutes=lunch_min, over_limit=lunch_min > 60, source=WorkBreak.Source.WEB))
             if (i + back) % 2 == 0:
                 tea = npt_instant(day, '16:00')
                 if tea < current:
-                    execute("""INSERT INTO work_break (company_id, employee_id, local_date, kind, paid, max_min, started_at, ended_at, minutes, over_limit, source)
-                               VALUES (%s, %s, %s, 'tea', true, 15, %s, %s, 12, false, 'web')""",
-                            [ctx.company_id, e.id, day, tea, tea + timedelta(minutes=12)])
+                    breaks.append(WorkBreak(company_id=ctx.company_id, employee_id=e.id, local_date=day, kind=WorkBreak.Kind.TEA,
+                                            paid=True, max_min=15, started_at=tea, ended_at=tea + timedelta(minutes=12), minutes=12,
+                                            over_limit=False, source=WorkBreak.Source.WEB))
+    WorkBreak.objects.bulk_create(breaks)
 
 
 def seed_roster(ctx: DemoContext) -> None:
     """A morning and an evening shift for operations, next week's roster published, and a shift swap waiting for approval."""
     kit, hr = ctx.kit, ctx.hr
-    if rows("SELECT 1 FROM shift WHERE company_id = %s AND code = 'EARLY'", [ctx.company_id]):
+    company_shifts = Shift.objects.for_company(ctx.company_id)
+    if company_shifts.filter(code='EARLY').exists():
         return
     early_id = kit.call('POST /shifts', shifts.create_shift, hr.user, {'code': 'EARLY', 'nameEn': 'Early 07:00-15:00', 'start': '07:00', 'end': '15:00', 'graceInMin': 10})['id']
     late_id = kit.call('POST /shifts', shifts.create_shift, hr.user, {'code': 'LATE', 'nameEn': 'Late 13:00-21:00', 'start': '13:00', 'end': '21:00', 'graceInMin': 10})['id']
-    g = one("SELECT id FROM shift WHERE company_id = %s AND code = 'GEN'", [ctx.company_id])
-    gen = str(g['id']) if g else None
+    g = company_shifts.filter(code='GEN').values_list('id', flat=True).first()
+    gen = str(g) if g else None
     team = [e for e in ctx.employees if re.search(r'reliab|network|datacenter|technician|support|success|office', e.designation or '', re.I)][:6]
     if len(team) < 2:
         return

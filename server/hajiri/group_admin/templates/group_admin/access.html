@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Access · Group · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Access" subtitle="Who can work in which company of the group, with which roles and employee record there." %}
+  <button class="hj-btn default" hx-get="{% url 'group_admin:access_invite' %}{% if company %}?company_id={{ company }}{% endif %}" hx-target="#hj-modal-body"><i class="ti ti-mail-plus" aria-hidden="true"></i>Invite a person</button>
+  <button class="hj-btn" hx-get="{% url 'group_admin:access_new' %}{% if company %}?company_id={{ company }}{% endif %}" hx-target="#hj-modal-body"><i class="ti ti-user-plus" aria-hidden="true"></i>Give access</button>
+{% endpage_header %}
+<form class="hj-filters hj-mb" method="get">
+  <label class="hj-label" for="f-company">Company</label>
+  <select id="f-company" name="company" class="hj-select" hx-get="{% url 'group_admin:access_table' %}" hx-target="#group-access" hx-swap="outerHTML" hx-push-url="true" hx-trigger="change">
+    <option value="">Every company</option>
+    {% for id, name in company_choices %}<option value="{{ id }}"{% if id == company %} selected{% endif %}>{{ name }}</option>{% endfor %}
+  </select>
+</form>
+{% include "group_admin/partials/access_table.html" %}
+<p class="hj-help hj-mt-sm">People with a group role (group admin, group HR, group executive) work in every company through it; manage those roles on the Overview tab.</p>
+{% endblock %}

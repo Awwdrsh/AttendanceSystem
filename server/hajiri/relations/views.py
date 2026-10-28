@@ -2,7 +2,7 @@
 Employee relations pages and their HTMX fragments (port of apps/web/src/pages/relations, components/relations and
 api/relations.ts). The Employee relations hub (/relations, HR) has six tabs; employees use /me/help/grievances,
 /me/profile/conduct and /me/attendance/devices. Rules live in services.py; these views turn form posts into the TS
-request bodies and draw the result.
+request bodies (forms.py) and draw the result. Everything is read in the user's active company.
 """
 from __future__ import annotations
 
@@ -14,15 +14,16 @@ from django.urls import reverse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from hajiri.core.auth import company_id_of, has_role
-from hajiri.core.db import one, rows
 from hajiri.core.errors import BadRequestError, HttpError
-from hajiri.core.schema import is_uuid
+from hajiri.core.scoping import is_uuid
+from hajiri.db.models import Branch, Designation, OrgUnit
 from hajiri.files.store import stored_file_response
 from hajiri.web.decorators import login_required, require_feature, require_role, signed_in
 from hajiri.web.htmx import close_modal, is_htmx, refresh, toast, trigger
 from hajiri.web.middleware import error_message
 from hajiri.web.nav import feature_on, url_of
 
+from . import forms as F
 from . import services as S
 
 STATUS_TONE = {'submitted': 'info', 'under_review': 'info', 'hearing_scheduled': 'accent', 'decided': 'ok', 'appealed': 'warn',
@@ -53,32 +54,18 @@ def _render_ok(request, template: str, ctx: dict, message: str | None, *refreshe
     return toast(request, resp, message) if message else resp
 
 
-def _bool(v) -> bool:
-    return str(v or '').lower() in ('1', 'true', 'on', 'yes')
-
-
-def _opt(v):
-    """A form value, or None when the field was left empty."""
-    v = (v or '').strip() if isinstance(v, str) else v
-    return v or None
-
-
-def _set(body: dict, key: str, v):
-    """Put v in body unless the form left it empty (an optional key that is simply absent in the TS body)."""
-    if v not in (None, ''):
-        body[key] = v
-
-
 def _is_hr(request) -> bool:
     return has_role(request.hajiri_user, 'hr')
 
 
 def _structure(company_id: str) -> dict:
+    """Branches, departments and active positions of the company for the pickers."""
+    def opts(qs):
+        return [{'id': str(i), 'name_en': n} for i, n in qs.order_by('name_en').values_list('id', 'name_en')]
     return {
-        'branches': [{**r, 'id': str(r['id'])} for r in rows('SELECT id, name_en FROM branch WHERE company_id = %s ORDER BY name_en', [company_id])],
-        'units': [{**r, 'id': str(r['id'])} for r in rows('SELECT id, name_en FROM org_unit WHERE company_id = %s ORDER BY name_en', [company_id])],
-        'designations': [{**r, 'id': str(r['id'])} for r in rows(
-            'SELECT id, name_en FROM designation WHERE company_id = %s AND active ORDER BY name_en', [company_id])],
+        'branches': opts(Branch.objects.for_company(company_id)),
+        'units': opts(OrgUnit.objects.for_company(company_id)),
+        'designations': opts(Designation.objects.for_company(company_id).filter(active=True)),
     }
 
 
@@ -122,7 +109,7 @@ def grievances_admin(request):
 @require_role('hr')
 def committee_save(request):
     user = request.hajiri_user
-    S.set_committee(user, {'userIds': request.POST.getlist('userIds')})
+    S.set_committee(user, F.CommitteeForm(request.POST).body())
     com = S.committee(user)
     return _render_ok(request, 'relations/partials/committee.html',
                       {'committee': com, 'member_ids': [m['user_id'] for m in com['members']], 'users': S.company_users(user)},
@@ -153,10 +140,7 @@ def my_grievances(request):
 def grievance_new(request):
     if request.method == 'GET':
         return render(request, 'relations/partials/grievance_form.html', {'categories': S.GRIEVANCE_CATEGORY_LABEL.items()})
-    p = request.POST
-    body = {'category': p.get('category') or '', 'subject': p.get('subject') or '', 'description': p.get('description') or '',
-            'concerns': _opt(p.get('concerns')), 'fileIds': [f for f in p.getlist('fileIds') if f]}
-    r = S.file_grievance(request.hajiri_user, body)
+    r = S.file_grievance(request.hajiri_user, F.GrievanceForm(request.POST).body())
     resp = _ok(request, f"Grievance G-{r['number']} filed. The committee will be in touch.", 'grievances', close=True)
     # MyGrievancesPage opens the new grievance at once.
     return trigger(resp, 'hj:open-grievance', {'url': reverse('relations:grievance', args=[r['id']])})
@@ -195,54 +179,37 @@ def grievance_file(request, id, file_id):
 @require_POST
 @login_required
 def grievance_note(request, id):
-    S.add_note(request.hajiri_user, str(id), {'body': request.POST.get('body') or '', 'shared': _bool(request.POST.get('shared'))})
+    S.add_note(request.hajiri_user, str(id), F.NoteForm(request.POST).note())
     return _thread(request, id, 'Sent.')
 
 
 @require_POST
 @login_required
 def grievance_update(request, id):
-    p = request.POST
-    action = p.get('action')
-    user = request.hajiri_user
-    if action == 'review':
-        S.update_grievance(user, str(id), {'status': 'under_review'})
-        return _thread(request, id, 'Marked as under review.')
-    if action == 'hearing':
-        d, t = (p.get('date') or '').strip(), (p.get('time') or '').strip()
-        if not d or not t:
-            raise BadRequestError('set the hearing date and time')
-        S.update_grievance(user, str(id), {'hearingAt': f'{d}T{t}:00+05:45', 'hearingPlace': _opt(p.get('place'))})
-        return _thread(request, id, 'Hearing set. The employee was told.')
-    if action == 'exclude':
-        S.update_grievance(user, str(id), {'excludeUserIds': p.getlist('excludeUserIds')})
-        return _thread(request, id, 'Saved.')
-    raise BadRequestError('unknown action')
+    action, body = F.GrievanceUpdateForm(request.POST).body()
+    S.update_grievance(request.hajiri_user, str(id), body)
+    return _thread(request, id, {'review': 'Marked as under review.', 'hearing': 'Hearing set. The employee was told.',
+                                 'exclude': 'Saved.'}[action])
 
 
 @require_POST
 @login_required
 def grievance_decide(request, id):
-    S.decide_grievance(request.hajiri_user, str(id), {'outcome': request.POST.get('outcome') or '',
-                                                      'findings': request.POST.get('findings') or ''})
+    S.decide_grievance(request.hajiri_user, str(id), F.GrievanceDecisionForm(request.POST).body())
     return _thread(request, id, 'Decision recorded.')
 
 
 @require_POST
 @login_required
 def grievance_appeal(request, id):
-    S.appeal_grievance(request.hajiri_user, str(id), {'reason': request.POST.get('reason') or ''})
+    S.appeal_grievance(request.hajiri_user, str(id), F.AppealForm(request.POST).body())
     return _thread(request, id, 'Appeal sent to HR.')
 
 
 @require_POST
 @login_required
 def grievance_appeal_decide(request, id):
-    p = request.POST
-    body = {'outcome': p.get('outcome') or '', 'note': p.get('note') or ''}
-    if p.get('outcome') == 'decision_changed':
-        _set(body, 'newOutcome', p.get('newOutcome'))
-    S.decide_appeal(request.hajiri_user, str(id), body)
+    S.decide_appeal(request.hajiri_user, str(id), F.AppealDecisionForm(request.POST).body())
     return _thread(request, id, 'Appeal decided.')
 
 
@@ -289,10 +256,7 @@ def case_new(request):
         eid = request.GET.get('employee') or None
         return render(request, 'relations/partials/case_form.html', {'employee_id': eid, 'categories': S.CASE_CATEGORY_LABEL.items(),
                                                                      'today': S.today()})
-    p = request.POST
-    body = {'employeeId': p.get('employeeId') or '', 'category': p.get('category') or '', 'incidentDate': p.get('incidentDate') or '',
-            'incident': p.get('incident') or ''}
-    r = S.open_case(request.hajiri_user, body)
+    r = S.open_case(request.hajiri_user, F.CaseForm(request.POST).body())
     resp = _ok(request, f"Case D-{r['number']} opened.", 'cases', 'relations-cases', close=True)
     return trigger(resp, 'hj:open-case', {'url': reverse('relations:case', args=[r['id']])})
 
@@ -322,34 +286,25 @@ def case(request, id):
 @require_POST
 @require_role('hr')
 def case_show_cause(request, id):
-    S.show_cause(request.hajiri_user, str(id), {'text': request.POST.get('text') or '', 'responseDue': request.POST.get('responseDue') or ''})
+    S.show_cause(request.hajiri_user, str(id), F.ShowCauseForm(request.POST).body())
     return _case(request, id, 'Notice sent to the employee.')
 
 
 @require_POST
 @require_role('hr')
 def case_decide(request, id):
-    p = request.POST
-    body = {'stageId': _opt(p.get('stageId')), 'note': p.get('note') or '', 'force': _bool(p.get('force'))}
-    effect = None
-    if body['stageId']:
-        st = one('SELECT effect FROM disciplinary_stage WHERE id = %s AND company_id = %s',
-                 [body['stageId'], company_id_of(request.hajiri_user)]) if is_uuid(body['stageId']) else None
-        effect = st['effect'] if st else None
-    # The form shows the date fields only for the chosen stage's effect (CaseDetail).
-    if effect == 'suspension':
-        _set(body, 'suspensionFrom', p.get('suspensionFrom'))
-        _set(body, 'suspensionTo', p.get('suspensionTo'))
-    if effect == 'termination':
-        _set(body, 'lastWorkingDay', p.get('lastWorkingDay'))
-    S.decide_case(request.hajiri_user, str(id), body)
+    stages = S.stages_of(company_id_of(request.hajiri_user))
+
+    def effect_of(stage_id: str) -> str | None:
+        return stages.filter(pk=stage_id).values_list('effect', flat=True).first() if is_uuid(stage_id) else None
+    S.decide_case(request.hajiri_user, str(id), F.CaseDecisionForm(request.POST).body(effect_of))
     return _case(request, id, 'Decision recorded. The employee was told.')
 
 
 @require_POST
 @require_role('hr')
 def case_withdraw(request, id):
-    S.withdraw_case(request.hajiri_user, str(id), {'reason': request.POST.get('reason') or ''})
+    S.withdraw_case(request.hajiri_user, str(id), F.ReasonForm(request.POST).body())
     return _case(request, id, 'Case withdrawn.')
 
 
@@ -377,21 +332,8 @@ def case_letter(request, id):
 def stages(request):
     user = request.hajiri_user
     if request.method == 'GET':
-        return render(request, 'relations/partials/stages.html', {'stages': S.list_stages(user)['stages'], 'slots': range(20)})
-    p = request.POST
-    out = []
-    for i in range(20):
-        if not p.get(f's-{i}-present'):
-            continue
-        s = {'code': p.get(f's-{i}-code') or '', 'name': p.get(f's-{i}-name') or '', 'effect': p.get(f's-{i}-effect') or '',
-             'letterTemplateCode': _opt(p.get(f's-{i}-letter')), 'active': _bool(p.get(f's-{i}-active'))}
-        try:
-            s['severity'] = int(p.get(f's-{i}-severity') or 1)
-        except ValueError:
-            s['severity'] = p.get(f's-{i}-severity')
-        _set(s, 'id', p.get(f's-{i}-id'))
-        out.append(s)
-    S.save_stages(user, {'stages': out})
+        return render(request, 'relations/partials/stages.html', {'stages': S.list_stages(user)['stages'], 'slots': range(F.STAGE_SLOTS)})
+    S.save_stages(user, F.StagesForm(request.POST).body())
     return _ok(request, 'Stages saved.', close=True)
 
 
@@ -410,7 +352,7 @@ def conduct(request):
 @require_POST
 @login_required
 def case_respond(request, id):
-    S.respond_case(request.hajiri_user, str(id), {'response': request.POST.get('response') or ''})
+    S.respond_case(request.hajiri_user, str(id), F.CaseResponseForm(request.POST).body())
     return _ok(request, 'Your response was sent to HR.', 'my-cases', 'relations-home')
 
 
@@ -442,19 +384,7 @@ def policy(request):
     pol = S.get_policy(user)['policy']
     if request.method == 'GET':
         return render(request, 'relations/partials/policy_form.html', {'policy': pol, 'years': ', '.join(str(y) for y in pol['serviceYears'])})
-    p = request.POST
-
-    def num(key, default):
-        try:
-            return int(p.get(key) or default)
-        except ValueError:
-            return default
-    years = []
-    for part in (p.get('serviceYears') or '').replace(';', ',').split(','):
-        part = part.strip()
-        if part.isdigit() and 0 < int(part) <= 60:
-            years.append(int(part))
-    S.save_policy(user, {**pol, 'retirementAge': num('retirementAge', 58), 'serviceYears': years, 'appealDays': num('appealDays', 15)})
+    S.save_policy(user, F.PolicyForm(request.POST).body(pol))
     resp = _ok(request, 'Saved.', close=True)
     resp.headers['HX-Refresh'] = 'true'
     return resp
@@ -465,7 +395,7 @@ def policy(request):
 def devices_policy(request):
     user = request.hajiri_user
     pol = S.get_policy(user)['policy']
-    nxt = _bool(request.POST.get('registeredDevicesOnly'))
+    nxt = F.DevicesPolicyForm(request.POST).cleaned()['registeredDevicesOnly']
     S.save_policy(user, {**pol, 'registeredDevicesOnly': nxt})
     resp = _ok(request, 'Clock-in now needs a registered device.' if nxt else 'Any device can clock in again.')
     resp.headers['HX-Refresh'] = 'true'
@@ -499,24 +429,16 @@ def assignment_new(request):
     if request.method == 'GET':
         return render(request, 'relations/partials/assignment_form.html',
                       {'employee_id': request.GET.get('employee') or None, 'today': S.today(), **_structure(company_id_of(user))})
-    p = request.POST
-    kind = p.get('kind') or ''
-    body = {'employeeId': p.get('employeeId') or '', 'kind': kind, 'startDate': p.get('startDate') or '',
-            'endDate': p.get('endDate') or '', 'note': _opt(p.get('note'))}
-    if kind == 'acting':
-        body['designationId'] = _opt(p.get('designationId'))
-    else:
-        body['branchId'] = _opt(p.get('branchId'))
-        body['orgUnitId'] = _opt(p.get('orgUnitId'))
-    S.add_assignment(user, body)
+    S.add_assignment(user, F.AssignmentForm(request.POST).body())
     return _ok(request, 'Saved.', 'assignments', 'relations-assignments', close=True)
 
 
 @require_POST
 @require_role('hr')
 def assignment_end(request, id):
-    cancel = _bool(request.POST.get('cancel'))
-    S.end_assignment(request.hajiri_user, str(id), {'cancel': True} if cancel else {})
+    body = F.AssignmentEndForm(request.POST).body()
+    cancel = bool(body.get('cancel'))
+    S.end_assignment(request.hajiri_user, str(id), body)
     return _ok(request, 'Cancelled.' if cancel else 'Ended today.', 'assignments', 'relations-assignments')
 
 
@@ -562,15 +484,7 @@ def kye_new(request):
         return render(request, 'relations/partials/kye_form.html', {
             'sections': S.SECTION_LABEL.items(), 'chosen': ['personal', 'contact', 'emergency', 'family', 'bank'],
             'due': (_today() + timedelta(days=14)).isoformat(), 'today': S.today(), **_structure(company_id_of(user))})
-    p = request.POST
-    aud = p.get('audienceKind') or 'all'
-    body = {'title': p.get('title') or '', 'message': _opt(p.get('message')), 'sections': p.getlist('sections'),
-            'audienceKind': aud, 'dueDate': p.get('dueDate') or ''}
-    if aud == 'branch':
-        body['audienceId'] = _opt(p.get('branchId'))
-    elif aud == 'department':
-        body['audienceId'] = _opt(p.get('orgUnitId'))
-    r = S.launch_campaign(user, body)
+    r = S.launch_campaign(user, F.CampaignForm(request.POST).body())
     return _ok(request, f"Sent to {r['employees']} employees.", 'kye-campaigns', close=True)
 
 
@@ -606,9 +520,9 @@ def kye_close(request, id):
 @require_POST
 @login_required
 def kye_respond(request, id):
-    status = request.POST.get('status') or ''
-    S.respond_kye(request.hajiri_user, str(id), {'status': status, 'note': _opt(request.POST.get('note'))})
-    if status == 'changes_requested':
+    body = F.KyeResponseForm(request.POST).body()
+    S.respond_kye(request.hajiri_user, str(id), body)
+    if body['status'] == 'changes_requested':
         # "Something needs changing" goes on to the profile, where changes are made (RelationsHomeCard).
         resp = HttpResponse(status=204)
         resp.headers['HX-Redirect'] = url_of('people:profile') or '/me/profile'
@@ -661,8 +575,7 @@ def my_devices(request):
 @require_POST
 @login_required
 def device_register(request):
-    S.register_device(request.hajiri_user, {'token': request.POST.get('device_token') or '', 'label': request.POST.get('label') or ''},
-                      request.headers.get('User-Agent'))
+    S.register_device(request.hajiri_user, F.DeviceForm(request.POST).body(), request.headers.get('User-Agent'))
     return _ok(request, 'Registered. HR has been asked to approve it.', 'my-devices')
 
 
@@ -697,7 +610,7 @@ def popup_notices(request):
 @login_required
 def popup_dismiss(request, id):
     try:
-        S.dismiss_popup(request.hajiri_user, str(id), {'acknowledge': _bool(request.POST.get('acknowledge'))})
+        S.dismiss_popup(request.hajiri_user, str(id), F.DismissForm(request.POST).body())
     except HttpError as e:
         r = HttpResponse(status=e.status)
         r.headers['HX-Reswap'] = 'none'
@@ -748,5 +661,5 @@ def employee_section(request, employee_id):
 @require_POST
 @require_role('hr')
 def contract_save(request, employee_id):
-    S.set_contract(request.hajiri_user, str(employee_id), {'contractEnd': _opt(request.POST.get('contractEnd'))})
+    S.set_contract(request.hajiri_user, str(employee_id), F.ContractForm(request.POST).body())
     return _ok(request, 'Saved.')

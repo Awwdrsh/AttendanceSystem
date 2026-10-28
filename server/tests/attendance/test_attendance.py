@@ -13,7 +13,7 @@ from hajiri.attendance.service import (
 )
 from hajiri.core import auth
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.core.errors import ForbiddenError, NotFoundError, ValidationError
 from tests.core.fixtures import PW
 from tests.core.punches import insert_punch
@@ -317,5 +317,5 @@ def test_resolve_shift_prefers_regularisation_then_roster_then_assignment(demo):
 
 def test_sql_nepal_date_expression_matches_npt_today(db):
     # Raw SQL uses (now() AT TIME ZONE 'Asia/Kathmandu')::date where the TS code used current_date.
-    from hajiri.core.db import one as _one
+    from tests.support.sql import one as _one
     assert _one("SELECT (now() AT TIME ZONE 'Asia/Kathmandu')::date AS d")['d'] == npt_today()

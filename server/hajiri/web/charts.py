@@ -110,7 +110,7 @@ def donut(data: Sequence[dict], *, size: int = 160, center_label: str = '', aria
     for i, d in enumerate(data):
         color = SERIES_VARS[i % len(SERIES_VARS)]
         legend.append({'label': d['label'], 'count': d['count'], 'color': color,
-                       'pct': f'{fmt._round_half_up(d["count"] / total * 100)}%' if total else fmt.DASH})
+                       'pct': f'{fmt.round_half_up(d["count"] / total * 100)}%' if total else fmt.DASH})
         if not d['count'] or not total:
             continue
         ln = d['count'] / total * circ
@@ -156,7 +156,7 @@ def trend_bars(points: Sequence[dict], *, label: str, max: float = 100, suffix: 
               for i, p in enumerate(points) if i % step == 0 or i == n - 1]
     return {'w': w, 'h': h, 'left': left, 'label_y': h - 4, 'label': label, 'suffix': suffix,
             'range': f'{fmt.fmt_date(points[0]["date"])} to {fmt.fmt_date(points[-1]["date"])}' if points else 'No data yet',
-            'avg': None if avg is None else f'{fmt._round_half_up(avg)}{suffix}',
+            'avg': None if avg is None else f'{fmt.round_half_up(avg)}{suffix}',
             'ticks': [{'y': _r(top + plot_h - plot_h * t / max), 'ty': _r(top + plot_h - plot_h * t / max + 4),
                        'label': f'{fmt.fmt_num(int(t) if float(t).is_integer() else t)}{suffix}'} for t in ticks],
             'bars': bars, 'labels': labels}

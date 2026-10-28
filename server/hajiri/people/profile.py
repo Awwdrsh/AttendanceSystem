@@ -10,109 +10,22 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+from django.db.models.functions import Now
+
 from hajiri.core.crypto import field_cipher
-from hajiri.core.db import execute, one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, NotFoundError, ValidationError
-from hajiri.core.schema import MISSING, Arr, Bool, Enum, Int, IsoDate, Num, Obj, Str, parse
+from hajiri.core.validation import validate
+from hajiri.db.models import (Employee, EmployeeEducation, EmployeeEmergencyContact, EmployeeExperience, EmployeeFamily)
 
 from .history import record_field_changes
+from .serializers import EDUCATION_LEVELS, FAMILY_RELATIONS, SECTION_SERIALIZERS  # noqa: F401
 
+BLOOD_GROUPS = tuple(Employee.BloodGroup.values)
 
-def _text(n: int) -> Str:
-    return Str(trim=True, min=1, max=n)
+# "Left out" in a section value (the stored value is kept), as opposed to None (cleared).
+MISSING: Any = type('Missing', (), {'__repr__': lambda s: 'MISSING', '__bool__': lambda s: False})()
 
-
-def _opt_text(n: int) -> Str:
-    return Str(trim=True, max=n, nullish=True)
-
-
-_PHONE_RE = r'^\+?[0-9 ()-]{6,20}$'
-
-
-def _phone(**kw) -> Str:
-    return Str(trim=True, regex=_PHONE_RE, regex_message='phone number', **kw)
-
-
-ADDRESS = Obj({
-    'province': _opt_text(60), 'district': _opt_text(60), 'municipality': _opt_text(80),
-    'ward': Int(min=1, max=40, nullish=True), 'street': _opt_text(160),
-}, strict=True, nullish=True)
-
-BLOOD_GROUPS = ('A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-')
-FAMILY_RELATIONS = ('spouse', 'father', 'mother', 'son', 'daughter', 'brother', 'sister', 'father_in_law', 'mother_in_law',
-                    'grandfather', 'grandmother', 'other')
-EDUCATION_LEVELS = ('see', 'plus_two', 'diploma', 'bachelor', 'master', 'mphil', 'phd', 'other')
-
-
-def _year(**kw) -> Num:
-    return Int(min=1950, max=2200, **kw)
-
-
-SECTION_SCHEMAS: dict[str, Obj] = {
-    'personal': Obj({
-        'gender': Enum(('male', 'female', 'other'), nullish=True),
-        'dob': IsoDate(nullish=True),
-        'maritalStatus': Enum(('single', 'couple'), nullish=True),
-        'bloodGroup': Enum(BLOOD_GROUPS, nullish=True),
-        'nationality': _opt_text(60),
-    }, strict=True),
-    'contact': Obj({
-        'personalEmail': Str(email=True, max=160, nullish=True),
-        'personalPhone': _phone(nullish=True),
-        'workPhone': _phone(nullish=True),
-        'permanentAddress': ADDRESS,
-        'temporaryAddress': ADDRESS,
-    }, strict=True),
-    'bank': Obj({
-        'bankCode': _opt_text(20),
-        'bankBranch': _opt_text(80),
-        'bankAccount': Str(trim=True, regex=r'^[0-9A-Za-z-]{4,40}$', regex_message='account number', optional=True),
-    }, strict=True),
-    'ids': Obj({
-        'pan': Str(trim=True, regex=r'^\d{9}$', regex_message='PAN must be 9 digits', nullish=True),
-        'citizenshipNo': Str(trim=True, regex=r'^[0-9A-Za-z/ -]{3,30}$', regex_message='citizenship number', nullish=True),
-        'citizenshipDistrict': _opt_text(60),
-        'citizenshipIssuedOn': IsoDate(nullish=True),
-        'passportNo': Str(trim=True, regex=r'^[0-9A-Za-z]{5,20}$', regex_message='passport number', nullish=True),
-        'passportExpiry': IsoDate(nullish=True),
-        'licenceNo': Str(trim=True, regex=r'^[0-9A-Za-z/ -]{4,30}$', regex_message='licence number', nullish=True),
-        'licenceExpiry': IsoDate(nullish=True),
-        'ssfId': _opt_text(20),
-        'citId': _opt_text(40),
-        'pfId': _opt_text(40),
-    }, strict=True),
-    'emergency': Obj({
-        'contacts': Arr(Obj({'name': _text(120), 'relation': _text(40), 'phone': _phone(), 'altPhone': _phone(nullish=True),
-                             'address': _opt_text(200)}, strict=True), max=5),
-    }, strict=True),
-    'family': Obj({
-        'members': Arr(Obj({
-            'name': _text(120), 'relation': Enum(FAMILY_RELATIONS), 'dob': IsoDate(nullish=True), 'occupation': _opt_text(80),
-            'phone': _phone(nullish=True), 'isDependent': Bool(default=False), 'isNominee': Bool(default=False),
-            'nomineeShare': Num(max=100, nullish=True, refine=(lambda v: v > 0, 'Too small: expected number to be >0')),
-        }, strict=True), max=20),
-    }, strict=True),
-    'education': Obj({
-        'items': Arr(Obj({
-            'level': Enum(EDUCATION_LEVELS), 'degree': _opt_text(120), 'field': _opt_text(120), 'institution': _text(160),
-            'board': _opt_text(160), 'startYear': _year(nullish=True), 'endYear': _year(nullish=True), 'result': _opt_text(40),
-        }, strict=True, refine=(lambda e: not e.get('startYear') or not e.get('endYear') or e['endYear'] >= e['startYear'],
-                                'end year is before start year')), max=15),
-    }, strict=True),
-    'experience': Obj({
-        'items': Arr(Obj({
-            'organisation': _text(160), 'designation': _opt_text(120), 'fromDate': IsoDate(nullish=True), 'toDate': IsoDate(nullish=True),
-            'responsibilities': _opt_text(1000), 'reasonForLeaving': _opt_text(300),
-        }, strict=True, refine=(lambda e: not e.get('fromDate') or not e.get('toDate') or e['toDate'] >= e['fromDate'],
-                                'end date is before start date')), max=20),
-    }, strict=True),
-    'skills': Obj({
-        'skills': Arr(Str(trim=True, min=1, max=60), max=30),
-        'languages': Arr(Str(trim=True, min=1, max=40), max=15),
-    }, strict=True),
-}
-
-SECTIONS = tuple(SECTION_SCHEMAS)
+SECTIONS = tuple(SECTION_SERIALIZERS)
 SECTION_LABEL = {
     'personal': 'Personal details', 'contact': 'Contact and address', 'bank': 'Bank account', 'ids': 'ID documents',
     'emergency': 'Emergency contacts', 'family': 'Family and nominees', 'education': 'Education',
@@ -122,28 +35,21 @@ SECTION_LABEL = {
 SENSITIVE_SECTIONS = ('bank', 'ids')
 
 
-def _family_issues(v: dict) -> list[dict]:
-    members = v.get('members') or []
-    nominees = [m for m in members if m.get('isNominee')]
-    issues = []
-    if any(not m.get('nomineeShare') for m in nominees):
-        issues.append({'path': 'members', 'message': 'every nominee needs a share'})
-    elif nominees and abs(sum(m.get('nomineeShare') or 0 for m in nominees) - 100) > 0.001:
-        issues.append({'path': 'members', 'message': 'nominee shares must add up to 100%'})
-    if any(not m.get('isNominee') and m.get('nomineeShare') for m in members):
-        issues.append({'path': 'members', 'message': 'only nominees have a share'})
-    return issues
+def _plain(v: Any) -> Any:
+    """Validated data as plain dicts and lists (what the TS code stores as JSON)."""
+    if isinstance(v, dict):
+        return {k: _plain(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_plain(x) for x in v]
+    return v
 
 
 def parse_section(section: str, value: Any) -> tuple[str, dict]:
-    if section not in SECTION_SCHEMAS:
+    if section not in SECTION_SERIALIZERS:
         raise NotFoundError(f'unknown profile section {section}')
-    out = parse(SECTION_SCHEMAS[section], value)
-    if section == 'family':
-        issues = _family_issues(out)
-        if issues:
-            raise ValidationError(issues)
-    return section, out
+    if value is None or value is MISSING:
+        raise ValidationError([{'path': '', 'message': 'Required'}])
+    return section, _plain(validate(SECTION_SERIALIZERS[section], value))
 
 
 # ---------------------------------------------------------------- reading
@@ -205,19 +111,23 @@ def js_num(v):
     return f
 
 
+_PROFILE_COLS = ('id', 'gender', 'dob', 'marital_status', 'blood_group', 'nationality', 'personal_email', 'personal_phone',
+                 'work_phone', 'permanent_address', 'temporary_address', 'bank_code', 'bank_branch', 'bank_account_last4',
+                 'ssf_id', 'cit_id', 'pf_id', 'citizenship_district', 'citizenship_issued_on', 'passport_expiry',
+                 'licence_expiry', 'skills', 'languages', 'pan_enc', 'bank_account_enc', 'citizenship_no_enc',
+                 'passport_no_enc', 'licence_no_enc')
+
+
 def _load_emp(employee_id: str) -> dict:
-    r = one("""SELECT id, gender, dob, marital_status, blood_group, nationality, personal_email, personal_phone, work_phone,
-                      permanent_address, temporary_address, bank_code, bank_branch, bank_account_last4, ssf_id, cit_id, pf_id,
-                      citizenship_district, citizenship_issued_on, passport_expiry, licence_expiry, skills, languages,
-                      pan_enc, bank_account_enc, citizenship_no_enc, passport_no_enc, licence_no_enc
-                 FROM employee WHERE id = %s""", [employee_id])
+    r = Employee.objects.filter(pk=employee_id).values(*_PROFILE_COLS).first()
     if not r:
         raise NotFoundError('employee not found')
     return r
 
 
 def read_profile(employee_id: str, *, reveal: bool = False) -> dict:
-    """The whole profile, section by section. Encrypted numbers are masked unless `reveal` (the caller audits that)."""
+    """The whole profile, section by section. Encrypted numbers are masked unless `reveal` (the caller audits that).
+    Callers have already checked that the employee belongs to the active company."""
     employee_id = str(employee_id)
     e = _load_emp(employee_id)
     cipher = field_cipher()
@@ -228,13 +138,14 @@ def read_profile(employee_id: str, *, reveal: bool = False) -> dict:
             return None
         plain = cipher.decrypt(bytes(blob), secret_aad(employee_id, f))
         return plain if reveal else mask(plain)
-    contacts = rows('SELECT name, relation, phone, alt_phone, address FROM employee_emergency_contact WHERE employee_id = %s ORDER BY sort, name', [employee_id])
-    family = rows("""SELECT name, relation, dob, occupation, phone, is_dependent, is_nominee, nominee_share FROM employee_family
-                      WHERE employee_id = %s ORDER BY sort, name""", [employee_id])
-    education = rows("""SELECT level, degree, field, institution, board, start_year, end_year, result FROM employee_education
-                         WHERE employee_id = %s ORDER BY sort""", [employee_id])
-    experience = rows("""SELECT organisation, designation, from_date, to_date, responsibilities, reason_for_leaving FROM employee_experience
-                          WHERE employee_id = %s ORDER BY sort""", [employee_id])
+    contacts = EmployeeEmergencyContact.objects.filter(employee_id=employee_id).order_by('sort', 'name').values(
+        'name', 'relation', 'phone', 'alt_phone', 'address')
+    family = EmployeeFamily.objects.filter(employee_id=employee_id).order_by('sort', 'name').values(
+        'name', 'relation', 'dob', 'occupation', 'phone', 'is_dependent', 'is_nominee', 'nominee_share')
+    education = EmployeeEducation.objects.filter(employee_id=employee_id).order_by('sort').values(
+        'level', 'degree', 'field', 'institution', 'board', 'start_year', 'end_year', 'result')
+    experience = EmployeeExperience.objects.filter(employee_id=employee_id).order_by('sort').values(
+        'organisation', 'designation', 'from_date', 'to_date', 'responsibilities', 'reason_for_leaving')
     return {
         'personal': {'gender': e['gender'], 'dob': _iso(e['dob']), 'maritalStatus': e['marital_status'], 'bloodGroup': e['blood_group'],
                      'nationality': e['nationality']},
@@ -354,11 +265,9 @@ def apply_section(*, company_id: str, employee_id: str, section: str, value: dic
         return v.get(k, U)
 
     def set_(cols: dict) -> None:
-        entries = [(c, x) for c, x in cols.items() if x is not U]
-        if not entries:
-            return
-        execute(f"UPDATE employee SET {', '.join(f'{c} = %s' for c, _ in entries)}, updated_at = now() WHERE id = %s",
-                [x for _, x in entries] + [employee_id])
+        sets = {c: x for c, x in cols.items() if x is not U}
+        if sets:
+            Employee.objects.filter(pk=employee_id).update(**sets, updated_at=Now())
 
     def enc(f: str, plain):
         if plain is U:
@@ -367,17 +276,17 @@ def apply_section(*, company_id: str, employee_id: str, section: str, value: dic
             return None
         return cipher.encrypt(str(plain), secret_aad(employee_id, f))
 
-    def js(x):
-        if x is U:
-            return U
-        return None if x is None else json.dumps(x)
+    def replace(model, items: list[dict], build) -> None:
+        """List sections replace the whole list, keeping the posted order."""
+        model.objects.filter(employee_id=employee_id).delete()
+        model.objects.bulk_create([model(employee_id=employee_id, sort=i, **build(x)) for i, x in enumerate(items)])
 
     if section == 'personal':
         set_({'gender': g('gender'), 'dob': g('dob'), 'marital_status': g('maritalStatus'), 'blood_group': g('bloodGroup'),
               'nationality': g('nationality')})
     elif section == 'contact':
         set_({'personal_email': g('personalEmail'), 'personal_phone': g('personalPhone'), 'work_phone': g('workPhone'),
-              'permanent_address': js(g('permanentAddress')), 'temporary_address': js(g('temporaryAddress'))})
+              'permanent_address': g('permanentAddress'), 'temporary_address': g('temporaryAddress')})
     elif section == 'bank':
         acct = g('bankAccount')
         set_({'bank_code': g('bankCode'), 'bank_branch': g('bankBranch'), 'bank_account_enc': enc('bankAccount', acct),
@@ -385,10 +294,10 @@ def apply_section(*, company_id: str, employee_id: str, section: str, value: dic
     elif section == 'ids':
         pan = g('pan')
         if isinstance(pan, str):
-            owner = one('SELECT emp_code FROM employee WHERE company_id = %s AND pan_bidx = %s AND id <> %s LIMIT 1',
-                        [company_id, cipher.blind_index(pan), employee_id])
+            owner = (Employee.objects.for_company(company_id).filter(pan_bidx=cipher.blind_index(pan)).exclude(pk=employee_id)
+                     .values_list('emp_code', flat=True).first())
             if owner:
-                raise ConflictError(f"this PAN is already recorded for employee {owner['emp_code']}")
+                raise ConflictError(f'this PAN is already recorded for employee {owner}')
         set_({
             'pan_enc': enc('pan', pan), 'pan_bidx': U if pan is U else None if pan is None else cipher.blind_index(str(pan)),
             'citizenship_no_enc': enc('citizenshipNo', g('citizenshipNo')), 'citizenship_district': g('citizenshipDistrict'),
@@ -397,32 +306,21 @@ def apply_section(*, company_id: str, employee_id: str, section: str, value: dic
             'ssf_id': g('ssfId'), 'cit_id': g('citId'), 'pf_id': g('pfId'),
         })
     elif section == 'emergency':
-        execute('DELETE FROM employee_emergency_contact WHERE employee_id = %s', [employee_id])
-        for i, c in enumerate(v['contacts']):
-            execute("""INSERT INTO employee_emergency_contact (employee_id, name, relation, phone, alt_phone, address, sort)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                    [employee_id, c['name'], c['relation'], c['phone'], c.get('altPhone'), c.get('address'), i])
+        replace(EmployeeEmergencyContact, v['contacts'], lambda c: {
+            'name': c['name'], 'relation': c['relation'], 'phone': c['phone'], 'alt_phone': c.get('altPhone'), 'address': c.get('address')})
     elif section == 'family':
-        execute('DELETE FROM employee_family WHERE employee_id = %s', [employee_id])
-        for i, m in enumerate(v['members']):
-            execute("""INSERT INTO employee_family (employee_id, name, relation, dob, occupation, phone, is_dependent, is_nominee, nominee_share, sort)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    [employee_id, m['name'], m['relation'], m.get('dob'), m.get('occupation'), m.get('phone'),
-                     m.get('isDependent', False), m.get('isNominee', False), m.get('nomineeShare') if m.get('isNominee') else None, i])
+        replace(EmployeeFamily, v['members'], lambda m: {
+            'name': m['name'], 'relation': m['relation'], 'dob': m.get('dob'), 'occupation': m.get('occupation'), 'phone': m.get('phone'),
+            'is_dependent': m.get('isDependent', False), 'is_nominee': m.get('isNominee', False),
+            'nominee_share': m.get('nomineeShare') if m.get('isNominee') else None})
     elif section == 'education':
-        execute('DELETE FROM employee_education WHERE employee_id = %s', [employee_id])
-        for i, x in enumerate(v['items']):
-            execute("""INSERT INTO employee_education (employee_id, level, degree, field, institution, board, start_year, end_year, result, sort)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    [employee_id, x['level'], x.get('degree'), x.get('field'), x['institution'], x.get('board'), x.get('startYear'),
-                     x.get('endYear'), x.get('result'), i])
+        replace(EmployeeEducation, v['items'], lambda x: {
+            'level': x['level'], 'degree': x.get('degree'), 'field': x.get('field'), 'institution': x['institution'],
+            'board': x.get('board'), 'start_year': x.get('startYear'), 'end_year': x.get('endYear'), 'result': x.get('result')})
     elif section == 'experience':
-        execute('DELETE FROM employee_experience WHERE employee_id = %s', [employee_id])
-        for i, x in enumerate(v['items']):
-            execute("""INSERT INTO employee_experience (employee_id, organisation, designation, from_date, to_date, responsibilities, reason_for_leaving, sort)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                    [employee_id, x['organisation'], x.get('designation'), x.get('fromDate'), x.get('toDate'), x.get('responsibilities'),
-                     x.get('reasonForLeaving'), i])
+        replace(EmployeeExperience, v['items'], lambda x: {
+            'organisation': x['organisation'], 'designation': x.get('designation'), 'from_date': x.get('fromDate'),
+            'to_date': x.get('toDate'), 'responsibilities': x.get('responsibilities'), 'reason_for_leaving': x.get('reasonForLeaving')})
     elif section == 'skills':
         set_({'skills': g('skills'), 'languages': g('languages')})
     else:

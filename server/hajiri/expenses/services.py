@@ -9,8 +9,10 @@ Travel: a trip is requested with its daily allowance (TADA by grade and destinat
 payroll pays once the trip is approved; afterwards the traveller settles it with bills, and the difference between
 the entitlement and the advance is paid or recovered through payroll.
 
-The route-level functions take the signed-in AuthUser and a body in the TS camelCase shape (validated with the same
-rules as the zod schemas) and return what the TS route answered, so the views and the tests share one contract.
+The route-level functions take the signed-in AuthUser and a body in the TS camelCase shape (validated with the
+serializers in serializers.py, the zod rules of the TS routes) and return what the TS route answered, so the pages,
+the JSON API and the tests share one contract. Every query is scoped to the user's active company; an id of another
+company is not found.
 """
 from __future__ import annotations
 
@@ -18,54 +20,47 @@ from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from django.db import transaction
+from django.db.models import Case, Count, F, IntegerField, Max, Min, OuterRef, Q, StringAgg, Subquery, Sum, Value, When
+from django.db.models.functions import Coalesce, Now
 
 from engines.bs_calendar import ad_to_bs, bs_month_bounds
 from hajiri.core.audit import audit
 from hajiri.core.auth import AuthUser, company_id_of, has_role, is_manager_of
 from hajiri.core.bsdate import bs_label, bs_range
 from hajiri.core.clock import npt_today as _npt_today
-from hajiri.core.db import execute, one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
-from hajiri.core.schema import Arr, Bool, Enum, Int, IsoDate, Num, Obj, Str, Uuid, parse, parse_uuid
+from hajiri.core.scoping import get_or_404
+from hajiri.core.settings_store import get_setting, put_setting
+from hajiri.core.validation import parse_uuid, plain, validate
+from hajiri.db.models import (Employee, EmployeeAssignment, ExpenseCategory, ExpenseClaim, ExpenseItem, ExpenseLimit,
+                              ExpensePayout, TadaRate, TravelBill, TravelRequest, TravelSettlement)
 from hajiri.files.store import attach_file, read_file
 from hajiri.notifications.service import notify, user_id_for_employee
 from hajiri.web.format import group_digits
-from hajiri.workflow.service import (DecisionContext, act, can_act, cancel_workflow, get_instance, register_handler,
+from hajiri.workflow.service import (DecisionContext, act, can_act, cancel_workflow, instance_in, register_handler,
                                      register_summariser, start_workflow)
+
+from . import filters
+from . import serializers as s
+from .serializers import BILL_KINDS, CLAIM_STATUSES, DESTINATIONS, GROUP_BY, MODES, SCOPES, TRIP_STATUSES  # noqa: F401
+
+Claim = ExpenseClaim.Status
+Trip = TravelRequest.Status
+Advance = TravelRequest.AdvanceStatus
+Settlement = TravelSettlement.Status
+Payout = ExpensePayout.Status
+Source = ExpensePayout.SourceType
+Code = ExpensePayout.ComponentCode
 
 # ---------------------------------------------------------------- constants
 
-DESTINATIONS = ('valley', 'city', 'rural', 'international')
 DESTINATION_LABEL = {'valley': 'Kathmandu valley', 'city': 'Other city', 'rural': 'Rural area', 'international': 'International'}
-MODES = ('bus', 'air', 'office_vehicle', 'own_vehicle', 'other')
 MODE_LABEL = {'bus': 'Bus', 'air': 'Air', 'office_vehicle': 'Office vehicle', 'own_vehicle': 'Own vehicle', 'other': 'Other'}
-BILL_KINDS = ('transport', 'lodging', 'other')
 BILL_KIND_LABEL = {'transport': 'Transport', 'lodging': 'Lodging', 'other': 'Other'}
-CLAIM_STATUSES = ('draft', 'pending', 'approved', 'rejected', 'cancelled', 'paid')
-TRIP_STATUSES = ('pending', 'approved', 'rejected', 'cancelled', 'settling', 'settled')
-SCOPES = ('own', 'team', 'all')
 # Travel bills above this need the bill attached.
 BILL_RECEIPT_ABOVE = 500
-
-_AMOUNT_RE = r'^\d{1,10}(\.\d{1,2})?$'
-_FX_RE = r'^\d{1,6}(\.\d{1,4})?$'
-
-
-def _amount(**kw) -> Str:
-    return Str(regex=_AMOUNT_RE, regex_message='amount with up to 2 decimals', **kw)
-
-
-def _fx(**kw) -> Str:
-    return Str(regex=_FX_RE, regex_message='exchange rate with up to 4 decimals', **kw)
-
-
-ITEM_SCHEMA = Obj({
-    'expenseDate': IsoDate(), 'categoryId': Uuid(), 'description': Str(trim=True, min=1, max=300),
-    'amount': _amount(optional=True), 'km': Num(min=0, max=5000, optional=True,
-                                                refine=(lambda v: v > 0, 'Too small: expected number to be >0')),
-    'receiptFileId': Uuid(nullish=True),
-})
-CLAIM_SCHEMA = Obj({'title': Str(trim=True, min=1, max=120), 'items': Arr(ITEM_SCHEMA, min=1, max=50), 'submit': Bool(optional=True)})
+# Claims, travel and HR payment states that count towards a monthly limit.
+COUNTED = (Claim.PENDING, Claim.APPROVED, Claim.PAID)
 
 
 # ---------------------------------------------------------------- numbers
@@ -89,14 +84,14 @@ def money(d) -> str:
 
 def rs(d) -> str:
     """'Rs 1,500' / 'Rs 1,500.5' (en-IN grouping, up to 2 decimals), as the TS rs()."""
-    s = money(d)
-    neg = s.startswith('-')
-    i, _, f = s.lstrip('-').partition('.')
+    s_ = money(d)
+    neg = s_.startswith('-')
+    i, _, f = s_.lstrip('-').partition('.')
     f = f.rstrip('0')
     return f"Rs {'-' if neg else ''}{group_digits(i)}{'.' + f if f else ''}"
 
 
-def _days_between(a: str, b: str) -> int:
+def _days_between(a, b) -> int:
     return (date.fromisoformat(str(b)[:10]) - date.fromisoformat(str(a)[:10])).days
 
 
@@ -105,14 +100,14 @@ def npt_today() -> str:
 
 
 def _s(v) -> str | None:
+    """A column as the text PostgreSQL's ::text gave (numeric '900.00', date 'YYYY-MM-DD', uuid)."""
     return None if v is None else str(v)
 
 
 # ---------------------------------------------------------------- policy
 
 def expense_policy(company_id: str) -> dict:
-    r = one("SELECT value FROM company_setting WHERE company_id = %s AND key = 'expense.policy'", [company_id])
-    v = (r or {}).get('value') or {}
+    v = get_setting(company_id, 'expense.policy', {}) or {}
     if not isinstance(v, dict):
         v = {}
     raw = v.get('mileageRatePerKm')
@@ -130,12 +125,12 @@ def expense_policy(company_id: str) -> dict:
     }
 
 
-def employee_of(company_id: str, employee_id: str) -> dict:
-    r = one('SELECT id::text, name_en, emp_code, grade, status FROM employee WHERE id = %s AND company_id = %s',
-            [str(employee_id), company_id])
+def employee_of(company_id: str, employee_id) -> dict:
+    r = (Employee.objects.for_company(company_id).filter(pk=employee_id)
+         .values('id', 'name_en', 'emp_code', 'grade', 'status').first())
     if not r:
         raise NotFoundError('employee not found')
-    return r
+    return {**r, 'id': str(r['id'])}
 
 
 def _require_hr(user: AuthUser) -> None:
@@ -152,9 +147,9 @@ def _self_employee(user: AuthUser) -> str:
 # ---------------------------------------------------------------- claim checks
 
 def _categories(company_id: str) -> dict[str, dict]:
-    cats = rows("""SELECT id::text, code, name, kind, receipt_required_above::text, active FROM expense_category
-                    WHERE company_id = %s""", [company_id])
-    return {c['id']: c for c in cats}
+    cats = ExpenseCategory.objects.for_company(company_id).values('id', 'code', 'name', 'kind', 'receipt_required_above',
+                                                                  'active')
+    return {str(c['id']): {**c, 'id': str(c['id']), 'receipt_required_above': _s(c['receipt_required_above'])} for c in cats}
 
 
 def normalise_items(company_id: str, items: list[dict]) -> list[dict]:
@@ -168,7 +163,7 @@ def normalise_items(company_id: str, items: list[dict]) -> list[dict]:
             raise BadRequestError(f'Line {i + 1}: choose a valid category.')
         if not category['active']:
             raise BadRequestError(f"Line {i + 1}: {category['name']} is no longer available.")
-        if category['kind'] == 'mileage':
+        if category['kind'] == ExpenseCategory.Kind.MILEAGE:
             km = it.get('km')
             if not km or km <= 0:
                 raise BadRequestError(f'Line {i + 1}: enter the distance in km.')
@@ -179,6 +174,15 @@ def normalise_items(company_id: str, items: list[dict]) -> list[dict]:
             raise BadRequestError(f'Line {i + 1}: enter an amount above zero.')
         out.append({**it, 'km': None, 'category': category, 'amount': money(amt)})
     return out
+
+
+def _month_total_elsewhere(company_id: str, employee_id, category_id, start, end, exclude_claim_id) -> Decimal:
+    """The employee's other open or paid claims for this category in these dates (approved amounts where decided)."""
+    qs = ExpenseItem.objects.for_company(company_id).filter(
+        claim__employee_id=employee_id, category_id=category_id, claim__status__in=COUNTED, expense_date__range=(start, end))
+    if exclude_claim_id:
+        qs = qs.exclude(claim_id=exclude_claim_id)
+    return qs.aggregate(t=Coalesce(Sum(Coalesce('approved_amount', 'amount')), Value(Decimal(0))))['t']
 
 
 def check_claim(company_id: str, employee_id: str, items: list[dict], exclude_claim_id: str | None) -> list[dict]:
@@ -202,9 +206,8 @@ def check_claim(company_id: str, employee_id: str, items: list[dict], exclude_cl
             what = f" for {it['category']['name']} above {rs(thr)}" if D(thr) > 0 else f" for {it['category']['name']}"
             issues.append({'level': 'block', 'code': 'receipt_required', 'message': f'Line {i + 1}: attach a receipt{what}.', 'item': i})
     cat_ids = list(dict.fromkeys(it['category']['id'] for it in items))
-    limits = rows("""SELECT category_id::text, grade, per_claim::text, per_month::text FROM expense_limit
-                      WHERE company_id = %s AND category_id = ANY(%s::uuid[]) AND grade IN (%s, '*')""",
-                  [company_id, cat_ids, emp['grade'] or '*'])
+    limits = [{**x, 'category_id': str(x['category_id'])} for x in ExpenseLimit.objects.for_company(company_id).filter(
+        category_id__in=cat_ids, grade__in=(emp['grade'] or '*', '*')).values('category_id', 'grade', 'per_claim', 'per_month')]
 
     def limit_for(cat_id):
         return (next((x for x in limits if x['category_id'] == cat_id and x['grade'] == emp['grade']), None)
@@ -218,7 +221,7 @@ def check_claim(company_id: str, employee_id: str, items: list[dict], exclude_cl
         mine = [x for x in items if x['category']['id'] == cat_id]
         name = mine[0]['category']['name']
         total = sum((D(x['amount']) for x in mine), Decimal(0))
-        if lim['per_claim'] is not None and total > D(lim['per_claim']):
+        if lim['per_claim'] is not None and total > lim['per_claim']:
             issues.append({'level': level, 'code': 'per_claim_limit',
                            'message': f"{name}: {rs(total)} is over the limit of {rs(lim['per_claim'])} per claim."})
         if lim['per_month'] is not None:
@@ -228,13 +231,9 @@ def check_claim(company_id: str, employee_id: str, items: list[dict], exclude_cl
                 months[(b.year, b.month)] = months.get((b.year, b.month), Decimal(0)) + D(x['amount'])
             for (y, m), amt in months.items():
                 bounds = bs_month_bounds(y, m)
-                other = one("""SELECT coalesce(sum(coalesce(i.approved_amount, i.amount)), 0)::text AS total
-                                 FROM expense_item i JOIN expense_claim c ON c.id = i.claim_id
-                                WHERE c.employee_id = %s AND i.category_id = %s AND c.status IN ('pending', 'approved', 'paid')
-                                  AND i.expense_date BETWEEN %s AND %s AND (%s::uuid IS NULL OR c.id <> %s::uuid)""",
-                            [employee_id, cat_id, bounds['startAd'], bounds['endAd'], exclude_claim_id, exclude_claim_id])
-                month_total = amt + D(other['total'])
-                if month_total > D(lim['per_month']):
+                month_total = amt + _month_total_elsewhere(company_id, employee_id, cat_id, bounds['startAd'],
+                                                           bounds['endAd'], exclude_claim_id)
+                if month_total > lim['per_month']:
                     label = bs_label(bounds['startAd']).split(' ', 1)[1]
                     issues.append({'level': level, 'code': 'per_month_limit',
                                    'message': f"{name}: {rs(month_total)} in {label} is over the monthly limit of {rs(lim['per_month'])}."})
@@ -248,10 +247,10 @@ def quote_tada(company_id: str, employee_id: str, dest: str, from_: str, to: str
     if to < from_:
         raise BadRequestError('The return date must be on or after the start date.')
     emp = employee_of(company_id, employee_id)
-    rate = one("""SELECT grade, da_rate::text, lodging_rate::text FROM tada_rate WHERE company_id = %s AND destination = %s
-                   AND grade IN (%s, '*') ORDER BY (grade = '*') LIMIT 1""", [company_id, dest, emp['grade'] or '*']) \
-        or {'grade': '*', 'da_rate': '0', 'lodging_rate': '0'}
-    international = dest == 'international'
+    rate = (TadaRate.objects.for_company(company_id).filter(destination=dest, grade__in=(emp['grade'] or '*', '*'))
+            .order_by(Case(When(grade='*', then=1), default=0, output_field=IntegerField()))
+            .values('grade', 'da_rate', 'lodging_rate').first()) or {'grade': '*', 'da_rate': Decimal(0), 'lodging_rate': Decimal(0)}
+    international = dest == TravelRequest.DestinationCategory.INTERNATIONAL
     if international and (not fx_rate or not D(fx_rate) > 0):
         raise BadRequestError('Enter the US dollar exchange rate for an international trip.')
     fx = D(fx_rate) if international else Decimal(1)
@@ -273,12 +272,13 @@ def quote_tada(company_id: str, employee_id: str, dest: str, from_: str, to: str
 # ---------------------------------------------------------------- payouts
 
 def create_payout(*, company_id: str, employee_id: str, source_type: str, source_id: str, code: str, amount: Decimal, note: str) -> None:
+    """One payout per source and component; a second call for the same source does nothing (the partial unique index
+    on (source_type, source_id, component_code) for root payouts)."""
     if not amount > 0:
         return
-    execute("""INSERT INTO expense_payout (company_id, employee_id, source_type, source_id, component_code, amount, note)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (source_type, source_id, component_code) WHERE parent_payout_id IS NULL DO NOTHING""",
-            [str(company_id), str(employee_id), source_type, str(source_id), code, money(amount), note[:200]])
+    ExpensePayout.objects.bulk_create([ExpensePayout(
+        company_id=company_id, employee_id=employee_id, source_type=source_type, source_id=source_id, component_code=code,
+        amount=money(amount), note=note[:200])], ignore_conflicts=True)
 
 
 def _tell(company_id, employee_id, template: str, title: str, body: str, payload: dict) -> None:
@@ -294,128 +294,130 @@ def _why(reason: str | None) -> str:
 
 
 # ---------------------------------------------------------------- workflow handlers
+# Called by the workflow engine with the object id of an instance it already loaded for the deciding user's company.
 
 def apply_claim_decision(claim_id: str, state: str, ctx: DecisionContext) -> None:
-    c = one('SELECT company_id::text, employee_id::text, title, status FROM expense_claim WHERE id = %s FOR UPDATE', [claim_id])
+    claim_id = str(claim_id)
+    c = ExpenseClaim.objects.select_for_update().filter(pk=claim_id).first()
     if not c:
         raise NotFoundError('claim not found')
-    if c['status'] != 'pending':
-        raise ConflictError(f"claim already {c['status']}")
+    if c.status != Claim.PENDING:
+        raise ConflictError(f'claim already {c.status}')
+    claims = ExpenseClaim.objects.filter(pk=claim_id)
     if state == 'rejected':
-        execute("""UPDATE expense_claim SET status = 'rejected', decided_at = now(), decision_note = %s, updated_at = now()
-                    WHERE id = %s""", [ctx.reason, claim_id])
-        _tell(c['company_id'], c['employee_id'], 'expense_claim.rejected', 'Expense claim rejected',
-              f"\"{c['title']}\" was rejected{_why(ctx.reason)}.", {'claimId': claim_id})
+        claims.update(status=Claim.REJECTED, decided_at=Now(), decision_note=ctx.reason, updated_at=Now())
+        _tell(c.company_id, c.employee_id, 'expense_claim.rejected', 'Expense claim rejected',
+              f'"{c.title}" was rejected{_why(ctx.reason)}.', {'claimId': claim_id})
         return
-    execute('UPDATE expense_item SET approved_amount = coalesce(approved_amount, amount) WHERE claim_id = %s', [claim_id])
-    total = D(one('SELECT coalesce(sum(approved_amount), 0)::text AS total FROM expense_item WHERE claim_id = %s', [claim_id])['total'])
-    execute("""UPDATE expense_claim SET status = %s, total_approved = %s, decided_at = now(), decision_note = %s,
-                      payment_method = 'payroll', updated_at = now() WHERE id = %s""",
-            ['approved' if total > 0 else 'rejected', money(total), ctx.reason, claim_id])
+    lines = ExpenseItem.objects.filter(claim_id=claim_id)
+    lines.update(approved_amount=Coalesce('approved_amount', 'amount'))
+    total = lines.aggregate(t=Coalesce(Sum('approved_amount'), Value(Decimal(0))))['t']
+    claims.update(status=Claim.APPROVED if total > 0 else Claim.REJECTED, total_approved=money(total), decided_at=Now(),
+                  decision_note=ctx.reason, payment_method=ExpenseClaim.PaymentMethod.PAYROLL, updated_at=Now())
     if not total > 0:
-        _tell(c['company_id'], c['employee_id'], 'expense_claim.rejected', 'Expense claim not paid',
-              f"\"{c['title']}\" was approved for nothing{_why(ctx.reason)}.", {'claimId': claim_id})
+        _tell(c.company_id, c.employee_id, 'expense_claim.rejected', 'Expense claim not paid',
+              f'"{c.title}" was approved for nothing{_why(ctx.reason)}.', {'claimId': claim_id})
         return
-    create_payout(company_id=c['company_id'], employee_id=c['employee_id'], source_type='expense_claim', source_id=claim_id,
-                  code='EXP_REIMB', amount=total, note=f"Claim: {c['title']}")
-    _tell(c['company_id'], c['employee_id'], 'expense_claim.approved', 'Expense claim approved',
-          f"\"{c['title']}\" was approved for {rs(total)}. It will be paid with your next salary.", {'claimId': claim_id})
+    create_payout(company_id=c.company_id, employee_id=c.employee_id, source_type=Source.EXPENSE_CLAIM, source_id=claim_id,
+                  code=Code.EXP_REIMB, amount=total, note=f'Claim: {c.title}')
+    _tell(c.company_id, c.employee_id, 'expense_claim.approved', 'Expense claim approved',
+          f'"{c.title}" was approved for {rs(total)}. It will be paid with your next salary.', {'claimId': claim_id})
 
 
 def apply_travel_decision(travel_id: str, state: str, ctx: DecisionContext) -> None:
-    t = one("""SELECT company_id::text, employee_id::text, destination, status, from_date::text, to_date::text,
-                      advance_requested::text, advance_approved::text FROM travel_request WHERE id = %s FOR UPDATE""", [travel_id])
+    travel_id = str(travel_id)
+    t = TravelRequest.objects.select_for_update().filter(pk=travel_id).first()
     if not t:
         raise NotFoundError('travel request not found')
-    if t['status'] != 'pending':
-        raise ConflictError(f"travel request already {t['status']}")
-    when = bs_range(t['from_date'], t['to_date'])
+    if t.status != Trip.PENDING:
+        raise ConflictError(f'travel request already {t.status}')
+    when = bs_range(t.from_date, t.to_date)
+    trips = TravelRequest.objects.filter(pk=travel_id)
     if state == 'rejected':
-        execute("UPDATE travel_request SET status = 'rejected', decided_at = now(), decision_note = %s WHERE id = %s", [ctx.reason, travel_id])
-        _tell(t['company_id'], t['employee_id'], 'travel_request.rejected', 'Travel request rejected',
-              f"Your trip to {t['destination']} ({when}) was rejected{_why(ctx.reason)}.", {'travelId': travel_id})
+        trips.update(status=Trip.REJECTED, decided_at=Now(), decision_note=ctx.reason)
+        _tell(t.company_id, t.employee_id, 'travel_request.rejected', 'Travel request rejected',
+              f'Your trip to {t.destination} ({when}) was rejected{_why(ctx.reason)}.', {'travelId': travel_id})
         return
-    advance = D(t['advance_approved'] if t['advance_approved'] is not None else t['advance_requested'])
-    execute("""UPDATE travel_request SET status = 'approved', decided_at = now(), decision_note = %s, advance_approved = %s,
-                      advance_status = CASE WHEN %s::numeric > 0 THEN 'pending' ELSE 'none' END,
-                      advance_method = CASE WHEN %s::numeric > 0 THEN 'payroll' END WHERE id = %s""",
-            [ctx.reason, money(advance), money(advance), money(advance), travel_id])
-    create_payout(company_id=t['company_id'], employee_id=t['employee_id'], source_type='travel_advance', source_id=travel_id,
-                  code='TRAVEL_ADV', amount=advance, note=f"Travel advance: {t['destination']}")
+    advance = D(t.advance_approved if t.advance_approved is not None else t.advance_requested)
+    trips.update(status=Trip.APPROVED, decided_at=Now(), decision_note=ctx.reason, advance_approved=money(advance),
+                 advance_status=Advance.PENDING if advance > 0 else Advance.NONE,
+                 advance_method=TravelRequest.AdvanceMethod.PAYROLL if advance > 0 else None)
+    create_payout(company_id=t.company_id, employee_id=t.employee_id, source_type=Source.TRAVEL_ADVANCE, source_id=travel_id,
+                  code=Code.TRAVEL_ADV, amount=advance, note=f'Travel advance: {t.destination}')
     with_adv = f' with an advance of {rs(advance)}' if advance > 0 else ''
-    _tell(t['company_id'], t['employee_id'], 'travel_request.approved', 'Travel request approved',
-          f"Your trip to {t['destination']} ({when}) was approved{with_adv}.", {'travelId': travel_id})
+    _tell(t.company_id, t.employee_id, 'travel_request.approved', 'Travel request approved',
+          f'Your trip to {t.destination} ({when}) was approved{with_adv}.', {'travelId': travel_id})
 
 
 def apply_settlement_decision(settlement_id: str, state: str, ctx: DecisionContext) -> None:
-    s = one("""SELECT s.company_id::text, s.employee_id::text, s.status, s.travel_request_id::text, s.entitlement::text,
-                      s.advance::text, s.net::text, t.destination
-                 FROM travel_settlement s JOIN travel_request t ON t.id = s.travel_request_id WHERE s.id = %s FOR UPDATE OF s""",
-            [settlement_id])
-    if not s:
+    settlement_id = str(settlement_id)
+    s_ = (TravelSettlement.objects.select_for_update(of=('self',)).select_related('travel_request')
+          .filter(pk=settlement_id).first())
+    if not s_:
         raise NotFoundError('settlement not found')
-    if s['status'] != 'pending':
-        raise ConflictError(f"settlement already {s['status']}")
+    if s_.status != Settlement.PENDING:
+        raise ConflictError(f'settlement already {s_.status}')
+    destination = s_.travel_request.destination
+    trip_id = s_.travel_request_id
+    rows_ = TravelSettlement.objects.filter(pk=settlement_id)
     if state == 'rejected':
-        execute("UPDATE travel_settlement SET status = 'rejected', decided_at = now(), decision_note = %s WHERE id = %s",
-                [ctx.reason, settlement_id])
-        execute("UPDATE travel_request SET status = 'approved' WHERE id = %s AND status = 'settling'", [s['travel_request_id']])
-        _tell(s['company_id'], s['employee_id'], 'travel_settlement.rejected', 'Travel settlement returned',
-              f"Your settlement for {s['destination']} was rejected{_why(ctx.reason)}. You can correct and submit it again.",
+        rows_.update(status=Settlement.REJECTED, decided_at=Now(), decision_note=ctx.reason)
+        TravelRequest.objects.filter(pk=trip_id, status=Trip.SETTLING).update(status=Trip.APPROVED)
+        _tell(s_.company_id, s_.employee_id, 'travel_settlement.rejected', 'Travel settlement returned',
+              f'Your settlement for {destination} was rejected{_why(ctx.reason)}. You can correct and submit it again.',
               {'settlementId': settlement_id})
         return
     # An advance that payroll has not picked up yet is never paid: it is cancelled and the whole entitlement is settled instead.
-    advance = D(s['advance'])
-    adv = rows("""UPDATE expense_payout SET status = 'cancelled' WHERE source_type = 'travel_advance' AND source_id = %s
-                   AND status = 'pending' AND payroll_run_id IS NULL RETURNING id""", [s['travel_request_id']])
-    if adv:
+    advance = s_.advance
+    cancelled = ExpensePayout.objects.for_company(s_.company_id).filter(
+        source_type=Source.TRAVEL_ADVANCE, source_id=trip_id, status=Payout.PENDING, payroll_run__isnull=True,
+    ).update(status=Payout.CANCELLED)
+    if cancelled:
         advance = Decimal(0)
-        execute("UPDATE travel_request SET advance_status = 'none' WHERE id = %s", [s['travel_request_id']])
-    net = D(s['entitlement']) - advance
-    execute("""UPDATE travel_settlement SET status = 'approved', decided_at = now(), decision_note = %s, advance = %s, net = %s
-                WHERE id = %s""", [ctx.reason, money(advance), money(net), settlement_id])
-    execute("UPDATE travel_request SET status = 'settled' WHERE id = %s", [s['travel_request_id']])
+        TravelRequest.objects.filter(pk=trip_id).update(advance_status=Advance.NONE)
+    net = s_.entitlement - advance
+    rows_.update(status=Settlement.APPROVED, decided_at=Now(), decision_note=ctx.reason, advance=money(advance), net=money(net))
+    TravelRequest.objects.filter(pk=trip_id).update(status=Trip.SETTLED)
     if net > 0:
-        create_payout(company_id=s['company_id'], employee_id=s['employee_id'], source_type='travel_settlement', source_id=settlement_id,
-                      code='EXP_REIMB', amount=net, note=f"Travel settlement: {s['destination']}")
+        create_payout(company_id=s_.company_id, employee_id=s_.employee_id, source_type=Source.TRAVEL_SETTLEMENT,
+                      source_id=settlement_id, code=Code.EXP_REIMB, amount=net, note=f'Travel settlement: {destination}')
     if net < 0:
-        create_payout(company_id=s['company_id'], employee_id=s['employee_id'], source_type='travel_settlement', source_id=settlement_id,
-                      code='EXP_RECOVERY', amount=-net, note=f"Unspent travel advance: {s['destination']}")
+        create_payout(company_id=s_.company_id, employee_id=s_.employee_id, source_type=Source.TRAVEL_SETTLEMENT,
+                      source_id=settlement_id, code=Code.EXP_RECOVERY, amount=-net, note=f'Unspent travel advance: {destination}')
     if net > 0:
-        body = f"{rs(net)} for your trip to {s['destination']} will be paid with your next salary."
+        body = f'{rs(net)} for your trip to {destination} will be paid with your next salary.'
     elif net < 0:
-        body = f"{rs(-net)} of unspent advance for {s['destination']} will be recovered from your next salary."
+        body = f'{rs(-net)} of unspent advance for {destination} will be recovered from your next salary.'
     else:
-        body = f"Your trip to {s['destination']} is settled with nothing more to pay or recover."
-    _tell(s['company_id'], s['employee_id'], 'travel_settlement.approved', 'Travel settlement approved', body,
+        body = f'Your trip to {destination} is settled with nothing more to pay or recover.'
+    _tell(s_.company_id, s_.employee_id, 'travel_settlement.approved', 'Travel settlement approved', body,
           {'settlementId': settlement_id})
 
 
 def _summary_claim(inst: dict) -> dict:
-    c = one("""SELECT c.title, c.total_claimed::text, (SELECT count(*)::int FROM expense_item i WHERE i.claim_id = c.id) AS items,
-                      (SELECT count(*)::int FROM expense_item i WHERE i.claim_id = c.id AND i.receipt_file_id IS NOT NULL) AS receipts,
-                      (SELECT string_agg(DISTINCT ec.name, ', ') FROM expense_item i JOIN expense_category ec ON ec.id = i.category_id
-                        WHERE i.claim_id = c.id) AS categories
-                 FROM expense_claim c WHERE c.id = %s""", [inst['object_id']])
-    return {'title': c['title'], 'amount': c['total_claimed'], 'items': c['items'], 'receipts': c['receipts'],
-            'categories': c['categories']} if c else {}
+    c = (ExpenseClaim.objects.for_company(inst['company_id']).filter(pk=inst['object_id'])
+         .annotate(n_items=Count('expense_items'),
+                   n_receipts=Count('expense_items', filter=Q(expense_items__receipt_file__isnull=False)),
+                   category_names=StringAgg('expense_items__category__name', Value(', '), distinct=True,
+                                            order_by='expense_items__category__name'))
+         .values('title', 'total_claimed', 'n_items', 'n_receipts', 'category_names').first())
+    return {'title': c['title'], 'amount': _s(c['total_claimed']), 'items': c['n_items'], 'receipts': c['n_receipts'],
+            'categories': c['category_names']} if c else {}
 
 
 def _summary_travel(inst: dict) -> dict:
-    t = one("""SELECT destination, destination_category, purpose, from_date::text, to_date::text, days, da_amount::text,
-                      estimated_cost::text, advance_requested::text, mode FROM travel_request WHERE id = %s""", [inst['object_id']])
-    return {'destination': t['destination'], 'destinationCategory': DESTINATION_LABEL.get(t['destination_category']),
-            'purpose': t['purpose'], 'from': t['from_date'], 'to': t['to_date'], 'days': t['days'],
-            'dailyAllowance': t['da_amount'], 'estimatedCost': t['estimated_cost'], 'advance': t['advance_requested'],
-            'mode': t['mode']} if t else {}
+    t = TravelRequest.objects.for_company(inst['company_id']).filter(pk=inst['object_id']).first()
+    return {'destination': t.destination, 'destinationCategory': DESTINATION_LABEL.get(t.destination_category),
+            'purpose': t.purpose, 'from': _s(t.from_date), 'to': _s(t.to_date), 'days': t.days,
+            'dailyAllowance': _s(t.da_amount), 'estimatedCost': _s(t.estimated_cost), 'advance': _s(t.advance_requested),
+            'mode': t.mode} if t else {}
 
 
 def _summary_settlement(inst: dict) -> dict:
-    s = one("""SELECT t.destination, s.actual_from::text, s.actual_to::text, s.entitlement::text, s.advance::text, s.net::text,
-                      (SELECT count(*)::int FROM travel_bill b WHERE b.settlement_id = s.id) AS bills
-                 FROM travel_settlement s JOIN travel_request t ON t.id = s.travel_request_id WHERE s.id = %s""", [inst['object_id']])
-    return {'destination': s['destination'], 'from': s['actual_from'], 'to': s['actual_to'], 'entitlement': s['entitlement'],
-            'advance': s['advance'], 'net': s['net'], 'bills': s['bills']} if s else {}
+    s_ = (TravelSettlement.objects.for_company(inst['company_id']).filter(pk=inst['object_id'])
+          .annotate(destination=F('travel_request__destination'), n_bills=Count('travel_bills')).first())
+    return {'destination': s_.destination, 'from': _s(s_.actual_from), 'to': _s(s_.actual_to),
+            'entitlement': _s(s_.entitlement), 'advance': _s(s_.advance), 'net': _s(s_.net), 'bills': s_.n_bills} if s_ else {}
 
 
 def register() -> None:
@@ -433,26 +435,7 @@ register()
 
 # ================================================================ route-level functions
 
-def _default_scope(u: AuthUser) -> str:
-    return 'all' if has_role(u, 'hr') else 'team' if has_role(u, 'manager') else 'own'
-
-
-def _scope_filter(u: AuthUser, scope: str, alias: str) -> tuple[str, list]:
-    """Own records, a manager's reports (and own), or the whole company for HR."""
-    if scope == 'all':
-        if not has_role(u, 'hr'):
-            raise ForbiddenError('only HR can see everyone')
-        return 'TRUE', []
-    if scope == 'team':
-        if not has_role(u, 'manager', 'hr') or not u.employee_id:
-            raise ForbiddenError('only managers can see their team')
-        return f'({alias}.employee_id = %s OR hj_manages(%s::uuid, {alias}.employee_id, (now() AT TIME ZONE \'Asia/Kathmandu\')::date))', [u.employee_id, u.employee_id]
-    if not u.employee_id:
-        raise BadRequestError('your account is not linked to an employee')
-    return f'{alias}.employee_id = %s', [u.employee_id]
-
-
-def _assert_can_see(u: AuthUser, employee_id: str) -> None:
+def _assert_can_see(u: AuthUser, employee_id) -> None:
     """The employee, their manager and HR may read a claim or trip; everyone else gets a 404."""
     if has_role(u, 'hr') or u.employee_id == str(employee_id):
         return
@@ -462,30 +445,44 @@ def _assert_can_see(u: AuthUser, employee_id: str) -> None:
 
 
 def _can_act_on(user: AuthUser, instance_id) -> bool:
-    inst = get_instance(str(instance_id)) if instance_id else None
+    inst = instance_in(user.company_id, instance_id) if instance_id else None
     return can_act(user, inst) if inst else False
 
 
-def _pay_outside(source_type: str, source_id: str) -> None:
+def _pay_outside(company_id: str, source_type: str, source_id: str) -> None:
     """Settle a source's pending payout outside payroll; refused while a pay run being prepared holds it."""
-    p = rows("""SELECT id, payroll_run_id FROM expense_payout WHERE source_type = %s AND source_id = %s AND status = 'pending'
-                 FOR UPDATE""", [source_type, source_id])
-    if not p:
+    waiting = ExpensePayout.objects.for_company(company_id).filter(source_type=source_type, source_id=source_id,
+                                                                   status=Payout.PENDING)
+    held = list(waiting.select_for_update().values_list('payroll_run_id', flat=True))
+    if not held:
         raise ConflictError('nothing is waiting to be paid')
-    if any(x['payroll_run_id'] for x in p):
+    if any(held):
         raise ConflictError('This payment is already in a pay run being prepared. Pay it in that run instead.')
-    execute("""UPDATE expense_payout SET status = 'cash', paid_amount = amount, paid_at = now()
-                WHERE source_type = %s AND source_id = %s AND status = 'pending'""", [source_type, source_id])
+    waiting.update(status=Payout.CASH, paid_amount=F('amount'), paid_at=Now())
     from .payroll import mark_sources_paid
     mark_sources_paid([{'source_type': source_type, 'source_id': source_id}])
 
 
-def _claim_row(company_id: str, id: str) -> dict:
-    r = one("""SELECT id::text, employee_id::text, title, status, total_claimed::text, total_approved::text,
-                      workflow_instance_id::text, payment_method FROM expense_claim WHERE id = %s AND company_id = %s""", [id, company_id])
-    if not r:
-        raise NotFoundError('claim not found')
-    return r
+def _claim(company_id: str, id: str, *, lock: bool = False) -> ExpenseClaim:
+    qs = ExpenseClaim.objects.select_for_update() if lock else ExpenseClaim.objects.all()
+    return get_or_404(qs, company_id, 'claim not found', pk=id)
+
+
+def _trip(company_id: str, id: str, *, lock: bool = False) -> TravelRequest:
+    qs = TravelRequest.objects.select_for_update() if lock else TravelRequest.objects.all()
+    return get_or_404(qs, company_id, 'travel request not found', pk=id)
+
+
+def _payout_rows(qs) -> list[dict]:
+    """Payouts with the pay period of the run holding them (none while waiting for a run)."""
+    out = []
+    for p in qs.order_by('created_at', 'id').values('id', 'source_type', 'component_code', 'amount', 'status', 'paid_amount',
+                                                    'paid_at', bs_year=F('payroll_run__period__bs_year'),
+                                                    bs_month=F('payroll_run__period__bs_month')):
+        out.append({'id': str(p['id']), 'sourceType': p['source_type'], 'code': p['component_code'], 'amount': _s(p['amount']),
+                    'status': p['status'], 'paidAmount': _s(p['paid_amount']), 'paidAt': p['paid_at'],
+                    'bsYear': p['bs_year'], 'bsMonth': p['bs_month']})
+    return out
 
 
 # ---------------------------------------------------------------- policy routes
@@ -493,116 +490,91 @@ def _claim_row(company_id: str, id: str) -> dict:
 def get_policy(user: AuthUser) -> dict:
     company_id = company_id_of(user)
     settings = expense_policy(company_id)
-    cats = rows("""SELECT id::text, code, name, kind, receipt_required_above::text AS "receiptRequiredAbove", active,
-                          sort_order AS "sortOrder" FROM expense_category WHERE company_id = %s ORDER BY sort_order, name""", [company_id])
-    limits = rows("""SELECT id::text, category_id::text AS "categoryId", grade, per_claim::text AS "perClaim",
-                            per_month::text AS "perMonth" FROM expense_limit WHERE company_id = %s ORDER BY grade""", [company_id])
-    rates = rows("""SELECT grade, destination, da_rate::text AS "daRate", lodging_rate::text AS "lodgingRate" FROM tada_rate
-                     WHERE company_id = %s ORDER BY (grade = '*') DESC, grade, destination""", [company_id])
+    cats = [{'id': str(c.id), 'code': c.code, 'name': c.name, 'kind': c.kind, 'receiptRequiredAbove': _s(c.receipt_required_above),
+             'active': c.active, 'sortOrder': c.sort_order}
+            for c in ExpenseCategory.objects.for_company(company_id).order_by('sort_order', 'name')]
+    limits = [{'id': str(x.id), 'categoryId': str(x.category_id), 'grade': x.grade, 'perClaim': _s(x.per_claim),
+               'perMonth': _s(x.per_month)} for x in ExpenseLimit.objects.for_company(company_id).order_by('grade')]
+    rates = [{'grade': r.grade, 'destination': r.destination, 'daRate': _s(r.da_rate), 'lodgingRate': _s(r.lodging_rate)}
+             for r in TadaRate.objects.for_company(company_id).order_by(
+                 Case(When(grade='*', then=0), default=1, output_field=IntegerField()), 'grade', 'destination')]
     grade = employee_of(company_id, user.employee_id)['grade'] if user.employee_id else None
-    grades = [g['grade'] for g in rows('SELECT DISTINCT grade FROM employee WHERE company_id = %s AND grade IS NOT NULL ORDER BY grade',
-                                       [company_id])] if has_role(user, 'hr') else []
+    grades = list(Employee.objects.for_company(company_id).filter(grade__isnull=False).order_by('grade')
+                  .values_list('grade', flat=True).distinct()) if has_role(user, 'hr') else []
     return {'settings': settings, 'categories': cats, 'limits': limits, 'tadaRates': rates,
             'destinations': [{'value': d, 'label': DESTINATION_LABEL[d]} for d in DESTINATIONS], 'myGrade': grade, 'grades': grades}
 
 
-SETTINGS_SCHEMA = Obj({'mileageRatePerKm': _amount(), 'limitMode': Enum(('block', 'warn')), 'claimWindowDays': Int(min=7, max=365)})
-
-
 def save_settings(user: AuthUser, body: dict) -> dict:
     _require_hr(user)
-    b = parse(SETTINGS_SCHEMA, body)
+    b = validate(s.SettingsIn, body)
     company_id = company_id_of(user)
-    import json
     with transaction.atomic():
         before = expense_policy(company_id)
-        execute("""INSERT INTO company_setting (company_id, key, value) VALUES (%s, 'expense.policy', %s)
-                   ON CONFLICT (company_id, key) DO UPDATE SET value = EXCLUDED.value""", [company_id, json.dumps(b)])
+        put_setting(company_id, 'expense.policy', b, updated_by=user.id)
         audit('update', 'company_setting', actor_id=user.id, row_id=None, before={'key': 'expense.policy', **before}, after=b)
     return {'settings': expense_policy(company_id)}
 
 
-def _category_fields(partial: bool) -> dict:
-    o = {'optional': True} if partial else {}
-    f = {
-        'name': Str(trim=True, min=1, max=80, **o), 'kind': Enum(('amount', 'mileage'), **o),
-        'receiptRequiredAbove': _amount(nullish=True), 'active': Bool(optional=True), 'sortOrder': Int(min=0, max=9999, optional=True),
-    }
-    if not partial:
-        f['code'] = Str(regex=r'^[A-Z][A-Z0-9_]{1,29}$', regex_message='capital letters, digits and _')
-    return f
-
-
 def create_category(user: AuthUser, body: dict) -> dict:
     _require_hr(user)
-    b = parse(Obj(_category_fields(False)), body)
+    b = validate(s.CategoryIn, body)
     with transaction.atomic():
-        r = one("""INSERT INTO expense_category (company_id, code, name, kind, receipt_required_above, active, sort_order)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id::text""",
-                [company_id_of(user), b['code'], b['name'], b['kind'], b.get('receiptRequiredAbove'), b.get('active', True),
-                 b.get('sortOrder', 100)])
-        audit('create', 'expense_category', actor_id=user.id, row_id=r['id'], after=b)
-    return {'id': r['id']}
+        c = ExpenseCategory.objects.create(company_id=company_id_of(user), code=b['code'], name=b['name'], kind=b['kind'],
+                                           receipt_required_above=b.get('receiptRequiredAbove'), active=b.get('active', True),
+                                           sort_order=b.get('sortOrder', 100))
+        audit('create', 'expense_category', actor_id=user.id, row_id=str(c.id), after=b)
+    return {'id': str(c.id)}
+
+
+_CATEGORY_COLUMNS = {'name': 'name', 'kind': 'kind', 'receiptRequiredAbove': 'receipt_required_above', 'active': 'active',
+                     'sortOrder': 'sort_order'}
 
 
 def update_category(user: AuthUser, id: str, body: dict) -> dict:
     _require_hr(user)
     id = parse_uuid(str(id))
-    b = parse(Obj(_category_fields(True)), body)
+    b = validate(s.CategoryPatchIn, body)
     with transaction.atomic():
-        r = one("""UPDATE expense_category SET name = coalesce(%s, name), kind = coalesce(%s, kind),
-                          receipt_required_above = CASE WHEN %s::boolean THEN %s::numeric ELSE receipt_required_above END,
-                          active = coalesce(%s, active), sort_order = coalesce(%s, sort_order)
-                    WHERE id = %s AND company_id = %s RETURNING id""",
-                [b.get('name'), b.get('kind'), 'receiptRequiredAbove' in b, b.get('receiptRequiredAbove'), b.get('active'),
-                 b.get('sortOrder'), id, company_id_of(user)])
-        if not r:
+        found = ExpenseCategory.objects.for_company(company_id_of(user)).filter(pk=id)
+        changes = {_CATEGORY_COLUMNS[k]: v for k, v in b.items() if k in _CATEGORY_COLUMNS}
+        if not (found.update(**changes) if changes else found.exists()):
             raise NotFoundError('category not found')
         audit('update', 'expense_category', actor_id=user.id, row_id=id, after=b)
     return {'ok': True}
 
 
-LIMITS_SCHEMA = Obj({'limits': Arr(Obj({'grade': Str(trim=True, min=1, max=40), 'perClaim': _amount(nullish=True),
-                                        'perMonth': _amount(nullish=True)}), max=50)})
-
-
 def set_limits(user: AuthUser, id: str, body: dict) -> dict:
     _require_hr(user)
     id = parse_uuid(str(id))
-    b = parse(LIMITS_SCHEMA, body)
+    b = validate(s.LimitsIn, body)
     company_id = company_id_of(user)
     grades = [x['grade'] for x in b['limits']]
     if len(set(grades)) != len(grades):
         raise BadRequestError('each grade can appear only once')
     with transaction.atomic():
-        if not one('SELECT 1 AS x FROM expense_category WHERE id = %s AND company_id = %s', [id, company_id]):
-            raise NotFoundError('category not found')
-        execute('DELETE FROM expense_limit WHERE category_id = %s', [id])
-        for x in b['limits']:
-            if not x.get('perClaim') and not x.get('perMonth'):
-                continue
-            execute('INSERT INTO expense_limit (company_id, category_id, grade, per_claim, per_month) VALUES (%s, %s, %s, %s, %s)',
-                    [company_id, id, x['grade'], x.get('perClaim'), x.get('perMonth')])
+        get_or_404(ExpenseCategory, company_id, 'category not found', pk=id)
+        ExpenseLimit.objects.for_company(company_id).filter(category_id=id).delete()
+        ExpenseLimit.objects.bulk_create([
+            ExpenseLimit(company_id=company_id, category_id=id, grade=x['grade'], per_claim=x.get('perClaim'),
+                         per_month=x.get('perMonth'))
+            for x in b['limits'] if x.get('perClaim') or x.get('perMonth')])
         audit('update', 'expense_limit', actor_id=user.id, row_id=id, after=b['limits'])
     return {'ok': True}
 
 
-TADA_SCHEMA = Obj({'rates': Arr(Obj({'grade': Str(trim=True, min=1, max=40), 'destination': Enum(DESTINATIONS),
-                                     'daRate': _amount(), 'lodgingRate': _amount()}), max=200)})
-
-
 def set_tada_rates(user: AuthUser, body: dict) -> dict:
     _require_hr(user)
-    b = parse(TADA_SCHEMA, body)
+    b = validate(s.TadaRatesIn, body)
     keys = [f"{x['grade']}|{x['destination']}" for x in b['rates']]
     if len(set(keys)) != len(keys):
         raise BadRequestError('each grade and destination can appear only once')
     company_id = company_id_of(user)
     with transaction.atomic():
-        execute('DELETE FROM tada_rate WHERE company_id = %s', [company_id])
-        for x in b['rates']:
-            execute('INSERT INTO tada_rate (company_id, grade, destination, da_rate, lodging_rate) VALUES (%s, %s, %s, %s, %s)',
-                    [company_id, x['grade'], x['destination'], x['daRate'], x['lodgingRate']])
+        TadaRate.objects.for_company(company_id).delete()
+        TadaRate.objects.bulk_create([
+            TadaRate(company_id=company_id, grade=x['grade'], destination=x['destination'], da_rate=x['daRate'],
+                     lodging_rate=x['lodgingRate']) for x in b['rates']])
         audit('update', 'tada_rate', actor_id=user.id, row_id=None, after=b['rates'])
     return {'ok': True}
 
@@ -610,7 +582,7 @@ def set_tada_rates(user: AuthUser, body: dict) -> dict:
 # ---------------------------------------------------------------- claims
 
 def check_items(user: AuthUser, body: dict) -> dict:
-    b = parse(Obj({'items': Arr(ITEM_SCHEMA, min=1, max=50), 'claimId': Uuid(optional=True)}), body)
+    b = plain(validate(s.CheckIn, body))
     company_id = company_id_of(user)
     items = normalise_items(company_id, b['items'])
     issues = check_claim(company_id, _self_employee(user), items, b.get('claimId'))
@@ -624,17 +596,19 @@ def _write_items(company_id: str, user_id: str, employee_id: str, claim_id: str,
     blocks = [i for i in issues if i['level'] == 'block']
     if submitting and blocks:
         raise BadRequestError(' '.join(x['message'] for x in blocks), {'code': 'claim_blocked', 'issues': issues})
-    execute('DELETE FROM expense_item WHERE claim_id = %s', [claim_id])
+    ExpenseItem.objects.filter(claim_id=claim_id).delete()
+    lines = []
     for i, it in enumerate(items):
         if it.get('receiptFileId'):
             attach_file(company_id=company_id, file_id=it['receiptFileId'], user_id=user_id, purpose='expense_receipt',
                         attached_to=f'expense_claim:{claim_id}')
-        execute("""INSERT INTO expense_item (claim_id, expense_date, category_id, description, amount, km, receipt_file_id, sort_order)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                [claim_id, it['expenseDate'], it['categoryId'], it['description'], it['amount'], it.get('km'),
-                 it.get('receiptFileId'), i])
+        lines.append(ExpenseItem(claim_id=claim_id, expense_date=it['expenseDate'], category_id=it['categoryId'],
+                                 description=it['description'], amount=it['amount'],
+                                 km=D(it['km']) if it.get('km') is not None else None,
+                                 receipt_file_id=it.get('receiptFileId'), sort_order=i))
+    ExpenseItem.objects.bulk_create(lines)
     total = sum((D(it['amount']) for it in items), Decimal(0))
-    execute('UPDATE expense_claim SET total_claimed = %s, updated_at = now() WHERE id = %s', [money(total), claim_id])
+    ExpenseClaim.objects.filter(pk=claim_id).update(total_claimed=money(total), updated_at=Now())
     return issues, total
 
 
@@ -642,161 +616,169 @@ def _submit(company_id: str, claim_id: str, employee_id: str, title: str, total:
     emp = employee_of(company_id, employee_id)
     inst = start_workflow(company_id=company_id, object_type='expense_claim', object_id=claim_id, employee_id=employee_id,
                           amount=float(total), title='Expense claim to approve', body=f"{emp['name_en']}: {title}, {rs(total)}")
-    execute("""UPDATE expense_claim SET status = 'pending', submitted_at = now(), workflow_instance_id = %s, updated_at = now()
-                WHERE id = %s""", [inst['id'], claim_id])
+    ExpenseClaim.objects.filter(pk=claim_id).update(status=Claim.PENDING, submitted_at=Now(), workflow_instance_id=inst['id'],
+                                                    updated_at=Now())
 
 
 def create_claim(user: AuthUser, body: dict) -> dict:
-    b = parse(CLAIM_SCHEMA, body)
+    b = plain(validate(s.ClaimIn, body))
     company_id = company_id_of(user)
     employee_id = _self_employee(user)
     emp = employee_of(company_id, employee_id)
-    if emp['status'] != 'active':
+    if emp['status'] != Employee.Status.ACTIVE:
         raise ForbiddenError('only active employees can claim expenses')
     submit = bool(b.get('submit'))
     with transaction.atomic():
-        id = one('INSERT INTO expense_claim (company_id, employee_id, title, created_by) VALUES (%s, %s, %s, %s) RETURNING id::text',
-                 [company_id, employee_id, b['title'], user.id])['id']
+        id = str(ExpenseClaim.objects.create(company_id=company_id, employee_id=employee_id, title=b['title'],
+                                             created_by_id=user.id).id)
         issues, total = _write_items(company_id, user.id, employee_id, id, b['items'], submit)
         if submit:
             _submit(company_id, id, employee_id, b['title'], money(total))
         audit('create', 'expense_claim', actor_id=user.id, row_id=id, after={'title': b['title'], 'total': money(total), 'submitted': submit})
-    return {'id': id, 'status': 'pending' if submit else 'draft', 'total': money(total), 'issues': issues}
+    return {'id': id, 'status': Claim.PENDING if submit else Claim.DRAFT, 'total': money(total), 'issues': issues}
+
+
+def _own_draft(user: AuthUser, company_id: str, id: str) -> ExpenseClaim:
+    """The caller's own claim, locked; anyone else's is not found."""
+    c = ExpenseClaim.objects.for_company(company_id).select_for_update().filter(pk=id).first()
+    if not c or str(c.employee_id) != user.employee_id:
+        raise NotFoundError('claim not found')
+    return c
 
 
 def update_claim(user: AuthUser, id: str, body: dict) -> dict:
     id = parse_uuid(str(id))
-    b = parse(CLAIM_SCHEMA, body)
+    b = plain(validate(s.ClaimIn, body))
     company_id = company_id_of(user)
     submit = bool(b.get('submit'))
     with transaction.atomic():
-        row = one('SELECT employee_id::text, status FROM expense_claim WHERE id = %s AND company_id = %s FOR UPDATE', [id, company_id])
-        if not row or row['employee_id'] != user.employee_id:
-            raise NotFoundError('claim not found')
-        if row['status'] != 'draft':
+        c = _own_draft(user, company_id, id)
+        if c.status != Claim.DRAFT:
             raise ConflictError('only a draft claim can be edited')
-        execute('UPDATE expense_claim SET title = %s WHERE id = %s', [b['title'], id])
-        issues, total = _write_items(company_id, user.id, row['employee_id'], id, b['items'], submit)
+        ExpenseClaim.objects.filter(pk=id).update(title=b['title'])
+        issues, total = _write_items(company_id, user.id, str(c.employee_id), id, b['items'], submit)
         if submit:
-            _submit(company_id, id, row['employee_id'], b['title'], money(total))
-    return {'id': id, 'status': 'pending' if submit else 'draft', 'total': money(total), 'issues': issues}
+            _submit(company_id, id, str(c.employee_id), b['title'], money(total))
+    return {'id': id, 'status': Claim.PENDING if submit else Claim.DRAFT, 'total': money(total), 'issues': issues}
 
 
 def _stored_items(claim_id: str) -> list[dict]:
-    its = rows("""SELECT expense_date::text, category_id::text, description, amount::text, km::text, receipt_file_id::text
-                    FROM expense_item WHERE claim_id = %s ORDER BY sort_order""", [claim_id])
-    return [{'expenseDate': i['expense_date'], 'categoryId': i['category_id'], 'description': i['description'], 'amount': i['amount'],
-             'km': float(i['km']) if i['km'] else None, 'receiptFileId': i['receipt_file_id']} for i in its]
+    return [{'expenseDate': _s(i.expense_date), 'categoryId': str(i.category_id), 'description': i.description,
+             'amount': _s(i.amount), 'km': float(i.km) if i.km else None, 'receiptFileId': _s(i.receipt_file_id)}
+            for i in ExpenseItem.objects.filter(claim_id=claim_id).order_by('sort_order')]
 
 
 def submit_claim(user: AuthUser, id: str) -> dict:
     id = parse_uuid(str(id))
     company_id = company_id_of(user)
     with transaction.atomic():
-        row = one('SELECT employee_id::text, status, title FROM expense_claim WHERE id = %s AND company_id = %s FOR UPDATE', [id, company_id])
-        if not row or row['employee_id'] != user.employee_id:
-            raise NotFoundError('claim not found')
-        if row['status'] != 'draft':
-            raise ConflictError(f"claim is {row['status']}")
+        c = _own_draft(user, company_id, id)
+        if c.status != Claim.DRAFT:
+            raise ConflictError(f'claim is {c.status}')
         raw = _stored_items(id)
         if not raw:
             raise BadRequestError('add at least one expense')
-        _, total = _write_items(company_id, user.id, row['employee_id'], id, raw, True)
-        _submit(company_id, id, row['employee_id'], row['title'], money(total))
-    return {'id': id, 'status': 'pending'}
+        _, total = _write_items(company_id, user.id, str(c.employee_id), id, raw, True)
+        _submit(company_id, id, str(c.employee_id), c.title, money(total))
+    return {'id': id, 'status': Claim.PENDING}
 
 
 def cancel_claim(user: AuthUser, id: str) -> dict:
     id = parse_uuid(str(id))
     with transaction.atomic():
-        c = _claim_row(company_id_of(user), id)
-        if c['employee_id'] != user.employee_id:
+        c = _claim(company_id_of(user), id)
+        if str(c.employee_id) != user.employee_id:
             raise NotFoundError('claim not found')
-        if c['status'] not in ('draft', 'pending'):
-            raise ConflictError(f"a {c['status']} claim cannot be cancelled")
-        execute("UPDATE expense_claim SET status = 'cancelled', updated_at = now() WHERE id = %s", [id])
+        if c.status not in (Claim.DRAFT, Claim.PENDING):
+            raise ConflictError(f'a {c.status} claim cannot be cancelled')
+        ExpenseClaim.objects.filter(pk=id).update(status=Claim.CANCELLED, updated_at=Now())
         cancel_workflow('expense_claim', id)
-    return {'id': id, 'status': 'cancelled'}
+    return {'id': id, 'status': Claim.CANCELLED}
+
+
+def _query(query: dict | None) -> dict:
+    """Query-string filters: empty values are left out (an empty select means 'any')."""
+    return {k: v for k, v in (query or {}).items() if v not in (None, '')}
+
+
+def claims_queryset(user: AuthUser, query: dict | None = None):
+    """The claims the user may list (scope own / team / all, drafts only their own), newest first."""
+    q = plain(validate(s.ClaimsQueryIn, _query(query)))
+    return filters.apply(filters.ClaimFilter, user, ExpenseClaim.objects.for_company(company_id_of(user)), q) \
+        .order_by('-created_at', '-id')
+
+
+def _claim_list_rows(qs, limit: int | None = 500) -> list[dict]:
+    payout = ExpensePayout.objects.filter(source_type=Source.EXPENSE_CLAIM, source_id=OuterRef('pk'), parent_payout__isnull=True)
+    rows_ = qs.annotate(
+        n_items=Count('expense_items'), first_date=Min('expense_items__expense_date'), last_date=Max('expense_items__expense_date'),
+        payout_status=Subquery(payout.values('status')[:1]),
+        pay_bs_year=Subquery(payout.values('payroll_run__period__bs_year')[:1]),
+        pay_bs_month=Subquery(payout.values('payroll_run__period__bs_month')[:1]),
+    ).values('id', 'title', 'status', 'total_claimed', 'total_approved', 'submitted_at', 'decided_at', 'payment_method', 'paid_at',
+             'created_at', 'employee_id', 'n_items', 'first_date', 'last_date', 'payout_status', 'pay_bs_year', 'pay_bs_month',
+             emp_code=F('employee__emp_code'), employee_name=F('employee__name_en'))
+    if limit is not None:
+        rows_ = rows_[:limit]
+    return [{'id': str(c['id']), 'title': c['title'], 'status': c['status'], 'totalClaimed': _s(c['total_claimed']),
+             'totalApproved': _s(c['total_approved']), 'submittedAt': c['submitted_at'], 'decidedAt': c['decided_at'],
+             'paymentMethod': c['payment_method'], 'paidAt': c['paid_at'], 'createdAt': c['created_at'],
+             'employeeId': str(c['employee_id']), 'empCode': c['emp_code'], 'employeeName': c['employee_name'],
+             'items': c['n_items'], 'firstDate': _s(c['first_date']), 'lastDate': _s(c['last_date']),
+             'payoutStatus': c['payout_status'], 'payBsYear': c['pay_bs_year'], 'payBsMonth': c['pay_bs_month']}
+            for c in rows_]
 
 
 def list_claims(user: AuthUser, query: dict | None = None) -> dict:
-    q = parse(Obj({'scope': Enum(SCOPES, optional=True), 'status': Enum(CLAIM_STATUSES, optional=True),
-                   'employeeId': Uuid(optional=True)}), {k: v for k, v in (query or {}).items() if v not in (None, '')})
-    scope = q.get('scope') or _default_scope(user)
-    sql, params = _scope_filter(user, scope, 'c')
-    params = [company_id_of(user), *params]
-    extra = ''
-    if q.get('status'):
-        params.append(q['status'])
-        extra += ' AND c.status = %s'
-    if q.get('employeeId'):
-        params.append(q['employeeId'])
-        extra += ' AND c.employee_id = %s'
-    # Drafts are private to the employee.
-    if user.employee_id:
-        params.append(user.employee_id)
-        extra += " AND (c.status <> 'draft' OR c.employee_id = %s)"
-    else:
-        extra += " AND c.status <> 'draft'"
-    claims = rows(f"""
-        SELECT c.id::text, c.title, c.status, c.total_claimed::text AS "totalClaimed", c.total_approved::text AS "totalApproved",
-               c.submitted_at AS "submittedAt", c.decided_at AS "decidedAt", c.payment_method AS "paymentMethod", c.paid_at AS "paidAt",
-               c.created_at AS "createdAt", e.id::text AS "employeeId", e.emp_code AS "empCode", e.name_en AS "employeeName",
-               (SELECT count(*)::int FROM expense_item i WHERE i.claim_id = c.id) AS items,
-               (SELECT min(i.expense_date)::text FROM expense_item i WHERE i.claim_id = c.id) AS "firstDate",
-               (SELECT max(i.expense_date)::text FROM expense_item i WHERE i.claim_id = c.id) AS "lastDate",
-               p.status AS "payoutStatus", pp.bs_year AS "payBsYear", pp.bs_month AS "payBsMonth"
-          FROM expense_claim c JOIN employee e ON e.id = c.employee_id
-          LEFT JOIN expense_payout p ON p.source_type = 'expense_claim' AND p.source_id = c.id AND p.parent_payout_id IS NULL
-          LEFT JOIN payroll_run pr ON pr.id = p.payroll_run_id LEFT JOIN payroll_period pp ON pp.id = pr.period_id
-         WHERE c.company_id = %s AND {sql}{extra}
-         ORDER BY c.created_at DESC LIMIT 500""", params)
-    return {'claims': claims}
+    return {'claims': _claim_list_rows(claims_queryset(user, query))}
 
 
 def _emp_card(emp: dict) -> dict:
     return {'id': emp['id'], 'empCode': emp['emp_code'], 'name': emp['name_en'], 'grade': emp['grade']}
 
 
+def _claim_items(claim_id: str) -> list[dict]:
+    lines = (ExpenseItem.objects.filter(claim_id=claim_id).order_by('sort_order')
+             .values('id', 'expense_date', 'category_id', 'description', 'amount', 'km', 'receipt_file_id', 'approved_amount',
+                     'adjust_reason', category_name=F('category__name'), category_kind=F('category__kind'),
+                     receipt_name=Case(When(receipt_file__deleted_at__isnull=True, then=F('receipt_file__filename'))),
+                     receipt_mime=Case(When(receipt_file__deleted_at__isnull=True, then=F('receipt_file__mime')))))
+    return [{'id': str(i['id']), 'expenseDate': _s(i['expense_date']), 'categoryId': str(i['category_id']),
+             'categoryName': i['category_name'], 'categoryKind': i['category_kind'], 'description': i['description'],
+             'amount': _s(i['amount']), 'km': _s(i['km']), 'receiptFileId': _s(i['receipt_file_id']),
+             'receiptName': i['receipt_name'], 'receiptMime': i['receipt_mime'], 'approvedAmount': _s(i['approved_amount']),
+             'adjustReason': i['adjust_reason']} for i in lines]
+
+
 def claim_detail(user: AuthUser, id: str) -> dict:
     id = parse_uuid(str(id))
     company_id = company_id_of(user)
-    c = _claim_row(company_id, id)
-    _assert_can_see(user, c['employee_id'])
-    if c['status'] == 'draft' and c['employee_id'] != user.employee_id:
+    c = _claim(company_id, id)
+    _assert_can_see(user, c.employee_id)
+    if c.status == Claim.DRAFT and str(c.employee_id) != user.employee_id:
         raise NotFoundError('claim not found')
-    emp = employee_of(company_id, c['employee_id'])
-    items = rows("""
-        SELECT i.id::text, i.expense_date::text AS "expenseDate", i.category_id::text AS "categoryId", ec.name AS "categoryName",
-               ec.kind AS "categoryKind", i.description, i.amount::text AS amount, i.km::text AS km,
-               i.receipt_file_id::text AS "receiptFileId", f.filename AS "receiptName", f.mime AS "receiptMime",
-               i.approved_amount::text AS "approvedAmount", i.adjust_reason AS "adjustReason"
-          FROM expense_item i JOIN expense_category ec ON ec.id = i.category_id
-          LEFT JOIN stored_file f ON f.id = i.receipt_file_id AND f.deleted_at IS NULL
-         WHERE i.claim_id = %s ORDER BY i.sort_order""", [id])
-    full = one("""SELECT decision_note AS "decisionNote", submitted_at AS "submittedAt", decided_at AS "decidedAt", paid_at AS "paidAt",
-                         created_at AS "createdAt" FROM expense_claim WHERE id = %s""", [id])
-    payouts = rows("""
-        SELECT p.id::text, p.component_code AS code, p.amount::text, p.status, p.paid_amount::text AS "paidAmount", p.paid_at AS "paidAt",
-               pp.bs_year AS "bsYear", pp.bs_month AS "bsMonth"
-          FROM expense_payout p LEFT JOIN payroll_run pr ON pr.id = p.payroll_run_id LEFT JOIN payroll_period pp ON pp.id = pr.period_id
-         WHERE p.source_type = 'expense_claim' AND p.source_id = %s ORDER BY p.created_at""", [id])
+    emp = employee_of(company_id, c.employee_id)
+    items = _claim_items(id)
+    payouts = [{k: v for k, v in p.items() if k != 'sourceType'} for p in _payout_rows(
+        ExpensePayout.objects.for_company(company_id).filter(source_type=Source.EXPENSE_CLAIM, source_id=id))]
     # Approvers see the same limit and receipt checks the employee saw when submitting.
     issues: list[dict] = []
-    if c['status'] in ('draft', 'pending') and items:
+    if c.status in (Claim.DRAFT, Claim.PENDING) and items:
         try:
             with transaction.atomic():
                 norm = normalise_items(company_id, [{'expenseDate': i['expenseDate'], 'categoryId': i['categoryId'],
                                                      'description': i['description'], 'amount': i['amount'],
                                                      'km': float(i['km']) if i['km'] else None, 'receiptFileId': i['receiptFileId']}
                                                     for i in items])
-                issues = check_claim(company_id, c['employee_id'], norm, id)
+                issues = check_claim(company_id, str(c.employee_id), norm, id)
         except Exception:  # noqa: BLE001 - the TS route swallowed any error here
             issues = []
-    can_decide = _can_act_on(user, c['workflow_instance_id']) if c['status'] == 'pending' and c['workflow_instance_id'] else False
+    can_decide = _can_act_on(user, c.workflow_instance_id) if c.status == Claim.PENDING and c.workflow_instance_id else False
     return {
-        'claim': {'id': c['id'], 'title': c['title'], 'status': c['status'], 'totalClaimed': c['total_claimed'],
-                  'totalApproved': c['total_approved'], 'paymentMethod': c['payment_method'], **(full or {}), 'employee': _emp_card(emp)},
+        'claim': {'id': str(c.id), 'title': c.title, 'status': c.status, 'totalClaimed': _s(c.total_claimed),
+                  'totalApproved': _s(c.total_approved), 'paymentMethod': c.payment_method, 'decisionNote': c.decision_note,
+                  'submittedAt': c.submitted_at, 'decidedAt': c.decided_at, 'paidAt': c.paid_at, 'createdAt': c.created_at,
+                  'employee': _emp_card(emp)},
         'items': items, 'payouts': payouts, 'issues': issues, 'canDecide': can_decide,
     }
 
@@ -805,196 +787,181 @@ def claim_receipt(user: AuthUser, id: str, item_id: str) -> dict:
     """The receipt file of one line; an approver's view is audited."""
     id, item_id = parse_uuid(str(id)), parse_uuid(str(item_id))
     company_id = company_id_of(user)
-    c = _claim_row(company_id, id)
-    _assert_can_see(user, c['employee_id'])
-    i = one('SELECT receipt_file_id::text FROM expense_item WHERE id = %s AND claim_id = %s', [item_id, id])
-    file_id = i and i['receipt_file_id']
+    c = _claim(company_id, id)
+    _assert_can_see(user, c.employee_id)
+    file_id = ExpenseItem.objects.filter(pk=item_id, claim_id=id).values_list('receipt_file_id', flat=True).first()
     if not file_id:
         raise NotFoundError('no receipt for this line')
-    if c['employee_id'] != user.employee_id:
+    if str(c.employee_id) != user.employee_id:
         audit('view_receipt', 'expense_item', actor_id=user.id, row_id=item_id)
-    return read_file(company_id, file_id)
-
-
-REVIEW_SCHEMA = Obj({'decision': Enum(('approve', 'reject')), 'reason': Str(trim=True, max=1000, optional=True),
-                     'items': Arr(Obj({'id': Uuid(), 'approvedAmount': _amount(), 'reason': Str(trim=True, max=300, optional=True)}),
-                                  max=50, optional=True)})
+    return read_file(company_id, str(file_id))
 
 
 def review_claim(user: AuthUser, id: str, body: dict) -> dict:
     """Approve (optionally reducing line amounts, with a reason) or reject, as the current approver."""
     id = parse_uuid(str(id))
-    b = parse(REVIEW_SCHEMA, body)
+    b = plain(validate(s.ClaimReviewIn, body))
     company_id = company_id_of(user)
     with transaction.atomic():
-        row = one('SELECT status, workflow_instance_id::text FROM expense_claim WHERE id = %s AND company_id = %s FOR UPDATE', [id, company_id])
-        if not row:
-            raise NotFoundError('claim not found')
-        if row['status'] != 'pending' or not row['workflow_instance_id']:
-            raise ConflictError(f"claim is {row['status']}")
+        c = _claim(company_id, id, lock=True)
+        if c.status != Claim.PENDING or not c.workflow_instance_id:
+            raise ConflictError(f'claim is {c.status}')
         if b['decision'] == 'approve' and b.get('items'):
-            lines = {x['id']: x for x in rows('SELECT id::text, amount::text, description FROM expense_item WHERE claim_id = %s', [id])}
+            lines = {str(x.id): x for x in ExpenseItem.objects.filter(claim_id=id)}
+            changed = []
             for it in b['items']:
                 line = lines.get(it['id'])
                 if not line:
                     raise BadRequestError('a line does not belong to this claim')
-                if D(it['approvedAmount']) > D(line['amount']):
-                    raise BadRequestError(f"\"{line['description']}\": the approved amount cannot be more than claimed.")
-                reduced = D(it['approvedAmount']) < D(line['amount'])
+                if D(it['approvedAmount']) > line.amount:
+                    raise BadRequestError(f'"{line.description}": the approved amount cannot be more than claimed.')
+                reduced = D(it['approvedAmount']) < line.amount
                 if reduced and not it.get('reason'):
-                    raise BadRequestError(f"\"{line['description']}\": give a reason for approving less.")
-                execute('UPDATE expense_item SET approved_amount = %s, adjust_reason = %s WHERE id = %s',
-                        [money(it['approvedAmount']), it.get('reason') if reduced else None, it['id']])
-            t = one('SELECT coalesce(sum(coalesce(approved_amount, amount)), 0)::text AS total FROM expense_item WHERE claim_id = %s', [id])
-            if not D(t['total']) > 0:
+                    raise BadRequestError(f'"{line.description}": give a reason for approving less.')
+                line.approved_amount = money(it['approvedAmount'])
+                line.adjust_reason = it.get('reason') if reduced else None
+                changed.append(line)
+            ExpenseItem.objects.bulk_update(changed, ['approved_amount', 'adjust_reason'])
+            total = ExpenseItem.objects.filter(claim_id=id).aggregate(
+                t=Coalesce(Sum(Coalesce('approved_amount', 'amount')), Value(Decimal(0))))['t']
+            if not total > 0:
                 raise BadRequestError('Nothing would be paid; reject the claim instead.')
-        state = act(instance_id=row['workflow_instance_id'], user=user, decision=b['decision'], reason=b.get('reason'))
+        state = act(instance_id=str(c.workflow_instance_id), user=user, decision=b['decision'], reason=b.get('reason'))
     return {'state': state}
-
-
-NOTE_SCHEMA = Obj({'note': Str(trim=True, min=3, max=300)})
 
 
 def pay_claim_outside(user: AuthUser, id: str, body: dict) -> dict:
     """HR paid an approved claim in cash or by transfer outside payroll; payroll will not pay it again."""
     _require_hr(user)
     id = parse_uuid(str(id))
-    b = parse(NOTE_SCHEMA, body)
+    b = validate(s.NoteIn, body)
     company_id = company_id_of(user)
     with transaction.atomic():
-        c = one('SELECT status FROM expense_claim WHERE id = %s AND company_id = %s FOR UPDATE', [id, company_id])
-        if not c:
-            raise NotFoundError('claim not found')
-        if c['status'] != 'approved':
-            raise ConflictError(f"claim is {c['status']}")
-        execute("UPDATE expense_claim SET payment_method = 'cash' WHERE id = %s", [id])
-        _pay_outside('expense_claim', id)
-        execute("""UPDATE expense_claim SET decision_note = concat_ws(' · ', decision_note, %s::text), updated_at = now()
-                    WHERE id = %s""", [f"Paid outside payroll: {b['note']}", id])
+        c = _claim(company_id, id, lock=True)
+        if c.status != Claim.APPROVED:
+            raise ConflictError(f'claim is {c.status}')
+        ExpenseClaim.objects.filter(pk=id).update(payment_method=ExpenseClaim.PaymentMethod.CASH)
+        _pay_outside(company_id, Source.EXPENSE_CLAIM, id)
+        # concat_ws(' · ', decision_note, note): the note is appended to any decision note.
+        note = f"Paid outside payroll: {b['note']}"
+        ExpenseClaim.objects.filter(pk=id).update(
+            decision_note=f'{c.decision_note} · {note}' if c.decision_note is not None else note, updated_at=Now())
         audit('pay_outside_payroll', 'expense_claim', actor_id=user.id, row_id=id, after={'note': b['note']})
-    return {'id': id, 'status': 'paid'}
+    return {'id': id, 'status': Claim.PAID}
 
 
 # ---------------------------------------------------------------- travel
 
-TRAVEL_SCHEMA = Obj({
-    'destination': Str(trim=True, min=1, max=120), 'destinationCategory': Enum(DESTINATIONS), 'purpose': Str(trim=True, min=3, max=1000),
-    'fromDate': IsoDate(), 'toDate': IsoDate(), 'mode': Enum(MODES),
-    'estimatedCost': _amount(optional=True), 'advanceRequested': _amount(optional=True), 'fxRate': _fx(nullish=True),
-})
-QUOTE_SCHEMA = Obj({'destinationCategory': Enum(DESTINATIONS), 'fromDate': IsoDate(), 'toDate': IsoDate(), 'fxRate': _fx(nullish=True)})
-
-
 def travel_quote(user: AuthUser, body: dict) -> dict:
-    b = parse(QUOTE_SCHEMA, body)
+    b = validate(s.QuoteIn, body)
     return {'quote': quote_tada(company_id_of(user), _self_employee(user), b['destinationCategory'], b['fromDate'], b['toDate'],
                                 b.get('fxRate'))}
 
 
 def request_travel(user: AuthUser, body: dict) -> dict:
-    b = parse(TRAVEL_SCHEMA, body)
+    b = validate(s.TravelIn, body)
     company_id = company_id_of(user)
     employee_id = _self_employee(user)
     emp = employee_of(company_id, employee_id)
-    if emp['status'] != 'active':
+    if emp['status'] != Employee.Status.ACTIVE:
         raise ForbiddenError('only active employees can request travel')
     if b['toDate'] < npt_today():
         raise BadRequestError('This trip has already ended. Ask HR to record it.')
     q = quote_tada(company_id, employee_id, b['destinationCategory'], b['fromDate'], b['toDate'], b.get('fxRate'))
-    if one("""SELECT 1 AS x FROM travel_request WHERE employee_id = %s AND status IN ('pending', 'approved', 'settling')
-               AND from_date <= %s AND to_date >= %s""", [employee_id, b['toDate'], b['fromDate']]):
+    if TravelRequest.objects.for_company(company_id).filter(
+            employee_id=employee_id, status__in=(Trip.PENDING, Trip.APPROVED, Trip.SETTLING),
+            from_date__lte=b['toDate'], to_date__gte=b['fromDate']).exists():
         raise ConflictError('You already have a trip on these dates.')
     advance = D(b.get('advanceRequested') or '0')
     ceiling = D(q['daAmount']) + D(q['lodgingLimit']) + D(b.get('estimatedCost') or '0')
     if advance > ceiling:
         raise BadRequestError(f'The advance cannot be more than the expected cost of the trip ({rs(ceiling)}).')
     with transaction.atomic():
-        id = one("""INSERT INTO travel_request (company_id, employee_id, destination, destination_category, purpose, from_date, to_date,
-                                                mode, estimated_cost, advance_requested, fx_rate, days, nights, da_rate, lodging_rate,
-                                                da_amount, lodging_limit, created_by)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id::text""",
-                 [company_id, employee_id, b['destination'], b['destinationCategory'], b['purpose'], b['fromDate'], b['toDate'], b['mode'],
-                  b.get('estimatedCost') or '0', money(advance), q['fxRate'], q['days'], q['nights'], q['daRate'], q['lodgingRate'],
-                  q['daAmount'], q['lodgingLimit'], user.id])['id']
+        t = TravelRequest.objects.create(
+            company_id=company_id, employee_id=employee_id, destination=b['destination'],
+            destination_category=b['destinationCategory'], purpose=b['purpose'], from_date=b['fromDate'], to_date=b['toDate'],
+            mode=b['mode'], estimated_cost=b.get('estimatedCost') or '0', advance_requested=money(advance), fx_rate=q['fxRate'],
+            days=q['days'], nights=q['nights'], da_rate=q['daRate'], lodging_rate=q['lodgingRate'], da_amount=q['daAmount'],
+            lodging_limit=q['lodgingLimit'], created_by_id=user.id)
+        id = str(t.id)
         adv = f', advance {rs(advance)}' if advance > 0 else ''
         inst = start_workflow(company_id=company_id, object_type='travel_request', object_id=id, employee_id=employee_id,
                               amount=float(ceiling), title='Travel request to approve',
                               body=f"{emp['name_en']}: {b['destination']}, {bs_range(b['fromDate'], b['toDate'])}{adv}")
-        execute('UPDATE travel_request SET workflow_instance_id = %s WHERE id = %s', [inst['id'], id])
+        TravelRequest.objects.filter(pk=id).update(workflow_instance_id=inst['id'])
         audit('create', 'travel_request', actor_id=user.id, row_id=id, after={**b, 'quote': q})
-    return {'id': id, 'status': 'pending', 'quote': q}
+    return {'id': id, 'status': Trip.PENDING, 'quote': q}
+
+
+def trips_queryset(user: AuthUser, query: dict | None = None):
+    q = validate(s.TripsQueryIn, _query(query))
+    return filters.apply(filters.TripFilter, user, TravelRequest.objects.for_company(company_id_of(user)), q) \
+        .order_by('-from_date', '-id')
+
+
+def _trip_list_rows(qs, limit: int | None = 500) -> list[dict]:
+    latest = TravelSettlement.objects.filter(travel_request=OuterRef('pk')).order_by('-created_at', '-id')
+    qs = qs.annotate(s_id=Subquery(latest.values('id')[:1]), s_status=Subquery(latest.values('status')[:1]),
+                     s_net=Subquery(latest.values('net')[:1]), emp_code=F('employee__emp_code'),
+                     employee_name=F('employee__name_en'))
+    out = []
+    for t in (qs[:limit] if limit is not None else qs):
+        out.append({'id': str(t.id), 'destination': t.destination, 'destinationCategory': t.destination_category,
+                    'purpose': t.purpose, 'fromDate': _s(t.from_date), 'toDate': _s(t.to_date), 'mode': t.mode, 'days': t.days,
+                    'daAmount': _s(t.da_amount), 'lodgingLimit': _s(t.lodging_limit), 'estimatedCost': _s(t.estimated_cost),
+                    'advanceRequested': _s(t.advance_requested), 'advanceApproved': _s(t.advance_approved),
+                    'advanceStatus': t.advance_status, 'advanceMethod': t.advance_method, 'status': t.status,
+                    'createdAt': t.created_at, 'employeeId': str(t.employee_id), 'empCode': t.emp_code,
+                    'employeeName': t.employee_name,
+                    'settlement': {'id': str(t.s_id), 'status': t.s_status, 'net': _s(t.s_net)} if t.s_id else None})
+    return out
 
 
 def list_trips(user: AuthUser, query: dict | None = None) -> dict:
-    q = parse(Obj({'scope': Enum(SCOPES, optional=True), 'status': Enum(TRIP_STATUSES, optional=True)}),
-              {k: v for k, v in (query or {}).items() if v not in (None, '')})
-    sql, params = _scope_filter(user, q.get('scope') or _default_scope(user), 't')
-    params = [company_id_of(user), *params]
-    extra = ''
-    if q.get('status'):
-        params.append(q['status'])
-        extra = ' AND t.status = %s'
-    trips = rows(f"""
-        SELECT t.id::text, t.destination, t.destination_category AS "destinationCategory", t.purpose, t.from_date::text AS "fromDate",
-               t.to_date::text AS "toDate", t.mode, t.days, t.da_amount::text AS "daAmount", t.lodging_limit::text AS "lodgingLimit",
-               t.estimated_cost::text AS "estimatedCost", t.advance_requested::text AS "advanceRequested",
-               t.advance_approved::text AS "advanceApproved", t.advance_status AS "advanceStatus", t.advance_method AS "advanceMethod",
-               t.status, t.created_at AS "createdAt", e.id::text AS "employeeId", e.emp_code AS "empCode", e.name_en AS "employeeName",
-               (SELECT jsonb_build_object('id', s.id, 'status', s.status, 'net', s.net::text) FROM travel_settlement s
-                 WHERE s.travel_request_id = t.id ORDER BY s.created_at DESC LIMIT 1) AS settlement
-          FROM travel_request t JOIN employee e ON e.id = t.employee_id
-         WHERE t.company_id = %s AND {sql}{extra} ORDER BY t.from_date DESC LIMIT 500""", params)
-    return {'trips': trips}
+    return {'trips': _trip_list_rows(trips_queryset(user, query))}
 
 
-def _travel_row(company_id: str, id: str, lock: bool = False) -> dict:
-    r = one(f"""SELECT id::text, employee_id::text, status, destination, from_date::text, to_date::text, advance_approved::text,
-                       advance_status, da_rate::text, lodging_rate::text, fx_rate::text, workflow_instance_id::text,
-                       advance_requested::text
-                  FROM travel_request WHERE id = %s AND company_id = %s{' FOR UPDATE' if lock else ''}""", [id, company_id])
-    if not r:
-        raise NotFoundError('travel request not found')
-    return r
+def _settlement_rows(trip_id: str) -> list[dict]:
+    settlements = list(TravelSettlement.objects.filter(travel_request_id=trip_id).order_by('-created_at', '-id'))
+    bills: dict[str, list] = {}
+    for b in (TravelBill.objects.filter(settlement__travel_request_id=trip_id).order_by('bill_date', 'id')
+              .values('id', 'settlement_id', 'kind', 'bill_date', 'description', 'amount', 'file_id', file_name=F('file__filename'))):
+        bills.setdefault(str(b['settlement_id']), []).append({
+            'id': str(b['id']), 'kind': b['kind'], 'billDate': _s(b['bill_date']), 'description': b['description'],
+            'amount': _s(b['amount']), 'fileId': _s(b['file_id']), 'fileName': b['file_name']})
+    return [{'id': str(x.id), 'status': x.status, 'actualFrom': _s(x.actual_from), 'actualTo': _s(x.actual_to), 'days': x.days,
+             'nights': x.nights, 'daAmount': _s(x.da_amount), 'lodgingClaimed': _s(x.lodging_claimed),
+             'lodgingAllowed': _s(x.lodging_allowed), 'otherBills': _s(x.other_bills), 'entitlement': _s(x.entitlement),
+             'advance': _s(x.advance), 'net': _s(x.net), 'note': x.note, 'decisionNote': x.decision_note,
+             'createdAt': x.created_at, 'workflowInstanceId': _s(x.workflow_instance_id), 'bills': bills.get(str(x.id), [])}
+            for x in settlements]
 
 
 def trip_detail(user: AuthUser, id: str) -> dict:
     id = parse_uuid(str(id))
     company_id = company_id_of(user)
-    t = _travel_row(company_id, id)
-    _assert_can_see(user, t['employee_id'])
-    emp = employee_of(company_id, t['employee_id'])
-    trip = one("""
-        SELECT id::text, destination, destination_category AS "destinationCategory", purpose, from_date::text AS "fromDate",
-               to_date::text AS "toDate", mode, estimated_cost::text AS "estimatedCost", advance_requested::text AS "advanceRequested",
-               advance_approved::text AS "advanceApproved", advance_status AS "advanceStatus", advance_method AS "advanceMethod",
-               fx_rate::text AS "fxRate", days, nights, da_rate::text AS "daRate", lodging_rate::text AS "lodgingRate",
-               da_amount::text AS "daAmount", lodging_limit::text AS "lodgingLimit", status, decision_note AS "decisionNote",
-               decided_at AS "decidedAt", created_at AS "createdAt"
-          FROM travel_request WHERE id = %s""", [id])
-    settlements = rows("""
-        SELECT s.id::text, s.status, s.actual_from::text AS "actualFrom", s.actual_to::text AS "actualTo", s.days, s.nights,
-               s.da_amount::text AS "daAmount", s.lodging_claimed::text AS "lodgingClaimed", s.lodging_allowed::text AS "lodgingAllowed",
-               s.other_bills::text AS "otherBills", s.entitlement::text, s.advance::text, s.net::text, s.note,
-               s.decision_note AS "decisionNote", s.created_at AS "createdAt", s.workflow_instance_id::text AS "workflowInstanceId",
-               coalesce((SELECT jsonb_agg(jsonb_build_object('id', b.id, 'kind', b.kind, 'billDate', b.bill_date::text,
-                                 'description', b.description, 'amount', b.amount::text, 'fileId', b.file_id, 'fileName', f.filename)
-                                 ORDER BY b.bill_date)
-                           FROM travel_bill b LEFT JOIN stored_file f ON f.id = b.file_id WHERE b.settlement_id = s.id), '[]') AS bills
-          FROM travel_settlement s WHERE s.travel_request_id = %s ORDER BY s.created_at DESC""", [id])
-    payouts = rows("""
-        SELECT p.id::text, p.source_type AS "sourceType", p.component_code AS code, p.amount::text, p.status,
-               p.paid_amount::text AS "paidAmount", p.paid_at AS "paidAt", pp.bs_year AS "bsYear", pp.bs_month AS "bsMonth"
-          FROM expense_payout p LEFT JOIN payroll_run pr ON pr.id = p.payroll_run_id LEFT JOIN payroll_period pp ON pp.id = pr.period_id
-         WHERE (p.source_type = 'travel_advance' AND p.source_id = %s)
-            OR (p.source_type = 'travel_settlement' AND p.source_id IN (SELECT id FROM travel_settlement WHERE travel_request_id = %s))
-         ORDER BY p.created_at""", [id, id])
-    pending = next((s for s in settlements if s['status'] == 'pending'), None)
+    t = _trip(company_id, id)
+    _assert_can_see(user, t.employee_id)
+    emp = employee_of(company_id, t.employee_id)
+    settlements = _settlement_rows(id)
+    payouts = _payout_rows(ExpensePayout.objects.for_company(company_id).filter(
+        Q(source_type=Source.TRAVEL_ADVANCE, source_id=id)
+        | Q(source_type=Source.TRAVEL_SETTLEMENT,
+            source_id__in=TravelSettlement.objects.filter(travel_request_id=id).values('id'))))
+    pending = next((x for x in settlements if x['status'] == Settlement.PENDING), None)
+    trip = {'id': str(t.id), 'destination': t.destination, 'destinationCategory': t.destination_category, 'purpose': t.purpose,
+            'fromDate': _s(t.from_date), 'toDate': _s(t.to_date), 'mode': t.mode, 'estimatedCost': _s(t.estimated_cost),
+            'advanceRequested': _s(t.advance_requested), 'advanceApproved': _s(t.advance_approved),
+            'advanceStatus': t.advance_status, 'advanceMethod': t.advance_method, 'fxRate': _s(t.fx_rate), 'days': t.days,
+            'nights': t.nights, 'daRate': _s(t.da_rate), 'lodgingRate': _s(t.lodging_rate), 'daAmount': _s(t.da_amount),
+            'lodgingLimit': _s(t.lodging_limit), 'status': t.status, 'decisionNote': t.decision_note,
+            'decidedAt': t.decided_at, 'createdAt': t.created_at}
     return {
-        'trip': {**trip, 'destinationLabel': DESTINATION_LABEL.get(trip['destinationCategory']), 'employee': _emp_card(emp)},
+        'trip': {**trip, 'destinationLabel': DESTINATION_LABEL.get(t.destination_category), 'employee': _emp_card(emp)},
         'settlements': settlements, 'payouts': payouts,
-        'canDecide': _can_act_on(user, t['workflow_instance_id']) if t['status'] == 'pending' and t['workflow_instance_id'] else False,
+        'canDecide': _can_act_on(user, t.workflow_instance_id) if t.status == Trip.PENDING and t.workflow_instance_id else False,
         'canDecideSettlement': _can_act_on(user, pending['workflowInstanceId']) if pending and pending['workflowInstanceId'] else False,
-        'canSettle': t['employee_id'] == user.employee_id and t['status'] == 'approved' and t['from_date'] <= npt_today(),
+        'canSettle': str(t.employee_id) == user.employee_id and t.status == Trip.APPROVED and _s(t.from_date) <= npt_today(),
     }
 
 
@@ -1002,88 +969,91 @@ def cancel_trip(user: AuthUser, id: str) -> dict:
     id = parse_uuid(str(id))
     company_id = company_id_of(user)
     with transaction.atomic():
-        t = _travel_row(company_id, id, True)
-        if t['employee_id'] != user.employee_id and not has_role(user, 'hr'):
+        t = _trip(company_id, id, lock=True)
+        if str(t.employee_id) != user.employee_id and not has_role(user, 'hr'):
             raise NotFoundError('travel request not found')
-        if t['status'] not in ('pending', 'approved'):
-            raise ConflictError(f"a {t['status']} trip cannot be cancelled")
-        if t['advance_status'] == 'paid':
+        if t.status not in (Trip.PENDING, Trip.APPROVED):
+            raise ConflictError(f'a {t.status} trip cannot be cancelled')
+        if t.advance_status == Advance.PAID:
             raise ConflictError('The advance has been paid; submit a settlement instead so it can be recovered.')
-        if one("""SELECT 1 AS x FROM expense_payout WHERE source_type = 'travel_advance' AND source_id = %s AND status = 'pending'
-                   AND payroll_run_id IS NOT NULL""", [id]):
+        advance = ExpensePayout.objects.for_company(company_id).filter(source_type=Source.TRAVEL_ADVANCE, source_id=id,
+                                                                       status=Payout.PENDING)
+        if advance.filter(payroll_run__isnull=False).exists():
             raise ConflictError('The advance is already in a pay run being prepared; submit a settlement instead.')
-        execute("UPDATE expense_payout SET status = 'cancelled' WHERE source_type = 'travel_advance' AND source_id = %s AND status = 'pending'", [id])
-        execute("UPDATE travel_request SET status = 'cancelled', advance_status = 'none' WHERE id = %s", [id])
+        advance.update(status=Payout.CANCELLED)
+        TravelRequest.objects.filter(pk=id).update(status=Trip.CANCELLED, advance_status=Advance.NONE)
         cancel_workflow('travel_request', id)
         audit('cancel', 'travel_request', actor_id=user.id, row_id=id)
-    return {'id': id, 'status': 'cancelled'}
+    return {'id': id, 'status': Trip.CANCELLED}
 
 
 def review_trip(user: AuthUser, id: str, body: dict) -> dict:
     id = parse_uuid(str(id))
-    b = parse(Obj({'decision': Enum(('approve', 'reject')), 'reason': Str(trim=True, max=1000, optional=True),
-                   'advanceApproved': _amount(optional=True)}), body)
+    b = validate(s.TripReviewIn, body)
     company_id = company_id_of(user)
     with transaction.atomic():
-        t = _travel_row(company_id, id, True)
-        if t['status'] != 'pending' or not t['workflow_instance_id']:
-            raise ConflictError(f"travel request is {t['status']}")
+        t = _trip(company_id, id, lock=True)
+        if t.status != Trip.PENDING or not t.workflow_instance_id:
+            raise ConflictError(f'travel request is {t.status}')
         if b['decision'] == 'approve' and 'advanceApproved' in b:
-            if D(b['advanceApproved']) > D(t['advance_requested']):
+            if D(b['advanceApproved']) > t.advance_requested:
                 raise BadRequestError('The approved advance cannot be more than requested.')
-            execute('UPDATE travel_request SET advance_approved = %s WHERE id = %s', [money(b['advanceApproved']), id])
-        state = act(instance_id=t['workflow_instance_id'], user=user, decision=b['decision'], reason=b.get('reason'))
+            TravelRequest.objects.filter(pk=id).update(advance_approved=money(b['advanceApproved']))
+        state = act(instance_id=str(t.workflow_instance_id), user=user, decision=b['decision'], reason=b.get('reason'))
     return {'state': state}
 
 
 def pay_advance_outside(user: AuthUser, id: str, body: dict) -> dict:
     _require_hr(user)
     id = parse_uuid(str(id))
-    b = parse(NOTE_SCHEMA, body)
+    b = validate(s.NoteIn, body)
     company_id = company_id_of(user)
     with transaction.atomic():
-        t = _travel_row(company_id, id, True)
-        if t['advance_status'] != 'pending':
+        t = _trip(company_id, id, lock=True)
+        if t.advance_status != Advance.PENDING:
             raise ConflictError('there is no advance waiting to be paid')
-        _pay_outside('travel_advance', id)
-        execute("UPDATE travel_request SET advance_status = 'paid', advance_method = 'cash' WHERE id = %s", [id])
+        _pay_outside(company_id, Source.TRAVEL_ADVANCE, id)
+        TravelRequest.objects.filter(pk=id).update(advance_status=Advance.PAID, advance_method=TravelRequest.AdvanceMethod.CASH)
         audit('pay_outside_payroll', 'travel_request', actor_id=user.id, row_id=id, after={'note': b['note']})
-    return {'id': id, 'advanceStatus': 'paid'}
+    return {'id': id, 'advanceStatus': Advance.PAID}
 
 
-BILL_SCHEMA = Obj({'kind': Enum(BILL_KINDS), 'billDate': IsoDate(), 'description': Str(trim=True, min=1, max=300), 'amount': _amount(),
-                   'fileId': Uuid(nullish=True)})
-SETTLE_SCHEMA = Obj({'actualFrom': IsoDate(), 'actualTo': IsoDate(), 'bills': Arr(BILL_SCHEMA, max=60),
-                     'note': Str(trim=True, max=1000, optional=True)})
-
-
-def settlement_figures(trip: dict, actual_from: str, actual_to: str, bills: list[dict]) -> dict:
-    """Daily allowance for each day travelled, lodging up to the nightly limit, transport and other bills as spent, less the advance.
-    `trip` has da_rate, lodging_rate, fx_rate, advance_status, advance_approved."""
+def settlement_figures(trip, actual_from: str, actual_to: str, bills: list[dict]) -> dict:
+    """Daily allowance for each day travelled, lodging up to the nightly limit, transport and other bills as spent, less the
+    advance. `trip` is a TravelRequest (or a dict with da_rate, lodging_rate, fx_rate, advance_status, advance_approved)."""
+    get = trip.get if isinstance(trip, dict) else (lambda k, d=None: getattr(trip, k, d))
     days = _days_between(actual_from, actual_to) + 1
     nights = days - 1
-    fx = D(trip['fx_rate'] if trip.get('fx_rate') is not None else 1)
-    da = D(trip['da_rate']) * fx * days
-    lodging_claimed = sum((D(x['amount']) for x in bills if x['kind'] == 'lodging'), Decimal(0))
-    lodging_allowed = min(lodging_claimed, D(trip['lodging_rate']) * fx * max(nights, 0))
-    other = sum((D(x['amount']) for x in bills if x['kind'] != 'lodging'), Decimal(0))
+    fx = D(get('fx_rate') if get('fx_rate') is not None else 1)
+    da = D(get('da_rate')) * fx * days
+    lodging_claimed = sum((D(x['amount']) for x in bills if x['kind'] == TravelBill.Kind.LODGING), Decimal(0))
+    lodging_allowed = min(lodging_claimed, D(get('lodging_rate')) * fx * max(nights, 0))
+    other = sum((D(x['amount']) for x in bills if x['kind'] != TravelBill.Kind.LODGING), Decimal(0))
     entitlement = da + lodging_allowed + other
-    advance = D(trip.get('advance_approved') or 0) if trip['advance_status'] in ('pending', 'paid') else Decimal(0)
+    advance = D(get('advance_approved') or 0) if get('advance_status') in (Advance.PENDING, Advance.PAID) else Decimal(0)
     return {'days': days, 'nights': nights, 'da': da, 'lodgingClaimed': lodging_claimed, 'lodgingAllowed': lodging_allowed,
             'other': other, 'entitlement': entitlement, 'advance': advance, 'net': entitlement - advance}
 
 
+def own_trip(user: AuthUser, id: str) -> TravelRequest:
+    """The caller's own trip (the settlement form's figures); anyone else's is not found."""
+    t = TravelRequest.objects.for_company(company_id_of(user)).filter(pk=parse_uuid(str(id))).first()
+    if not t or str(t.employee_id) != user.employee_id:
+        raise NotFoundError('travel request not found')
+    return t
+
+
 def settle_trip(user: AuthUser, id: str, body: dict) -> dict:
     id = parse_uuid(str(id))
-    b = parse(SETTLE_SCHEMA, body)
+    b = plain(validate(s.SettleIn, body))
     company_id = company_id_of(user)
     with transaction.atomic():
-        t = _travel_row(company_id, id, True)
-        if t['employee_id'] != user.employee_id:
+        t = _trip(company_id, id, lock=True)
+        if str(t.employee_id) != user.employee_id:
             raise NotFoundError('travel request not found')
-        if t['status'] != 'approved':
-            raise ConflictError('a settlement is already waiting for approval' if t['status'] == 'settling'
-                                else f"a {t['status']} trip cannot be settled")
+        if t.status != Trip.APPROVED:
+            raise ConflictError('a settlement is already waiting for approval' if t.status == Trip.SETTLING
+                                else f'a {t.status} trip cannot be settled')
         today = npt_today()
         if b['actualFrom'] > today:
             raise BadRequestError('Settle the trip once it has started.')
@@ -1099,94 +1069,105 @@ def settle_trip(user: AuthUser, id: str, body: dict) -> dict:
         if _days_between(b['actualFrom'], b['actualTo']) + 1 > 90:
             raise BadRequestError('A single trip can be at most 90 days.')
         f = settlement_figures(t, b['actualFrom'], b['actualTo'], b['bills'])
-        sid = one("""INSERT INTO travel_settlement (company_id, travel_request_id, employee_id, actual_from, actual_to, days, nights,
-                                                    da_amount, lodging_claimed, lodging_allowed, other_bills, entitlement, advance, net,
-                                                    note, created_by)
-                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id::text""",
-                  [company_id, id, t['employee_id'], b['actualFrom'], b['actualTo'], f['days'], f['nights'], money(f['da']),
-                   money(f['lodgingClaimed']), money(f['lodgingAllowed']), money(f['other']), money(f['entitlement']),
-                   money(f['advance']), money(f['net']), b.get('note') or None, user.id])['id']
+        st = TravelSettlement.objects.create(
+            company_id=company_id, travel_request_id=id, employee_id=t.employee_id, actual_from=b['actualFrom'],
+            actual_to=b['actualTo'], days=f['days'], nights=f['nights'], da_amount=money(f['da']),
+            lodging_claimed=money(f['lodgingClaimed']), lodging_allowed=money(f['lodgingAllowed']), other_bills=money(f['other']),
+            entitlement=money(f['entitlement']), advance=money(f['advance']), net=money(f['net']), note=b.get('note') or None,
+            created_by_id=user.id)
+        sid = str(st.id)
         for x in b['bills']:
             if x.get('fileId'):
                 attach_file(company_id=company_id, file_id=x['fileId'], user_id=user.id, purpose=['travel_bill', 'expense_receipt'],
                             attached_to=f'travel_settlement:{sid}')
-            execute('INSERT INTO travel_bill (settlement_id, kind, bill_date, description, amount, file_id) VALUES (%s, %s, %s, %s, %s, %s)',
-                    [sid, x['kind'], x['billDate'], x['description'], money(x['amount']), x.get('fileId')])
-        emp = employee_of(company_id, t['employee_id'])
+        TravelBill.objects.bulk_create([
+            TravelBill(settlement_id=sid, kind=x['kind'], bill_date=x['billDate'], description=x['description'],
+                       amount=money(x['amount']), file_id=x.get('fileId')) for x in b['bills']])
+        emp = employee_of(company_id, t.employee_id)
         net = f['net']
-        inst = start_workflow(company_id=company_id, object_type='travel_settlement', object_id=sid, employee_id=t['employee_id'],
+        inst = start_workflow(company_id=company_id, object_type='travel_settlement', object_id=sid, employee_id=str(t.employee_id),
                               amount=float(f['entitlement']), title='Travel settlement to approve',
-                              body=f"{emp['name_en']}: {t['destination']}, " + (f'pay {rs(net)}' if net >= 0 else f'recover {rs(-net)}'))
-        execute('UPDATE travel_settlement SET workflow_instance_id = %s WHERE id = %s', [inst['id'], sid])
-        execute("UPDATE travel_request SET status = 'settling' WHERE id = %s", [id])
+                              body=f"{emp['name_en']}: {t.destination}, " + (f'pay {rs(net)}' if net >= 0 else f'recover {rs(-net)}'))
+        TravelSettlement.objects.filter(pk=sid).update(workflow_instance_id=inst['id'])
+        TravelRequest.objects.filter(pk=id).update(status=Trip.SETTLING)
         audit('create', 'travel_settlement', actor_id=user.id, row_id=sid,
               after={'entitlement': money(f['entitlement']), 'advance': money(f['advance']), 'net': money(net)})
     return {'id': sid, 'daAmount': money(f['da']), 'lodgingAllowed': money(f['lodgingAllowed']), 'otherBills': money(f['other']),
             'entitlement': money(f['entitlement']), 'advance': money(f['advance']), 'net': money(net)}
 
 
+def settlement_trip_id(user: AuthUser, id: str) -> str:
+    """The trip a settlement of the active company belongs to (the drawer to redraw after a decision)."""
+    trip_id = (TravelSettlement.objects.for_company(company_id_of(user)).filter(pk=parse_uuid(str(id)))
+               .values_list('travel_request_id', flat=True).first())
+    if not trip_id:
+        raise NotFoundError('settlement not found')
+    return str(trip_id)
+
+
 def review_settlement(user: AuthUser, id: str, body: dict) -> dict:
     id = parse_uuid(str(id))
-    b = parse(Obj({'decision': Enum(('approve', 'reject')), 'reason': Str(trim=True, max=1000, optional=True)}), body)
+    b = validate(s.SettlementReviewIn, body)
     company_id = company_id_of(user)
     with transaction.atomic():
-        row = one('SELECT status, workflow_instance_id::text FROM travel_settlement WHERE id = %s AND company_id = %s FOR UPDATE',
-                  [id, company_id])
-        if not row:
-            raise NotFoundError('settlement not found')
-        if row['status'] != 'pending' or not row['workflow_instance_id']:
-            raise ConflictError(f"settlement is {row['status']}")
-        state = act(instance_id=row['workflow_instance_id'], user=user, decision=b['decision'], reason=b.get('reason'))
+        st = get_or_404(TravelSettlement.objects.select_for_update(), company_id, 'settlement not found', pk=id)
+        if st.status != Settlement.PENDING or not st.workflow_instance_id:
+            raise ConflictError(f'settlement is {st.status}')
+        state = act(instance_id=str(st.workflow_instance_id), user=user, decision=b['decision'], reason=b.get('reason'))
     return {'state': state}
 
 
 def bill_file(user: AuthUser, id: str, bill_id: str) -> dict:
     id, bill_id = parse_uuid(str(id)), parse_uuid(str(bill_id))
     company_id = company_id_of(user)
-    row = one("""SELECT s.employee_id::text, b.file_id::text FROM travel_settlement s JOIN travel_bill b ON b.settlement_id = s.id
-                  WHERE s.id = %s AND s.company_id = %s AND b.id = %s""", [id, company_id, bill_id])
+    row = (TravelBill.objects.for_company(company_id).filter(pk=bill_id, settlement_id=id)
+           .values('file_id', employee_id=F('settlement__employee_id')).first())
     if not row:
         raise NotFoundError('bill not found')
     _assert_can_see(user, row['employee_id'])
     if not row['file_id']:
         raise NotFoundError('no file for this bill')
-    if row['employee_id'] != user.employee_id:
+    if str(row['employee_id']) != user.employee_id:
         audit('view_receipt', 'travel_bill', actor_id=user.id, row_id=bill_id)
-    return read_file(company_id, row['file_id'])
+    return read_file(company_id, str(row['file_id']))
 
 
 # ---------------------------------------------------------------- reports (HR)
 
-GROUP_BY = ('category', 'department', 'month', 'employee')
 GROUP_LABEL = {'category': 'Category', 'department': 'Department', 'month': 'Month', 'employee': 'Employee'}
+
+
+def _department_on(employee_ref: str, date_ref: str) -> Subquery:
+    """The department of the employee's assignment on that date (employee_assignment.valid @> date)."""
+    return Subquery(EmployeeAssignment.objects.filter(employee_id=OuterRef(employee_ref), valid__contains=OuterRef(date_ref))
+                    .values('org_unit__name_en')[:1])
+
+
+def _spend_lines(company_id: str, from_: str, to: str) -> list[dict]:
+    """Approved or paid claim lines (approved amounts) and approved travel settlements (the entitlement, as 'Travel')."""
+    items = (ExpenseItem.objects.filter(claim__company_id=company_id, claim__status__in=(Claim.APPROVED, Claim.PAID),
+                                        expense_date__range=(from_, to))
+             .values('expense_date', category_name=F('category__name'), department=_department_on('claim__employee_id', 'expense_date'),
+                     emp_code=F('claim__employee__emp_code'), name_en=F('claim__employee__name_en'),
+                     spent=Coalesce('approved_amount', 'amount')))
+    trips = (TravelSettlement.objects.for_company(company_id).filter(status=Settlement.APPROVED, actual_to__range=(from_, to))
+             .values(expense_date=F('actual_to'), category_name=Value('Travel'),
+                     department=_department_on('employee_id', 'actual_to'), emp_code=F('employee__emp_code'),
+                     name_en=F('employee__name_en'), spent=F('entitlement')))
+    return [{**x, 'expense_date': _s(x['expense_date'])} for x in (*items, *trips)]
 
 
 def report_spend(user: AuthUser, query: dict) -> dict:
     """Approved claims and settled trips grouped by category, department, BS month or employee."""
     _require_hr(user)
-    q = parse(Obj({'from': IsoDate(), 'to': IsoDate(), 'groupBy': Enum(GROUP_BY, default='category')}),
-              {k: v for k, v in (query or {}).items() if k in ('from', 'to', 'groupBy') and v not in (None, '')})
+    q = validate(s.SpendQueryIn, {k: v for k, v in (query or {}).items() if k in ('from', 'to', 'groupBy') and v not in (None, '')})
     if q['to'] < q['from']:
         raise BadRequestError('the end date must be after the start date')
-    company_id = company_id_of(user)
-    lines = rows("""
-        SELECT i.expense_date::text, ec.name AS category, ou.name_en AS department, e.emp_code, e.name_en,
-               coalesce(i.approved_amount, i.amount)::text AS amount
-          FROM expense_item i JOIN expense_claim c ON c.id = i.claim_id JOIN expense_category ec ON ec.id = i.category_id
-          JOIN employee e ON e.id = c.employee_id
-          LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> i.expense_date LEFT JOIN org_unit ou ON ou.id = a.org_unit_id
-         WHERE c.company_id = %s AND c.status IN ('approved', 'paid') AND i.expense_date BETWEEN %s AND %s
-        UNION ALL
-        SELECT s.actual_to::text, 'Travel', ou.name_en, e.emp_code, e.name_en, s.entitlement::text
-          FROM travel_settlement s JOIN employee e ON e.id = s.employee_id
-          LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> s.actual_to LEFT JOIN org_unit ou ON ou.id = a.org_unit_id
-         WHERE s.company_id = %s AND s.status = 'approved' AND s.actual_to BETWEEN %s AND %s""",
-                 [company_id, q['from'], q['to'], company_id, q['from'], q['to']])
     gb = q['groupBy']
     groups: dict[str, dict] = {}
-    for x in lines:
+    for x in _spend_lines(company_id_of(user), q['from'], q['to']):
         if gb == 'category':
-            key = x['category']
+            key = x['category_name']
         elif gb == 'department':
             key = x['department'] or 'No department'
         elif gb == 'employee':
@@ -1194,7 +1175,7 @@ def report_spend(user: AuthUser, query: dict) -> dict:
         else:
             key = bs_label(x['expense_date']).split(' ', 1)[-1]
         g = groups.setdefault(key, {'key': key, 'amount': Decimal(0), 'count': 0, 'sort': x['expense_date']})
-        g['amount'] += D(x['amount'])
+        g['amount'] += x['spent']
         g['count'] += 1
         if x['expense_date'] < g['sort']:
             g['sort'] = x['expense_date']
@@ -1207,13 +1188,11 @@ def report_spend(user: AuthUser, query: dict) -> dict:
 
 def report_advances(user: AuthUser) -> dict:
     _require_hr(user)
-    out = rows("""SELECT t.id::text, e.emp_code AS "empCode", e.name_en AS "employeeName", t.destination, t.from_date::text AS "fromDate",
-                         t.to_date::text AS "toDate", t.advance_approved::text AS advance, t.advance_status AS "advanceStatus", t.status
-                    FROM travel_request t JOIN employee e ON e.id = t.employee_id
-                   WHERE t.company_id = %s AND t.advance_status IN ('pending', 'paid') AND t.status IN ('approved', 'settling')
-                   ORDER BY t.to_date""", [company_id_of(user)])
-    for x in out:
-        x['trip'] = bs_range(x['fromDate'], x['toDate'])
+    out = [{'id': str(t.id), 'empCode': t.employee.emp_code, 'employeeName': t.employee.name_en, 'destination': t.destination,
+            'fromDate': _s(t.from_date), 'toDate': _s(t.to_date), 'advance': _s(t.advance_approved),
+            'advanceStatus': t.advance_status, 'status': t.status, 'trip': bs_range(t.from_date, t.to_date)}
+           for t in TravelRequest.objects.for_company(company_id_of(user)).select_related('employee').filter(
+               advance_status__in=(Advance.PENDING, Advance.PAID), status__in=(Trip.APPROVED, Trip.SETTLING)).order_by('to_date', 'id')]
     return {'filename': 'outstanding-travel-advances', 'columns': [
         {'key': 'empCode', 'header': 'Code'}, {'key': 'employeeName', 'header': 'Employee'}, {'key': 'destination', 'header': 'Destination'},
         {'key': 'trip', 'header': 'Trip'}, {'key': 'advance', 'header': 'Advance (NPR)'}, {'key': 'advanceStatus', 'header': 'Advance'},
@@ -1222,17 +1201,18 @@ def report_advances(user: AuthUser) -> dict:
 
 def report_pending_payment(user: AuthUser) -> dict:
     _require_hr(user)
-    out = rows("""SELECT p.id::text, e.emp_code AS "empCode", e.name_en AS "employeeName", p.source_type AS "sourceType",
-                         p.source_id::text AS "sourceId", p.component_code AS code, p.amount::text, p.note, p.created_at AS "createdAt",
-                         pp.bs_year AS "bsYear", pp.bs_month AS "bsMonth"
-                    FROM expense_payout p JOIN employee e ON e.id = p.employee_id LEFT JOIN payroll_run pr ON pr.id = p.payroll_run_id
-                    LEFT JOIN payroll_period pp ON pp.id = pr.period_id
-                   WHERE p.company_id = %s AND p.status = 'pending' ORDER BY e.emp_code, p.created_at""", [company_id_of(user)])
-    for x in out:
-        x['kind'] = 'Recover' if x['code'] == 'EXP_RECOVERY' else 'Pay'
-        x['inRun'] = f"{x['bsYear']}-{x['bsMonth']:02d}" if x['bsYear'] else 'Next pay run'
+    out = []
+    for p in (ExpensePayout.objects.for_company(company_id_of(user)).filter(status=Payout.PENDING)
+              .order_by('employee__emp_code', 'created_at', 'id')
+              .values('id', 'source_type', 'source_id', 'component_code', 'amount', 'note', 'created_at',
+                      emp_code=F('employee__emp_code'), employee_name=F('employee__name_en'),
+                      bs_year=F('payroll_run__period__bs_year'), bs_month=F('payroll_run__period__bs_month'))):
+        out.append({'id': str(p['id']), 'empCode': p['emp_code'], 'employeeName': p['employee_name'], 'sourceType': p['source_type'],
+                    'sourceId': str(p['source_id']), 'code': p['component_code'], 'amount': _s(p['amount']), 'note': p['note'],
+                    'createdAt': p['created_at'], 'bsYear': p['bs_year'], 'bsMonth': p['bs_month'],
+                    'kind': 'Recover' if p['component_code'] == Code.EXP_RECOVERY else 'Pay',
+                    'inRun': f"{p['bs_year']}-{p['bs_month']:02d}" if p['bs_year'] else 'Next pay run'})
     return {'filename': 'expenses-pending-payment', 'columns': [
         {'key': 'empCode', 'header': 'Code'}, {'key': 'employeeName', 'header': 'Employee'}, {'key': 'note', 'header': 'For'},
         {'key': 'kind', 'header': 'Pay or recover'}, {'key': 'amount', 'header': 'Amount (NPR)'}, {'key': 'inRun', 'header': 'Pay run'}],
         'rows': out}
-

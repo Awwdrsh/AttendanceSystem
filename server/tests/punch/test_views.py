@@ -4,7 +4,7 @@ from __future__ import annotations
 from django.test import Client
 
 from hajiri.core import auth
-from hajiri.core.db import execute
+from tests.support.sql import execute
 from tests.punch.api import HOME, SELFIE, punch
 from tests.web.factories import htmx
 

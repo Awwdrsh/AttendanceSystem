@@ -1,24 +1,60 @@
 """
 Ad-hoc report builder (port of apps/api/src/modules/reports/adhoc.ts). HR picks a dataset, columns, filters and a
-sort. Nothing the user sends ever becomes SQL text: datasets, columns and operators are looked up in the whitelist
-below and every value is a bound parameter.
+sort. Nothing the user sends ever becomes SQL: datasets, columns and operators are looked up in the whitelist below,
+each column is an ORM expression, and every value is a bound parameter. A query reads only the active company.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from datetime import date
+from decimal import Decimal
+from typing import Any, Callable
 
+from django.db import models
+from django.db.models import BooleanField, Case, DecimalField, ExpressionWrapper, F, Func, IntegerField, OuterRef, Q
+from django.db.models import Subquery, Sum, TextField, Value, When
+from django.db.models.fields.json import KT
+from django.db.models.functions import Cast, Coalesce, Lower, Replace, Upper
+from django.db.models.lookups import Exact, GreaterThan, GreaterThanOrEqual, LessThan, LessThanOrEqual
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema_field
+from rest_framework import serializers
+
+from hajiri.company_settings.fields import JsonBool, JsonString, StrictSerializer, plain_dict  # noqa: F401 - re-exported
 from hajiri.core.errors import BadRequestError
-from hajiri.core.schema import Arr, Bool, Enum, Num, Obj, Str, Union, parse
+from hajiri.core.validation import validate
+from hajiri.db.models import (
+    CareerEvent, Employee, EmployeeAssignment, EmployeeEducation, EmployeeExperience, EmployeeFamily, LeaveLedger,
+)
 
 from .csv import Column
+
+Expr = Callable[['Ctx'], Any]
+
+
+@dataclass(frozen=True)
+class Ctx:
+    """What a column expression needs: the path from the dataset's rows to the employee ('' or 'employee__') and today
+    (Nepal date)."""
+    e: str
+    today: date
+
+    def f(self, name: str) -> F:
+        return F(self.e + name)
+
+    @property
+    def employee_ref(self) -> OuterRef:
+        return OuterRef(self.e + 'id' if self.e else 'pk')
+
+    def today_value(self) -> Value:
+        return Value(self.today, output_field=models.DateField())
 
 
 @dataclass(frozen=True)
 class C:
     label: str
-    sql: str
+    expr: Expr
     type: str  # 'text' | 'number' | 'date' | 'bool'
 
 
@@ -26,156 +62,236 @@ class C:
 class Dataset:
     label: str
     description: str
-    from_: str
+    rows: Callable[[str], models.QuerySet]   # company id -> the dataset's rows
+    employee: str                             # path from a row to its employee
     default_columns: tuple[str, ...]
     columns: dict[str, C]
 
 
-# Joins giving `e` its placement today: branch b, department o, manager m.
-PLACED = """employee e
-  LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> %(today)s::date
-  LEFT JOIN branch b ON b.id = a.branch_id
-  LEFT JOIN org_unit o ON o.id = a.org_unit_id
-  LEFT JOIN employee m ON m.id = a.manager_id"""
+def field(name: str) -> Expr:
+    return lambda c: F(name)
+
+
+def emp(name: str) -> Expr:
+    return lambda c: c.f(name)
+
+
+def placed(path: str) -> Expr:
+    """The employee's placement today (branch, department, manager, employment type)."""
+    return lambda c: Subquery(EmployeeAssignment.objects.filter(employee=c.employee_ref, valid__contains=c.today)
+                              .values(path)[:1])
+
+
+def is_set(name: str) -> Expr:
+    return lambda c: ExpressionWrapper(Q(**{c.e + name + '__isnull': False}), output_field=BooleanField())
+
+
+def underscores_to_spaces(expr: Expr) -> Expr:
+    return lambda c: Replace(expr(c), Value('_'), Value(' '), output_field=TextField())
+
+
+def years_between(start: Expr, end: Expr | None = None) -> Expr:
+    """Years from start to end (today when None) to one decimal: round(((end - start) / 365.25)::numeric, 1)."""
+    def build(c):
+        stop = end(c) if end else c.today_value()
+        return Func(stop, start(c), template='round(((%(expressions)s) / 365.25)::numeric, 1)', arg_joiner=' - ',
+                    output_field=DecimalField())
+    return build
+
+
+def age_today(c: Ctx):
+    return Cast(Func(Func(c.today_value(), c.f('dob'), function='age'), template='extract(year FROM %(expressions)s)'),
+                IntegerField())
+
 
 WHO = {
-    'emp_code': C('Emp code', 'e.emp_code', 'text'),
-    'name': C('Name', 'e.name_en', 'text'),
-    'department': C('Department', 'o.name_en', 'text'),
-    'branch': C('Branch', 'b.name_en', 'text'),
-    'employee_status': C('Employee status', 'e.status', 'text'),
+    'emp_code': C('Emp code', emp('emp_code'), 'text'),
+    'name': C('Name', emp('name_en'), 'text'),
+    'department': C('Department', placed('org_unit__name_en'), 'text'),
+    'branch': C('Branch', placed('branch__name_en'), 'text'),
+    'employee_status': C('Employee status', emp('status'), 'text'),
 }
+
+
+def _ledger(c: Ctx, **filters):
+    rows = LeaveLedger.objects.filter(employee=OuterRef('pk'), leave_type=OuterRef('_leave_type'),
+                                      effective_date__lte=c.today, **filters)
+    return rows.values('employee').annotate(n=Sum('delta_days')).values('n')[:1]
+
+
+def _balance(c: Ctx):
+    return Coalesce(Subquery(_ledger(c), output_field=DecimalField()), Value(Decimal(0)), output_field=DecimalField())
+
+
+def _used(c: Ctx):
+    return -Coalesce(Subquery(_ledger(c, reason='usage'), output_field=DecimalField()), Value(Decimal(0)),
+                     output_field=DecimalField())
+
 
 ADHOC_DATASETS: dict[str, Dataset] = {
     'employees': Dataset(
         label='Employees', description='One row per employee with job, placement and personal details (no ID or bank numbers).',
-    from_=PLACED,
-    default_columns=('emp_code', 'name', 'designation', 'department', 'branch', 'join_date'),
-    columns={
-      **WHO,
-      'designation': C('Designation', 'e.designation', 'text'),
-      'grade': C('Grade', 'e.grade', 'text'),
-      'employment_type': C('Employment type', 'a.employment_type', 'text'),
-      'manager': C('Manager', 'm.name_en', 'text'),
-      'gender': C('Gender', 'e.gender', 'text'),
-      'dob': C('Date of birth', 'e.dob', 'date'),
-      'age': C('Age', 'extract(year FROM age(%(today)s::date, e.dob))::int', 'number'),
-      'marital_status': C('Marital status', "CASE e.marital_status WHEN 'couple' THEN 'married' ELSE e.marital_status END", 'text'),
-      'blood_group': C('Blood group', 'e.blood_group', 'text'),
-      'nationality': C('Nationality', 'e.nationality', 'text'),
-      'join_date': C('Join date', 'e.join_date', 'date'),
-      'service_years': C('Years of service', 'round(((%(today)s::date - e.join_date) / 365.25)::numeric, 1)', 'number'),
-      'confirmed_on': C('Confirmed on', 'e.confirmed_on', 'date'),
-      'probation_end': C('Probation ends', 'e.probation_end', 'date'),
-      'exit_date': C('Exit date', 'e.exit_date', 'date'),
-      'work_email': C('Work email', 'e.email', 'text'),
-      'work_phone': C('Work phone', 'coalesce(e.work_phone, e.phone)', 'text'),
-      'personal_email': C('Personal email', 'e.personal_email', 'text'),
-      'province': C('Province', "e.permanent_address->>'province'", 'text'),
-      'district': C('District', "e.permanent_address->>'district'", 'text'),
-      'regime': C('Retirement fund', 'upper(e.regime)', 'text'),
-      'pan_on_file': C('PAN on file', 'e.pan_enc IS NOT NULL', 'bool'),
-      'bank_on_file': C('Bank account on file', 'e.bank_account_enc IS NOT NULL', 'bool'),
-      'bank_code': C('Bank', 'e.bank_code', 'text'),
-      'ot_eligible': C('Overtime eligible', 'e.ot_eligible', 'bool'),
-      'skills': C('Skills', "array_to_string(e.skills, ', ')", 'text'),
+        rows=lambda cid: Employee.objects.for_company(cid), employee='',
+        default_columns=('emp_code', 'name', 'designation', 'department', 'branch', 'join_date'),
+        columns={
+            **WHO,
+            'designation': C('Designation', field('designation'), 'text'),
+            'grade': C('Grade', field('grade'), 'text'),
+            'employment_type': C('Employment type', placed('employment_type'), 'text'),
+            'manager': C('Manager', placed('manager__name_en'), 'text'),
+            'gender': C('Gender', field('gender'), 'text'),
+            'dob': C('Date of birth', field('dob'), 'date'),
+            'age': C('Age', age_today, 'number'),
+            'marital_status': C('Marital status', lambda c: Case(When(marital_status='couple', then=Value('married')),
+                                                                 default=F('marital_status'), output_field=TextField()), 'text'),
+            'blood_group': C('Blood group', field('blood_group'), 'text'),
+            'nationality': C('Nationality', field('nationality'), 'text'),
+            'join_date': C('Join date', field('join_date'), 'date'),
+            'service_years': C('Years of service', years_between(field('join_date')), 'number'),
+            'confirmed_on': C('Confirmed on', field('confirmed_on'), 'date'),
+            'probation_end': C('Probation ends', field('probation_end'), 'date'),
+            'exit_date': C('Exit date', field('exit_date'), 'date'),
+            'work_email': C('Work email', field('email'), 'text'),
+            'work_phone': C('Work phone', lambda c: Coalesce('work_phone', 'phone'), 'text'),
+            'personal_email': C('Personal email', field('personal_email'), 'text'),
+            'province': C('Province', lambda c: KT('permanent_address__province'), 'text'),
+            'district': C('District', lambda c: KT('permanent_address__district'), 'text'),
+            'regime': C('Retirement fund', lambda c: Upper('regime'), 'text'),
+            'pan_on_file': C('PAN on file', is_set('pan_enc'), 'bool'),
+            'bank_on_file': C('Bank account on file', is_set('bank_account_enc'), 'bool'),
+            'bank_code': C('Bank', field('bank_code'), 'text'),
+            'ot_eligible': C('Overtime eligible', field('ot_eligible'), 'bool'),
+            'skills': C('Skills', lambda c: Func(F('skills'), Value(', '), function='array_to_string',
+                                                 output_field=TextField()), 'text'),
         },
     ),
     'education': Dataset(
         label='Education', description='One row per qualification.',
-    from_=PLACED + ' JOIN employee_education ed ON ed.employee_id = e.id',
-    default_columns=('emp_code', 'name', 'level', 'degree', 'institution', 'end_year'),
-    columns={
-      **WHO,
-      'level': C('Level', 'ed.level', 'text'),
-      'degree': C('Degree', 'ed.degree', 'text'),
-      'field': C('Field', 'ed.field', 'text'),
-      'institution': C('Institution', 'ed.institution', 'text'),
-      'board': C('Board or university', 'ed.board', 'text'),
-      'start_year': C('From year', 'ed.start_year', 'number'),
-      'end_year': C('To year', 'ed.end_year', 'number'),
-      'result': C('Result', 'ed.result', 'text'),
+        rows=lambda cid: EmployeeEducation.objects.for_company(cid), employee='employee__',
+        default_columns=('emp_code', 'name', 'level', 'degree', 'institution', 'end_year'),
+        columns={
+            **WHO,
+            'level': C('Level', field('level'), 'text'),
+            'degree': C('Degree', field('degree'), 'text'),
+            'field': C('Field', field('field'), 'text'),
+            'institution': C('Institution', field('institution'), 'text'),
+            'board': C('Board or university', field('board'), 'text'),
+            'start_year': C('From year', field('start_year'), 'number'),
+            'end_year': C('To year', field('end_year'), 'number'),
+            'result': C('Result', field('result'), 'text'),
         },
     ),
     'family': Dataset(
         label='Family and nominees', description='One row per family member.',
-    from_=PLACED + ' JOIN employee_family fm ON fm.employee_id = e.id',
-    default_columns=('emp_code', 'name', 'member', 'relation', 'nominee', 'share'),
-    columns={
-      **WHO,
-      'member': C('Family member', 'fm.name', 'text'),
-      'relation': C('Relation', "replace(fm.relation, '_', ' ')", 'text'),
-      'member_dob': C('Member date of birth', 'fm.dob', 'date'),
-      'occupation': C('Occupation', 'fm.occupation', 'text'),
-      'dependent': C('Dependent', 'fm.is_dependent', 'bool'),
-      'nominee': C('Nominee', 'fm.is_nominee', 'bool'),
-      'share': C('Nominee share (%)', 'fm.nominee_share', 'number'),
+        rows=lambda cid: EmployeeFamily.objects.for_company(cid), employee='employee__',
+        default_columns=('emp_code', 'name', 'member', 'relation', 'nominee', 'share'),
+        columns={
+            **WHO,
+            'member': C('Family member', field('name'), 'text'),
+            'relation': C('Relation', underscores_to_spaces(field('relation')), 'text'),
+            'member_dob': C('Member date of birth', field('dob'), 'date'),
+            'occupation': C('Occupation', field('occupation'), 'text'),
+            'dependent': C('Dependent', field('is_dependent'), 'bool'),
+            'nominee': C('Nominee', field('is_nominee'), 'bool'),
+            'share': C('Nominee share (%)', field('nominee_share'), 'number'),
         },
     ),
     'experience': Dataset(
         label='Previous employment', description='One row per earlier job.',
-    from_=PLACED + ' JOIN employee_experience ex ON ex.employee_id = e.id',
-    default_columns=('emp_code', 'name', 'organisation', 'job_title', 'from_date', 'to_date'),
-    columns={
-      **WHO,
-      'organisation': C('Organisation', 'ex.organisation', 'text'),
-      'job_title': C('Designation there', 'ex.designation', 'text'),
-      'from_date': C('From', 'ex.from_date', 'date'),
-      'to_date': C('To', 'ex.to_date', 'date'),
-      'years': C('Years', 'round(((coalesce(ex.to_date, %(today)s::date) - ex.from_date) / 365.25)::numeric, 1)', 'number'),
-      'reason_for_leaving': C('Reason for leaving', 'ex.reason_for_leaving', 'text'),
+        rows=lambda cid: EmployeeExperience.objects.for_company(cid), employee='employee__',
+        default_columns=('emp_code', 'name', 'organisation', 'job_title', 'from_date', 'to_date'),
+        columns={
+            **WHO,
+            'organisation': C('Organisation', field('organisation'), 'text'),
+            'job_title': C('Designation there', field('designation'), 'text'),
+            'from_date': C('From', field('from_date'), 'date'),
+            'to_date': C('To', field('to_date'), 'date'),
+            'years': C('Years', years_between(field('from_date'),
+                                              lambda c: Coalesce(F('to_date'), c.today_value())), 'number'),
+            'reason_for_leaving': C('Reason for leaving', field('reason_for_leaving'), 'text'),
         },
     ),
     'career_events': Dataset(
         label='Career events', description='Hires, promotions, transfers, confirmations and separations.',
-    from_=PLACED + " JOIN career_event ce ON ce.employee_id = e.id AND ce.status <> 'cancelled'",
-    default_columns=('emp_code', 'name', 'event', 'effective_date', 'new_designation'),
-    columns={
-      **WHO,
-      'event': C('Event', "replace(ce.kind, '_', ' ')", 'text'),
-      'effective_date': C('Effective date', 'ce.effective_date', 'date'),
-      'event_status': C('Event status', 'ce.status', 'text'),
-      'new_designation': C('New designation', "ce.details->>'designation'", 'text'),
-      'new_grade': C('New grade', "ce.details->>'grade'", 'text'),
-      'separation_type': C('Separation type', "replace(ce.details->>'separationType', '_', ' ')", 'text'),
-      'note': C('Note', 'ce.note', 'text'),
+        rows=lambda cid: CareerEvent.objects.for_company(cid).exclude(status=CareerEvent.Status.CANCELLED),
+        employee='employee__',
+        default_columns=('emp_code', 'name', 'event', 'effective_date', 'new_designation'),
+        columns={
+            **WHO,
+            'event': C('Event', underscores_to_spaces(field('kind')), 'text'),
+            'effective_date': C('Effective date', field('effective_date'), 'date'),
+            'event_status': C('Event status', field('status'), 'text'),
+            'new_designation': C('New designation', lambda c: KT('details__designation'), 'text'),
+            'new_grade': C('New grade', lambda c: KT('details__grade'), 'text'),
+            'separation_type': C('Separation type', underscores_to_spaces(lambda c: KT('details__separationType')), 'text'),
+            'note': C('Note', field('note'), 'text'),
         },
     ),
     'leave_balances': Dataset(
         label='Leave balances', description='One row per employee and leave type, with the balance today.',
-    from_=PLACED + " JOIN leave_type lt ON lt.company_id = e.company_id\n      LEFT JOIN LATERAL (SELECT coalesce(sum(l.delta_days), 0) AS balance, coalesce(sum(-l.delta_days) FILTER (WHERE l.reason = 'usage'), 0) AS used\n                           FROM leave_ledger l WHERE l.employee_id = e.id AND l.leave_type_id = lt.id AND l.effective_date <= %(today)s::date) lb ON true",
-    default_columns=('emp_code', 'name', 'leave_type', 'balance'),
-    columns={
-      **WHO,
-      'leave_type': C('Leave type', 'lt.name_en', 'text'),
-      'leave_code': C('Leave code', 'lt.code', 'text'),
-      'balance': C('Balance (days)', 'lb.balance', 'number'),
-      'used': C('Used (days)', 'lb.used', 'number'),
-      'paid': C('Paid leave', 'lt.paid', 'bool'),
+        # One row per employee and each leave type of their company (the join through company).
+        rows=lambda cid: Employee.objects.for_company(cid).annotate(_leave_type=F('company__leave_types__id'))
+        .filter(_leave_type__isnull=False),
+        employee='',
+        default_columns=('emp_code', 'name', 'leave_type', 'balance'),
+        columns={
+            **WHO,
+            'leave_type': C('Leave type', field('company__leave_types__name_en'), 'text'),
+            'leave_code': C('Leave code', field('company__leave_types__code'), 'text'),
+            'balance': C('Balance (days)', _balance, 'number'),
+            'used': C('Used (days)', _used, 'number'),
+            'paid': C('Paid leave', field('company__leave_types__paid'), 'bool'),
         },
     ),
 }
 
 
 OPS = ('eq', 'neq', 'contains', 'starts', 'gt', 'gte', 'lt', 'lte', 'empty', 'not_empty')
+KEY = r'^[a-z_]{1,40}$'
 
 
-def _key(**kw):
-    return Str(regex=r'^[a-z_]{1,40}$', **kw)
+def _key(**kw) -> JsonString:
+    return JsonString(pattern=KEY, **kw)
 
 
-ADHOC_DEFINITION = Obj({
-    'dataset': _key(),
-    'columns': Arr(_key(), min=1, max=30),
-    'filters': Arr(Obj({'column': _key(), 'op': Enum(OPS),
-                        'value': Union(Str(max=200), Num(), Bool(), nullish=True)}, strict=True), max=15, default=list),
-    'sort': Obj({'column': _key(), 'dir': Enum(('asc', 'desc'), default='asc')}, strict=True, nullish=True),
-    'includeExited': Bool(default=False),
-}, strict=True)
+@extend_schema_field(OpenApiTypes.ANY)
+class FilterValue(serializers.Field):
+    """A filter value: a string of at most 200 characters, a number or a boolean (or nothing)."""
+
+    def to_internal_value(self, v):
+        if isinstance(v, str):
+            if len(v) > 200:
+                raise serializers.ValidationError('Invalid input')
+            return v
+        if isinstance(v, (bool, int, float)):
+            return v
+        raise serializers.ValidationError('Invalid input')
+
+    def to_representation(self, value):
+        return value
+
+
+class FilterIn(StrictSerializer):
+    column = _key()
+    op = serializers.ChoiceField(OPS)
+    value = FilterValue(required=False, allow_null=True)
+
+
+class SortIn(StrictSerializer):
+    column = _key()
+    dir = serializers.ChoiceField(('asc', 'desc'), default='asc')
+
+
+class AdhocDefinitionIn(StrictSerializer):
+    dataset = _key()
+    columns = serializers.ListField(child=_key(), min_length=1, max_length=30)
+    filters = serializers.ListField(child=FilterIn(), max_length=15, default=list)
+    sort = SortIn(required=False, allow_null=True)
+    includeExited = JsonBool(default=False)
 
 
 def parse_definition(data: Any) -> dict:
-    return parse(ADHOC_DEFINITION, data)
+    return plain_dict(validate(AdhocDefinitionIn, data))
 
 
 def _coerce(type_: str, v: Any, column: str) -> Any:
@@ -183,7 +299,7 @@ def _coerce(type_: str, v: Any, column: str) -> Any:
         raise BadRequestError(f'enter a value for the filter on {column}')
     if type_ == 'number':
         try:
-            n = float(v) if not isinstance(v, bool) else float(v)
+            n = float(v)
         except (TypeError, ValueError):
             raise BadRequestError(f'{column} needs a number')
         if n != n or n in (float('inf'), float('-inf')):
@@ -209,17 +325,29 @@ def _coerce(type_: str, v: Any, column: str) -> Any:
 
 @dataclass(frozen=True)
 class BuiltQuery:
-    sql: str
-    params: dict
-    count_sql: str
+    rows: models.QuerySet        # limited, ordered, values() of the chosen columns (as `c_<key>`)
+    count: models.QuerySet       # the same rows without limit, for the total
+    keys: list[str]
     columns: list[Column]
+
+    def fetch(self) -> list[dict]:
+        return [{k: r[f'c_{k}'] for k in self.keys} for r in self.rows]
+
+
+_COMPARE = {'eq': Exact, 'gt': GreaterThan, 'gte': GreaterThanOrEqual, 'lt': LessThan, 'lte': LessThanOrEqual}
+
+
+def _as_text(expr):
+    return Cast(expr, TextField())
 
 
 def build_adhoc_query(d: dict, company_id: str, today: str, limit: int) -> BuiltQuery:
-    """Parameterised SQL for a parsed definition: %(company)s and %(today)s, then one parameter per user value."""
+    """The queryset for a parsed definition, scoped to the company: the chosen columns, the filters (bound values) and
+    the sort, at most `limit` rows."""
     ds = ADHOC_DATASETS.get(d['dataset'])
     if not ds:
         raise BadRequestError('unknown dataset')
+    ctx = Ctx(ds.employee, date.fromisoformat(today))
 
     def col(k: str) -> C:
         c = ds.columns.get(k)
@@ -228,50 +356,50 @@ def build_adhoc_query(d: dict, company_id: str, today: str, limit: int) -> Built
         return c
 
     keys = list(dict.fromkeys(d['columns']))
-    select = ', '.join(f'{col(k).sql} AS "{k}"' for k in keys)
-    params: dict = {'company': company_id, 'today': today}
-
-    def p(v):
-        name = f'p{len(params)}'
-        params[name] = v
-        return f'%({name})s'
-
-    where = ['e.company_id = %(company)s']
+    used = list(dict.fromkeys(keys + [f['column'] for f in d.get('filters', [])]
+                              + ([d['sort']['column']] if d.get('sort') else [])))
+    qs = ds.rows(company_id).annotate(**{f'c_{k}': col(k).expr(ctx) for k in used})
     if not d.get('includeExited'):
-        where.append("e.status = 'active'")
+        qs = qs.filter(**{ds.employee + 'status': Employee.Status.ACTIVE})
     for f in d.get('filters', []):
         c = col(f['column'])
-        expr, op_name = c.sql, f['op']
-        if op_name == 'empty':
-            where.append(f"nullif({expr}::text, '') IS NULL" if c.type == 'text' else f'{expr} IS NULL')
-        elif op_name == 'not_empty':
-            where.append(f"nullif({expr}::text, '') IS NOT NULL" if c.type == 'text' else f'{expr} IS NOT NULL')
-        elif op_name in ('contains', 'starts'):
-            s = re.sub(r'[\\%_]', lambda m: '\\' + m[0], str(_coerce('text', f.get('value'), c.label)))
-            where.append(f"{expr}::text ILIKE {p(f'%{s}%' if op_name == 'contains' else f'{s}%')}")
+        alias, op = f'c_{f["column"]}', f['op']
+        ref = F(alias)
+        if op in ('empty', 'not_empty'):
+            blank = (Q(**{f'{alias}__isnull': True}) | Q(Exact(_as_text(ref), Value(''))) if c.type == 'text'
+                     else Q(**{f'{alias}__isnull': True}))
+            qs = qs.filter(blank if op == 'empty' else ~blank)
+        elif op in ('contains', 'starts'):
+            s = str(_coerce('text', f.get('value'), c.label))
+            text = f'{alias}_text'
+            qs = qs.alias(**{text: _as_text(ref)}).filter(**{f'{text}__{"icontains" if op == "contains" else "istartswith"}': s})
         else:
             v = _coerce(c.type, f.get('value'), c.label)
-            op = {'eq': '=', 'neq': '<>', 'gt': '>', 'gte': '>=', 'lt': '<', 'lte': '<='}[op_name]
-            if c.type == 'text' and op_name in ('eq', 'neq'):
-                where.append(f'lower({expr}::text) {op} lower({p(v)})')
+            lookup = _COMPARE.get('eq' if op == 'neq' else op)
+            if c.type == 'text' and op in ('eq', 'neq'):
+                cond = Exact(Lower(_as_text(ref)), Lower(Value(v)))
             elif c.type == 'text':
-                where.append(f'{expr}::text {op} {p(v)}')
+                cond = lookup(_as_text(ref), Value(v))
             elif c.type == 'date':
-                where.append(f'{expr} {op} {p(v)}::date')
+                cond = lookup(ref, Value(date.fromisoformat(v), output_field=models.DateField()))
             elif c.type == 'bool':
-                if op_name not in ('eq', 'neq'):
+                if op not in ('eq', 'neq'):
                     raise BadRequestError(f'{c.label} can only be compared with "is" or "is not"')
-                where.append(f'{expr} {op} {p(v)}::boolean')
+                cond = Exact(ref, Value(v, output_field=BooleanField()))
             else:
-                where.append(f'{expr} {op} {p(v)}::numeric')
+                cond = lookup(ref, Value(Decimal(str(v)), output_field=DecimalField()))
+            # `<>` is NOT (=): a row whose value is empty matches neither, as in SQL.
+            qs = qs.filter(~Q(cond) if op == 'neq' else cond)
+    emp_code = F(ds.employee + 'emp_code').asc()
     sort = d.get('sort')
-    order = f"{col(sort['column']).sql} {'DESC' if sort.get('dir') == 'desc' else 'ASC'} NULLS LAST, e.emp_code" if sort else 'e.emp_code'
-    where_sql = ' AND '.join(where)
+    if sort:
+        by = F(f'c_{sort["column"]}')
+        qs = qs.order_by(by.desc(nulls_last=True) if sort.get('dir') == 'desc' else by.asc(nulls_last=True), emp_code)
+    else:
+        qs = qs.order_by(emp_code)
     lim = max(1, min(limit, 10_000))
-    return BuiltQuery(
-        sql=f'SELECT {select} FROM {ds.from_} WHERE {where_sql} ORDER BY {order} LIMIT {lim}', params=params,
-        count_sql=f'SELECT count(*)::int AS n FROM {ds.from_} WHERE {where_sql}',
-        columns=[Column(k, col(k).label, col(k).type) for k in keys])
+    return BuiltQuery(rows=qs.values(*(f'c_{k}' for k in keys))[:lim], count=qs.order_by(), keys=keys,
+                      columns=[Column(k, col(k).label, col(k).type) for k in keys])
 
 
 def datasets() -> dict:

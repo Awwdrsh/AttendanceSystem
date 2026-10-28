@@ -2,7 +2,7 @@
 import pytest
 from django.test import Client
 
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.core.errors import BadRequestError, ForbiddenError, ValidationError
 from hajiri.workflow import flow_admin, service
 from hajiri.workflow.flows import match_score, steps_for_amount, Subject

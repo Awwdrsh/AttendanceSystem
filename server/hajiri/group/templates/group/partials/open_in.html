@@ -1,0 +1,4 @@
+{% comment %}A link into one company's own page: a plain link in the active company, else a switch to that company
+first (web:switch_company lands on `next` there). Needs: company_id, next, active, label (and optional cls).{% endcomment %}
+{% if active %}<a class="{{ cls|default:'hj-btn light xs' }}" href="{{ next }}">{{ label }}</a>
+{% else %}<form method="post" action="{% url 'web:switch_company' %}" class="hj-inline-form" style="display:inline">{% csrf_token %}<input type="hidden" name="company_id" value="{{ company_id }}"><input type="hidden" name="next" value="{{ next }}"><button class="{{ cls|default:'hj-btn light xs' }}" type="submit">{{ label }}</button></form>{% endif %}

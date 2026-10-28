@@ -24,11 +24,18 @@ TONES = ('ok', 'info', 'err', 'warn')
 
 
 def is_htmx(request) -> bool:
+    """An HTMX request (django-htmx's `request.htmx`, set by HtmxMiddleware; header check for bare requests)."""
+    details = getattr(request, 'htmx', None)
+    if details is not None:
+        return bool(details)
     return request.headers.get('HX-Request') == 'true'
 
 
 def htmx_target(request) -> str | None:
     """Id of the element HTMX will swap into (without '#'), or None."""
+    details = getattr(request, 'htmx', None)
+    if details is not None:
+        return details.target if details else None
     return request.headers.get('HX-Target') if is_htmx(request) else None
 
 

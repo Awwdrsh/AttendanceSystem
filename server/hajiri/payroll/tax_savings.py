@@ -9,6 +9,7 @@ from datetime import date
 from decimal import localcontext
 
 from django.db import transaction
+from django.db.models.functions import Now
 
 from engines.bs_calendar import ad_to_bs, bs_month_bounds, fiscal_year_of
 from engines.payroll import compute_payslip
@@ -18,23 +19,19 @@ from hajiri.core.audit import audit
 from hajiri.core.auth import AuthUser, company_id_of, has_module
 from hajiri.core.clock import npt_today
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
-from hajiri.core.schema import Arr, Int, Money, Obj, Str, Uuid, parse
+from hajiri.core.scoping import as_uuid
+from hajiri.core.validation import parse_uuid, plain, validate
+from hajiri.db.models import Employee, TaxDeclaration, TaxDeclarationRequest
 from hajiri.notifications.service import notify, user_id_for_employee
 
-from ._db import fx, js_round, q, q1, x
 from .compliance_service import effective_cit, opening_balance
+from .numbers import column_row, fx, round_half_up
 from .rules import resolve_rules
+from .serializers import DECL_FIELDS, EstimateIn, SavingsIn, SavingsQueryIn
 
-_AMOUNT = lambda: Money(default='0', refine=(lambda v: not v.startswith('-'), 'must not be negative'))  # noqa: E731
-DECL_FIELDS = ('lifePremium', 'healthPremium', 'citMonthly', 'medicalCost', 'otherRetirementAnnual', 'donation')
-
-
-def declaration_body() -> dict:
-    return {k: _AMOUNT() for k in DECL_FIELDS}
-
-
-def fy_param(**kw) -> Int:
-    return Int(min=2070, max=2200, coerce=True, **kw)
+Request = TaxDeclarationRequest
+DECL_COLUMNS = {'lifePremium': 'life_premium', 'healthPremium': 'health_premium', 'citMonthly': 'cit_monthly', 'medicalCost': 'medical_cost',
+                'otherRetirementAnnual': 'other_retirement_annual', 'donation': 'donation'}
 
 
 def fy_label(fy: int) -> str:
@@ -44,7 +41,7 @@ def fy_label(fy: int) -> str:
 def _req(r: dict | None) -> dict | None:
     if r is None:
         return None
-    out = dict(r)
+    out = column_row(TaxDeclarationRequest, r)
     for k in ('id', 'company_id', 'employee_id', 'workflow_instance_id', 'created_by', 'decided_by'):
         if out.get(k) is not None:
             out[k] = str(out[k])
@@ -58,7 +55,7 @@ def _req(r: dict | None) -> dict | None:
 def _decl(r: dict | None) -> dict | None:
     if r is None:
         return None
-    out = dict(r)
+    out = column_row(TaxDeclaration, r)
     for k in ('id', 'employee_id', 'verified_by'):
         if out.get(k) is not None:
             out[k] = str(out[k])
@@ -83,22 +80,29 @@ def current_fiscal_year_start() -> int:
 
 # ---------------------------------------------------------------- decision handler
 
+def requests(company_id: str | None = None):
+    """Tax savings requests (of one company when given)."""
+    return Request.objects.for_company(company_id) if company_id else Request.objects.all()
+
+
+def verify(employee_id: str, fiscal_year_start: int, values: dict, actor_id: str) -> None:
+    """Record a declaration as verified by `actor_id` (HR approval, or HR entering it); a later CIT change starts over."""
+    TaxDeclaration.objects.update_or_create(
+        employee_id=employee_id, fiscal_year_start=fiscal_year_start,
+        defaults={**values, 'cit_from_month': None, 'cit_prev_monthly': 0, 'status': TaxDeclaration.Status.VERIFIED,
+                  'verified_by_id': actor_id, 'verified_at': Now(), 'updated_at': Now()})
+
+
 def apply_tax_declaration_decision(request_id: str, state: str, ctx) -> None:
-    req = _req(q1('SELECT * FROM tax_declaration_request WHERE id = $1 FOR UPDATE', [str(request_id)]))
+    """Workflow decision handler for 'tax_declaration' (the workflow engine checks the approver's access)."""
+    req = _req(requests().select_for_update().filter(pk=as_uuid(request_id)).values().first())
     if not req:
         raise NotFoundError('tax declaration request not found')
-    if req['status'] != 'pending':
+    if req['status'] != Request.Status.PENDING:
         raise ConflictError(f"request already {req['status']}")
-    x('UPDATE tax_declaration_request SET status = $2, decided_by = $3, decided_at = now(), decision_note = $4 WHERE id = $1',
-      [request_id, state, ctx.actor_id, ctx.reason])
-    if state == 'approved':
-        x("""INSERT INTO tax_declaration (employee_id, fiscal_year_start, life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, donation, status, verified_by, verified_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $9, 'verified', $8, now())
-             ON CONFLICT (employee_id, fiscal_year_start) DO UPDATE SET life_premium = EXCLUDED.life_premium, health_premium = EXCLUDED.health_premium, cit_monthly = EXCLUDED.cit_monthly,
-               medical_cost = EXCLUDED.medical_cost, other_retirement_annual = EXCLUDED.other_retirement_annual, donation = EXCLUDED.donation, cit_from_month = NULL, cit_prev_monthly = 0,
-               status = 'verified', verified_by = EXCLUDED.verified_by, verified_at = now(), updated_at = now()""",
-          [req['employee_id'], req['fiscal_year_start'], req['life_premium'], req['health_premium'], req['cit_monthly'], req['medical_cost'],
-           req['other_retirement_annual'], ctx.actor_id, req['donation']])
+    requests().filter(pk=req['id']).update(status=state, decided_by_id=ctx.actor_id, decided_at=Now(), decision_note=ctx.reason)
+    if state == Request.Status.APPROVED:
+        verify(req['employee_id'], req['fiscal_year_start'], {col: req[col] for col in DECL_COLUMNS.values()}, ctx.actor_id)
     audit(state, 'tax_declaration_request', actor_id=ctx.actor_id, row_id=request_id,
           after={'fiscalYearStart': req['fiscal_year_start'], 'reason': ctx.reason})
     fy = req['fiscal_year_start']
@@ -111,12 +115,16 @@ def apply_tax_declaration_decision(request_id: str, state: str, ctx) -> None:
            payload={'requestId': str(request_id)}, channels=('push',))
 
 
+def verified(employee_id: str, fiscal_year_start: int, *fields: str) -> dict | None:
+    return _decl(TaxDeclaration.objects.filter(employee_id=employee_id, fiscal_year_start=fiscal_year_start,
+                                               status=TaxDeclaration.Status.VERIFIED).values(*fields).first())
+
+
 def tax_declaration_summary(inst: dict) -> dict:
-    x_ = _req(q1('SELECT * FROM tax_declaration_request WHERE id = $1', [inst['object_id']]))
+    x_ = _req(requests().filter(pk=as_uuid(inst['object_id'])).values().first())
     if not x_:
         return {}
-    cur = _decl(q1("""SELECT life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, donation FROM tax_declaration
-                       WHERE employee_id = $1 AND fiscal_year_start = $2 AND status = 'verified'""", [x_['employee_id'], x_['fiscal_year_start']]))
+    cur = verified(x_['employee_id'], x_['fiscal_year_start'], *DECL_COLUMNS.values())
     return {'fiscalYearStart': x_['fiscal_year_start'], 'lifePremium': x_['life_premium'], 'healthPremium': x_['health_premium'],
             'citMonthly': x_['cit_monthly'], 'medicalCost': x_['medical_cost'], 'otherRetirementAnnual': x_['other_retirement_annual'],
             'donation': x_['donation'], 'note': x_['note'], 'proofs': len(x_['proof_file_ids']), 'current': to_input(cur) if cur else None}
@@ -130,34 +138,31 @@ def submit_tax_savings(user: AuthUser, company_id: str, employee_id: str, fiscal
     from hajiri.files.store import attach_file
     from hajiri.workflow.service import cancel_workflow, start_workflow
 
-    prev = q("""SELECT id FROM tax_declaration_request WHERE employee_id = $1 AND fiscal_year_start = $2 AND status = 'pending' FOR UPDATE""",
-             [employee_id, fiscal_year_start])
-    for p in prev:
-        x("""UPDATE tax_declaration_request SET status = 'cancelled', decided_at = now(), decision_note = 'replaced by a newer submission'
-              WHERE id = $1""", [p['id']])
-        cancel_workflow('tax_declaration', str(p['id']))
-    rid = str(q1('SELECT uuidv7() AS id')['id'])
+    pending = requests(company_id).filter(employee_id=employee_id, fiscal_year_start=fiscal_year_start, status=Request.Status.PENDING)
+    for pid in pending.select_for_update().values_list('id', flat=True):
+        requests().filter(pk=pid).update(status=Request.Status.CANCELLED, decided_at=Now(), decision_note='replaced by a newer submission')
+        cancel_workflow('tax_declaration', str(pid))
     proofs = list(dict.fromkeys(proof_file_ids or []))
+    ins = Request.objects.create(
+        company_id=company_id, employee_id=employee_id, fiscal_year_start=fiscal_year_start, note=note, proof_file_ids=proofs,
+        created_by_id=user.id, **{DECL_COLUMNS[k]: values[k] for k in DECL_FIELDS if k != 'donation'},
+        donation=values.get('donation') or '0')
+    rid = str(ins.pk)
     for f in proofs:
         attach_file(company_id=company_id, file_id=f, user_id=user.id, purpose=['employee_document', 'tax_proof'],
                     attached_to=f'tax_declaration_request:{rid}')
-    ins = q1("""INSERT INTO tax_declaration_request (id, company_id, employee_id, fiscal_year_start, life_premium, health_premium, cit_monthly, medical_cost,
-                       other_retirement_annual, donation, note, proof_file_ids, created_by)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $13, $10, $11::uuid[], $12) RETURNING *""",
-             [rid, company_id, employee_id, fiscal_year_start, values['lifePremium'], values['healthPremium'], values['citMonthly'],
-              values['medicalCost'], values['otherRetirementAnnual'], note, proofs, user.id, values.get('donation') or '0'])
     inst = start_workflow(company_id=company_id, object_type='tax_declaration', object_id=rid, employee_id=employee_id,
                           title='Tax savings to verify',
                           body=f"Tax savings declaration for FY {fy_label(fiscal_year_start)}{f' with {len(proofs)} proof file(s)' if proofs else ''}.")
-    x('UPDATE tax_declaration_request SET workflow_instance_id = $2 WHERE id = $1', [rid, inst['id']])
+    requests().filter(pk=rid).update(workflow_instance_id=inst['id'])
     audit('create', 'tax_declaration_request', actor_id=user.id, row_id=rid,
           after={'fiscalYearStart': fiscal_year_start, **values, 'proofs': len(proofs)})
-    return {**_req(ins), 'workflow_instance_id': str(inst['id'])}
+    return {**_req(requests().filter(pk=rid).values().get()), 'workflow_instance_id': str(inst['id'])}
 
 
 def pending_tax_savings(employee_id: str, fiscal_year_start: int) -> dict | None:
-    return _req(q1("SELECT * FROM tax_declaration_request WHERE employee_id = $1 AND fiscal_year_start = $2 AND status = 'pending'",
-                   [str(employee_id), fiscal_year_start]))
+    return _req(requests().filter(employee_id=employee_id, fiscal_year_start=fiscal_year_start, status=Request.Status.PENDING)
+                .values().first())
 
 
 def decide_tax_savings(user: AuthUser, req: dict, decision: str, reason: str | None) -> None:
@@ -186,7 +191,7 @@ def estimate_input(company_id: str, employee_id: str, fiscal_year_start: int) ->
     The payroll engine input for this month's payslip of one employee, as a real run would build it, with full
     attendance, no one-offs and the verified declaration. Returns {input, bsYear, bsMonth} or {reason}.
     """
-    from .service import active_employees, components_for, payroll_policy
+    from .runs import active_employees, components_for, payroll_policy, year_to_date
     today = npt_today().isoformat()
     bs = ad_to_bs(today)
     fy = fiscal_year_of(bs)
@@ -202,21 +207,12 @@ def estimate_input(company_id: str, employee_id: str, fiscal_year_start: int) ->
     components = components_for(company_id, str(emp['assignment']['structure_version_id']))
     policy = payroll_policy(company_id)
     rules, _ = resolve_rules(p['end_ad'])
-    y = q1("""
-        SELECT coalesce(sum(ps.taxable), 0)::text AS taxable, coalesce(sum(ps.tds), 0)::text AS tds,
-               coalesce((SELECT sum(l.amount) FROM payslip_line l WHERE l.payslip_id = ANY(array_agg(ps.id)) AND l.component_code IN ('SSF_EE', 'PF_EE', 'CIT')), 0)::text AS ee,
-               coalesce(sum(ps.employer_statutory), 0)::text AS er,
-               coalesce(bool_or(EXISTS (SELECT 1 FROM payslip_line l WHERE l.payslip_id = ps.id AND l.component_code = 'FESTIVAL')), false) AS festival
-          FROM payslip ps JOIN payroll_run r ON r.id = ps.run_id JOIN payroll_period pp ON pp.id = r.period_id
-         WHERE ps.employee_id = $1 AND r.locked_at IS NOT NULL AND pp.start_ad >= $2::date AND pp.start_ad < $3::date""",
-           [employee_id, fy.start_ad, p['start_ad']])
+    y = year_to_date(employee_id, fy.start_ad, p['start_ad'], inclusive=False)
     ob = opening_balance(employee_id, fy.start_year)
-    verified = _decl(q1("""SELECT life_premium, health_premium, cit_monthly, medical_cost, other_retirement_annual, donation, cit_from_month, cit_prev_monthly
-                             FROM tax_declaration WHERE employee_id = $1 AND fiscal_year_start = $2 AND status = 'verified'""",
-                        [employee_id, fiscal_year_start]))
+    declared = verified(employee_id, fiscal_year_start, *DECL_COLUMNS.values(), 'cit_from_month', 'cit_prev_monthly')
     month_index = ((p['bs_month'] - 4 + 12) % 12) + 1
     service_from = emp['join_date'] if emp['join_date'] and emp['join_date'] > fy.start_ad else fy.start_ad
-    months = 12 if service_from == fy.start_ad else min(12, max(1, js_round(
+    months = 12 if service_from == fy.start_ad else min(12, max(1, round_half_up(
         (date.fromisoformat(fy.end_ad) - date.fromisoformat(service_from)).days / 30.44)))
 
     def plus(a, b2):
@@ -234,7 +230,7 @@ def estimate_input(company_id: str, employee_id: str, fiscal_year_start: int) ->
                 'retirementEmployee': plus(y['ee'], (ob or {}).get('retirement_employee')),
                 'retirementEmployer': plus(y['er'], (ob or {}).get('retirement_employer')),
                 'festivalPaid': bool(y['festival']) or bool((ob or {}).get('festival_paid'))},
-        'declaration': to_input(verified, month_index), 'loans': [], 'rules': rules, 'policy': policy,
+        'declaration': to_input(declared, month_index), 'loans': [], 'rules': rules, 'policy': policy,
         'extras': {'monthsOfServiceInFy': months},
     }
     return {'input': input_, 'bsYear': bs.year, 'bsMonth': bs.month}
@@ -263,12 +259,17 @@ def estimate_tax(company_id: str, employee_id: str, fiscal_year_start: int, prop
 # ---------------------------------------------------------------- routes (/payroll/tax-savings)
 
 def _employee_exists(company_id: str, employee_id: str) -> bool:
-    return bool(q1('SELECT 1 AS x FROM employee WHERE id = $1 AND company_id = $2', [employee_id, company_id]))
+    return Employee.objects.for_company(company_id).filter(pk=as_uuid(employee_id)).exists()
+
+
+def lock_employee(employee_id: str) -> None:
+    """Serialise submissions of one employee (a row lock that does not block other writes referencing the employee)."""
+    Employee.objects.select_for_update(no_key=True).filter(pk=employee_id).first()
 
 
 def get_savings(user: AuthUser, query: dict) -> dict:
     from hajiri.files.store import file_meta
-    qy = parse(Obj({'fiscalYearStart': fy_param(optional=True), 'employeeId': Uuid(optional=True)}), query)
+    qy = plain(validate(SavingsQueryIn, query))
     company_id = company_id_of(user)
     employee_id = qy.get('employeeId') or user.employee_id
     if not employee_id:
@@ -278,23 +279,22 @@ def get_savings(user: AuthUser, query: dict) -> dict:
     if not _employee_exists(company_id, employee_id):
         raise NotFoundError('employee not found')
     fy = qy.get('fiscalYearStart') or current_fiscal_year_start()
-    verified = _decl(q1('SELECT * FROM tax_declaration WHERE employee_id = $1 AND fiscal_year_start = $2', [employee_id, fy]))
-    history = [_req(h) for h in q("""SELECT * FROM tax_declaration_request WHERE employee_id = $1 AND fiscal_year_start = $2
-                                      ORDER BY created_at DESC LIMIT 20""", [employee_id, fy])]
+    declaration = _decl(TaxDeclaration.objects.for_company(company_id).filter(employee_id=employee_id, fiscal_year_start=fy).values().first())
+    history = [_req(h) for h in requests(company_id).filter(employee_id=employee_id, fiscal_year_start=fy).order_by('-created_at', '-id')
+               .values()[:20]]
     files: dict[str, dict] = {}
     for h in history:
         for f in h['proof_file_ids']:
             m = file_meta(company_id, f)
             if m:
                 files[f] = {'id': str(m['id']), 'filename': m['filename'], 'mime': m['mime'], 'bytes': m['bytes']}
-    return {'fiscalYearStart': fy, 'declaration': verified,
-            'pending': next((h for h in history if h['status'] == 'pending'), None),
+    return {'fiscalYearStart': fy, 'declaration': declaration,
+            'pending': next((h for h in history if h['status'] == Request.Status.PENDING), None),
             'history': [{**h, 'proofs': [files[f] for f in h['proof_file_ids'] if f in files]} for h in history]}
 
 
 def submit_savings(user: AuthUser, body: dict) -> dict:
-    b = parse(Obj({**declaration_body(), 'fiscalYearStart': fy_param(), 'note': Str(trim=True, max=1000, optional=True),
-                   'proofFileIds': Arr(Uuid(), max=10, default=list)}), body)
+    b = plain(validate(SavingsIn, body))
     employee_id = user.employee_id
     if not employee_id:
         raise BadRequestError('this account is not linked to an employee')
@@ -304,7 +304,7 @@ def submit_savings(user: AuthUser, body: dict) -> dict:
         raise BadRequestError('declarations can be made for the current, previous or next fiscal year only')
     values = {k: b[k] for k in DECL_FIELDS}
     with transaction.atomic():
-        x('SELECT pg_advisory_xact_lock(hashtext($1))', [f'tax_savings:{employee_id}'])
+        lock_employee(employee_id)
         row = submit_tax_savings(user, company_id, employee_id, b['fiscalYearStart'], values, note=b.get('note'),
                                  proof_file_ids=b['proofFileIds'])
     return {'request': row}
@@ -312,22 +312,21 @@ def submit_savings(user: AuthUser, body: dict) -> dict:
 
 def cancel_savings(user: AuthUser, request_id: str) -> dict:
     from hajiri.workflow.service import cancel_workflow
-    rid = parse(Uuid(), request_id)
+    rid = parse_uuid(request_id)
     with transaction.atomic():
-        r = _req(q1('SELECT * FROM tax_declaration_request WHERE id = $1 AND company_id = $2', [rid, company_id_of(user)]))
+        r = _req(requests(company_id_of(user)).select_for_update().filter(pk=rid).values().first())
         if not r or r['employee_id'] != user.employee_id:
             raise NotFoundError('request not found')
-        if r['status'] != 'pending':
+        if r['status'] != Request.Status.PENDING:
             raise ConflictError(f"request already {r['status']}")
-        x("UPDATE tax_declaration_request SET status = 'cancelled', decided_at = now() WHERE id = $1", [rid])
+        requests().filter(pk=rid).update(status=Request.Status.CANCELLED, decided_at=Now())
         cancel_workflow('tax_declaration', rid)
         audit('cancel', 'tax_declaration_request', actor_id=user.id, row_id=rid)
     return {'ok': True}
 
 
 def estimate(user: AuthUser, body: dict) -> dict:
-    b = parse(Obj({'fiscalYearStart': fy_param(optional=True), 'employeeId': Uuid(optional=True),
-                   'proposed': Obj(declaration_body(), optional=True)}), body or {})
+    b = plain(validate(EstimateIn, body or {}))
     company_id = company_id_of(user)
     employee_id = b.get('employeeId') or user.employee_id
     if not employee_id:
@@ -343,9 +342,9 @@ def estimate(user: AuthUser, body: dict) -> dict:
 def proof_file(user: AuthUser, request_id: str, file_id: str) -> dict:
     """A proof file: the employee who submitted it and HR. HR views are audited."""
     from hajiri.files.store import read_file
-    rid, fid = parse(Uuid(), request_id), parse(Uuid(), file_id)
+    rid, fid = parse_uuid(request_id), parse_uuid(file_id)
     company_id = company_id_of(user)
-    r = _req(q1('SELECT * FROM tax_declaration_request WHERE id = $1 AND company_id = $2', [rid, company_id]))
+    r = _req(requests(company_id).filter(pk=rid).values().first())
     own = bool(r) and r['employee_id'] == user.employee_id
     if not r or (not own and not has_module(user, 'payroll')) or fid not in r['proof_file_ids']:
         raise NotFoundError('file not found')

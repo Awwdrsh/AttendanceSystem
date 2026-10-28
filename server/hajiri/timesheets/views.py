@@ -7,8 +7,9 @@ settings card (TimeSettings.tsx).
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
 
+from django.core.paginator import Paginator
 from django.http import HttpResponse
 from django.shortcuts import render
 from django.urls import reverse
@@ -16,17 +17,19 @@ from django.utils.html import format_html
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from hajiri.core.auth import company_id_of, has_role
-from hajiri.core.db import rows
+from hajiri.core.clock import now
 from hajiri.core.errors import BadRequestError, HttpError
+from hajiri.db.models import Employee
 from hajiri.web.csv import csv_response
 from hajiri.web.decorators import login_required, require_feature, require_module, require_role
 from hajiri.web.format import add_days, fmt_date_short, minutes_to_hm
-from hajiri.web.htmx import close_modal, refresh, toast, trigger
+from hajiri.web.htmx import close_modal, htmx_target, refresh, toast, trigger
 from hajiri.web.middleware import error_message
 from hajiri.web.nav import area
 from hajiri.workflow import service as wf
 
 from . import services
+from .forms import BRAND, ArchiveForm, DecisionForm, EntryForm, NameForm, NoteForm, ProjectForm, SettingsForm, TimerForm
 
 WEEK_EVENT = 'timesheet-week'
 TIMER_EVENT = 'timesheet-timer'
@@ -57,28 +60,6 @@ def _week_label(ws: str) -> str:
     return f'{fmt_date_short(ws)} to {fmt_date_short(add_days(ws, 6))}'
 
 
-def _opt(v: str | None) -> str | None:
-    v = (v or '').strip()
-    return v or None
-
-
-def _bool(v) -> bool | None:
-    if v in (None, ''):
-        return None
-    return str(v).lower() in ('1', 'true', 'on', 'yes')
-
-
-def _int(v):
-    v = (v or '').strip() if isinstance(v, str) else v
-    if v in (None, ''):
-        return None
-    try:
-        f = float(v)
-    except ValueError:
-        return v               # the service answers the validation error
-    return int(f) if f.is_integer() else f
-
-
 def _work_options(user) -> dict:
     """useWorkOptions: the projects and activities this person may log to."""
     projects = services.list_projects(user)
@@ -92,7 +73,7 @@ def _project_label(p: dict) -> str:
 def _elapsed(started_at) -> int:
     if not started_at:
         return 0
-    return max(0, int((datetime.now(timezone.utc) - started_at).total_seconds()))
+    return max(0, int((now() - started_at).total_seconds()))
 
 
 # ================================================================ timer (TimerCard)
@@ -149,8 +130,7 @@ def _timer_action(request, fn, message: str, keep: bool = False) -> HttpResponse
 @login_required
 @require_feature('time')
 def timer_start(request):
-    p = request.POST
-    body = {'projectId': _opt(p.get('project_id')), 'activityId': _opt(p.get('activity_id')), 'note': (p.get('note') or '').strip() or None}
+    body = TimerForm(request.POST).start()
     return _timer_action(request, lambda: services.start_timer(request.hajiri_user, body), 'Timer started')
 
 
@@ -158,8 +138,8 @@ def timer_start(request):
 @login_required
 @require_feature('time')
 def timer_stop(request):
-    note = (request.POST.get('note') or '').strip() or None
-    return _timer_action(request, lambda: services.stop_timer(request.hajiri_user, {'note': note}), 'Time saved', keep=True)
+    body = TimerForm(request.POST).stop()
+    return _timer_action(request, lambda: services.stop_timer(request.hajiri_user, body), 'Time saved', keep=True)
 
 
 @require_POST
@@ -185,7 +165,7 @@ def home_timer(request):
 @require_feature('time')
 def activity_options(request):
     """The activity choices for a project (activityData: company-wide ones plus the project's own)."""
-    project_id = _opt(request.GET.get('project_id'))
+    project_id = (request.GET.get('project_id') or '').strip() or None
     acts = services.list_activities(request.hajiri_user)
     acts = [a for a in acts if not a['project_id'] or a['project_id'] == project_id]
     return render(request, 'timesheets/partials/activity_options.html', {'activities': acts, 'selected': request.GET.get('selected') or ''})
@@ -245,25 +225,6 @@ def week_partial(request):
 
 # ---------------------------------------------------------------- entries (EntryModal)
 
-def _entry_body(post, running: bool) -> dict:
-    body: dict = {'projectId': _opt(post.get('project_id')), 'activityId': _opt(post.get('activity_id')),
-                  'note': (post.get('note') or '').strip() or None}
-    if running:
-        return body
-    body['date'] = post.get('date') or ''
-    billable = _bool(post.get('billable'))
-    if billable is not None:
-        body['billable'] = billable
-    if (post.get('mode') or 'range') == 'range':
-        body['start'] = post.get('start') or ''
-        body['end'] = post.get('end') or ''
-    else:
-        body['durationMin'] = _int(post.get('duration_min'))
-        if body['durationMin'] is None:
-            body.pop('durationMin')
-    return body
-
-
 def _entry_form(request, entry: dict | None, default_date: str) -> HttpResponse:
     from hajiri.web.format import fmt_time
     opts = _work_options(request.hajiri_user)
@@ -300,7 +261,7 @@ def entry_new(request):
     if request.method == 'GET':
         services.own_employee(request.hajiri_user)
         return _entry_form(request, None, _iso_or(request.GET.get('date'), _today()))
-    services.add_entry(request.hajiri_user, _entry_body(request.POST, False))
+    services.add_entry(request.hajiri_user, EntryForm(request.POST).body(running=False))
     return _entry_saved(request, 'Time added')
 
 
@@ -311,8 +272,7 @@ def entry_edit(request, id):
     entry = services.get_entry(request.hajiri_user, str(id))
     if request.method == 'GET':
         return _entry_form(request, entry, entry['local_date'])
-    running = entry['duration_min'] is None
-    body = _entry_body(request.POST, running)
+    body = EntryForm(request.POST).body(running=entry['duration_min'] is None)
     services.update_entry(request.hajiri_user, str(id), body)
     return _entry_saved(request, 'Entry updated')
 
@@ -341,7 +301,7 @@ def submit(request):
         w = services.week(user, {'weekStart': week})
         return render(request, 'timesheets/partials/submit_form.html', {'w': w, 'week': week,
                                                                        'label': _week_label(w['weekStart'])})
-    note = (request.POST.get('note') or '').strip() or None
+    note = NoteForm(request.POST).note_value()
     try:
         services.submit_timesheet(user, {'weekStart': week, **({'note': note} if note else {})})
     except HttpError as e:
@@ -364,6 +324,7 @@ def withdraw(request, id):
 
 # ================================================================ review (TimesheetsReviewPage)
 
+HISTORY_PAGE_SIZE = 50
 REVIEW_VIEWS = (('approve', 'To approve'), ('week', 'This week'), ('history', 'History'), ('report', 'Hours report'))
 STATUS_FILTER = (('submitted', 'Waiting for approval'), ('approved', 'Approved'), ('rejected', 'Returned'), ('cancelled', 'Withdrawn'))
 GROUP_LABELS = (('project', 'Project'), ('client', 'Client'), ('employee', 'Person'), ('activity', 'Activity'), ('day', 'Day'))
@@ -383,7 +344,9 @@ def _review_ctx(request, view: str) -> dict:
         ctx['timesheets'] = _with_week_end(services.list_timesheets(user, {'status': 'submitted'}))
     elif view == 'history':
         status = g.get('status') if g.get('status') in services.STATUSES else ''
-        ctx.update({'timesheets': _with_week_end(services.list_timesheets(user, {'status': status} if status else {})), 'status': status,
+        qs = services.timesheets_queryset(user, {'status': status} if status else {})
+        page = Paginator(services.timesheet_values(qs), HISTORY_PAGE_SIZE).get_page(g.get('page'))
+        ctx.update({'timesheets': _with_week_end(services.timesheet_rows(page)), 'page': page, 'status': status,
                     'statuses': STATUS_FILTER})
     elif view == 'week':
         this_week = services.week_start_of(_today())
@@ -422,7 +385,7 @@ def _review_ctx(request, view: str) -> dict:
 def review(request):
     view = request.GET.get('view') if request.GET.get('view') in dict(REVIEW_VIEWS) else 'approve'
     ctx = _review_ctx(request, view)
-    if request.headers.get('HX-Target') == 'ts-review':
+    if htmx_target(request) == 'ts-review':
         return render(request, 'timesheets/partials/review_body.html', ctx)
     return render(request, 'timesheets/review.html', ctx)
 
@@ -468,8 +431,7 @@ def decide(request, id):
     sub = d['submission']
     if not sub or not sub['workflow_instance_id']:
         raise BadRequestError('timesheet is not waiting for approval')
-    kind = request.POST.get('decision')
-    reason = (request.POST.get('reason') or '').strip()
+    kind, reason = DecisionForm(request.POST).decision_value()
     if kind == 'reject' and not reason:
         return toast(request, HttpResponse(status=204), 'Say what needs fixing so they can correct it.', tone='info')
     if len(reason) > 1000:
@@ -484,7 +446,6 @@ def decide(request, id):
 # ================================================================ projects, clients, activities (ProjectsPage)
 
 PROJECT_VIEWS = (('projects', 'Projects'), ('clients', 'Clients'), ('activities', 'Activities'))
-BRAND = '#12773a'
 SWATCHES = (BRAND, '#0b7285', '#1971c2', '#6741d9', '#c2255c', '#e8590c', '#f08c00', '#495057')
 
 
@@ -495,11 +456,11 @@ def _projects_ctx(request, view: str) -> dict:
         projects = services.list_projects(user, True)
         for p in projects:
             if p['budget_hours']:
-                pct = services.js_round((p['tracked_min'] / 60 / float(p['budget_hours'])) * 100)
+                pct = services.round_half_up((p['tracked_min'] / 60 / float(p['budget_hours'])) * 100)
                 p['budget_pct'] = pct
                 p['budget_bar'] = min(pct, 100)
                 p['budget_tone'] = 'bad' if pct >= 100 else 'warn' if pct >= 80 else 'ok'
-                p['budget_num'] = services.js_num(float(p['budget_hours']))
+                p['budget_num'] = services.whole(float(p['budget_hours']))
         ctx['projects'] = projects
     elif view == 'clients':
         ctx['clients'] = services.list_clients(user, True)
@@ -515,39 +476,23 @@ def _projects_ctx(request, view: str) -> dict:
 def projects(request):
     view = request.GET.get('view') if request.GET.get('view') in dict(PROJECT_VIEWS) else 'projects'
     ctx = _projects_ctx(request, view)
-    if request.headers.get('HX-Target') == 'ts-catalogue':
+    if htmx_target(request) == 'ts-catalogue':
         return render(request, 'timesheets/partials/catalogue.html', ctx)
     return render(request, 'timesheets/projects.html', ctx)
-
-
-def _project_body(post, editing: bool) -> dict:
-    all_members = _bool(post.get('all_members')) or False
-    body = {
-        'code': (post.get('code') or '').strip().upper(), 'name': post.get('name') or '',
-        'clientId': _opt(post.get('client_id')), 'color': post.get('color') or BRAND,
-        'billable': bool(_bool(post.get('billable'))), 'billRate': _int(post.get('bill_rate')),
-        'budgetHours': _int(post.get('budget_hours')), 'allMembers': all_members,
-        'memberIds': [] if all_members else [m for m in post.getlist('member_ids') if m],
-    }
-    if editing:
-        body['status'] = 'archived' if _bool(post.get('archived')) else 'active'
-    else:
-        body['status'] = 'active'
-    return body
 
 
 def _project_form(request, project: dict | None) -> HttpResponse:
     user = request.hajiri_user
     clients = [c for c in services.list_clients(user, True) if not c['archived']]
-    people = rows("SELECT id::text AS id, name_en, emp_code FROM employee WHERE company_id = %s AND status = 'active' ORDER BY name_en",
-                  [company_id_of(user)])
+    people = [{**e, 'id': str(e['id'])} for e in Employee.objects.for_company(company_id_of(user))
+              .filter(status=Employee.Status.ACTIVE).order_by('name_en').values('id', 'name_en', 'emp_code')]
     p = project or {'code': '', 'name': '', 'client_id': None, 'color': BRAND, 'billable': True, 'bill_rate': None,
                     'budget_hours': None, 'all_members': True, 'members': [], 'status': 'active'}
     return render(request, 'timesheets/partials/project_form.html', {
         'project': project, 'p': p, 'clients': clients, 'people': people, 'swatches': SWATCHES,
         'member_ids': [m['id'] for m in p.get('members') or []],
-        'bill_rate': '' if p['bill_rate'] is None else services.js_num(float(p['bill_rate'])),
-        'budget_hours': '' if p['budget_hours'] is None else services.js_num(float(p['budget_hours']))})
+        'bill_rate': '' if p['bill_rate'] is None else services.whole(float(p['bill_rate'])),
+        'budget_hours': '' if p['budget_hours'] is None else services.whole(float(p['budget_hours']))})
 
 
 def _catalogue_saved(request, message: str) -> HttpResponse:
@@ -563,7 +508,7 @@ def _catalogue_saved(request, message: str) -> HttpResponse:
 def project_new(request):
     if request.method == 'GET':
         return _project_form(request, None)
-    services.create_project(request.hajiri_user, _project_body(request.POST, False))
+    services.create_project(request.hajiri_user, ProjectForm(request.POST).body(editing=False))
     return _catalogue_saved(request, 'Project created')
 
 
@@ -574,7 +519,7 @@ def project_edit(request, id):
     project = services.get_project(request.hajiri_user, str(id))
     if request.method == 'GET':
         return _project_form(request, project)
-    services.update_project(request.hajiri_user, str(id), _project_body(request.POST, True))
+    services.update_project(request.hajiri_user, str(id), ProjectForm(request.POST).body(editing=True))
     return _catalogue_saved(request, 'Project saved')
 
 
@@ -582,7 +527,7 @@ def project_edit(request, id):
 @require_module('attendance')
 @require_feature('time')
 def client_new(request):
-    services.create_client(request.hajiri_user, {'name': (request.POST.get('name') or '').strip()})
+    services.create_client(request.hajiri_user, NameForm(request.POST).client())
     return _catalogue_saved(request, 'Client added')
 
 
@@ -590,7 +535,7 @@ def client_new(request):
 @require_module('attendance')
 @require_feature('time')
 def client_archive(request, id):
-    services.update_client(request.hajiri_user, str(id), {'archived': _bool(request.POST.get('archived')) or False})
+    services.update_client(request.hajiri_user, str(id), ArchiveForm(request.POST).body())
     return _refresh_only('timesheets-catalogue')
 
 
@@ -598,8 +543,7 @@ def client_archive(request, id):
 @require_module('attendance')
 @require_feature('time')
 def activity_new(request):
-    services.create_activity(request.hajiri_user, {'name': (request.POST.get('name') or '').strip(),
-                                                   'projectId': _opt(request.POST.get('project_id'))})
+    services.create_activity(request.hajiri_user, NameForm(request.POST).activity())
     return _catalogue_saved(request, 'Activity added')
 
 
@@ -607,7 +551,7 @@ def activity_new(request):
 @require_module('attendance')
 @require_feature('time')
 def activity_archive(request, id):
-    services.update_activity(request.hajiri_user, str(id), {'archived': _bool(request.POST.get('archived')) or False})
+    services.update_activity(request.hajiri_user, str(id), ArchiveForm(request.POST).body())
     return _refresh_only('timesheets-catalogue')
 
 
@@ -629,16 +573,7 @@ def settings_card(request):
     """The Time tracking tab of Settings: GET the card, POST saves it (PUT /time/settings: the attendance area)."""
     user = request.hajiri_user
     if request.method == 'POST':
-        p = request.POST
-        hours = _int(p.get('auto_stop_hours'))
-        # NumberInput clamps to 1-24 and falls back to 12.
-        if not isinstance(hours, (int, float)) or not hours:
-            hours = 12
-        hours = int(min(24, max(1, hours)))
-        body = {'enabled': bool(_bool(p.get('enabled'))), 'requireProject': bool(_bool(p.get('require_project'))),
-                'roundingStep': _int(p.get('rounding_step')) or 0, 'roundingMode': p.get('rounding_mode') or p.get('rounding_mode_kept') or 'nearest',
-                'fridayReminder': bool(_bool(p.get('friday_reminder'))), 'autoStopHours': hours}
-        policy = services.save_settings(user, body)['policy']
+        policy = services.save_settings(user, SettingsForm(request.POST).policy())['policy']
         resp = render(request, 'timesheets/partials/settings_card.html', {'p': policy, 'steps': ROUNDING_STEPS, 'modes': ROUNDING_MODES})
         return toast(request, resp, 'Time tracking settings saved')
     policy = services.get_settings(user)['policy']

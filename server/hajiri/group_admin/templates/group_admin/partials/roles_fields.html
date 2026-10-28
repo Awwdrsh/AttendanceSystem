@@ -1,0 +1,10 @@
+<fieldset class="hj-fieldset"><legend class="hj-label">Roles in this company <span class="req">*</span></legend>
+  {% for choice in form.roles %}<label class="hj-check">{{ choice.tag }} <span>{{ choice.choice_label }}</span> <span class="hj-help">{{ role_help|get_item:choice.data.value }}</span></label>{% endfor %}
+  {% if form.roles.errors %}<div class="hj-error">{{ form.roles.errors|first }}</div>{% endif %}
+</fieldset>
+<div class="hj-fieldset">
+  <label class="hj-label" for="f-employee_id">Employee record in this company</label>
+  <div class="hj-help">The person's own records there (attendance, leave, payslips). Only records no account works as are listed.</div>
+  {% include "group_admin/partials/employee_select.html" %}
+  {% for e in form.employee_id.errors %}<div class="hj-error">{{ e }}</div>{% endfor %}
+</div>

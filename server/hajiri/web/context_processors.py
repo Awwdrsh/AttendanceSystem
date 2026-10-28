@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from django.conf import settings
+from django.db.models import F
 from django.utils.functional import SimpleLazyObject
 
 from . import nav
@@ -23,8 +24,36 @@ def layout(request):
     def embedded():
         return bool(user and navigation and navigation.embedded)
 
+    def my_companies():
+        if not (user and user.multi_company):
+            return []
+        from hajiri.core.companies import my_companies as load
+        return load(user)
+
+    def active_company():
+        """The company the page works in (name and code are always shown in the layout)."""
+        if not (user and user.company_id):
+            return None
+        ref = user.active_company
+        if ref is not None:
+            return ref
+        from hajiri.db.models import Company
+        return (Company.objects.filter(pk=user.company_id).values('code', name=F('name_en')).first()) or None
+
+    def group_link():
+        if not user:
+            return False
+        from hajiri.core.companies import can_open_group
+        return can_open_group(user)
+
     return {
         'hj_user': user,
+        # The company switcher (only for people who work in more than one company of a group).
+        'hj_companies': SimpleLazyObject(my_companies),
+        'hj_company': SimpleLazyObject(lambda: _Opt(active_company())),
+        # The Group hub: people with a group role or figures of several companies, and admins (who can add a sister
+        # company).
+        'hj_group_link': SimpleLazyObject(lambda: _Bool(group_link())),
         'hj_nav': navigation,
         'embedded': SimpleLazyObject(lambda: _Bool(embedded())),
         'hj_flash': getattr(request, 'hj_flash', []),
@@ -46,6 +75,24 @@ class _Bool:
 
     def __str__(self):
         return 'true' if self.v else ''
+
+
+class _Opt:
+    """An optional object SimpleLazyObject can wrap: falsy when there is none, attributes (or keys) otherwise."""
+    def __init__(self, v):
+        self.v = v
+
+    def __bool__(self):
+        return self.v is not None
+
+    def __getattr__(self, name):
+        v = self.__dict__['v']
+        if isinstance(v, dict):
+            try:
+                return v[name]
+            except KeyError:
+                raise AttributeError(name) from None
+        return getattr(v, name)
 
 
 class _Str:

@@ -2,45 +2,57 @@
 Workforce insights for HR and executives (port of apps/api/src/modules/insights/service.ts and routes.ts): headcount,
 joiners and leavers, attrition, demographics, people cost, overtime, leave and attendance trends by Bikram Sambat
 month, filtered by branch and department, and every dataset as CSV.
+
+Everything is read through the ORM and scoped to the ACTIVE company (`company_id_of(user)`): the employees of the
+company (narrowed by branch and department), and their attendance, overtime, leave and locked pay. A branch or
+department of another company is 'unknown', like the TS route.
 """
 from __future__ import annotations
 
-import math
 import re
 from datetime import date, timedelta
-from functools import cmp_to_key
 from typing import Any
+from zoneinfo import ZoneInfo
+
+from django.db import connection
+from django.db.models import (
+    BooleanField, Case, Count, DateField, Exists, ExpressionWrapper, F, Func, OuterRef, Q, Subquery, Sum, TextField,
+    Value, When, Avg,
+)
+from django.db.models.expressions import RawSQL
+from django.db.models.functions import Coalesce, TruncDate
 
 from engines.bs_calendar import BS_MONTH_NAMES_EN, ad_to_bs, bs_month_bounds
 
+from hajiri.core.numbers import round_half_up
 from hajiri.core.auth import AuthUser, company_id_of, has_role, MODULE_ROLES
 from hajiri.core.clock import npt_today
-from hajiri.core.db import one, rows
+from hajiri.core.collation import collate_key
 from hajiri.core.errors import BadRequestError, ForbiddenError
-from hajiri.core.schema import Obj, Str, Uuid, parse
+from hajiri.core.scoping import exists_in_company
+from hajiri.core.validation import plain, validate
+from hajiri.db.models import (
+    AttendanceDay, Branch, Employee, EmployeeAssignment, EmployeeExit, LeaveLedger, OrgUnit, OtSlip, PayrollRun, Payslip,
+)
 
-FILTER_QUERY = Obj({
-    'from': Str(regex=r'^\d{4}-\d{1,2}$', optional=True),
-    'to': Str(regex=r'^\d{4}-\d{1,2}$', optional=True),
-    'branchId': Uuid(optional=True),
-    'orgUnitId': Uuid(optional=True),
-})
+from .serializers import InsightsFilterIn
+
+NPT = ZoneInfo('Asia/Kathmandu')
 
 # Axis abbreviations that stay distinct (Ashadh and Ashwin both start "Ash").
 SHORT_MONTHS = ['Bai', 'Jes', 'Asr', 'Shr', 'Bha', 'Asw', 'Kar', 'Man', 'Pou', 'Mag', 'Fal', 'Cha']
-IDENT = re.compile(r'^[a-z_][a-z0-9_]*$')
+
+A = AttendanceDay.Status
+SCHEDULED = (A.PRESENT, A.HALF_DAY, A.ABSENT, A.WFH, A.INCOMPLETE, A.ON_LEAVE, A.HALF_DAY_LEAVE)
+WORKED = (A.PRESENT, A.HALF_DAY, A.WFH, A.INCOMPLETE)
+OT_COUNTED = (OtSlip.Status.APPROVED, OtSlip.Status.POSTED)
+LEAVE_TAKEN = (LeaveLedger.Reason.USAGE, LeaveLedger.Reason.CANCELLATION)
+# People cost comes from locked (or later) pay runs only: drafts can still change.
+PAY_FINAL = (PayrollRun.Status.LOCKED, PayrollRun.Status.DISBURSED, PayrollRun.Status.FILED)
+# Optional columns some installs add to employee for the exit reason, in order of preference.
+EXIT_COLUMNS = ('separation_type', 'exit_type', 'exit_reason', 'separation_reason')
 
 
-def js_round(n: float, d: int = 1) -> int | float:
-    """Math.round(n * 10 ** d) / 10 ** d, with whole results as int (as JSON would show them)."""
-    f = 10 ** d
-    v = math.floor(n * f + 0.5) / f
-    return int(v) if float(v).is_integer() else v
-
-
-def _num(v: Any) -> int | float:
-    v = float(v)
-    return int(v) if v.is_integer() else v
 
 
 def _require(user: AuthUser) -> None:
@@ -101,29 +113,25 @@ def months_between(frm: str | None, to: str | None, today: str) -> list[dict]:
 
 # ---------------------------------------------------------------- exit reasons
 
-def exit_reason_source() -> str | None:
+def _employee_exit_column() -> str | None:
+    """An exit-reason column added to employee by the install, if any (Django's schema introspection)."""
+    # Schema introspection, not a query of company data: the column is not part of the models.
+    with connection.cursor() as cur:
+        cols = {c.name for c in connection.introspection.get_table_description(cur, Employee._meta.db_table)}
+    return next((c for c in EXIT_COLUMNS if c in cols), None)
+
+
+def exit_reason_source():
     """
-    Exit reasons are optional data (they may live on the employee or in an offboarding table). Look for them at run
-    time; without such data the voluntary/involuntary split is simply not shown.
+    The exit kind of each employee as an expression on Employee: an exit-reason column on employee when the install
+    added one, otherwise the kind of the employee's exit record (resignation, termination, ...).
     """
-    col = one("""SELECT column_name FROM information_schema.columns
-                  WHERE table_schema = current_schema() AND table_name = 'employee'
-                    AND column_name IN ('exit_reason', 'exit_type', 'separation_type', 'separation_reason')
-                  ORDER BY array_position(ARRAY['separation_type', 'exit_type', 'exit_reason', 'separation_reason'], column_name::text)
-                  LIMIT 1""")
-    if col and IDENT.match(col['column_name']):
-        return f'e."{col["column_name"]}"::text'
-    t = one("""SELECT c.table_name, c.column_name FROM information_schema.columns c
-                WHERE c.table_schema = current_schema()
-                  AND (c.table_name LIKE '%%exit%%' OR c.table_name LIKE '%%separation%%' OR c.table_name LIKE '%%offboarding%%'
-                       OR c.table_name LIKE '%%resignation%%')
-                  AND c.column_name IN ('separation_type', 'exit_type', 'reason_type', 'kind', 'type')
-                  AND EXISTS (SELECT 1 FROM information_schema.columns x WHERE x.table_schema = c.table_schema
-                                AND x.table_name = c.table_name AND x.column_name = 'employee_id')
-                ORDER BY c.table_name LIMIT 1""")
-    if t and IDENT.match(t['table_name']) and IDENT.match(t['column_name']):
-        return f'(SELECT x."{t["column_name"]}"::text FROM "{t["table_name"]}" x WHERE x.employee_id = e.id LIMIT 1)'
-    return None
+    col = _employee_exit_column()
+    if col:
+        qn = connection.ops.quote_name
+        # Raw SQL: the column is optional and added outside the models, so the ORM has no field for it.
+        return RawSQL(f'{qn(Employee._meta.db_table)}.{qn(col)}::text', (), output_field=TextField())
+    return Subquery(EmployeeExit.objects.filter(employee=OuterRef('pk')).values('kind')[:1], output_field=TextField())
 
 
 def classify_exit(kind: str | None) -> str | None:
@@ -132,7 +140,7 @@ def classify_exit(kind: str | None) -> str | None:
     k = kind.lower()
     if re.search(r'involuntary|terminat|dismiss|layoff|lay_off|redundan|fired|misconduct', k):
         return 'involuntary'
-    if re.search(r'resign|voluntary|quit', k):
+    if re.search(r'resign|voluntary|quit|transfer', k):  # a transfer to a sister company is the person's move
         return 'voluntary'
     return 'other'
 
@@ -151,15 +159,34 @@ def _bands(items: list, labels: list[str], pick) -> list[dict]:
     return [{'label': k, 'count': v} for k, v in m.items()]
 
 
-def _locale_compare(a: str, b: str) -> int:
-    ka, kb = a.casefold(), b.casefold()
-    return (ka > kb) - (ka < kb) or (a > b) - (a < b)
-
-
 def _iso(v) -> str | None:
     if v is None:
         return None
     return v.isoformat() if isinstance(v, date) else str(v)[:10]
+
+
+def _f(v) -> float:
+    return float(v) if v is not None else 0.0
+
+
+def _month_of(field: str, months: list[dict]) -> Case:
+    """The BS month key ('2083-04') a date column falls in, for grouping by month."""
+    return Case(*[When(**{f'{field}__range': (m['startAd'], m['endAd'])}, then=Value(m['key'])) for m in months],
+                default=Value(None), output_field=TextField())
+
+
+def _units_under(company_id: str, unit_id: str) -> set[str]:
+    """A department and every unit below it (the org tree is small: one query, walked here)."""
+    children: dict[str, list[str]] = {}
+    for uid, parent in OrgUnit.objects.for_company(company_id).values_list('id', 'parent_id'):
+        children.setdefault(str(parent), []).append(str(uid))
+    out, todo = set(), [str(unit_id)]
+    while todo:
+        u = todo.pop()
+        if u not in out:
+            out.add(u)
+            todo.extend(children.get(u, []))
+    return out
 
 
 # ---------------------------------------------------------------- filters
@@ -169,24 +196,91 @@ def filter_options(user: AuthUser) -> dict:
     _require(user)
     c = company_id_of(user)
     return {
-        'branches': [{'id': str(r['id']), 'name': r['name']} for r in
-                     rows('SELECT id, name_en AS name FROM branch WHERE company_id = %s ORDER BY name_en', [c])],
-        'orgUnits': [{'id': str(r['id']), 'name': r['name'], 'kind': r['kind'], 'parentId': str(r['parentId']) if r['parentId'] else None}
-                     for r in rows('SELECT id, name_en AS name, kind, parent_id AS "parentId" FROM org_unit WHERE company_id = %s ORDER BY name_en', [c])],
+        'branches': [{'id': str(i), 'name': n} for i, n in
+                     Branch.objects.for_company(c).order_by('name_en').values_list('id', 'name_en')],
+        'orgUnits': [{'id': str(i), 'name': n, 'kind': k, 'parentId': str(p) if p else None} for i, n, k, p in
+                     OrgUnit.objects.for_company(c).order_by('name_en').values_list('id', 'name_en', 'kind', 'parent_id')],
     }
 
 
 def parse_filters(user: AuthUser, query: dict) -> dict:
     """The TS route's `filters`: query shape, then the branch and department must belong to the company."""
     _require(user)
-    q = parse(FILTER_QUERY, {k: v for k, v in query.items() if k in ('from', 'to', 'branchId', 'orgUnitId') and v not in (None, '')})
+    q = plain(validate(InsightsFilterIn, {k: v for k, v in query.items()
+                                          if k in ('from', 'to', 'branchId', 'orgUnitId') and v not in (None, '')}))
     c = company_id_of(user)
-    if q.get('branchId') and not one('SELECT 1 FROM branch WHERE id = %s AND company_id = %s', [q['branchId'], c]):
+    if q.get('branchId') and not exists_in_company(Branch, c, pk=q['branchId']):
         raise BadRequestError('unknown branch')
-    if q.get('orgUnitId') and not one('SELECT 1 FROM org_unit WHERE id = %s AND company_id = %s', [q['orgUnitId'], c]):
+    if q.get('orgUnitId') and not exists_in_company(OrgUnit, c, pk=q['orgUnitId']):
         raise BadRequestError('unknown department')
     return {'companyId': c, 'from': q.get('from'), 'to': q.get('to'), 'branchId': q.get('branchId'),
             'orgUnitId': q.get('orgUnitId'), 'today': npt_today().isoformat()}
+
+
+# ---------------------------------------------------------------- the queries
+
+def _employees(f: dict):
+    """The company's employees with their current placement (the assignment valid today, else the latest one),
+    narrowed by branch and department (with the units below it). Also the subquery of the other figures, so it carries
+    no exit-reason expression (an install's raw column would not survive Django's subquery aliasing)."""
+    c = f['companyId']
+    placement = (EmployeeAssignment.objects.filter(employee=OuterRef('pk'))
+                 .order_by(ExpressionWrapper(Q(valid__contains=date.fromisoformat(f['today'])), output_field=BooleanField()).desc(),
+                           Func(F('valid'), function='lower', output_field=DateField()).desc()))
+    qs = (Employee.objects.for_company(c)
+          .annotate(placed_branch=Subquery(placement.values('branch_id')[:1]),
+                    placed_unit=Subquery(placement.values('org_unit_id')[:1]),
+                    unit_name=Subquery(placement.values('org_unit__name_en')[:1]),
+                    branch_name=Subquery(placement.values('branch__name_en')[:1]),
+                    joined=Coalesce('join_date', TruncDate('created_at', tzinfo=NPT)),
+                    exited=Case(When(exit_date__isnull=False, then=F('exit_date')),
+                                When(status=Employee.Status.EXITED, then=TruncDate('updated_at', tzinfo=NPT)),
+                                default=None, output_field=DateField())))
+    if f.get('branchId'):
+        qs = qs.filter(placed_branch=f['branchId'])
+    if f.get('orgUnitId'):
+        qs = qs.filter(placed_unit__in=_units_under(c, f['orgUnitId']))
+    return qs
+
+
+def _attendance_by_month(c: str, people, months: list[dict]) -> dict[str, dict]:
+    newer = AttendanceDay.objects.filter(employee=OuterRef('employee'), local_date=OuterRef('local_date'),
+                                         version__gt=OuterRef('version'))
+    qs = (AttendanceDay.objects.for_company(c)
+          .filter(employee__in=people, local_date__range=(months[0]['startAd'], months[-1]['endAd']))
+          .exclude(Exists(newer))
+          .annotate(month=_month_of('local_date', months)).order_by().values('month')
+          .annotate(scheduled=Count('id', filter=Q(status__in=SCHEDULED)),
+                    present=Count('id', filter=Q(status__in=WORKED)),
+                    absent=Count('id', filter=Q(status=A.ABSENT)),
+                    late=Count('id', filter=Q(late_min__gt=0)),
+                    ot_min=Sum('ot_min'),
+                    avg_worked=Avg('worked_min', filter=Q(worked_min__gt=0))))
+    return {r['month']: r for r in qs}
+
+
+def _approved_ot_by_month(c: str, people, months: list[dict]) -> dict[str, int]:
+    qs = (OtSlip.objects.for_company(c)
+          .filter(employee__in=people, status__in=OT_COUNTED,
+                  local_date__range=(months[0]['startAd'], months[-1]['endAd']))
+          .annotate(month=_month_of('local_date', months)).order_by().values('month')
+          .annotate(minutes=Sum('approved_min')))
+    return {r['month']: r['minutes'] or 0 for r in qs}
+
+
+def _leave_taken(c: str, people, months: list[dict]):
+    return (LeaveLedger.objects.for_company(c)
+            .filter(employee__in=people, reason__in=LEAVE_TAKEN,
+                    effective_date__range=(months[0]['startAd'], months[-1]['endAd'])))
+
+
+def _final_payslips(c: str, people, months: list[dict]):
+    in_range = Q()
+    for m in months:
+        y, mo = m['key'].split('-')
+        in_range |= Q(run__period__bs_year=int(y), run__period__bs_month=int(mo))
+    return (Payslip.objects.for_company(c)
+            .filter(in_range, run__in=PayrollRun.objects.for_company(c).filter(status__in=PAY_FINAL), employee__in=people))
 
 
 # ---------------------------------------------------------------- the computation
@@ -195,27 +289,14 @@ def compute_insights(f: dict) -> dict:
     """Everything the Insights page shows, for one company, filter and BS month range."""
     months = months_between(f.get('from'), f.get('to'), f['today'])
     first, last = months[0], months[-1]
-    reason_expr = exit_reason_source()
-    emps = rows(f"""
-        WITH RECURSIVE units AS (
-            SELECT id FROM org_unit WHERE id = %(unit)s::uuid AND company_id = %(c)s
-            UNION SELECT o.id FROM org_unit o JOIN units ON o.parent_id = units.id)
-        SELECT e.id, e.gender, e.dob, coalesce(e.join_date, (e.created_at AT TIME ZONE 'Asia/Kathmandu')::date) AS joined,
-               CASE WHEN e.exit_date IS NOT NULL THEN e.exit_date WHEN e.status = 'exited' THEN (e.updated_at AT TIME ZONE 'Asia/Kathmandu')::date END AS exited,
-               e.status, o.name_en AS unit, b.name_en AS branch, {reason_expr or 'NULL::text'} AS exit_kind
-          FROM employee e
-          LEFT JOIN LATERAL (SELECT a.branch_id, a.org_unit_id FROM employee_assignment a WHERE a.employee_id = e.id
-                              ORDER BY (a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date) DESC, lower(a.valid) DESC LIMIT 1) a ON true
-          LEFT JOIN org_unit o ON o.id = a.org_unit_id LEFT JOIN branch b ON b.id = a.branch_id
-         WHERE e.company_id = %(c)s AND (%(branch)s::uuid IS NULL OR a.branch_id = %(branch)s::uuid)
-           AND (%(unit)s::uuid IS NULL OR a.org_unit_id IN (SELECT id FROM units))""",
-                {'c': f['companyId'], 'branch': f.get('branchId'), 'unit': f.get('orgUnitId')})
-    for e in emps:
-        e['id'] = str(e['id'])
-        e['joined'] = _iso(e['joined'])
-        e['exited'] = _iso(e['exited'])
-        e['dob'] = _iso(e['dob'])
-    ids = [e['id'] for e in emps]
+    c = f['companyId']
+    people_qs = _employees(f)
+    people = people_qs.values('pk')
+    emps = []
+    for e in people_qs.annotate(exit_kind=exit_reason_source()).values('id', 'gender', 'dob', 'joined', 'exited', 'status', 'unit_name', 'branch_name', 'exit_kind'):
+        emps.append({'id': str(e['id']), 'gender': e['gender'], 'dob': _iso(e['dob']), 'joined': _iso(e['joined']),
+                     'exited': _iso(e['exited']), 'status': e['status'], 'unit': e['unit_name'],
+                     'branch': e['branch_name'], 'exit_kind': e['exit_kind']})
 
     def active_at(ad: str) -> list[dict]:
         return [e for e in emps if e['joined'] <= ad and (not e['exited'] or e['exited'] > ad)]
@@ -233,7 +314,7 @@ def compute_insights(f: dict) -> dict:
         headcount.append({
             'month': m['key'], 'label': m['label'], 'short': m['short'], 'headcount': end, 'joins': joins,
             'exits': len(exit_rows), 'net': joins - len(exit_rows),
-            'attritionPct': js_round(len(exit_rows) / avg_hc * 100, 2) if avg_hc > 0 else 0,
+            'attritionPct': round_half_up(len(exit_rows) / avg_hc * 100, 2) if avg_hc > 0 else 0,
             'voluntary': sum(1 for e in exit_rows if classify_exit(e['exit_kind']) == 'voluntary'),
             'involuntary': sum(1 for e in exit_rows if classify_exit(e['exit_kind']) == 'involuntary'),
         })
@@ -241,12 +322,12 @@ def compute_insights(f: dict) -> dict:
     avg_monthly = sum(h['attritionPct'] for h in headcount) / len(headcount)
     with_reason = [e for e in emps if e['exited'] and first['startAd'] <= e['exited'] <= last['endAd'] and classify_exit(e['exit_kind'])]
     attrition = {
-        'exits': total_exits, 'monthlyAvgPct': js_round(avg_monthly, 2), 'annualisedPct': js_round(avg_monthly * 12, 1),
+        'exits': total_exits, 'monthlyAvgPct': round_half_up(avg_monthly, 2), 'annualisedPct': round_half_up(avg_monthly * 12, 1),
         'split': {
             'voluntary': sum(1 for e in with_reason if classify_exit(e['exit_kind']) == 'voluntary'),
             'involuntary': sum(1 for e in with_reason if classify_exit(e['exit_kind']) == 'involuntary'),
             'other': sum(1 for e in with_reason if classify_exit(e['exit_kind']) == 'other'),
-        } if reason_expr and with_reason else None,
+        } if with_reason else None,
     }
 
     as_of = last['endAd'] if last['endAd'] < f['today'] else f['today']
@@ -262,10 +343,11 @@ def compute_insights(f: dict) -> dict:
         y = _years_between(e['dob'], as_of)
         return 'Under 25' if y < 25 else '25–34' if y < 35 else '35–44' if y < 45 else '45–54' if y < 55 else '55 and over'
 
+    G = Employee.Gender
     tenure = _bands(current, ['Under 1 year', '1–2 years', '2–5 years', '5–10 years', '10+ years'], tenure_band)
     age = _bands(current, ['Under 25', '25–34', '35–44', '45–54', '55 and over', 'Not recorded'], age_band)
     gender = [g for g in _bands(current, ['Female', 'Male', 'Other', 'Not recorded'],
-                                lambda e: {'female': 'Female', 'male': 'Male', 'other': 'Other'}.get(e['gender'], 'Not recorded'))
+                                lambda e: {G.FEMALE: 'Female', G.MALE: 'Male', G.OTHER: 'Other'}.get(e['gender'], 'Not recorded'))
               if g['count'] > 0 or g['label'] != 'Other']
 
     def group_count(pick, none: str) -> list[dict]:
@@ -273,36 +355,14 @@ def compute_insights(f: dict) -> dict:
         for e in current:
             k = pick(e) or none
             m[k] = m.get(k, 0) + 1
-        out = [{'label': k, 'count': v} for k, v in m.items()]
-        out.sort(key=cmp_to_key(lambda a, b: (b['count'] - a['count']) or _locale_compare(a['label'], b['label'])))
-        return out
+        # Most people first, then by name in the browser's collation order.
+        return sorted(({'label': k, 'count': v} for k, v in m.items()), key=lambda x: (-x['count'], collate_key(x['label'])))
 
     departments = group_count(lambda e: e['unit'], 'No department')
     branches = group_count(lambda e: e['branch'], 'No branch')
 
-    mp = {'ids': ids, 'keys': [m['key'] for m in months], 'starts': [m['startAd'] for m in months],
-          'ends': [m['endAd'] for m in months], 'c': f['companyId'], 'first': first['startAd'], 'last': last['endAd']}
-    month_cte = 'm AS (SELECT * FROM unnest(%(keys)s::text[], %(starts)s::date[], %(ends)s::date[]) AS m(key, start_ad, end_ad))'
-
-    att = rows(f"""
-        WITH {month_cte}
-        SELECT m.key,
-               count(d.*) FILTER (WHERE d.status IN ('Present', 'HalfDay', 'Absent', 'WFH', 'Incomplete', 'OnLeave', 'HalfDayLeave'))::int AS scheduled,
-               count(d.*) FILTER (WHERE d.status IN ('Present', 'HalfDay', 'WFH', 'Incomplete'))::int AS present,
-               count(d.*) FILTER (WHERE d.status = 'Absent')::int AS absent,
-               count(d.*) FILTER (WHERE d.late_min > 0)::int AS late,
-               coalesce(sum(d.ot_min), 0)::int AS ot_min,
-               avg(d.worked_min) FILTER (WHERE d.worked_min > 0)::text AS avg_worked
-          FROM m LEFT JOIN v_attendance_latest d ON d.local_date BETWEEN m.start_ad AND m.end_ad AND d.employee_id = ANY(%(ids)s::uuid[])
-         GROUP BY m.key""", mp)
-    ot_approved = rows(f"""
-        WITH {month_cte}
-        SELECT m.key, coalesce(sum(s.approved_min), 0)::int AS min FROM m
-          LEFT JOIN ot_slip s ON s.local_date BETWEEN m.start_ad AND m.end_ad AND s.status IN ('approved', 'posted')
-                             AND s.employee_id = ANY(%(ids)s::uuid[])
-         GROUP BY m.key""", mp)
-    att_by = {r['key']: r for r in att}
-    ot_by = {r['key']: r['min'] for r in ot_approved}
+    att_by = _attendance_by_month(c, people, months)
+    ot_by = _approved_ot_by_month(c, people, months)
     attendance = []
     for m in months:
         a = att_by.get(m['key'])
@@ -313,63 +373,46 @@ def compute_insights(f: dict) -> dict:
         attendance.append({
             'month': m['key'], 'label': m['label'], 'short': m['short'], 'scheduledDays': scheduled, 'presentDays': present,
             'absentDays': absent, 'lateDays': late,
-            'absenteeismPct': js_round(absent / scheduled * 100, 1) if scheduled else None,
-            'latePct': js_round(late / present * 100, 1) if present else None,
-            'avgWorkedHours': js_round(float(a['avg_worked']) / 60, 2) if a and a['avg_worked'] else None,
+            'absenteeismPct': round_half_up(absent / scheduled * 100, 1) if scheduled else None,
+            'latePct': round_half_up(late / present * 100, 1) if present else None,
+            'avgWorkedHours': round_half_up(float(a['avg_worked']) / 60, 2) if a and a['avg_worked'] else None,
         })
     overtime = [{'month': m['key'], 'label': m['label'], 'short': m['short'],
-                 'detectedHours': js_round(((att_by.get(m['key']) or {}).get('ot_min') or 0) / 60, 1),
-                 'approvedHours': js_round((ot_by.get(m['key']) or 0) / 60, 1)} for m in months]
+                 'detectedHours': round_half_up(((att_by.get(m['key']) or {}).get('ot_min') or 0) / 60, 1),
+                 'approvedHours': round_half_up((ot_by.get(m['key']) or 0) / 60, 1)} for m in months]
 
-    leave_q = rows("""
-        SELECT lt.name_en AS type, lt.code, coalesce(-sum(l.delta_days), 0)::text AS days
-          FROM leave_ledger l JOIN leave_type lt ON lt.id = l.leave_type_id
-         WHERE lt.company_id = %(c)s AND l.employee_id = ANY(%(ids)s::uuid[]) AND l.reason IN ('usage', 'cancellation')
-           AND l.effective_date BETWEEN %(first)s AND %(last)s
-         GROUP BY lt.name_en, lt.code, lt.sort_order ORDER BY lt.sort_order""", mp)
+    taken = _leave_taken(c, people, months)
+    leave_q = (taken.filter(leave_type__company_id=c).order_by()
+               .values('leave_type__name_en', 'leave_type__code', 'leave_type__sort_order')
+               .annotate(days=-Sum('delta_days')).order_by('leave_type__sort_order'))
     avg_headcount = sum(h['headcount'] for h in headcount) / len(headcount)
-    leave = [x for x in ({'type': r['type'], 'code': r['code'], 'days': js_round(float(r['days']), 1),
-                          'perEmployee': js_round(float(r['days']) / avg_headcount, 2) if avg_headcount else 0} for r in leave_q)
+    leave = [x for x in ({'type': r['leave_type__name_en'], 'code': r['leave_type__code'], 'days': round_half_up(_f(r['days']), 1),
+                          'perEmployee': round_half_up(_f(r['days']) / avg_headcount, 2) if avg_headcount else 0} for r in leave_q)
              if x['days'] > 0]
-    leave_monthly = rows(f"""
-        WITH {month_cte}
-        SELECT m.key, coalesce(-sum(l.delta_days), 0)::text AS days FROM m
-          LEFT JOIN leave_ledger l ON l.effective_date BETWEEN m.start_ad AND m.end_ad AND l.reason IN ('usage', 'cancellation')
-                                  AND l.employee_id = ANY(%(ids)s::uuid[])
-         GROUP BY m.key""", mp)
-    leave_by = {r['key']: float(r['days']) for r in leave_monthly}
+    leave_by = {r['month']: -_f(r['days']) for r in
+                taken.annotate(month=_month_of('effective_date', months)).order_by().values('month')
+                .annotate(days=Sum('delta_days'))}
 
-    # People cost from locked (or later) pay runs only: drafts can still change.
-    cost_q = rows("""
-        SELECT (pp.bs_year || '-' || lpad(pp.bs_month::text, 2, '0')) AS key, sum(p.gross)::text AS gross,
-               sum(p.employer_statutory)::text AS employer, sum(p.net)::text AS net, sum(p.tds)::text AS tds,
-               count(DISTINCT p.employee_id)::int AS people
-          FROM payslip p JOIN payroll_run r ON r.id = p.run_id JOIN payroll_period pp ON pp.id = r.period_id
-         WHERE r.company_id = %(c)s AND r.status IN ('locked', 'disbursed', 'filed') AND p.employee_id = ANY(%(ids)s::uuid[])
-           AND (pp.bs_year || '-' || lpad(pp.bs_month::text, 2, '0')) = ANY(%(keys)s::text[])
-         GROUP BY 1""", mp)
-    cost_by = {r['key']: r for r in cost_q}
+    slips = _final_payslips(c, people, months)
+    cost_by = {f"{r['run__period__bs_year']}-{r['run__period__bs_month']:02d}": r for r in
+               slips.order_by().values('run__period__bs_year', 'run__period__bs_month')
+               .annotate(gross=Sum('gross'), employer=Sum('employer_statutory'), net=Sum('net'), tds=Sum('tds'),
+                         people=Count('employee_id', distinct=True))}
     cost = []
     for m in months:
-        c = cost_by.get(m['key'])
-        gross = float(c['gross']) if c else 0.0
-        employer = float(c['employer']) if c else 0.0
-        cost.append({'month': m['key'], 'label': m['label'], 'short': m['short'], 'gross': js_round(gross, 2),
-                     'employerContributions': js_round(employer, 2), 'totalCost': js_round(gross + employer, 2),
-                     'net': js_round(float(c['net']) if c else 0, 2), 'tds': js_round(float(c['tds']) if c else 0, 2),
-                     'people': c['people'] if c else 0, 'locked': bool(c)})
+        r = cost_by.get(m['key'])
+        gross = _f(r['gross']) if r else 0.0
+        employer = _f(r['employer']) if r else 0.0
+        cost.append({'month': m['key'], 'label': m['label'], 'short': m['short'], 'gross': round_half_up(gross, 2),
+                     'employerContributions': round_half_up(employer, 2), 'totalCost': round_half_up(gross + employer, 2),
+                     'net': round_half_up(_f(r['net']) if r else 0, 2), 'tds': round_half_up(_f(r['tds']) if r else 0, 2),
+                     'people': r['people'] if r else 0, 'locked': bool(r)})
     unit_of = {e['id']: e['unit'] or 'No department' for e in emps}
-    cost_dept_q = rows("""
-        SELECT p.employee_id, sum(p.gross)::text AS gross, sum(p.employer_statutory)::text AS employer
-          FROM payslip p JOIN payroll_run r ON r.id = p.run_id JOIN payroll_period pp ON pp.id = r.period_id
-         WHERE r.company_id = %(c)s AND r.status IN ('locked', 'disbursed', 'filed') AND p.employee_id = ANY(%(ids)s::uuid[])
-           AND (pp.bs_year || '-' || lpad(pp.bs_month::text, 2, '0')) = ANY(%(keys)s::text[])
-         GROUP BY p.employee_id""", mp)
     dept_cost: dict[str, float] = {}
-    for r in cost_dept_q:
+    for r in slips.order_by().values('employee_id').annotate(gross=Sum('gross'), employer=Sum('employer_statutory')):
         k = unit_of.get(str(r['employee_id']), 'No department')
-        dept_cost[k] = dept_cost.get(k, 0) + float(r['gross']) + float(r['employer'])
-    cost_by_department = sorted(({'label': k, 'totalCost': js_round(v, 2)} for k, v in dept_cost.items()),
+        dept_cost[k] = dept_cost.get(k, 0) + _f(r['gross']) + _f(r['employer'])
+    cost_by_department = sorted(({'label': k, 'totalCost': round_half_up(v, 2)} for k, v in dept_cost.items()),
                                 key=lambda x: -x['totalCost'])
 
     # Headline tiles: the last month of the range against the one before it.
@@ -383,7 +426,7 @@ def compute_insights(f: dict) -> dict:
     prev_a = attendance[-2] if len(attendance) > 1 else None
 
     def delta(a, b):
-        return None if a is None or b is None else js_round(a - b, 2)
+        return None if a is None or b is None else round_half_up(a - b, 2)
 
     leave_days = leave_by.get(last['key'], 0)
     prev_leave = leave_by.get(months[-2]['key'], 0) if prev_h else None
@@ -403,16 +446,17 @@ def compute_insights(f: dict) -> dict:
         {'key': 'absenteeism', 'label': 'Absenteeism', 'value': last_a['absenteeismPct'], 'delta': delta(last_a['absenteeismPct'], g(prev_a, 'absenteeismPct')), 'unit': '%', 'goodWhen': 'down'},
         {'key': 'late', 'label': 'Late arrivals', 'value': last_a['latePct'], 'delta': delta(last_a['latePct'], g(prev_a, 'latePct')), 'unit': '%', 'goodWhen': 'down'},
         {'key': 'hours', 'label': 'Average day', 'value': last_a['avgWorkedHours'], 'delta': delta(last_a['avgWorkedHours'], g(prev_a, 'avgWorkedHours')), 'unit': 'h', 'goodWhen': 'neutral'},
-        {'key': 'leave', 'label': 'Leave taken', 'value': js_round(leave_days, 1), 'delta': delta(leave_days, prev_leave), 'unit': 'days', 'goodWhen': 'neutral'},
+        {'key': 'leave', 'label': 'Leave taken', 'value': round_half_up(leave_days, 1), 'delta': delta(leave_days, prev_leave), 'unit': 'days', 'goodWhen': 'neutral'},
     ]
 
     return {
         'months': months, 'asOf': as_of, 'kpis': kpis, 'headcount': headcount, 'attrition': attrition, 'tenure': tenure,
         'age': age, 'gender': gender, 'departments': departments, 'branches': branches, 'cost': cost,
         'costByDepartment': cost_by_department, 'overtime': overtime, 'leave': leave,
-        'leaveMonthly': [{'month': m['key'], 'label': m['label'], 'short': m['short'], 'days': js_round(leave_by.get(m['key'], 0), 1)}
+        'leaveMonthly': [{'month': m['key'], 'label': m['label'], 'short': m['short'], 'days': round_half_up(leave_by.get(m['key'], 0), 1)}
                          for m in months],
-        'attendance': attendance, 'exitReasonsAvailable': bool(reason_expr),
+        # Exit reasons always have a source now: the employee exit records (or an install's own column).
+        'attendance': attendance, 'exitReasonsAvailable': True,
     }
 
 

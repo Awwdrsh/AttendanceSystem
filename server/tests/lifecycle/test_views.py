@@ -5,7 +5,7 @@ import pytest
 from django.test import Client
 
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.employees import service as emp
 from hajiri.lifecycle import api
 from tests.people.conftest import build_world

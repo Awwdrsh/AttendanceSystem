@@ -6,26 +6,25 @@ Documents & letters pages and their HTMX actions:
 - /employees/documents (DocumentsAdminPage.tsx, HR): to review, letters register, templates, policies, document types.
 - /_/documents/employee/<id> (EmployeeDocumentsTab.tsx): the Documents tab of an employee's page, loaded over HTMX.
 
-Rules live in services.py; views turn form posts into the TS request bodies and answer fragments, toasts and refresh
-events. File, letter and policy downloads are also served at their TS API addresses so old links keep working.
+Rules live in services.py; forms.py reads the posts into the TS request bodies; views answer fragments, toasts and
+refresh events. The JSON API for Bearer-token clients (the TS routes under /api/v1/documents) is in api.py.
 """
 from __future__ import annotations
 
-import re
+from datetime import date
 
 from django.http import HttpResponse
 from django.shortcuts import render
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from hajiri.core.auth import has_role
-from hajiri.core.errors import BadRequestError, HttpError, NotFoundError
-from hajiri.core.schema import is_uuid
+from hajiri.core.errors import BadRequestError, HttpError
 from hajiri.files.store import stored_file_response
 from hajiri.web.decorators import login_required, require_feature, require_role
-from hajiri.web.format import today_npt
+from hajiri.web.format import fmt_date, today_npt
 from hajiri.web.htmx import close_modal, refresh, toast, trigger
 
-from . import services
+from . import forms, services
 from .letters import LABEL, TOKEN
 
 FEATURE = 'documents'
@@ -37,30 +36,12 @@ SECTIONS = (('review', 'To review'), ('letters', 'Letters'), ('templates', 'Temp
             ('categories', 'Document types'))
 AUDIENCES = (('all', 'Everyone'), ('branch', 'Selected branches'), ('department', 'Selected departments'))
 NEW_TEMPLATE_BODY = 'Dear {{employee.title}} {{employee.name}},\n\n'
+SHOWN_REQUESTS = ('pending', 'approved', 'rejected')
 
 
 # ---------------------------------------------------------------- helpers
 
-def _checked(data, name: str) -> bool:
-    return data.get(name) in ('on', '1', 'true', 'True')
-
-
-def _text(data, name: str) -> str:
-    return (data.get(name) or '').strip()
-
-
-def _opt(data, name: str) -> str | None:
-    """An optional text field: blank posts as null, like `value.trim() || null` in the TS pages."""
-    return _text(data, name) or None
-
-
-def _uuid_or_none(v) -> str | None:
-    v = (v or '').strip()
-    return v if v and is_uuid(v) else None
-
-
 def _days_until(ad: str) -> int:
-    from datetime import date
     return (date.fromisoformat(ad) - date.fromisoformat(today_npt())).days
 
 
@@ -74,7 +55,6 @@ def file_size(n: int) -> str:
 
 def expiry_info(date_iso: str | None) -> dict:
     """ExpiryText: "Expires 3 Magh 2083", orange within 30 days and red once expired."""
-    from hajiri.web.format import fmt_date
     if not date_iso:
         return {'text': 'No expiry', 'tone': 'muted', 'warn': False}
     d = _days_until(date_iso)
@@ -117,6 +97,10 @@ def _err_toast(message: str, title: str, status: int = 400) -> HttpResponse:
     return trigger(r, 'hj:toast', {'message': message, 'tone': 'err', 'title': title})
 
 
+def _data(request):
+    return request.POST if request.method == 'POST' else request.GET
+
+
 # ---------------------------------------------------------------- documents grid (EmployeeDocuments.tsx)
 
 def _grid_ctx(request, mode: str, employee_id: str | None, history: bool) -> dict:
@@ -135,8 +119,9 @@ def _grid_ctx(request, mode: str, employee_id: str | None, history: bool) -> dic
 @login_required
 @require_feature(FEATURE)
 def docs_grid(request):
-    g = request.GET
-    ctx = _grid_ctx(request, g.get('mode') or 'self', _uuid_or_none(g.get('employee_id')), _checked(g, 'history'))
+    f = forms.GridQueryForm(request.GET)
+    d = f.cleaned()
+    ctx = _grid_ctx(request, d['mode'] or 'self', d['employee_id'], d['history'])
     return render(request, 'documents/partials/docs_grid.html', ctx)
 
 
@@ -145,25 +130,19 @@ def docs_grid(request):
 @require_feature(FEATURE)
 def upload(request):
     user = request.hajiri_user
-    data = request.POST if request.method == 'POST' else request.GET
-    hr = data.get('mode') == 'hr' and has_role(user, 'hr')
-    employee_id = (_uuid_or_none(data.get('employee_id')) if hr else None) or user.employee_id
+    f = forms.UploadForm(_data(request))
+    hr = f.hr_mode(user)
+    employee_id = (f.cleaned_data['employee_id'] if hr else None) or user.employee_id
     if request.method == 'POST':
         cats = {c['id']: c for c in services.list_categories(user)}
-        cat = cats.get(data.get('category_id') or '')
-        body = {'categoryId': data.get('category_id', ''), 'title': _text(data, 'title') or (cat['name'] if cat else 'Document'),
-                'fileId': data.get('file_id', ''), 'expiryDate': _opt(data, 'expiry_date'), 'notes': _opt(data, 'notes'),
-                'replacesId': _opt(data, 'replaces_id')}
-        if hr:
-            body['visibleToEmployee'] = _checked(data, 'visible_to_employee')
+        cat = cats.get(f.cleaned_data['category_id'])
+        body = f.document(hr=hr, category_name=cat['name'] if cat else None)
         if not employee_id:
             raise BadRequestError('only employees can upload documents')
         services.add_document(user, employee_id, body)
         return _done(request, 'Document saved.' if hr else 'Uploaded. HR will check it shortly.', 'docs-grid', 'doc-review')
-    replaces = None
-    rid = _uuid_or_none(data.get('replaces'))
-    if rid:
-        replaces = services.document_for(user, rid)
+    rid = f.cleaned_data['replaces']
+    replaces = services.document_for(user, rid) if rid else None
     cats = [c for c in services.list_categories(user) if c['active'] and (hr or c['employee_can_upload'])]
     cat_map = {c['id']: {'name': c['name'], 'expiry': c['expiry_required']} for c in cats}
     return render(request, 'documents/partials/upload_form.html', {
@@ -176,13 +155,10 @@ def upload(request):
 @require_feature(FEATURE)
 def doc_edit(request, doc_id):
     user = request.hajiri_user
+    d = services.hr_document(user, str(doc_id))
     if request.method == 'POST':
-        p = request.POST
-        services.update_document(user, str(doc_id), {
-            'title': _text(p, 'title'), 'expiryDate': _opt(p, 'expiry_date'),
-            'visibleToEmployee': _checked(p, 'visible_to_employee'), 'notes': _opt(p, 'notes')})
+        services.update_document(user, str(doc_id), forms.DocumentEditForm(request.POST).patch())
         return _done(request, 'Document updated.', 'docs-grid', 'doc-review')
-    d = services.load_doc(services.company_id_of(user), str(doc_id))
     return render(request, 'documents/partials/doc_edit.html', {'d': d})
 
 
@@ -191,7 +167,7 @@ def doc_edit(request, doc_id):
 @require_feature(FEATURE)
 def verify(request, doc_id):
     user = request.hajiri_user
-    d = services.load_doc(services.company_id_of(user), str(doc_id))
+    d = services.hr_document(user, str(doc_id))
     services.verify_document(user, str(doc_id), {'decision': 'verify'})
     return _done(request, f"{d['title']} verified.", 'docs-grid', 'doc-review', close=False)
 
@@ -201,18 +177,15 @@ def verify(request, doc_id):
 @require_feature(FEATURE)
 def reject(request, doc_id):
     user = request.hajiri_user
-    data = request.POST if request.method == 'POST' else request.GET
-    from_review = data.get('from') == 'review'
+    f = forms.RejectForm(_data(request))
+    from_review = f.from_review()
+    d = services.hr_document(user, str(doc_id))
     if request.method == 'POST':
-        services.verify_document(user, str(doc_id), {'decision': 'reject', 'reason': data.get('reason', '')})
+        services.verify_document(user, str(doc_id), f.body())
         msg = 'Sent back to the employee.' if from_review else 'The employee has been asked to upload it again.'
         return _done(request, msg, 'docs-grid', 'doc-review')
-    d = services.load_doc(services.company_id_of(user), str(doc_id))
-    name = None
-    if from_review:
-        e = services.one('SELECT name_en FROM employee WHERE id = %s', [d['employee_id']])
-        name = e['name_en'] if e else None
-    return render(request, 'documents/partials/reject_form.html', {'d': d, 'from_review': from_review, 'name': name})
+    return render(request, 'documents/partials/reject_form.html',
+                  {'d': d, 'from_review': from_review, 'name': d['employee_name'] if from_review else None})
 
 
 @require_POST
@@ -251,10 +224,11 @@ def _letters_ctx(request, *, hr: bool, employee_id: str | None, show_employee: b
 @login_required
 @require_feature(FEATURE)
 def letters(request):
-    g = request.GET
-    hr = g.get('scope') == 'hr' and has_role(request.hajiri_user, 'hr')
-    ctx = _letters_ctx(request, hr=hr, employee_id=_uuid_or_none(g.get('employee_id')) if hr else None,
-                       show_employee=hr and _checked(g, 'show_employee'), term=_text(g, 'q')[:80])
+    f = forms.LettersQueryForm(request.GET)
+    d = f.cleaned()
+    hr = d['scope'] == 'hr' and has_role(request.hajiri_user, 'hr')
+    ctx = _letters_ctx(request, hr=hr, employee_id=d['employee_id'] if hr else None,
+                       show_employee=hr and d['show_employee'], term=f.term())
     return render(request, 'documents/partials/letters_table.html', ctx)
 
 
@@ -268,23 +242,22 @@ def _template_info(templates: list[dict]) -> dict:
     return out
 
 
+def _request_of(user, f: forms.IssueForm) -> dict | None:
+    rid = f.cleaned()['request_id']
+    return services.get_request(user, rid) if rid else None
+
+
 @require_http_methods(['GET', 'POST'])
 @require_role('hr')
 @require_feature(FEATURE)
 def issue(request):
     """IssueLetterDrawer: pick the employee (unless fixed), the template and request details, preview, issue."""
     user = request.hajiri_user
-    data = request.POST if request.method == 'POST' else request.GET
-    req = services.get_request(user, data['request_id']) if _uuid_or_none(data.get('request_id')) else None
+    f = forms.IssueForm(_data(request))
+    req = _request_of(user, f)
     if request.method == 'POST':
-        body = {'templateId': req['template_id'] if req else data.get('template_id', ''),
-                'employeeId': req['employee_id'] if req else data.get('employee_id', ''),
-                'visibleToEmployee': _checked(data, 'visible_to_employee'), 'purpose': _opt(data, 'purpose'),
-                'addressedTo': _opt(data, 'addressed_to'), 'allowMissing': _checked(data, 'allow_missing')}
-        if req:
-            body['requestId'] = req['id']
         try:
-            r = services.issue_letter(user, body)
+            r = services.issue_letter(user, f.issue(req))
         except BadRequestError as e:
             if isinstance(e.details, dict) and e.details.get('code') == 'missing_values':
                 return _err_toast(e.message, 'Some details are missing')
@@ -294,7 +267,7 @@ def issue(request):
             refresh(resp, rid)
         return toast(request, resp, f"Letter {r['refNo']} issued.")
     templates = [t for t in services.list_templates(user) if t.get('active') is not False]
-    fixed_employee = req['employee_id'] if req else _uuid_or_none(data.get('employee_id'))
+    fixed_employee = req['employee_id'] if req else f.ids(None)[0]
     return render(request, 'documents/partials/issue_form.html', {
         'templates': templates, 'tpl_info': _template_info(templates), 'req': req, 'fixed_employee': fixed_employee,
         'employee_fixed': bool(req or fixed_employee)})
@@ -306,15 +279,15 @@ def issue(request):
 def issue_preview(request):
     """The live preview in the issue drawer, with missing details highlighted and the Issue button."""
     user = request.hajiri_user
-    p = request.POST
-    req = services.get_request(user, p['request_id']) if _uuid_or_none(p.get('request_id')) else None
-    emp = req['employee_id'] if req else _uuid_or_none(p.get('employee_id'))
-    tpl = req['template_id'] if req else _uuid_or_none(p.get('template_id'))
-    ctx = {'ready': bool(emp and tpl), 'allow_missing': _checked(p, 'allow_missing'), 'preview': None, 'missing': []}
+    f = forms.IssueForm(request.POST)
+    req = _request_of(user, f)
+    emp, tpl = f.ids(req)
+    d = f.cleaned()
+    ctx = {'ready': bool(emp and tpl), 'allow_missing': d['allow_missing'], 'preview': None, 'missing': []}
     if emp and tpl:
         try:
-            out = services.preview_letter(user, {'employeeId': emp, 'templateId': tpl, 'purpose': _opt(p, 'purpose'),
-                                                 'addressedTo': _opt(p, 'addressed_to')})
+            out = services.preview_letter(user, {'employeeId': emp, 'templateId': tpl, 'purpose': d['purpose'],
+                                                 'addressedTo': d['addressed_to']})
         except HttpError as e:
             return _err_toast(e.message, 'Preview failed', status=e.status)
         ctx['preview'] = out['html']
@@ -324,15 +297,19 @@ def issue_preview(request):
     return render(request, 'documents/partials/issue_preview.html', ctx)
 
 
-@require_GET
-@login_required
-@require_feature(FEATURE)
-def letter_html(request, letter_id):
-    html = services.letter_html(request.hajiri_user, str(letter_id))
+def letter_response(html: str) -> HttpResponse:
+    """A printable letter: its own strict policy (inline styles and data: images only) and never cached."""
     r = HttpResponse(html, content_type='text/html; charset=utf-8')
     r['Cache-Control'] = 'private, no-store'
     r['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'self' data:"
     return r
+
+
+@require_GET
+@login_required
+@require_feature(FEATURE)
+def letter_html(request, letter_id):
+    return letter_response(services.letter_html(request.hajiri_user, str(letter_id)))
 
 
 @require_http_methods(['GET', 'POST'])
@@ -340,12 +317,9 @@ def letter_html(request, letter_id):
 @require_feature(FEATURE)
 def void(request, letter_id):
     user = request.hajiri_user
-    letter = services.one('SELECT id, ref_no FROM issued_letter WHERE id = %s AND company_id = %s',
-                          [str(letter_id), services.company_id_of(user)])
-    if not letter:
-        raise NotFoundError('letter not found')
+    letter = services.letter_ref(user, str(letter_id))
     if request.method == 'POST':
-        services.void_letter(user, str(letter_id), {'reason': request.POST.get('reason', '')})
+        services.void_letter(user, str(letter_id), {'reason': forms.VoidForm(request.POST).cleaned()['reason']})
         return _done(request, f"{letter['ref_no']} voided.", 'doc-letters')
     return render(request, 'documents/partials/void_form.html', {'letter': letter})
 
@@ -357,9 +331,7 @@ def request_new(request):
     """RequestLetterDrawer: an employee asks HR for a letter such as a salary certificate."""
     user = request.hajiri_user
     if request.method == 'POST':
-        p = request.POST
-        services.request_letter(user, {'templateId': p.get('template_id', ''), 'purpose': _text(p, 'purpose'),
-                                       'addressedTo': _opt(p, 'addressed_to')})
+        services.request_letter(user, forms.LetterRequestForm(request.POST).letter_request())
         return _done(request, 'Request sent to HR.', 'my-requests')
     templates = services.list_templates(user)
     if has_role(user, 'hr'):
@@ -377,7 +349,7 @@ def request_cancel(request, request_id):
 
 def _my_requests_ctx(request) -> dict:
     reqs = [_req(r) for r in services.list_requests(request.hajiri_user)]
-    return {'requests': [r for r in reqs if r['status'] in ('pending', 'approved', 'rejected')][:6]}
+    return {'requests': [r for r in reqs if r['status'] in SHOWN_REQUESTS][:6]}
 
 
 @require_GET
@@ -442,11 +414,15 @@ def _policies_ctx(request, archived: bool) -> dict:
     return {'policies': ps, 'archived': archived}
 
 
+def _archived(request) -> bool:
+    return forms.ArchivedForm(request.GET).cleaned()['archived']
+
+
 @require_GET
 @require_role('hr')
 @require_feature(FEATURE)
 def policies(request):
-    return render(request, 'documents/partials/policies.html', _policies_ctx(request, _checked(request.GET, 'archived')))
+    return render(request, 'documents/partials/policies.html', _policies_ctx(request, _archived(request)))
 
 
 @require_http_methods(['GET', 'POST'])
@@ -455,12 +431,7 @@ def policies(request):
 def policy_new(request):
     user = request.hajiri_user
     if request.method == 'POST':
-        p = request.POST
-        audience = p.get('audience') or 'all'
-        services.publish_policy(user, {
-            'title': _text(p, 'title'), 'description': _opt(p, 'description'), 'fileId': p.get('file_id', ''),
-            'audience': audience, 'audienceIds': [] if audience == 'all' else [x for x in p.getlist('audience_ids') if x],
-            'requiresAck': _checked(p, 'requires_ack')})
+        services.publish_policy(user, forms.PolicyForm(request.POST).policy())
         return _done(request, 'Published. Everyone it applies to has been notified.', 'doc-policies')
     return render(request, 'documents/partials/policy_form.html', {
         'audiences': AUDIENCES, 'branches': services.branches(user), 'units': services.org_units(user)})
@@ -474,10 +445,7 @@ def policy_archive(request, policy_id):
     return _done(request, 'Archived.', 'doc-policies', close=False)
 
 
-@require_GET
-@require_role('hr')
-@require_feature(FEATURE)
-def policy_acks(request, policy_id):
+def _acks_page(request, policy_id) -> HttpResponse:
     user = request.hajiri_user
     p = services.get_policy(user, str(policy_id))
     emps = services.policy_acks(user, str(policy_id))
@@ -485,26 +453,23 @@ def policy_acks(request, policy_id):
         'p': p, 'employees': emps, 'acked': sum(1 for e in emps if e['acknowledged_at'])})
 
 
+@require_GET
+@require_role('hr')
+@require_feature(FEATURE)
+def policy_acks(request, policy_id):
+    return _acks_page(request, policy_id)
+
+
 @require_POST
 @require_role('hr')
 @require_feature(FEATURE)
 def policy_remind(request, policy_id):
-    user = request.hajiri_user
-    r = services.remind_policy(user, str(policy_id))
-    n = r['sent']
+    n = services.remind_policy(request.hajiri_user, str(policy_id))['sent']
     msg = f"Reminder sent to {n} {'person' if n == 1 else 'people'}." if n else 'Everyone has acknowledged it.'
-    p = services.get_policy(user, str(policy_id))
-    emps = services.policy_acks(user, str(policy_id))
-    resp = render(request, 'documents/partials/policy_acks.html', {
-        'p': p, 'employees': emps, 'acked': sum(1 for e in emps if e['acknowledged_at'])})
-    return toast(request, resp, msg)
+    return toast(request, _acks_page(request, policy_id), msg)
 
 
 # ---------------------------------------------------------------- categories
-
-def _slug(s: str) -> str:
-    return re.sub(r'^_+|_+$', '', re.sub(r'[^a-z0-9]+', '_', s.lower().strip()))[:40]
-
 
 def _categories(user) -> list[dict]:
     return [{**c, 'toggles': [('employee_can_upload', 'Employees can upload', c['employee_can_upload']),
@@ -526,28 +491,17 @@ def categories(request):
 @require_feature(FEATURE)
 def category_new(request):
     if request.method == 'POST':
-        p = request.POST
-        services.create_category(request.hajiri_user, {
-            'name': _text(p, 'name'), 'code': _slug(p.get('code') or ''), 'employeeCanUpload': _checked(p, 'employee_can_upload'),
-            'expiryRequired': _checked(p, 'expiry_required'), 'visibleToEmployee': _checked(p, 'visible_to_employee')})
+        services.create_category(request.hajiri_user, forms.CategoryForm(request.POST).category())
         return _done(request, 'Document type added.', 'doc-categories')
     return render(request, 'documents/partials/category_form.html')
-
-
-_TOGGLES = {'employee_can_upload': 'employeeCanUpload', 'expiry_required': 'expiryRequired',
-            'visible_to_employee': 'visibleToEmployee', 'active': 'active'}
 
 
 @require_POST
 @require_role('hr')
 @require_feature(FEATURE)
 def category_toggle(request, category_id):
-    key = _TOGGLES.get(request.POST.get('key') or '')
-    if not key:
-        raise BadRequestError('unknown setting')
-    services.update_category(request.hajiri_user, str(category_id), {key: _checked(request.POST, 'value')})
-    resp = HttpResponse(status=204)
-    return refresh(resp, 'doc-categories')
+    services.update_category(request.hajiri_user, str(category_id), forms.CategoryToggleForm(request.POST).patch())
+    return refresh(HttpResponse(status=204), 'doc-categories')
 
 
 # ---------------------------------------------------------------- templates and letter settings
@@ -565,10 +519,7 @@ def templates(request):
 @require_role('hr')
 @require_feature(FEATURE)
 def letter_settings(request):
-    p = request.POST
-    services.save_letter_settings(request.hajiri_user, {
-        'signatoryName': _opt(p, 'signatory_name'), 'signatoryTitle': _opt(p, 'signatory_title'),
-        'refPrefix': _text(p, 'ref_prefix')})
+    services.save_letter_settings(request.hajiri_user, forms.LetterSettingsForm(request.POST).settings())
     return _done(request, 'Letter settings saved.', 'doc-templates', close=False)
 
 
@@ -587,10 +538,7 @@ def _template_form(request, t: dict | None):
 @require_feature(FEATURE)
 def template_new(request):
     if request.method == 'POST':
-        p = request.POST
-        services.create_template(request.hajiri_user, {
-            'code': _text(p, 'code'), 'name': _text(p, 'name'), 'subject': _text(p, 'subject'), 'body': p.get('body', ''),
-            'requestable': _checked(p, 'requestable'), 'visibleToEmployee': _checked(p, 'visible_to_employee')})
+        services.create_template(request.hajiri_user, forms.TemplateForm(request.POST).template())
         return _done(request, 'Template saved.', 'doc-templates')
     return _template_form(request, None)
 
@@ -600,14 +548,11 @@ def template_new(request):
 @require_feature(FEATURE)
 def template_edit(request, template_id):
     user = request.hajiri_user
+    t = services.get_template(user, str(template_id))
     if request.method == 'POST':
-        p = request.POST
-        services.update_template(user, str(template_id), {
-            'name': _text(p, 'name'), 'subject': _text(p, 'subject'), 'body': p.get('body', ''),
-            'requestable': _checked(p, 'requestable'), 'visibleToEmployee': _checked(p, 'visible_to_employee'),
-            'active': _checked(p, 'active')})
+        services.update_template(user, str(template_id), forms.TemplateForm(request.POST).patch())
         return _done(request, 'Template saved.', 'doc-templates')
-    return _template_form(request, services.get_template(user, str(template_id)))
+    return _template_form(request, t)
 
 
 @require_POST
@@ -615,9 +560,8 @@ def template_edit(request, template_id):
 @require_feature(FEATURE)
 def template_preview(request):
     """TemplateEditor's live preview: the letter for the chosen employee, with unknown and missing placeholders."""
-    p = request.POST
-    emp = _uuid_or_none(p.get('preview_employee_id'))
-    subject, body = p.get('subject', ''), p.get('body', '')
+    d = forms.TemplatePreviewForm(request.POST).cleaned()
+    emp, subject, body = d['preview_employee_id'], d['subject'], d['body']
     preview = None
     if emp and subject.strip() and body.strip():
         try:
@@ -668,12 +612,13 @@ def admin(request):
     if section == 'review':
         ctx.update(_review_ctx(request))
     elif section == 'letters':
-        ctx.update(_letters_ctx(request, hr=True, employee_id=None, show_employee=True, term=_text(request.GET, 'q')[:80]))
+        term = forms.LettersQueryForm(request.GET).term()
+        ctx.update(_letters_ctx(request, hr=True, employee_id=None, show_employee=True, term=term))
     elif section == 'templates':
         ctx.update({'templates': services.list_templates(request.hajiri_user),
                     'settings': services.get_letter_settings(request.hajiri_user)})
     elif section == 'policies':
-        ctx.update(_policies_ctx(request, _checked(request.GET, 'archived')))
+        ctx.update(_policies_ctx(request, _archived(request)))
     else:
         ctx['categories'] = _categories(request.hajiri_user)
     return render(request, 'documents/admin.html', ctx)
@@ -695,7 +640,7 @@ def mine(request):
 def employee_tab(request, employee_id):
     """The Documents tab of an employee's page (EmployeeDocumentsTab.tsx), loaded with hx-get into the tab panel."""
     eid = str(employee_id)
-    ctx = {**_grid_ctx(request, 'hr', eid, _checked(request.GET, 'history')),
+    history = forms.GridQueryForm(request.GET).cleaned()['history']
+    ctx = {**_grid_ctx(request, 'hr', eid, history),
            **_letters_ctx(request, hr=True, employee_id=eid, show_employee=False)}
     return render(request, 'documents/partials/employee_tab.html', ctx)
-

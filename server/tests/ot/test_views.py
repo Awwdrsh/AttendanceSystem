@@ -1,7 +1,7 @@
 """The Overtime review page (OtSlipsPage.tsx), its HTMX actions, the request fragments and the legacy address."""
 from __future__ import annotations
 
-from hajiri.core.db import one
+from hajiri.db.models import OtRequest, OtSlip
 from hajiri.web import format as fmt
 from tests.web.factories import htmx, hx_triggers, toasts
 
@@ -56,7 +56,7 @@ def test_approve_modal(world):
     r = c.post(f'/_/ot/slips/{sid}/approve', {'approved_min': '90'}, **htmx())
     assert r.status_code == 204 and toasts(r)[0]['message'] == 'Overtime approved.'
     assert 'hj:refresh-ot-slips' in hx_triggers(r)
-    assert one('SELECT approved_min, status FROM ot_slip WHERE id = %s', [sid]) == {'approved_min': 90, 'status': 'approved'}
+    assert OtSlip.objects.values('approved_min', 'status').get(pk=sid) == {'approved_min': 90, 'status': 'approved'}
     # Approving again is a conflict shown as a toast.
     r = c.post(f'/_/ot/slips/{sid}/approve', {'approved_min': '60'}, **htmx())
     assert r.status_code == 409 and toasts(r)[0]['message'] == 'slip is already approved'
@@ -70,7 +70,7 @@ def test_reject_modal(world):
     assert c.post(f'/_/ot/slips/{sid}/reject', {'reason': 'no'}, **htmx()).status_code == 422
     r = c.post(f'/_/ot/slips/{sid}/reject', {'reason': 'not authorised'}, **htmx())
     assert r.status_code == 204 and toasts(r)[0]['message'] == 'Overtime rejected.'
-    assert one('SELECT status FROM ot_slip WHERE id = %s', [sid])['status'] == 'rejected'
+    assert OtSlip.objects.get(pk=sid).status == 'rejected'
 
 
 def test_comp_off_button(world):
@@ -114,13 +114,13 @@ def test_request_fragments(world):
     r = c.post('/_/ot/requests/new', {'local_date': days_ago(1), 'requested_min': '90', 'reason': 'audit'}, **htmx())
     assert r.status_code == 204 and toasts(r)[0]['message'] == 'Overtime request sent for approval.'
     assert 'hj:refresh-ot-requests' in hx_triggers(r)
-    rid = str(one("SELECT id FROM ot_request WHERE employee_id = %s", [world.demo['sita']])['id'])
+    rid = str(OtRequest.objects.get(employee_id=world.demo['sita']).id)
     body = c.get('/_/ot/requests', **htmx()).content.decode()
     assert '1 h 30 m' in body and 'Cancel' in body
     assert 'No cancelled overtime requests' in c.get('/_/ot/requests', {'status': 'cancelled'}, **htmx()).content.decode()
     r = c.post(f'/_/ot/requests/{rid}/cancel', **htmx())
     assert r.status_code == 204 and toasts(r)[0]['message'] == 'Overtime request cancelled.'
-    assert one('SELECT status FROM ot_request WHERE id = %s', [rid])['status'] == 'cancelled'
+    assert OtRequest.objects.get(pk=rid).status == 'cancelled'
 
 
 def test_nav_tab_and_palette(world):
@@ -147,4 +147,4 @@ def test_emptied_minutes_field_approves_zero_like_the_ts_modal(world):
     sid = slip(world.demo['ram'], '2026-09-21', 120)
     r = c.post(f'/_/ot/slips/{sid}/approve', {'approved_min': ''}, **htmx())
     assert r.status_code == 204
-    assert one('SELECT approved_min, status FROM ot_slip WHERE id = %s', [sid]) == {'approved_min': 0, 'status': 'approved'}
+    assert OtSlip.objects.values('approved_min', 'status').get(pk=sid) == {'approved_min': 0, 'status': 'approved'}

@@ -6,8 +6,10 @@ with no time zone; callers pass the Nepal (NPT) date.
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from itertools import accumulate
 from typing import Iterator
 
 from .data import (
@@ -84,28 +86,28 @@ def is_valid_bs_date(bs: BsDate) -> bool:
         return False
 
 
-# Days before Baishakh 1 of each year, counted from Baishakh 1 of MIN_YEAR.
-_YEAR_START: dict[int, int] = {}
-_acc = 0
-for _y in range(MIN_YEAR, MAX_YEAR + 1):
-    _YEAR_START[_y] = _acc
-    _acc += sum(BS_MONTH_DAYS[_y])
-_TOTAL_DAYS = _acc
+# Days before Baishakh 1 of each year, counted from Baishakh 1 of MIN_YEAR, and days before each month within its year.
+_YEAR_STARTS = (0, *accumulate(sum(BS_MONTH_DAYS[y]) for y in _YEARS))
+_YEAR_START: dict[int, int] = dict(zip(_YEARS, _YEAR_STARTS))
+_TOTAL_DAYS = _YEAR_STARTS[-1]
+_MONTH_STARTS: dict[int, tuple[int, ...]] = {y: (0, *accumulate(BS_MONTH_DAYS[y])) for y in _YEARS}
 
 
 def _ordinal(bs: BsDate) -> int:
     """Days from Baishakh 1 of MIN_YEAR to the given BS date."""
     if not is_valid_bs_date(bs):
         raise BsRangeError(f'Invalid BS date {format_bs(bs)}')
-    return _YEAR_START[bs.year] + sum(BS_MONTH_DAYS[bs.year][: bs.month - 1]) + bs.day - 1
+    return _YEAR_START[bs.year] + _MONTH_STARTS[bs.year][bs.month - 1] + bs.day - 1
 
 
 _ANCHOR_ORDINAL = _ordinal(BsDate(*ANCHOR_BS))
-_ISO = re.compile(r'^(\d{4})-(\d{2})-(\d{2})$')
+# [0-9] and fullmatch, as in the JS /^(\d{4})-(\d{2})-(\d{2})$/: Python's \d also matches other scripts' digits
+# and its $ also matches before a trailing newline.
+_ISO = re.compile(r'([0-9]{4})-([0-9]{2})-([0-9]{2})')
 
 
 def parse_iso_date(ad: str) -> date:
-    m = _ISO.match(ad)
+    m = _ISO.fullmatch(ad)
     if not m:
         raise BsRangeError(f'AD date must be YYYY-MM-DD, got {ad}')
     try:
@@ -134,16 +136,12 @@ def ad_to_bs(ad: str | date) -> BsDate:
         raise BsRangeError(f'AD date {d.isoformat()} is before supported BS range')
     if n >= _TOTAL_DAYS:
         raise BsRangeError(f'AD date {d.isoformat()} is after supported BS range')
-    year = MIN_YEAR
-    while n >= sum(BS_MONTH_DAYS[year]):
-        n -= sum(BS_MONTH_DAYS[year])
-        year += 1
-    months = BS_MONTH_DAYS[year]
-    month = 1
-    while n >= months[month - 1]:
-        n -= months[month - 1]
-        month += 1
-    return BsDate(year, month, n + 1)
+    i = bisect_right(_YEAR_STARTS, n) - 1
+    year = _YEARS[i]
+    n -= _YEAR_STARTS[i]
+    starts = _MONTH_STARTS[year]
+    month = bisect_right(starts, n)
+    return BsDate(year, month, n - starts[month - 1] + 1)
 
 
 def add_bs_days(bs: BsDate, days: int) -> BsDate:
@@ -199,7 +197,7 @@ def format_bs(bs: BsDate, numerals: str = 'latin', separator: str = '-') -> str:
 
 
 def parse_bs(s: str) -> BsDate:
-    m = _ISO.match(s)
+    m = _ISO.fullmatch(s)
     if not m:
         raise BsRangeError(f'BS date must be YYYY-MM-DD, got {s}')
     bs = BsDate(int(m[1]), int(m[2]), int(m[3]))

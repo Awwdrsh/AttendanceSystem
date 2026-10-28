@@ -12,7 +12,7 @@ from datetime import date, timedelta
 import pytest
 
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute
+from tests.support.sql import execute
 from hajiri.expenses import services as ex
 from hajiri.expenses.seeds import seed_expense_defaults
 from tests.web.factories import make_company, make_employee, make_user, sign_in

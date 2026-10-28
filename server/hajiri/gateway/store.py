@@ -1,13 +1,19 @@
 """Gateway storage: the Store contract, an in-memory store (tests, simulator, no-database demo) and the PostgreSQL store
-that shares the API's schema. Port of apps/gateway/src/store/{types,memory,postgres}.ts.
+that shares the API's schema through the Django ORM. Port of apps/gateway/src/store/{types,memory,postgres}.ts.
 """
 from __future__ import annotations
 
-import json
 import re
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+
+from django.db import IntegrityError, transaction
+from django.db.models import Case, F, TextField, Value, When
+from django.db.models.functions import Now
+from psycopg import errors as psycopg_errors
+
+from hajiri.db.models import BiometricTemplate, ConsentRecord, Device, DeviceCommand, DeviceUserMap, PunchEvent, RecomputeQueue
 
 from .jsutil import dt_from_ms, ms_from_dt
 from .punch import NormalizedPunch
@@ -40,6 +46,8 @@ class DeviceRecord:
     push_version: str | None = None
     fw_version: str | None = None
     clock_drift_sec: int | None = None
+    #: The company that owns the terminal (None until HR approves it).
+    company_id: str | None = None
 
 
 TOUCH_FIELDS = ('last_seen_at', 'last_handshake_at', 'push_version', 'fw_version', 'attlog_stamp', 'oplog_stamp',
@@ -193,145 +201,159 @@ class MemoryStore:
             c.status = 'acked' if return_code >= 0 else 'failed'
             c.return_code = return_code
 
-    def list_devices(self, status: str | None = None, protocol: str | None = None) -> list[DeviceRecord]:
-        return [d for d in self.devices.values() if (not status or d.status == status) and (not protocol or d.protocol == protocol)]
+    def list_devices(self, status: str | None = None, protocol: str | None = None,
+                     company_id: str | None = None) -> list[DeviceRecord]:
+        return [d for d in self.devices.values() if (not status or d.status == status)
+                and (not protocol or d.protocol == protocol) and (not company_id or d.company_id == company_id)]
 
     def count_punches(self, device_id: str, local_date: str) -> int:
         return sum(1 for p in self.punches if p.device_id == device_id and p.local_date == local_date)
 
 
-_COLS = 'id, serial_no, vendor, protocol, status, tz_offset_min, attlog_stamp, oplog_stamp, comm_key_hash'
+_COLS = ('id', 'company_id', 'serial_no', 'vendor', 'protocol', 'status', 'tz_offset_min', 'attlog_stamp', 'oplog_stamp',
+         'comm_key_hash')
 
 
 def _rec(r: dict) -> DeviceRecord:
     return DeviceRecord(id=str(r['id']), serial_no=r['serial_no'], vendor=r['vendor'], protocol=r['protocol'],
                         status=r['status'], tz_offset_min=r['tz_offset_min'], attlog_stamp=r['attlog_stamp'],
-                        oplog_stamp=r['oplog_stamp'], comm_key_hash=r['comm_key_hash'])
+                        oplog_stamp=r['oplog_stamp'], comm_key_hash=r['comm_key_hash'],
+                        company_id=str(r['company_id']) if r['company_id'] else None)
+
+
+def _is_unique_violation(e: IntegrityError) -> bool:
+    return isinstance(e.__cause__, psycopg_errors.UniqueViolation)
 
 
 class PostgresStore:
-    """Shares the schema owned by the API, through Django's database connection (one per server thread)."""
+    """Shares the schema owned by the API, through the Django ORM (one connection per server thread).
+
+    Devices belong to a company (device.company_id, set when HR approves the terminal). A punch or template is mapped
+    only to an employee of the device's own company: a PIN mapping that points at another company's employee is
+    ignored, so a terminal of one company of a group can never record attendance for a sister company."""
 
     def __init__(self, max_pending_devices: int | None = None, allow_dangerous_commands: bool = False, using: str = 'default'):
         self.max_pending_devices = max_pending_devices
         self.allow_dangerous_commands = allow_dangerous_commands
         self.using = using
 
-    # Raw SQL with json/jsonb decoding, on the chosen connection.
-    def _rows(self, sql: str, params=()) -> list[dict]:
-        from django.db import connections
-        with connections[self.using].cursor() as cur:
-            cur.execute(sql, params)
-            if cur.description is None:
-                return []
-            names = [c.name for c in cur.description]
-            return [dict(zip(names, r)) for r in cur.fetchall()]
-
-    def _execute(self, sql: str, params=()) -> int:
-        from django.db import connections
-        with connections[self.using].cursor() as cur:
-            cur.execute(sql, params)
-            return cur.rowcount
+    def _qs(self, model):
+        return model.objects.db_manager(self.using).all()
 
     def get_device(self, serial_no: str) -> DeviceRecord | None:
-        r = self._rows(f'SELECT {_COLS} FROM device WHERE serial_no = %s', [serial_no])
-        return _rec(r[0]) if r else None
+        r = self._qs(Device).filter(serial_no=serial_no).values(*_COLS).first()
+        return _rec(r) if r else None
 
     def register_pending(self, serial_no: str, *, vendor: str, protocol: str, push_version: str | None = None):
         existing = self.get_device(serial_no)
         if existing:
             return existing
-        n = self._rows("SELECT count(*)::int AS n FROM device WHERE status = 'pending'")[0]['n']
+        n = self._qs(Device).filter(status=Device.Status.PENDING).count()
         if n >= (self.max_pending_devices or DEFAULT_MAX_PENDING):
             return None
-        r = self._rows(
-            f"""INSERT INTO device (serial_no, vendor, protocol, status, push_version, last_seen_at)
-                VALUES (%s, %s, %s, 'pending', %s, now())
-                ON CONFLICT (serial_no) DO UPDATE SET last_seen_at = now() RETURNING {_COLS}""",
-            [serial_no, vendor, protocol, push_version])
-        return _rec(r[0])
+        try:
+            with transaction.atomic(using=self.using):
+                self._qs(Device).create(serial_no=serial_no, vendor=vendor, protocol=protocol, status=Device.Status.PENDING,
+                                        push_version=push_version, last_seen_at=Now())
+        except IntegrityError as e:
+            if not _is_unique_violation(e):
+                raise
+            # Registered by a concurrent request from the same terminal: only mark it seen.
+            self._qs(Device).filter(serial_no=serial_no).update(last_seen_at=Now())
+        return self.get_device(serial_no)
 
     def touch(self, serial_no: str, *, last_seen_at=None, last_handshake_at=None, push_version=None, fw_version=None,
               attlog_stamp=None, oplog_stamp=None, clock_drift_sec=None) -> None:
-        self._execute(
-            """UPDATE device SET last_seen_at = coalesce(%s::timestamptz, last_seen_at),
-                 last_handshake_at = coalesce(%s::timestamptz, last_handshake_at),
-                 push_version = coalesce(%s::text, push_version), fw_version = coalesce(%s::text, fw_version),
-                 attlog_stamp = coalesce(%s::text, attlog_stamp), oplog_stamp = coalesce(%s::text, oplog_stamp),
-                 clock_drift_sec = coalesce(%s::int, clock_drift_sec)
-               WHERE serial_no = %s""",
-            [last_seen_at, last_handshake_at, push_version, fw_version, attlog_stamp, oplog_stamp, clock_drift_sec, serial_no])
+        patch = {k: v for k, v in dict(
+            last_seen_at=last_seen_at, last_handshake_at=last_handshake_at, push_version=push_version,
+            fw_version=fw_version, attlog_stamp=attlog_stamp, oplog_stamp=oplog_stamp,
+            clock_drift_sec=clock_drift_sec).items() if v is not None}
+        if patch:
+            self._qs(Device).filter(serial_no=serial_no).update(**patch)
 
     def resolve_employee(self, device_id: str, pin: str, local_date: str) -> str | None:
-        r = self._rows('SELECT employee_id FROM device_user_map WHERE device_id = %s AND device_user_pin = %s AND valid @> %s::date',
-                       [device_id, pin, local_date])
-        return str(r[0]['employee_id']) if r else None
+        # Scoped to the device's company: the mapped employee must belong to the company that owns the terminal.
+        emp = (self._qs(DeviceUserMap)
+               .filter(device_id=device_id, device_user_pin=pin, valid__contains=date.fromisoformat(local_date),
+                       employee__company_id=F('device__company_id'))
+               .values_list('employee_id', flat=True).first())
+        return str(emp) if emp else None
 
     def insert_punch(self, p: NormalizedPunch) -> str:
         at = dt_from_ms(p.punched_at_ms)
-        near = self._rows(
-            """SELECT 1 FROM punch_event WHERE device_id = %s AND device_user_pin = %s AND verify_mode = %s
-                 AND punched_at BETWEEN %s::timestamptz - %s::interval AND %s::timestamptz + %s::interval
-                 AND idempotency_key <> %s LIMIT 1""",
-            [p.device_id, p.device_user_pin, p.verify_mode, at, f'{NEAR_DUPLICATE_WINDOW_MS} milliseconds', at,
-             f'{NEAR_DUPLICATE_WINDOW_MS} milliseconds', p.idempotency_key])
+        window = timedelta(milliseconds=NEAR_DUPLICATE_WINDOW_MS)
+        near = (self._qs(PunchEvent)
+                .filter(device_id=p.device_id, device_user_pin=p.device_user_pin, verify_mode=p.verify_mode,
+                        punched_at__range=(at - window, at + window))
+                .exclude(idempotency_key=p.idempotency_key).exists())
         if near:
             return 'near_duplicate'
-        n = self._execute(
-            """INSERT INTO punch_event (device_id, device_sn, vendor, device_user_pin, employee_id, punched_at, device_local_time,
-                 local_date, direction, verify_mode, source, raw, gateway_signature, idempotency_key)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s::jsonb, %s, %s)
-               ON CONFLICT (idempotency_key, punched_at) DO NOTHING""",
-            [p.device_id, p.device_sn, p.vendor, p.device_user_pin, p.employee_id, at, p.device_local_time, p.local_date,
-             p.direction, p.verify_mode, p.source, json.dumps(p.raw, ensure_ascii=False), p.gateway_signature, p.idempotency_key])
-        return 'inserted' if n > 0 else 'duplicate'
+        try:
+            with transaction.atomic(using=self.using):
+                self._qs(PunchEvent).create(
+                    device_id=p.device_id, device_sn=p.device_sn, vendor=p.vendor, device_user_pin=p.device_user_pin,
+                    employee_id=p.employee_id, punched_at=at, device_local_time=p.device_local_time,
+                    local_date=date.fromisoformat(p.local_date), direction=p.direction, verify_mode=p.verify_mode,
+                    source=p.source, raw=p.raw, gateway_signature=p.gateway_signature, idempotency_key=p.idempotency_key)
+        except IntegrityError as e:
+            # The (idempotency_key, punched_at) unique index: the same record was already stored.
+            if not _is_unique_violation(e):
+                raise
+            return 'duplicate'
+        return 'inserted'
 
     def enqueue_recompute(self, employee_id: str, local_date: str, reason: str) -> None:
-        self._execute(
-            """INSERT INTO recompute_queue (employee_id, local_date, reason) VALUES (%s, %s::date, %s)
-               ON CONFLICT (employee_id, local_date) DO UPDATE SET enqueued_at = now(), reason = EXCLUDED.reason""",
-            [employee_id, local_date, reason])
+        self._qs(RecomputeQueue).bulk_create(
+            [RecomputeQueue(employee_id=employee_id, local_date=date.fromisoformat(local_date), reason=reason,
+                            enqueued_at=Now())],
+            update_conflicts=True, unique_fields=['employee', 'local_date'], update_fields=['enqueued_at', 'reason'])
 
     def insert_template(self, t: TemplateRecord) -> None:
-        self._execute(
-            """INSERT INTO biometric_template (employee_id, device_user_pin, modality, vendor_format, ciphertext, key_version,
-                 aad_hash, enrolled_on_device_id, consent_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            [t.employee_id, t.device_user_pin, t.modality, t.vendor_format, t.ciphertext, t.key_version, t.aad_hash,
-             t.device_id, t.consent_id])
+        self._qs(BiometricTemplate).create(
+            employee_id=t.employee_id, device_user_pin=t.device_user_pin, modality=t.modality,
+            vendor_format=t.vendor_format, ciphertext=t.ciphertext, key_version=t.key_version, aad_hash=t.aad_hash,
+            enrolled_on_device_id=t.device_id, consent_id=t.consent_id)
 
     def active_consent_id(self, employee_id: str, modality: str) -> str | None:
-        r = self._rows("""SELECT id FROM consent_record WHERE employee_id = %s AND modality = %s AND revoked_at IS NULL
-                          ORDER BY granted_at DESC LIMIT 1""", [employee_id, modality])
-        return str(r[0]['id']) if r else None
+        cid = (self._qs(ConsentRecord).filter(employee_id=employee_id, modality=modality, revoked_at__isnull=True)
+               .order_by('-granted_at').values_list('id', flat=True).first())
+        return str(cid) if cid else None
 
     def enqueue_command(self, device_id: str, command: str) -> int:
         assert_allowed_command(command, self.allow_dangerous_commands)
-        return int(self._rows('INSERT INTO device_command (device_id, command) VALUES (%s, %s) RETURNING id', [device_id, command])[0]['id'])
+        return int(self._qs(DeviceCommand).create(device_id=device_id, command=command).id)
 
     def pop_queued_commands(self, device_id: str, now: datetime | None = None) -> list[dict]:
         now = now or _now_dt()
-        # Resend policy: sent-but-unacknowledged commands older than the ack timeout go back to the queue once, then fail.
-        self._execute(
-            """UPDATE device_command SET status = CASE WHEN attempts < %s::int THEN 'queued' ELSE 'failed' END
-                WHERE device_id = %s AND status = 'sent' AND sent_at < %s::timestamptz - make_interval(secs => %s::int)""",
-            [COMMAND_MAX_ATTEMPTS, device_id, now, COMMAND_ACK_TIMEOUT_MS // 1000])
-        r = self._rows(
-            """UPDATE device_command SET status = 'sent', sent_at = %s::timestamptz, attempts = attempts + 1
-                WHERE id IN (SELECT id FROM device_command WHERE device_id = %s AND status = 'queued' ORDER BY id FOR UPDATE SKIP LOCKED)
-                RETURNING id, command""", [now, device_id])
-        return [{'id': int(c['id']), 'command': c['command']} for c in sorted(r, key=lambda c: c['id'])]
+        S = DeviceCommand.Status
+        commands = self._qs(DeviceCommand).filter(device_id=device_id)
+        with transaction.atomic(using=self.using):
+            # Resend policy: sent-but-unacknowledged commands older than the ack timeout go back to the queue once, then fail.
+            commands.filter(status=S.SENT, sent_at__lt=now - timedelta(milliseconds=COMMAND_ACK_TIMEOUT_MS)).update(
+                status=Case(When(attempts__lt=COMMAND_MAX_ATTEMPTS, then=Value(S.QUEUED)), default=Value(S.FAILED),
+                            output_field=TextField()))
+            # Two pollers of the same terminal never get the same command twice.
+            queued = list(commands.filter(status=S.QUEUED).order_by('id').select_for_update(skip_locked=True)
+                          .values_list('id', 'command'))
+            if queued:
+                commands.filter(id__in=[i for i, _ in queued]).update(status=S.SENT, sent_at=now,
+                                                                       attempts=F('attempts') + 1)
+        return [{'id': int(i), 'command': c} for i, c in queued]
 
     def ack_command(self, device_id: str, id: int, return_code: int) -> None:
-        self._execute(
-            """UPDATE device_command SET status = CASE WHEN %s::int >= 0 THEN 'acked' ELSE 'failed' END, return_code = %s::int,
-                 acked_at = now() WHERE id = %s AND device_id = %s AND status = 'sent'""",
-            [return_code, return_code, id, device_id])
+        S = DeviceCommand.Status
+        self._qs(DeviceCommand).filter(id=id, device_id=device_id, status=S.SENT).update(
+            status=S.ACKED if return_code >= 0 else S.FAILED, return_code=return_code, acked_at=Now())
 
-    def list_devices(self, status: str | None = None, protocol: str | None = None) -> list[DeviceRecord]:
-        r = self._rows(f"""SELECT {_COLS} FROM device WHERE (%s::text IS NULL OR status = %s) AND (%s::text IS NULL OR protocol = %s)
-                           ORDER BY serial_no""", [status, status, protocol, protocol])
-        return [_rec(x) for x in r]
+    def list_devices(self, status: str | None = None, protocol: str | None = None,
+                     company_id: str | None = None) -> list[DeviceRecord]:
+        """Every device of the deployment, or with `company_id` only that company's (Device.objects.for_company)."""
+        qs = self._qs(Device).for_company(company_id) if company_id else self._qs(Device)
+        if status:
+            qs = qs.filter(status=status)
+        if protocol:
+            qs = qs.filter(protocol=protocol)
+        return [_rec(r) for r in qs.order_by('serial_no').values(*_COLS)]
 
     def count_punches(self, device_id: str, local_date: str) -> int:
-        return self._rows('SELECT count(*)::int AS n FROM punch_event WHERE device_id = %s AND local_date = %s::date',
-                          [device_id, local_date])[0]['n']
+        return self._qs(PunchEvent).filter(device_id=device_id, local_date=date.fromisoformat(local_date)).count()

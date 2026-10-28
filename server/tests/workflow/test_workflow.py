@@ -2,7 +2,7 @@
 import pytest
 
 from hajiri.core import auth
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.workflow import service
 
 from .helpers import api, file_leave, leave_type

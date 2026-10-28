@@ -1,0 +1,9 @@
+<form class="hj-form" data-modal-title="Invite a person" data-modal-size="lg" hx-post="{% url 'group_admin:access_invite' %}" hx-target="this" hx-swap="outerHTML">
+  {% form_errors form %}
+  <p class="hj-help">A new account whose home is the company below. Give them access to other companies afterwards.</p>
+  {% include "group_admin/partials/access_fields.html" %}
+  <div class="hj-form-row">{% form_field form.name %}{% form_field form.email %}</div>
+  {% include "group_admin/partials/roles_fields.html" %}
+  {% form_field form.password %}
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit">Create account</button></div>
+</form>

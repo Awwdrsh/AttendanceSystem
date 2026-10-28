@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Group · Hajiri{% endblock %}
+{% block page_class %}wide{% endblock %}
+{% block content %}
+{% if summary.group_name %}
+  {% page_header summary.group_name subtitle=group_subtitle eyebrow="Group" %}
+    {% if d %}<a class="hj-btn default" href="?refresh=1"><i class="ti ti-refresh" aria-hidden="true"></i>Refresh</a>{% endif %}
+    {% if can_add_company %}<button class="hj-btn" hx-get="{% url 'web:group_company_new' %}" hx-target="#hj-modal-body"><i class="ti ti-building-plus" aria-hidden="true"></i>Add a company</button>{% endif %}
+  {% endpage_header %}
+{% else %}
+  {% page_header "Companies" subtitle="Run several companies from one Hajiri: each keeps its own people, payroll and settings." %}
+    {% if can_add_company %}<button class="hj-btn" hx-get="{% url 'web:group_company_new' %}" hx-target="#hj-modal-body"><i class="ti ti-building-plus" aria-hidden="true"></i>Add a company</button>{% endif %}
+  {% endpage_header %}
+{% endif %}
+
+{% if d %}
+<div class="hj-stack" style="--gap:20px">
+  {% stat_strip stats %}
+
+  {% section "Companies" hint="Today in each company. Joiners, leavers and overtime are for "|add:d.month.label|add:"." %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr>
+      <th>Company</th><th class="right">People</th><th class="right">Joined</th><th class="right">Left</th>
+      <th class="right">In</th><th class="right">Late</th><th class="right">Absent</th><th class="right">On leave</th>
+      <th class="right">Approvals</th><th class="right">Exceptions</th><th class="right">Overtime</th>
+      <th>Latest locked payroll</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for c in d.companies %}
+      <tr>
+        <td><span class="hj-strong">{{ c.name }}</span> <span class="hj-muted mono hj-small">{{ c.code }}</span>{% if c.active %} {% badge "Working here" "accent" %}{% endif %}</td>
+        <td class="right num">{{ c.headcount|num }}</td>
+        <td class="right num">{{ c.joiners|num }}</td>
+        <td class="right num">{{ c.leavers|num }}</td>
+        <td class="right num">{{ c.present|num }}</td>
+        <td class="right num">{{ c.late|num }}</td>
+        <td class="right num">{{ c.absent|num }}</td>
+        <td class="right num">{{ c.onLeave|num }}</td>
+        <td class="right num">{{ c.pendingApprovals|num }}</td>
+        <td class="right num">{{ c.exceptions|num }}</td>
+        <td class="right num">{{ c.ot_hm }}</td>
+        <td>{% if not c.paySeen %}<span class="hj-muted" data-tip="This company does not show pay figures to executives.">Hidden</span>
+            {% elif c.payroll %}{{ c.payroll.bsYear|bs_month:c.payroll.bsMonth }} · <span class="num">{{ c.payroll.cost|npr:0 }}</span>
+              <div class="hj-small hj-muted">Gross {{ c.payroll.gross|npr:0 }}, net {{ c.payroll.net|npr:0 }}, {{ c.payroll.payslips|num }} payslip{{ c.payroll.payslips|pluralize }}</div>
+            {% else %}<span class="hj-muted">No locked run yet</span>{% endif %}</td>
+        <td class="right">{% if not c.active %}{% include "group/partials/open_in.html" with company_id=c.id next="/group" active=False label="Switch" %}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+    <tfoot><tr>
+      <td class="hj-strong">Group</td>
+      <td class="right num">{{ d.totals.headcount|num }}</td><td class="right num">{{ d.totals.joiners|num }}</td>
+      <td class="right num">{{ d.totals.leavers|num }}</td><td class="right num">{{ d.totals.present|num }}</td>
+      <td class="right num">{{ d.totals.late|num }}</td><td class="right num">{{ d.totals.absent|num }}</td>
+      <td class="right num">{{ d.totals.onLeave|num }}</td><td class="right num">{{ d.totals.pendingApprovals|num }}</td>
+      <td class="right num">{{ d.totals.exceptions|num }}</td><td class="right num">{{ d.totals.ot_hm }}</td>
+      <td>{% if d.totals.payrollCost %}<span class="num">{{ d.totals.payrollCost|npr:0 }}</span>{% if d.totals.payHidden %} <span class="hj-small hj-muted">({{ d.totals.payHidden }} hidden)</span>{% endif %}{% else %}<span class="hj-muted">—</span>{% endif %}</td>
+      <td></td>
+    </tr></tfoot>
+  </table></div></div>
+  <p class="hj-help hj-mt-sm">Figures for {{ d.date|bs_date }}. Only companies where you are admin, HR or executive (directly or through a group role) are counted. Payroll cost is gross pay plus employer contributions of the latest locked regular run.</p>
+  {% endsection %}
+
+  <div class="hj-grid" style="--cols:2;--gap:20px">
+    {% if attrition.empty %}
+      {% chart_card "Attrition" subtitle="Leavers as a share of average headcount, by BS month" %}{% empty_state title="No people yet" compact=True %}{% endchart_card %}
+    {% else %}
+      {% chart_card "Attrition" subtitle="Leavers as a share of average headcount, by BS month" legend=attrition.legend table=attrition.table %}{% line_chart attrition.labels attrition.series suffix="%" aria_label="Attrition by month" %}{% endchart_card %}
+    {% endif %}
+
+    {% card "Needs attention" %}
+      {% if d.needsAttention %}
+      <ul class="hj-stack" style="--gap:10px;list-style:none;margin:0;padding:0">
+        {% for a in d.needsAttention %}
+        <li class="hj-row nowrap hj-between" style="gap:12px;align-items:center">
+          <div class="hj-row nowrap" style="gap:10px;min-width:0;align-items:center">
+            <span class="hj-badge hj-tone-{{ a.tone }} sm"><i class="ti ti-{{ a.icon }}" aria-hidden="true"></i></span>
+            <div style="min-width:0"><div class="hj-sm hj-truncate">{{ a.label }}</div><div class="hj-small hj-muted">{{ a.companyName }}</div></div>
+          </div>
+          {% include "group/partials/open_in.html" with company_id=a.companyId next=a.next active=a.active label="Open" %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+        {% empty_state title="Nothing needs attention" hint="Devices are online, payroll has run and no documents or probation reviews are due." icon="circle-check" compact=True %}
+      {% endif %}
+    {% endcard %}
+  </div>
+</div>
+{% elif summary.group_name %}
+  {% alert "info" title="Group figures are for group roles" %}You can see this company's own figures on its pages. Group HR, group executives and group admins see every company of the group here.{% endalert %}
+{% else %}
+  {% empty_state title="This company is not part of a group yet" hint="Add a sister company to manage both from one sign-in. You become its admin, and its defaults are set up for you." icon="building" %}
+{% endif %}
+
+{% if is_admin and pay_policy %}
+  {% section "Pay figures in group views" hint="Executives of "|add:active_company_name|add:" see its payroll cost on the group pages unless you hide it. HR and admins always see it." %}
+    <form class="hj-row hj-gap-sm" style="align-items:center" hx-post="{% url 'group:pay_policy' %}" hx-trigger="change">
+      <label class="hj-check-row"><input type="checkbox" class="hj-switch" name="hide" value="on"{% if pay_policy.hidePayFromExecutives %} checked{% endif %}> Hide pay figures of {{ active_company_name }} from executives</label>
+    </form>
+  {% endsection %}
+{% endif %}
+
+{% if is_group_admin %}
+  {% section "Group roles" hint="People who work in every company of the group: group admins, group HR and group executives." %}
+    <div class="hj-end hj-mb"><button class="hj-btn default sm" hx-get="{% url 'web:group_role_new' %}" hx-target="#hj-modal-body"><i class="ti ti-shield-plus" aria-hidden="true"></i>Give group roles</button></div>
+    {% include "web/partials/group_roles.html" %}
+  {% endsection %}
+{% endif %}
+
+{% if is_admin %}
+  {% section "People from other companies" hint="People of the group who can also work in this company, with the roles they have here." %}
+    <div class="hj-end hj-mb"><button class="hj-btn default sm" hx-get="{% url 'web:group_access_new' %}" hx-target="#hj-modal-body"><i class="ti ti-user-plus" aria-hidden="true"></i>Give access</button></div>
+    {% include "web/partials/group_members.html" %}
+  {% endsection %}
+{% endif %}
+{% endblock %}

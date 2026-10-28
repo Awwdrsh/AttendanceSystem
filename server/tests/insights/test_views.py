@@ -10,7 +10,7 @@ import pytest
 
 from hajiri.core import auth
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from tests.core.fixtures import PW, Login
 from tests.insights.helpers import client_for, engage_world
 from tests.web.factories import htmx, hx_triggers, toasts
@@ -432,7 +432,7 @@ def test_builder_saves_shares_runs_updates_and_deletes_named_reports(p):
     assert gone.status_code == 200 and toasts(gone)[0]['message'] == 'Report deleted'
     assert 'Degrees v2' not in saved_names(hr)
     # The saved row is audited on create and delete.
-    acts = [r['action'] for r in __import__('hajiri.core.db', fromlist=['rows']).rows(
+    acts = [r['action'] for r in __import__('tests.support.sql', fromlist=['rows']).rows(
         "SELECT action FROM audit_log WHERE table_name = 'saved_report' AND row_id = %s ORDER BY id", [mine])]
     assert acts == ['create', 'delete']
 

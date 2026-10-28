@@ -6,17 +6,32 @@ from django.contrib.postgres.fields import ArrayField, DateRangeField
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class HiringApplication(models.Model):
+    class Source(models.TextChoices):
+        CAREERS = 'careers', 'Careers'
+        REFERRAL = 'referral', 'Referral'
+        MANUAL = 'manual', 'Manual'
+        JOB_BOARD = 'job_board', 'Job board'
+        OTHER = 'other', 'Other'
+
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        REJECTED = 'rejected', 'Rejected'
+        WITHDRAWN = 'withdrawn', 'Withdrawn'
+        HIRED = 'hired', 'Hired'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    job = models.ForeignKey('HiringJob', models.DO_NOTHING)
-    candidate = models.ForeignKey('HiringCandidate', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='hiring_applications')
+    job = models.ForeignKey('HiringJob', models.DO_NOTHING, related_name='hiring_applications')
+    candidate = models.ForeignKey('HiringCandidate', models.DO_NOTHING, related_name='hiring_applications')
     stage = models.TextField(db_default='Applied')
     furthest_stage = models.SmallIntegerField(db_default=0)
-    status = models.TextField(db_default='active')
-    source = models.TextField(db_default='careers')
-    cv_file = models.ForeignKey('StoredFile', models.DO_NOTHING, blank=True, null=True)
+    status = models.TextField(choices=Status, db_default='active')
+    source = models.TextField(choices=Source, db_default='careers')
+    cv_file = models.ForeignKey('StoredFile', models.DO_NOTHING, related_name='hiring_applications', blank=True, null=True)
     cover_note = models.TextField(blank=True, null=True)
     answers = models.JSONField(db_default={})
     experience_years = models.DecimalField(max_digits=4, decimal_places=1, blank=True, null=True)
@@ -26,22 +41,28 @@ class HiringApplication(models.Model):
     knocked_out = models.BooleanField(db_default=False)
     rating = models.SmallIntegerField(blank=True, null=True)
     tags = ArrayField(models.TextField(), db_default=[])
-    owner_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, blank=True, null=True)
+    owner_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='hiring_applications_as_owner', blank=True, null=True)
     rejected_reason = models.TextField(blank=True, null=True)
     closed_at = models.DateTimeField(blank=True, null=True)
-    hired_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, blank=True, null=True)
+    hired_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='hiring_applications_as_hired', blank=True, null=True)
     consent_at = models.DateTimeField(blank=True, null=True)
     stage_changed_at = models.DateTimeField(db_default=Now())
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'hiring_application'
         unique_together = (('job', 'candidate'),)
 
+    def __str__(self):
+        return f'HiringApplication {self.id}'
+
 
 class HiringCandidate(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='hiring_candidates')
     name = models.TextField()
     email = models.TextField(blank=True, null=True)
     phone = models.TextField(blank=True, null=True)
@@ -49,53 +70,99 @@ class HiringCandidate(models.Model):
     created_at = models.DateTimeField(db_default=Now())
 
     # A unique constraint could not be introspected.
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'hiring_candidate'
+
+    def __str__(self):
+        return str(self.name)
 
 
 class HiringEvent(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    application = models.ForeignKey(HiringApplication, models.DO_NOTHING)
-    actor = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='hiring_events')
+    application = models.ForeignKey(HiringApplication, models.DO_NOTHING, related_name='hiring_events')
+    actor = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='hiring_events_as_actor', blank=True, null=True)
     kind = models.TextField()
     body = models.TextField(blank=True, null=True)
     data = models.JSONField(db_default={})
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'hiring_event'
 
+    def __str__(self):
+        return f'HiringEvent {self.id}'
+
 
 class HiringInterview(models.Model):
+    class Mode(models.TextChoices):
+        IN_PERSON = 'in_person', 'In person'
+        PHONE = 'phone', 'Phone'
+        VIDEO = 'video', 'Video'
+
+    class Status(models.TextChoices):
+        SCHEDULED = 'scheduled', 'Scheduled'
+        COMPLETED = 'completed', 'Completed'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    application = models.ForeignKey(HiringApplication, models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='hiring_interviews')
+    application = models.ForeignKey(HiringApplication, models.DO_NOTHING, related_name='hiring_interviews')
     title = models.TextField(db_default='Interview')
     starts_at = models.DateTimeField()
     duration_min = models.SmallIntegerField(db_default=45)
-    mode = models.TextField()
+    mode = models.TextField(choices=Mode)
     location = models.TextField(blank=True, null=True)
     panel = ArrayField(models.UUIDField())
-    status = models.TextField(db_default='scheduled')
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    status = models.TextField(choices=Status, db_default='scheduled')
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='hiring_interviews_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'hiring_interview'
 
+    def __str__(self):
+        return str(self.title)
+
 
 class HiringJob(models.Model):
+    class EmploymentType(models.TextChoices):
+        FULL_TIME = 'full_time', 'Full time'
+        PART_TIME = 'part_time', 'Part time'
+        CONTRACT = 'contract', 'Contract'
+        INTERNSHIP = 'internship', 'Internship'
+        TEMPORARY = 'temporary', 'Temporary'
+
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Draft'
+        OPEN = 'open', 'Open'
+        CLOSED = 'closed', 'Closed'
+
+    class WorkMode(models.TextChoices):
+        ONSITE = 'onsite', 'Onsite'
+        REMOTE = 'remote', 'Remote'
+        HYBRID = 'hybrid', 'Hybrid'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    requisition = models.ForeignKey('HiringRequisition', models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='hiring_jobs')
+    requisition = models.ForeignKey('HiringRequisition', models.DO_NOTHING, related_name='hiring_jobs', blank=True, null=True)
     title = models.TextField()
     description = models.TextField(db_default='')
     requirements = models.TextField(db_default='')
     category = models.TextField(blank=True, null=True)
     location = models.TextField(blank=True, null=True)
-    work_mode = models.TextField(db_default='onsite')
-    employment_type = models.TextField(db_default='full_time')
+    work_mode = models.TextField(choices=WorkMode, db_default='onsite')
+    employment_type = models.TextField(choices=EmploymentType, db_default='full_time')
     experience_min = models.DecimalField(max_digits=4, decimal_places=1, blank=True, null=True)
     experience_max = models.DecimalField(max_digits=4, decimal_places=1, blank=True, null=True)
     salary_min = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
@@ -103,76 +170,125 @@ class HiringJob(models.Model):
     show_salary = models.BooleanField(db_default=False)
     openings = models.SmallIntegerField(db_default=1)
     deadline = models.DateField(blank=True, null=True)
-    org_unit = models.ForeignKey('OrgUnit', models.DO_NOTHING, blank=True, null=True)
-    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, blank=True, null=True)
-    hiring_manager = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, blank=True, null=True)
+    org_unit = models.ForeignKey('OrgUnit', models.DO_NOTHING, related_name='hiring_jobs', blank=True, null=True)
+    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, related_name='hiring_jobs', blank=True, null=True)
+    hiring_manager = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='hiring_jobs_as_hiring_manager', blank=True, null=True)
     stages = models.JSONField(db_default=['Applied', 'Screening', 'Interview', 'Offer', 'Hired'])
     questions = models.JSONField(db_default=[])
-    status = models.TextField(db_default='draft')
+    status = models.TextField(choices=Status, db_default='draft')
     published_at = models.DateTimeField(blank=True, null=True)
     closed_at = models.DateTimeField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='hiring_jobs_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'hiring_job'
 
+    def __str__(self):
+        return str(self.title)
+
 
 class HiringOffer(models.Model):
+    class Status(models.TextChoices):
+        PENDING_APPROVAL = 'pending_approval', 'Pending approval'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        ACCEPTED = 'accepted', 'Accepted'
+        DECLINED = 'declined', 'Declined'
+        WITHDRAWN = 'withdrawn', 'Withdrawn'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    application = models.ForeignKey(HiringApplication, models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='hiring_offers')
+    application = models.ForeignKey(HiringApplication, models.DO_NOTHING, related_name='hiring_offers')
     designation = models.TextField()
     salary = models.DecimalField(max_digits=12, decimal_places=2)
     join_date = models.DateField()
     expires_on = models.DateField(blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
-    status = models.TextField(db_default='pending_approval')
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
-    created_by_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, blank=True, null=True)
+    status = models.TextField(choices=Status, db_default='pending_approval')
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='hiring_offers_as_created_by', db_column='created_by', blank=True, null=True)
+    created_by_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='hiring_offers_as_created_by', blank=True, null=True)
     decided_at = models.DateTimeField(blank=True, null=True)
     responded_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'hiring_offer'
 
+    def __str__(self):
+        return f'HiringOffer {self.id}'
+
 
 class HiringRequisition(models.Model):
+    class Kind(models.TextChoices):
+        NEW = 'new', 'New'
+        REPLACEMENT = 'replacement', 'Replacement'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        CANCELLED = 'cancelled', 'Cancelled'
+        FILLED = 'filled', 'Filled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    raised_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='raised_by')
-    raised_by_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='hiring_requisitions')
+    raised_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='hiring_requisitions_as_raised_by', db_column='raised_by')
+    raised_by_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='hiring_requisitions_as_raised_by', blank=True, null=True)
     title = models.TextField()
     designation = models.TextField(blank=True, null=True)
-    org_unit = models.ForeignKey('OrgUnit', models.DO_NOTHING, blank=True, null=True)
-    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, blank=True, null=True)
+    org_unit = models.ForeignKey('OrgUnit', models.DO_NOTHING, related_name='hiring_requisitions', blank=True, null=True)
+    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, related_name='hiring_requisitions', blank=True, null=True)
     headcount = models.SmallIntegerField(db_default=1)
     filled = models.SmallIntegerField(db_default=0)
     salary_min = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
     salary_max = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
-    kind = models.TextField(db_default='new')
-    replacing_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='hiringrequisition_replacing_employee_set', blank=True, null=True)
+    kind = models.TextField(choices=Kind, db_default='new')
+    replacing_employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='hiring_requisitions_as_replacing', blank=True, null=True)
     justification = models.TextField()
-    status = models.TextField(db_default='pending')
+    status = models.TextField(choices=Status, db_default='pending')
     decided_at = models.DateTimeField(blank=True, null=True)
     decision_reason = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'hiring_requisition'
 
+    def __str__(self):
+        return str(self.title)
+
 
 class HiringScorecard(models.Model):
+    class Recommendation(models.TextChoices):
+        STRONG_NO = 'strong_no', 'Strong no'
+        NO = 'no', 'No'
+        YES = 'yes', 'Yes'
+        STRONG_YES = 'strong_yes', 'Strong yes'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    interview = models.ForeignKey(HiringInterview, models.DO_NOTHING)
-    reviewer = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
+    interview = models.ForeignKey(HiringInterview, models.DO_NOTHING, related_name='hiring_scorecards')
+    reviewer = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='hiring_scorecards_as_reviewer')
     ratings = models.JSONField(db_default={})
-    recommendation = models.TextField()
+    recommendation = models.TextField(choices=Recommendation)
     notes = models.TextField(blank=True, null=True)
     submitted_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'interview__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'hiring_scorecard'
         unique_together = (('interview', 'reviewer'),)
+
+    def __str__(self):
+        return f'HiringScorecard {self.id}'

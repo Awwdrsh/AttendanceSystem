@@ -11,7 +11,7 @@ from engines.bs_calendar import bs_month_bounds
 
 from hajiri.attendance.service import recompute_day
 from hajiri.attendance_tools.services import allocate_penalty, assert_clock_in_allowed, penalty_for, penalty_unpaid_days
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.core.errors import ConflictError
 from hajiri.leave.services import ledger_balance, leave_type_by_code
 from tests.punch.api import get, patch, post, put

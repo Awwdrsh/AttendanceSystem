@@ -7,8 +7,8 @@ from tests.web.fixtures import *  # noqa: F401,F403
 @pytest.fixture
 def reg(demo, login_as):
     """The TS beforeAll: HR, Sita (employee) and Ram (manager), with Sita reporting to Ram."""
-    from hajiri.core.db import execute
-    execute('UPDATE employee_assignment SET manager_id = %s WHERE employee_id = %s', [demo['ram'], demo['sita']])
+    from hajiri.db.models import EmployeeAssignment
+    EmployeeAssignment.objects.filter(employee_id=demo['sita']).update(manager_id=demo['ram'])
     return {
         'hr': login_as(['hr']),
         'sita': login_as(['employee'], demo['sita']),

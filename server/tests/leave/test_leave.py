@@ -2,7 +2,7 @@
 import pytest
 
 from hajiri.attendance.service import recompute_day
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.leave.accrual import expire_substitute_leave, run_monthly_accrual
 from hajiri.leave.service import credit_comp_off, ledger_balance
 

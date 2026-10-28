@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pytest
 from django.test import Client
 
-from hajiri.core.db import execute
+from tests.support.sql import execute
 from hajiri.core.errors import BadRequestError, ForbiddenError
 from hajiri.dashboard import services as dash
 from tests.core.punches import insert_punch
@@ -104,3 +104,45 @@ def test_overview_page_for_hr_and_access(demo, hr, emp, login_as):
     assert client_for(emp).get('/overview', **htmx()).status_code == 403
     # The page follows the App.tsx guard (insights: HR and executives); managers use the API data on other pages.
     assert client_for(login_as(['manager'])).get('/overview', **htmx()).status_code == 403
+
+
+def test_home_pending_requests_are_newest_first_capped_at_20_and_balances_sum_own_ledger(demo, emp):
+    from datetime import date, timedelta
+    from decimal import Decimal
+
+    from hajiri.db.models import LeaveLedger, LeaveRequest, LeaveType, OtRequest, RegularisationRequest
+    from hajiri.devices import biometrics as bio
+    sita, ram = demo['sita'], demo['ram']
+    lt = LeaveType.objects.get(company_id=emp.user.company_id, code='HOME')
+    t0 = datetime(2026, 9, 1, 4, 0, tzinfo=timezone.utc)
+    LeaveRequest.objects.create(employee_id=sita, leave_type=lt, from_date=date(2026, 9, 10), to_date=date(2026, 9, 11),
+                                days_requested=2, created_at=t0)
+    RegularisationRequest.objects.create(employee_id=sita, local_date=date(2026, 9, 3), kind='missed_punch', reason='x',
+                                         created_at=t0 + timedelta(hours=1))
+    OtRequest.objects.create(employee_id=sita, local_date=date(2026, 9, 4), requested_min=90, created_at=t0 + timedelta(hours=2))
+    OtRequest.objects.create(employee_id=sita, local_date=date(2026, 9, 5), requested_min=30, status='approved',
+                             created_at=t0 + timedelta(hours=3))
+    OtRequest.objects.create(employee_id=ram, local_date=date(2026, 9, 5), requested_min=30, created_at=t0)
+    r = dash.me(emp.user)
+    assert [(p['kind'], p['detail']) for p in r['pendingRequests']] == [
+        ('ot', '2026-09-04 90 min'), ('regularisation', '2026-09-03 missed_punch'), ('leave', '2026-09-10 to 2026-09-11')]
+    for i in range(25):
+        OtRequest.objects.create(employee_id=sita, local_date=date(2026, 8, 1), requested_min=i + 1,
+                                 created_at=t0 - timedelta(days=i + 1))
+    assert len(dash.me(emp.user)['pendingRequests']) == 20
+
+    # Balances add up the employee's own ledger only, as numeric(8,2) text.
+    before = {b['code']: Decimal(b['balance']) for b in dash.me(emp.user)['leaveBalances']}
+    LeaveLedger.objects.create(employee_id=sita, leave_type=lt, effective_date=date(2026, 9, 1), delta_days=Decimal('1.5'),
+                               reason='adjustment')
+    LeaveLedger.objects.create(employee_id=ram, leave_type=lt, effective_date=date(2026, 9, 1), delta_days=Decimal('9'),
+                               reason='adjustment')
+    after = {b['code']: b['balance'] for b in dash.me(emp.user)['leaveBalances']}
+    assert Decimal(after['HOME']) == before['HOME'] + Decimal('1.5') and after['HOME'].endswith('.50')
+
+    # The DSAR export lists every request, oldest first, with the same columns for every kind.
+    reqs = bio.dsar(emp.user, {'employeeId': sita})['requests']
+    assert [q['kind'] for q in reqs[-4:]] == ['leave', 'regularisation', 'overtime', 'overtime']
+    assert reqs[-4]['from_date'] == '2026-09-10' and reqs[-4]['to_date'] == '2026-09-11'
+    assert reqs[-3]['from_date'] == reqs[-3]['to_date'] == '2026-09-03'
+    assert [q['created_at'] for q in reqs] == sorted(q['created_at'] for q in reqs)

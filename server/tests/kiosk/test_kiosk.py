@@ -7,7 +7,7 @@ import json
 import pytest
 from django.test import Client
 
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.kiosk import tokens
 from tests.punch.api import Res, SELFIE, post, put
 

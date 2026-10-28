@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 
-from hajiri.core.db import execute, one
+from django.db.models import Exists, F, OuterRef, Subquery
+from django.db.models.functions import Coalesce, Lower
+
+from hajiri.db.models import Designation, Employee, EmployeeAssignment
 from hajiri.people import service as people
 
 from .context import DemoContext, DemoEmployee
@@ -52,7 +56,8 @@ def seed_structure(ctx: DemoContext) -> None:
         # Move platform people into the Platform team so the org chart has depth.
         for e in [x for x in ctx.employees if x.org_unit_id == eng['id']
                   and re.search(r'platform|reliability|network|datacenter|backend', x.designation or '', re.I)]:
-            execute('UPDATE employee_assignment SET org_unit_id = %s WHERE employee_id = %s AND valid @> %s::date', [plat['id'], e.id, ctx.today])
+            (EmployeeAssignment.objects.for_company(ctx.company_id).filter(employee_id=e.id, valid__contains=date.fromisoformat(ctx.today))
+             .update(org_unit_id=plat['id']))
     have = {d['name_en'].lower() for d in s['designations']}
     titles = list(dict.fromkeys(e.designation for e in ctx.employees if e.designation))
     n = 0
@@ -65,9 +70,11 @@ def seed_structure(ctx: DemoContext) -> None:
         kit.call('POST /people/structure/designations', people.create_designation, hr.user,
                  {'code': f'D{n:02d}', 'nameEn': t, 'grade': f'G{level}', 'jobLevel': level, 'orgUnitId': org_unit_id})
     # Link employees to their catalogue designation and grade.
-    execute("""UPDATE employee e SET designation_id = d.id, grade = coalesce(e.grade, d.grade)
-                 FROM designation d WHERE d.company_id = e.company_id AND lower(d.name_en) = lower(e.designation) AND e.company_id = %s""",
-            [ctx.company_id])
+    same_title = (Designation.objects.filter(company_id=OuterRef('company_id')).alias(lname=Lower('name_en'))
+                  .filter(lname=Lower(OuterRef('designation'))))
+    (Employee.objects.for_company(ctx.company_id).filter(Exists(same_title))
+     .update(designation_ref_id=Subquery(same_title.values('id')[:1]),
+             grade=Coalesce(F('grade'), Subquery(same_title.values('grade')[:1]))))
 
 
 def _gpa(i: int) -> str:
@@ -144,11 +151,12 @@ def seed_profiles(ctx: DemoContext) -> None:
     for i, e in enumerate(ctx.employees):
         p = profile_for(e, i, ctx.today)
         # PAN and bank details already on file (payroll may use them) are left as they are.
-        has = one('SELECT pan_enc IS NOT NULL AS pan, bank_account_enc IS NOT NULL AS bank FROM employee WHERE id = %s', [e.id])
-        if has and has['pan']:
+        pan, bank = (Employee.objects.for_company(ctx.company_id).filter(pk=e.id)
+                     .values_list('pan_enc', 'bank_account_enc').first() or (None, None))
+        if pan is not None:
             p['ids'].pop('pan', None)
         for section in ('personal', 'contact', 'emergency', 'family', 'education', 'experience', 'skills', 'ids', 'bank'):
-            if section == 'bank' and has and has['bank']:
+            if section == 'bank' and bank is not None:
                 continue
             ctx.kit.call(f'PUT /people/{e.id}/profile/{section}', people.save_section, ctx.hr.user, e.id, section, p[section])
 

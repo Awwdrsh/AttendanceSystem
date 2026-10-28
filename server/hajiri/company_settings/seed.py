@@ -6,11 +6,10 @@ what is missing and never changes what HR edited.
 """
 from __future__ import annotations
 
-import json
-
 from django.db import transaction
 
-from hajiri.core.db import execute, one
+from hajiri.core.settings_store import add_setting_if_missing
+from hajiri.db.models import Company, LeaveType, WorkflowDefinition
 from hajiri.worker.registry import seeders
 
 # code, name_en, name_ne, paid, statutory, basis, accrual_days, per_worked_days, max_balance, carry, encashable,
@@ -64,30 +63,30 @@ SETTINGS = (
 )
 
 
+_LEAVE_FIELDS = ('code', 'name_en', 'name_ne', 'paid', 'statutory', 'accrual_basis', 'accrual_days', 'accrual_per_worked_days',
+                 'max_balance', 'carry_forward', 'encashable', 'certificate_after_days', 'allow_half_day', 'gender_scope',
+                 'sandwich_rule', 'expiry_days')
+# Event-based statutory leave: paid days per event (maternity 60 of 98, maternity-care 15, mourning 13), not a balance.
+EVENT_DAYS = {'MATERNITY': 60, 'PATERNITY': 15, 'MOURNING': 13}
+# Home and sick leave can be taken by the hour from the start (HR can switch it off; re-seeding never turns it back on).
+HOURLY = ('HOME', 'SICK')
+
+
 @transaction.atomic
 def seed_defaults(company_id: str) -> dict[str, int]:
     n = 0
     for i, t in enumerate(LEAVE_TYPES):
-        r = one("""INSERT INTO leave_type (company_id, code, name_en, name_ne, paid, statutory, accrual_basis, accrual_days,
-                     accrual_per_worked_days, max_balance, carry_forward, encashable, certificate_after_days, allow_half_day,
-                     gender_scope, sandwich_rule, expiry_days, sort_order)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (company_id, code) DO NOTHING RETURNING id""", [company_id, *t, i])
-        # Home and sick leave can be taken by the hour from the start (HR can switch it off; re-seeding never turns it back on).
-        if r and t[0] in ('HOME', 'SICK'):
-            execute('UPDATE leave_type SET allow_hourly = true WHERE id = %s', [r['id']])
-        n += 1 if r else 0
-    # Event-based statutory leave: paid days per event (maternity 60 of 98, maternity-care 15, mourning 13), not a balance.
-    execute("""UPDATE leave_type SET event_days = v.days FROM (VALUES ('MATERNITY', 60), ('PATERNITY', 15), ('MOURNING', 13)) AS v(code, days)
-                WHERE leave_type.company_id = %s AND leave_type.code = v.code AND leave_type.event_days IS NULL""", [company_id])
-    w = 0
-    for object_type, steps in WORKFLOWS:
-        w += execute("""INSERT INTO workflow_definition (company_id, object_type, steps) VALUES (%s, %s, %s)
-                        ON CONFLICT (company_id, object_type) DO NOTHING""", [company_id, object_type, json.dumps(steps)])
-    s = 0
-    for key, value in SETTINGS:
-        s += execute('INSERT INTO company_setting (company_id, key, value) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING',
-                     [company_id, key, json.dumps(value)])
+        row = dict(zip(_LEAVE_FIELDS, t))
+        _, created = LeaveType.objects.get_or_create(
+            company_id=company_id, code=row.pop('code'),
+            defaults={**row, 'sort_order': i, 'allow_hourly': t[0] in HOURLY})
+        n += created
+    for code, days in EVENT_DAYS.items():
+        LeaveType.objects.for_company(company_id).filter(code=code, event_days__isnull=True).update(event_days=days)
+    w = sum(WorkflowDefinition.objects.get_or_create(company_id=company_id, object_type=object_type,
+                                                     defaults={'steps': steps})[1]
+            for object_type, steps in WORKFLOWS)
+    s = sum(add_setting_if_missing(company_id, key, value) for key, value in SETTINGS)
     out = {'leaveTypes': n, 'workflows': w, 'settings': s}
     for seeder in seeders():
         out.update(seeder.fn(str(company_id)) or {})
@@ -97,8 +96,7 @@ def seed_defaults(company_id: str) -> dict[str, int]:
 @transaction.atomic
 def create_company(code: str, name_en: str, name_ne: str | None = None, *, seed: bool = True) -> dict:
     """A new company with its defaults seeded, as `create-company` in the CLI."""
-    c = one('INSERT INTO company (code, name_en, name_ne) VALUES (%s, %s, %s) RETURNING id, code, name_en, name_ne',
-            [code.strip(), name_en.strip(), name_ne])
-    c['id'] = str(c['id'])
-    c['seeded'] = seed_defaults(c['id']) if seed else {}
-    return c
+    c = Company.objects.create(code=code.strip(), name_en=name_en.strip(), name_ne=name_ne)
+    out = {'id': str(c.pk), 'code': c.code, 'name_en': c.name_en, 'name_ne': c.name_ne}
+    out['seeded'] = seed_defaults(out['id']) if seed else {}
+    return out

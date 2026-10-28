@@ -1,4 +1,4 @@
-"""Print the Django stack's URL map as Markdown (the counterpart of docs/api.md for the TS API).
+"""Print the URL map as Markdown: the JSON endpoints, the gateway's routes and, with --all, every page.
 
     server/.venv/bin/python scripts/django_routes.py [--all]
 

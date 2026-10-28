@@ -1,6 +1,12 @@
 """Django views for the device gateway process. Each view turns the request into a GwRequest, runs the Gateway logic
 and answers in plain text (JSON only for /health), exactly as the TS gateway did. Served by config.gateway_urls with
-no middleware (see hajiri.gateway.wsgi), so there is no CSRF, session or HTML error page on the device VLAN."""
+no middleware (see hajiri.gateway.wsgi), so there is no CSRF, session or HTML error page on the device VLAN.
+
+These are deliberately plain Django views, not DRF: terminals speak the vendors' line protocols (ADMS "OK: n",
+"C:id:CMD" lines, Hikvision multipart), not JSON, and authenticate by serial number and per-device key rather than by
+a person's session, so DRF's negotiation, renderers and authentication would only get in the way of byte-exact
+replies. Which company a device belongs to comes from the device row (device.company_id); the store maps PINs only to
+that company's employees."""
 from __future__ import annotations
 
 import codecs

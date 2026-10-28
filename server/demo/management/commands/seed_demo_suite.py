@@ -1,7 +1,7 @@
 """`manage.py seed_demo_suite --database <url> --yes [--company DEMO] [--only a,b]` (port of the TS CLI's seed-demo-suite).
 
 Sample data for every HR module. The target must be named on the command line and must not be the live database (the
-DATABASE_URL in the environment, server/.env or apps/api/.env): a mistyped command can never fill production with demo
+DATABASE_URL in the environment or server/.env): a mistyped command can never fill production with demo
 people.
 """
 from __future__ import annotations
@@ -16,12 +16,12 @@ from django.db import connections
 from dotenv import dotenv_values
 
 NEED_TARGET = 'seed_demo_suite adds sample people data. Name the demo database with --database <url> and add --yes to confirm.'
-REFUSE_LIVE = 'refusing to add demo data to the live database (the DATABASE_URL in server/.env, apps/api/.env or the environment)'
+REFUSE_LIVE = 'refusing to add demo data to the live database (the DATABASE_URL in server/.env or the environment)'
 
 
 def live_env_files() -> list[Path]:
     base = Path(settings.BASE_DIR)
-    return [base / '.env', base.parent / 'apps' / 'api' / '.env']
+    return [base / '.env']
 
 
 def live_database_urls(environ: dict | None = None, files: list[Path] | None = None) -> list[str]:
@@ -79,6 +79,21 @@ def use_database(url: str) -> None:
         cur[k] = target[k]
 
 
+def use_demo_database(o: dict, need_target: str) -> None:
+    """The safety rules of every demo seeder: the target is named with --database and confirmed with --yes, it is
+    not the live database, and Django's connection is pointed at it before anything is read or written."""
+    target = o.get('database')
+    if not target or not o.get('yes'):
+        raise CommandError(need_target)
+    if is_live(target, live_database_urls()):
+        raise CommandError(REFUSE_LIVE)
+    use_database(target)
+
+
+def split_sections(value: str | None) -> list[str] | None:
+    return [s.strip() for s in (value or '').split(',') if s.strip()] or None
+
+
 class Command(BaseCommand):
     help = 'Fill every HR module of a demo database with realistic sample data (never the live database).'
 
@@ -89,14 +104,9 @@ class Command(BaseCommand):
         parser.add_argument('--only', help='comma-separated sections')
 
     def handle(self, *args, **o):
-        target = o.get('database')
-        if not target or not o.get('yes'):
-            raise CommandError(NEED_TARGET)
-        if is_live(target, live_database_urls()):
-            raise CommandError(REFUSE_LIVE)
-        use_database(target)
+        use_demo_database(o, NEED_TARGET)
         from demo.suite import seed_demo_suite
-        only = [s.strip() for s in (o.get('only') or '').split(',') if s.strip()] or None
+        only = split_sections(o.get('only'))
         try:
             out = seed_demo_suite(company=o.get('company') or 'DEMO', only=only, log=lambda m: self.stdout.write(m))
         except RuntimeError as e:

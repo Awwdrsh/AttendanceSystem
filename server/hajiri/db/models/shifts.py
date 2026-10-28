@@ -6,6 +6,8 @@ from django.contrib.postgres.fields import ArrayField, DateRangeField
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class BsCalendar(models.Model):
     pk = models.CompositePrimaryKey('bs_year', 'bs_month', 'bs_day')
@@ -18,31 +20,50 @@ class BsCalendar(models.Model):
     class Meta:
         db_table = 'bs_calendar'
 
+    def __str__(self):
+        return f'BsCalendar {self.pk}'
+
 
 class Holiday(models.Model):
+    class GenderScope(models.TextChoices):
+        ALL = 'all', 'All'
+        FEMALE = 'female', 'Female'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='holidays')
+    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, related_name='holidays', blank=True, null=True)
     local_date = models.DateField()
     bs_date = models.TextField(blank=True, null=True)
     name_en = models.TextField()
     name_ne = models.TextField(blank=True, null=True)
-    gender_scope = models.TextField(db_default='all')
+    gender_scope = models.TextField(choices=GenderScope, db_default='all')
     optional = models.BooleanField(db_default=False)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'holiday'
         unique_together = (('company', 'branch', 'local_date', 'name_en'),)
 
+    def __str__(self):
+        return str(self.name_en)
+
 
 class Roster(models.Model):
     pk = models.CompositePrimaryKey('employee_id', 'local_date')
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='rosters')
     local_date = models.DateField()
-    shift = models.ForeignKey('Shift', models.DO_NOTHING, blank=True, null=True)
+    shift = models.ForeignKey('Shift', models.DO_NOTHING, related_name='rosters', blank=True, null=True)
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'roster'
+
+    def __str__(self):
+        return f'Roster {self.pk}'
 
 
 class RuleVersion(models.Model):
@@ -56,18 +77,34 @@ class RuleVersion(models.Model):
     value = models.JSONField()
     source_url = models.TextField(blank=True, null=True)
     note = models.TextField(blank=True, null=True)
-    approved_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='approved_by', blank=True, null=True)
+    approved_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='rule_versions_as_approved_by', db_column='approved_by', blank=True, null=True)
     approved_at = models.DateTimeField(blank=True, null=True)
-    supersedes = models.ForeignKey('self', models.DO_NOTHING, blank=True, null=True)
+    supersedes = models.ForeignKey('self', models.DO_NOTHING, related_name='rule_versions_as_supersedes', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'approved_by__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'rule_version'
 
+    def __str__(self):
+        return f'RuleVersion {self.id}'
+
 
 class Shift(models.Model):
+    class PairingMode(models.TextChoices):
+        ALTERNATING = 'alternating', 'Alternating'
+        STRICT_LOG_TYPE = 'strict_log_type', 'Strict log type'
+        FIRST_LAST = 'first_last', 'First last'
+
+    class RoundingDirection(models.TextChoices):
+        NEAREST = 'nearest', 'Nearest'
+        DOWN = 'down', 'Down'
+        UP = 'up', 'Up'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='shifts')
     code = models.TextField()
     name_en = models.TextField()
     name_ne = models.TextField(blank=True, null=True)
@@ -80,40 +117,66 @@ class Shift(models.Model):
     break_minutes = models.SmallIntegerField(db_default=0)
     half_day_threshold_min = models.SmallIntegerField(db_default=240)
     absent_threshold_min = models.SmallIntegerField(db_default=120)
-    pairing_mode = models.TextField(db_default='alternating')
+    pairing_mode = models.TextField(choices=PairingMode, db_default='alternating')
     rounding_min = models.SmallIntegerField(db_default=0)
-    rounding_direction = models.TextField(db_default='nearest')
+    rounding_direction = models.TextField(choices=RoundingDirection, db_default='nearest')
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'shift'
         unique_together = (('company', 'code'),)
 
+    def __str__(self):
+        return str(self.name_en)
+
 
 class ShiftAssignment(models.Model):
     pk = models.CompositePrimaryKey('employee_id', 'valid')
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    shift = models.ForeignKey(Shift, models.DO_NOTHING)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='shift_assignments')
+    shift = models.ForeignKey(Shift, models.DO_NOTHING, related_name='shift_assignments')
     valid = DateRangeField()
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'shift_assignment'
 
+    def __str__(self):
+        return f'ShiftAssignment {self.pk}'
+
 
 class ShiftSwap(models.Model):
+    class Status(models.TextChoices):
+        AWAITING_COLLEAGUE = 'awaiting_colleague', 'Awaiting colleague'
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        DECLINED = 'declined', 'Declined'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    requester = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    colleague = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='shiftswap_colleague_set')
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='shift_swaps')
+    requester = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='shift_swaps_as_requester')
+    colleague = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='shift_swaps_as_colleague')
     local_date = models.DateField()
-    requester_shift = models.ForeignKey(Shift, models.DO_NOTHING, blank=True, null=True)
-    colleague_shift = models.ForeignKey(Shift, models.DO_NOTHING, related_name='shiftswap_colleague_shift_set', blank=True, null=True)
+    requester_shift = models.ForeignKey(Shift, models.DO_NOTHING, related_name='shift_swaps_as_requester_shift', blank=True, null=True)
+    colleague_shift = models.ForeignKey(Shift, models.DO_NOTHING, related_name='shift_swaps_as_colleague_shift', blank=True, null=True)
     reason = models.TextField(blank=True, null=True)
-    status = models.TextField(db_default='awaiting_colleague')
+    status = models.TextField(choices=Status, db_default='awaiting_colleague')
     colleague_note = models.TextField(blank=True, null=True)
     workflow_instance_id = models.UUIDField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     decided_at = models.DateTimeField(blank=True, null=True)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'shift_swap'
         unique_together = (('requester', 'local_date'),)
+
+    def __str__(self):
+        return f'ShiftSwap {self.id}'

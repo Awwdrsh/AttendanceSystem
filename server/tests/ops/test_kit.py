@@ -2,7 +2,8 @@
 import re
 from datetime import datetime, timezone
 
-from demo.kit import ApiError, add_days_iso, base36, iso_z, js_day, make_pdf, npt_instant, pick, week_start
+from demo.kit import ApiError, add_days_iso, base36, make_pdf, npt_instant, pick, week_start
+from demo.work import is_workday
 
 
 def test_make_pdf_is_a_valid_one_page_pdf():
@@ -27,12 +28,13 @@ def test_make_pdf_is_a_valid_one_page_pdf():
 def test_dates_follow_the_ts_helpers():
     assert add_days_iso('2026-10-26', 7) == '2026-11-02'
     assert add_days_iso('2026-03-01', -1) == '2026-02-28'
-    assert js_day('2026-10-25') == 0 and js_day('2026-10-31') == 6
+    assert is_workday('2026-10-25') and not is_workday('2026-10-31')   # Saturday is the weekly off
     assert week_start('2026-10-26') == '2026-10-25'      # Monday -> the Sunday before
     assert week_start('2026-10-25') == '2026-10-25'      # Sunday stays
     assert week_start('2026-10-31') == '2026-10-25'      # Saturday
-    assert iso_z(npt_instant('2026-10-26', '15:00')) == '2026-10-26T09:15:00.000Z'
-    assert iso_z(datetime(2026, 1, 2, 3, 4, 5, 678900, tzinfo=timezone.utc)) == '2026-01-02T03:04:05.678Z'
+    at = npt_instant('2026-10-26', '15:00')
+    assert at.isoformat() == '2026-10-26T15:00:00+05:45'
+    assert at.astimezone(timezone.utc) == datetime(2026, 10, 26, 9, 15, tzinfo=timezone.utc)
 
 
 def test_pick_and_base36_match_javascript():

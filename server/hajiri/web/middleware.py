@@ -192,6 +192,27 @@ def _unknown_page(request) -> bool:
     return True
 
 
+class ApiCorsMiddleware:
+    """CORS for the JSON API under /api/: origins listed in CORS_ORIGINS may call it with credentials (the TS corsOrigins
+    option). A preflight from an allowed origin is answered here with 204."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if not request.path_info.startswith('/api/'):
+            return self.get_response(request)
+        from hajiri.core.cors import cors_headers, cors_origins
+        allowed = cors_origins()
+        origin = request.headers.get('Origin')
+        if not (allowed and origin and origin in allowed):
+            return self.get_response(request)
+        response = HttpResponse(status=204) if request.method == 'OPTIONS' else self.get_response(request)
+        for k, v in cors_headers(origin).items():
+            response[k] = v
+        return response
+
+
 class HttpErrorMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response

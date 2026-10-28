@@ -4,7 +4,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 
 from hajiri.careers import services as careers
-from hajiri.core.db import one, rows
+from tests.support.sql import one, rows
 from hajiri.hiring import services as hiring
 from tests.hiring.world import QUESTIONS, World, future
 from tests.web.factories import htmx, make_company, make_user, set_features_off
@@ -57,7 +57,7 @@ def test_single_company_install_needs_no_code_and_hides_salary_unless_shown():
 
 def test_deadline_passed_closes_the_job_to_applicants():
     co, hr, jid = _open_job()
-    from hajiri.core.db import execute
+    from tests.support.sql import execute
     execute("UPDATE hiring_job SET deadline = (now() AT TIME ZONE 'Asia/Kathmandu')::date - 5 WHERE id = %s", [jid])
     assert Client().get(f'/api/v1/public/careers/jobs/{jid}').status_code == 404
     assert Client().get('/api/v1/public/careers/jobs').json()['jobs'] == []

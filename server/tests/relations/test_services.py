@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError, ValidationError
 from hajiri.relations import services as S
 from tests.web.factories import make_user

@@ -5,104 +5,158 @@ Foreign keys use DO_NOTHING: the database enforces ON DELETE (cascade, set null 
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class ApprovalAction(models.Model):
+    class Decision(models.TextChoices):
+        APPROVE = 'approve', 'Approve'
+        REJECT = 'reject', 'Reject'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    instance = models.ForeignKey('WorkflowInstance', models.DO_NOTHING)
+    instance = models.ForeignKey('WorkflowInstance', models.DO_NOTHING, related_name='approval_actions')
     step = models.IntegerField()
-    actor = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
-    decision = models.TextField()
+    actor = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='approval_actions_as_actor')
+    decision = models.TextField(choices=Decision)
     reason = models.TextField(blank=True, null=True)
-    on_behalf_of = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='on_behalf_of', related_name='approvalaction_on_behalf_of_set', blank=True, null=True)
+    on_behalf_of = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='approval_actions_as_on_behalf_of', db_column='on_behalf_of', blank=True, null=True)
     signature = models.TextField(blank=True, null=True)
     acted_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'actor__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'approval_action'
 
+    def __str__(self):
+        return f'ApprovalAction {self.id}'
+
 
 class ApprovalFlow(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('Company', models.DO_NOTHING)
+    company = models.ForeignKey('Company', models.DO_NOTHING, related_name='approval_flows')
     object_type = models.TextField()
     name = models.TextField()
     conditions = models.JSONField(db_default={})
     steps = models.JSONField()
     priority = models.IntegerField(db_default=0)
     active = models.BooleanField(db_default=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='approval_flows_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'approval_flow'
 
+    def __str__(self):
+        return str(self.name)
+
 
 class ApproverDelegate(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('Company', models.DO_NOTHING)
-    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
-    delegate = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='approverdelegate_delegate_set')
+    company = models.ForeignKey('Company', models.DO_NOTHING, related_name='approver_delegates')
+    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='approver_delegates')
+    delegate = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='approver_delegates_as_delegate')
     from_date = models.DateField()
     to_date = models.DateField()
     note = models.TextField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', related_name='approverdelegate_created_by_set', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='approver_delegates_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     cancelled_at = models.DateTimeField(blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'approver_delegate'
 
+    def __str__(self):
+        return f'ApproverDelegate {self.id}'
+
 
 class UserGroup(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='user_groups')
     name = models.TextField()
     description = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'user_group'
         unique_together = (('company', 'name'),)
 
+    def __str__(self):
+        return str(self.name)
+
 
 class UserGroupMember(models.Model):
     pk = models.CompositePrimaryKey('group_id', 'user_id')
-    group = models.ForeignKey(UserGroup, models.DO_NOTHING)
-    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
+    group = models.ForeignKey(UserGroup, models.DO_NOTHING, related_name='user_group_members')
+    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='user_group_members')
+
+    company_scope = 'group__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'user_group_member'
 
+    def __str__(self):
+        return f'UserGroupMember {self.pk}'
+
 
 class WorkflowDefinition(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='workflow_definitions')
     object_type = models.TextField()
     steps = models.JSONField()
     sla_hours = models.IntegerField(db_default=24)
     escalation_hours = models.IntegerField(db_default=48)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'workflow_definition'
         unique_together = (('company', 'object_type'),)
 
+    def __str__(self):
+        return f'WorkflowDefinition {self.id}'
+
 
 class WorkflowInstance(models.Model):
+    class State(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='workflow_instances')
     object_type = models.TextField()
     object_id = models.UUIDField()
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, blank=True, null=True)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='workflow_instances', blank=True, null=True)
     steps = models.JSONField()
     current_step = models.IntegerField(db_default=0)
-    state = models.TextField(db_default='pending')
+    state = models.TextField(choices=State, db_default='pending')
     created_at = models.DateTimeField(db_default=Now())
     completed_at = models.DateTimeField(blank=True, null=True)
     routing = models.JSONField(db_default=[])
     amount = models.DecimalField(max_digits=14, decimal_places=2, blank=True, null=True)
     flow_id = models.UUIDField(blank=True, null=True)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'workflow_instance'
         unique_together = (('object_type', 'object_id'),)
+
+    def __str__(self):
+        return f'WorkflowInstance {self.id}'

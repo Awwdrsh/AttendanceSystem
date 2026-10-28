@@ -9,7 +9,7 @@ from django.db import transaction
 from django.test import Client
 
 from hajiri.core.crypto import field_cipher
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 
 P = '/api/v1/payroll'
 

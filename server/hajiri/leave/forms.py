@@ -1,98 +1,186 @@
 """
-Form posts turned into the TS request bodies the services validate (hajiri.core.schema mirrors the zod schemas, so the
-same limits and messages apply to the pages and the JSON API).
+Page forms of the leave app. A form reads the HTML post (switches, number inputs, empty selects) and gives the service
+its TS-shaped body; the rules themselves (lengths, ranges, choices) live once in serializers.py and are checked by the
+service, so a page post and a JSON call are refused with the same messages. A value the form cannot even read (text in
+a number field) is reported in the same issue shape.
 """
 from __future__ import annotations
 
+import copy
+
+from django import forms
+
 from hajiri.core.errors import ValidationError
 
-
-def _num(v: str, path: str):
-    try:
-        f = float(v)
-    except ValueError:
-        raise ValidationError([{'path': path, 'message': 'Expected number, received string'}])
-    return int(f) if f.is_integer() else f
+SWITCH_ON = ('on', 'true', '1')
 
 
-def _on(post, key: str) -> bool:
-    return post.get(key) in ('on', 'true', '1')
+def form_issues(form: forms.Form, names: dict[str, str] | None = None) -> ValidationError:
+    """ValidationError with the form's errors as TS issues; `names` maps form fields to body keys."""
+    names = names or {}
+    return ValidationError([{'path': names.get(f, f) if f != '__all__' else '', 'message': str(m)}
+                            for f, msgs in form.errors.items() for m in msgs])
 
 
-def apply_body(post, employee_id: str) -> dict:
-    """LeaveApplyForm: type, dates, half day or hours, reason and attachment reference."""
-    b: dict = {'employeeId': employee_id, 'leaveTypeId': post.get('leave_type_id') or '', 'from': post.get('from') or '',
-               'to': post.get('to') or post.get('from') or ''}
-    hourly = _on(post, 'hourly') and b['from'] == b['to']
-    if _on(post, 'half') and not hourly:
-        b['halfDay'] = post.get('half_which') or 'first_half'
-    if hourly:
-        b['fromTime'] = post.get('from_time') or ''
-        b['toTime'] = post.get('to_time') or ''
-    if (post.get('reason') or '').strip():
-        b['reason'] = post['reason']
-    if (post.get('attachment') or '').strip():
-        b['attachmentKey'] = post['attachment']
-    if _on(post, 'override'):
-        b['override'] = True
-    return b
+class SwitchField(forms.Field):
+    """A checkbox or switch: on only for 'on', 'true' or '1' (the raw value is read, not CheckboxInput's guess)."""
+    widget = forms.HiddenInput
+
+    def to_python(self, value):
+        return value in SWITCH_ON
 
 
-def preview_query(get) -> dict | None:
-    """The preview's query, or None while the form is incomplete (no type, no dates, to before from, bad hours)."""
-    t, frm, to = get.get('leave_type_id'), get.get('from'), get.get('to') or get.get('from')
-    if not t or not frm or not to or to < frm:
-        return None
-    q = {'leaveTypeId': t, 'from': frm, 'to': to}
-    if get.get('employee_id'):
-        q['employeeId'] = get['employee_id']
-    hourly = _on(get, 'hourly') and frm == to
-    if hourly:
-        ft, tt = get.get('from_time') or '', get.get('to_time') or ''
-        if not (ft < tt):
+class NumberField(forms.Field):
+    """A number input: '' is None, an integral value an int (the TS page sent Number(value))."""
+
+    def to_python(self, value):
+        value = (value or '').strip()
+        if value == '':
             return None
-        q.update({'fromTime': ft, 'toTime': tt})
-    elif _on(get, 'half'):
-        q['halfDay'] = get.get('half_which') or 'first_half'
-    return q
+        try:
+            f = float(value)
+        except ValueError:
+            raise forms.ValidationError('Expected number, received string') from None
+        return int(f) if f.is_integer() else f
 
 
-def adjust_body(post) -> dict:
+def _text() -> forms.CharField:
+    return forms.CharField(required=False, strip=False)
+
+
+class _Form(forms.Form):
+    """Always bound to a post (or a query string) and raises instead of re-rendering."""
+    body_names: dict[str, str] = {}
+    extra_fields: dict[str, forms.Field] = {}     # names that cannot be class attributes ('from', camelCase keys)
+
+    def __init__(self, data, *args, **kw):
+        super().__init__(data, *args, **kw)
+        for name, field in self.extra_fields.items():
+            self.fields[name] = copy.deepcopy(field)
+
+    def cleaned(self) -> dict:
+        if not self.is_valid():
+            raise form_issues(self, self.body_names)
+        return self.cleaned_data
+
+
+class ApplyForm(_Form):
+    """LeaveApplyForm: type, dates, half day or hours, reason and attachment reference."""
+    leave_type_id = _text()
+    to = _text()
+    half = SwitchField(required=False)
+    half_which = _text()
+    hourly = SwitchField(required=False)
+    from_time = _text()
+    to_time = _text()
+    reason = _text()
+    attachment = _text()
+    override = SwitchField(required=False)
+    extra_fields = {'from': _text()}
+
+    def body(self, employee_id: str) -> dict:
+        d = self.cleaned()
+        b: dict = {'employeeId': employee_id, 'leaveTypeId': d['leave_type_id'], 'from': d['from'],
+                   'to': d['to'] or d['from']}
+        hourly = d['hourly'] and b['from'] == b['to']
+        if d['half'] and not hourly:
+            b['halfDay'] = d['half_which'] or 'first_half'
+        if hourly:
+            b['fromTime'] = d['from_time']
+            b['toTime'] = d['to_time']
+        if d['reason'].strip():
+            b['reason'] = d['reason']
+        if d['attachment'].strip():
+            b['attachmentKey'] = d['attachment']
+        if d['override']:
+            b['override'] = True
+        return b
+
+
+class PreviewForm(_Form):
+    """The preview's query string; query() is None while the form is incomplete (no type, no dates, to before from,
+    bad hours)."""
+    leave_type_id = _text()
+    to = _text()
+    employee_id = _text()
+    half = SwitchField(required=False)
+    half_which = _text()
+    hourly = SwitchField(required=False)
+    from_time = _text()
+    to_time = _text()
+    extra_fields = {'from': _text()}
+
+    def query(self) -> dict | None:
+        d = self.cleaned()
+        t, frm, to = d['leave_type_id'], d['from'], d['to'] or d['from']
+        if not t or not frm or not to or to < frm:
+            return None
+        q = {'leaveTypeId': t, 'from': frm, 'to': to}
+        if d['employee_id']:
+            q['employeeId'] = d['employee_id']
+        if d['hourly'] and frm == to:
+            ft, tt = d['from_time'], d['to_time']
+            if not (ft < tt):
+                return None
+            q.update({'fromTime': ft, 'toTime': tt})
+        elif d['half']:
+            q['halfDay'] = d['half_which'] or 'first_half'
+        return q
+
+
+class AdjustForm(_Form):
     """LeaveAdjustPage: employee, type, days, kind, effective date and reason."""
-    b: dict = {'employeeId': post.get('employee_id') or '', 'leaveTypeId': post.get('leave_type_id') or '',
-               'reason': (post.get('reason') or ''), 'kind': post.get('kind') or 'adjustment'}
-    b['deltaDays'] = _num(post.get('delta_days') or '0', 'deltaDays')
-    if post.get('effective_date'):
-        b['effectiveDate'] = post['effective_date']
-    return b
+    employee_id = _text()
+    leave_type_id = _text()
+    delta_days = NumberField(required=False)
+    kind = _text()
+    effective_date = _text()
+    reason = _text()
+    body_names = {'delta_days': 'deltaDays'}
+
+    def body(self) -> dict:
+        d = self.cleaned()
+        b: dict = {'employeeId': d['employee_id'], 'leaveTypeId': d['leave_type_id'], 'reason': d['reason'],
+                   'kind': d['kind'] or 'adjustment', 'deltaDays': d['delta_days'] if d['delta_days'] is not None else 0}
+        if d['effective_date']:
+            b['effectiveDate'] = d['effective_date']
+        return b
 
 
 NUMBER_FIELDS = ('accrualDays', 'accrualPerWorkedDays', 'maxBalance', 'expiryDays', 'negativeBalanceLimit',
                  'certificateAfterDays', 'maxConsecutiveDays', 'minServiceDays')
 SWITCHES = ('paid', 'allowHalfDay', 'allowHourly', 'sandwichRule', 'carryForward', 'encashable')
 LOCKED = ('accrualBasis', 'accrualDays', 'accrualPerWorkedDays', 'maxBalance', 'paid', 'genderScope', 'expiryDays')
+TEXTS = ('code', 'nameEn', 'nameNe', 'accrualBasis', 'genderScope')
 
 
-def type_body(post, *, locked: bool, partial: bool) -> dict:
-    """LeaveTypesPage save(): empty values are left out; a statutory type never sends its entitlement fields."""
-    b: dict = {}
-    for k in ('code', 'nameEn', 'nameNe', 'accrualBasis', 'genderScope'):
-        v = post.get(k)
-        if v not in (None, ''):
-            b[k] = v.upper() if k == 'code' else v
-    for k in NUMBER_FIELDS:
-        v = (post.get(k) or '').strip()
-        if v != '':
-            b[k] = _num(v, k)
-    for k in SWITCHES:
-        b[k] = _on(post, k)
-    if not b.get('paid', True):
-        b['allowHourly'] = False
-    club = post.get('clubWithId')
-    b['clubWithId'] = club or None
-    if partial:
-        b.pop('code', None)  # the code cannot change once a type exists
-    if locked:
-        for k in LOCKED:
-            b.pop(k, None)
-    return b
+class TypeForm(_Form):
+    """LeaveTypesPage save(): empty values are left out; a statutory type never sends its entitlement fields. The page
+    names its inputs after the body keys."""
+    extra_fields = {**{k: _text() for k in (*TEXTS, 'clubWithId')}, **{k: NumberField(required=False) for k in NUMBER_FIELDS},
+                    **{k: SwitchField(required=False) for k in SWITCHES}}
+
+    def __init__(self, data, *, locked: bool, partial: bool):
+        super().__init__(data)
+        self.locked, self.partial = locked, partial
+
+    def body(self) -> dict:
+        d = self.cleaned()
+        b: dict = {}
+        for k in TEXTS:
+            if d[k] != '':
+                b[k] = d[k].upper() if k == 'code' else d[k]
+        for k in NUMBER_FIELDS:
+            if d[k] is not None:
+                b[k] = d[k]
+        for k in SWITCHES:
+            b[k] = d[k]
+        if not b.get('paid', True):
+            b['allowHourly'] = False
+        b['clubWithId'] = d['clubWithId'] or None
+        if self.partial:
+            b.pop('code', None)  # the code cannot change once a type exists
+        if self.locked:
+            for k in LOCKED:
+                b.pop(k, None)
+        return b

@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from django.test import Client
 
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from tests.web.factories import hx_triggers, htmx, make_company, sign_in, signed_in_client, toasts
 
 

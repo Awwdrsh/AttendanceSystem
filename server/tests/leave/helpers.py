@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import pytest
 from django.test import Client
 
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 
 
 class Api:

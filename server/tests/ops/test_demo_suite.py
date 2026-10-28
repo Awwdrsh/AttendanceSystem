@@ -12,11 +12,8 @@ from django.db import connection
 from demo.management.commands import seed_demo_suite as cmd_mod
 from demo.management.commands.seed_demo_suite import Command, NEED_TARGET, REFUSE_LIVE, is_live, live_database_urls
 from demo.suite import DEMO_SUITE_SECTIONS, seed_demo_suite
-from hajiri.core.db import one, rows
 
-
-def count(sql: str, params=()) -> int:
-    return one(f'SELECT count(*)::int AS n FROM ({sql}) x', params)['n']
+from .sql import count, execute, one, rows
 
 
 def test_fills_every_module_of_a_fresh_database(suite_company):
@@ -115,7 +112,6 @@ def test_only_runs_the_named_sections(suite_company):
 
 
 def test_a_failed_section_is_reported_and_leaves_nothing(suite_company):
-    from hajiri.core.db import execute
     cid = suite_company['company_id']
     execute("""INSERT INTO company_setting (company_id, key, value) VALUES (%s, 'features', '{"off": ["time"]}')""", [cid])
     from hajiri.features.service import invalidate_features
@@ -131,7 +127,6 @@ def test_a_failed_section_is_reported_and_leaves_nothing(suite_company):
 def test_field_work_off_stops_the_field_section_but_not_the_roster(suite_company):
     # The TS field gate covers /field/breaks, /visits, /kiosks, /kiosk-pin and /kiosk-qr only: the roster section
     # (/shifts and /field/swaps) still ran with field work switched off.
-    from hajiri.core.db import execute
     from hajiri.features.service import invalidate_features
     cid = suite_company['company_id']
     execute("""INSERT INTO company_setting (company_id, key, value) VALUES (%s, 'features', '{"off": ["field"]}')""", [cid])
@@ -145,7 +140,6 @@ def test_field_work_off_stops_the_field_section_but_not_the_roster(suite_company
 
 
 def test_half_seeded_section_is_refused(suite_company):
-    from hajiri.core.db import execute
     cid = suite_company['company_id']
     execute("INSERT INTO time_client (company_id, name) VALUES (%s, 'Left over')", [cid])
     out = seed_demo_suite(company='DEMO', only=['time'], log=lambda m: None)
@@ -171,7 +165,7 @@ LIVE = 'postgres://hajiri:secret@localhost:5433/hajiri'
 
 @pytest.fixture
 def live_env(tmp_path, monkeypatch):
-    """The live database named in an env file (as apps/api/.env names it), and nothing in the process environment."""
+    """The live database named in an env file (as server/.env names it), and nothing in the process environment."""
     f = tmp_path / '.env'
     f.write_text(f'PORT=3000\nDATABASE_URL={LIVE}\n')
     monkeypatch.setattr(cmd_mod, 'live_env_files', lambda: [f])
@@ -254,7 +248,6 @@ def test_command_fills_a_demo_database(live_env, suite_company):
 
 
 def test_command_reports_failed_sections(live_env, suite_company):
-    from hajiri.core.db import execute
     execute("INSERT INTO time_client (company_id, name) VALUES (%s, 'Left over')", [suite_company['company_id']])
     with pytest.raises(CommandError) as e:
         run(database=_this_database_url(), yes=True, only='time')

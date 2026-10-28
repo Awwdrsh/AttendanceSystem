@@ -1,52 +1,57 @@
 """
 Employee lifecycle routes (port of apps/api/src/modules/lifecycle/routes.ts): onboarding and exit checklists,
 probation, resignations and exits, the exit interview and the asset register. Each function is one TS route: it takes
-the signed-in AuthUser and a body in the TS camelCase shape and raises hajiri.core.errors with the TS messages.
+the signed-in AuthUser and a body in the TS camelCase shape (validated with serializers.py) and raises
+hajiri.core.errors with the TS messages. Everything is scoped to the ACTIVE company; ids of another company are not
+found. (The module keeps its TS name; the pages call these functions, there is no JSON API for lifecycle.)
 """
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 from django.db import IntegrityError, transaction
+from django.db.models import (BooleanField, Count, Exists, ExpressionWrapper, F, FilteredRelation, Func, IntegerField, Max, Min,
+                              OuterRef, Q, Subquery, Value)
+from django.db.models.functions import Coalesce, Greatest, JSONObject, Least, Now
 
 from hajiri.core.audit import audit
-from hajiri.core.auth import AuthUser, company_id_of, has_role, is_manager_of
+from hajiri.core.auth import AuthUser, company_id_of, has_role, is_manager_of, manages
 from hajiri.core.bsdate import bs_label
 from hajiri.core.clock import npt_today
 from hajiri.core.crypto import field_cipher
-from hajiri.core.db import execute, one, rows
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
-from hajiri.core.schema import MISSING, Arr, Bool, Enum, Int, IsoDate, Money, Obj, Str, Union, Uuid, parse, parse_uuid
-from hajiri.notifications.service import notify, user_id_for_employee
+from hajiri.core.scoping import is_uuid
+from hajiri.core.settings_store import put_setting
+from hajiri.core.validation import parse_uuid, plain, validate
+from hajiri.db.models import (AppUser, Asset, AssetAssignment, AssetType, Branch, Employee, EmployeeAssignment, EmployeeConfirmation,
+                              EmployeeExit,
+                              ExitInterview, ExitInterviewQuestion, LifecycleCase, LifecycleTask, LifecycleTaskComment,
+                              LifecycleTemplate, LifecycleTemplateTask, OrgUnit, ProbationReview)
+from hajiri.notifications.service import notify
+from hajiri.people.accounts import user_id_for_employee
+from hajiri.people.serializers import one_of
 
 from . import service as svc
-from .service import (EXIT_KINDS, POLICY_SCHEMA, apply_confirmation, can_complete_task, can_view_case, clearance_blockers,
+from .filters import AssetFilter
+from .serializers import (CASE_KINDS, CASE_STATUSES, AddTaskIn, AssetIn, AssetQuery, AssetTypeIn, AssetUpdateIn, AssignAssetIn,
+                          CancelExitIn, CommentIn, CompleteExitIn, ConfirmIn, InterviewIn, PolicyIn, ProbationQuery, QuestionsIn,
+                          RecordExitIn, ResignIn, ReturnAssetIn, ReviewIn, StartCaseIn, TemplateIn, UpdateExitIn, UpdateTaskIn)
+from .service import (EXIT_KINDS, TASK_COLS, apply_confirmation, can_complete_task, can_view_case, clearance_blockers,  # noqa: F401
                       complete_case_if_done, complete_exit, diff_days, lifecycle_policy, record_exit, responsible_users,
                       settlement_status, start_case, task_row)
 
-ASSIGNEES = ('hr', 'manager', 'employee', 'user')
+CaseStatus = LifecycleCase.Status
+TaskStatus = LifecycleTask.Status
+ExitStatus = EmployeeExit.Status
+ASSIGNEES = tuple(LifecycleTask.AssigneeType.values)
 EXIT_KIND_LABEL = {'resignation': 'Resignation', 'termination': 'Termination', 'retirement': 'Retirement', 'contract_end': 'Contract ended',
                    'death': 'Death', 'other': 'Other'}
 ASSIGNEE_LABEL = {'hr': 'HR', 'manager': 'Manager', 'employee': 'Employee', 'user': 'Named person'}
 RESIGN_REASONS = ['Better pay', 'Career growth', 'Work-life balance', 'Manager or team', 'Relocation', 'Further studies', 'Health or family', 'Other']
-CONDITIONS = ('new', 'good', 'fair', 'poor', 'damaged', 'lost')
-
-
-def _page_link(**kw) -> Str:
-    return Str(max=200, regex=r'^/[A-Za-z0-9/_?=&-]*$', regex_message='a page inside Hajiri, starting with /', **kw)
-
-
-TEMPLATE_TASK = Obj({
-    'title': Str(trim=True, min=1, max=160), 'description': Str(max=1000, nullish=True), 'department': Str(max=60, nullish=True),
-    'assigneeType': Enum(ASSIGNEES), 'assigneeUserId': Uuid(nullish=True), 'dueOffsetDays': Int(min=-90, max=365, default=0),
-    'link': _page_link(nullish=True),
-}, refine=(lambda t: t['assigneeType'] != 'user' or bool(t.get('assigneeUserId')), 'choose the person for this task'))
-TEMPLATE_BODY = Obj({
-    'kind': Enum(('onboarding', 'offboarding')), 'name': Str(trim=True, min=1, max=120), 'description': Str(max=1000, nullish=True),
-    'branchId': Uuid(nullish=True), 'orgUnitId': Uuid(nullish=True), 'isDefault': Bool(default=False), 'active': Bool(default=True),
-    'tasks': Arr(TEMPLATE_TASK, max=60),
-})
+CONDITIONS = tuple(Asset.Condition.values)
+CASE_COLS = ('id', 'company_id', 'employee_id', 'kind', 'template_id', 'anchor_date', 'status', 'exit_id', 'started_by', 'created_at',
+             'completed_at')
 
 
 def _s(r: dict | None, *keys: str) -> dict | None:
@@ -58,13 +63,25 @@ def _s(r: dict | None, *keys: str) -> dict | None:
     return r
 
 
+def _flag(q: Q) -> ExpressionWrapper:
+    return ExpressionWrapper(q, output_field=BooleanField())
+
+
+def count_of(qs) -> Subquery:
+    """count(*) of a correlated queryset as a subquery (COUNT without GROUP BY, so it is one row)."""
+    return Subquery(qs.order_by().annotate(n=Func(F('pk'), function='COUNT', output_field=IntegerField())).values('n'),
+                    output_field=IntegerField())
+
+
 def _is_hr(user: AuthUser) -> bool:
     return has_role(user, 'hr')
 
 
 def assert_manages(user: AuthUser, employee_id: str) -> None:
-    """The TS lifecycle routes use the workflow helper ('not allowed to act for this employee')."""
+    """The TS lifecycle routes use the workflow helper ('not allowed to act for this employee'). An employee of another
+    company is not found, before any role check."""
     from hajiri.workflow.services import assert_manages as wf_assert
+    employee_in(company_id_of(user), employee_id)
     wf_assert(user, employee_id)
 
 
@@ -73,20 +90,28 @@ def _require(user: AuthUser, *roles: str) -> None:
         raise ForbiddenError(f"requires role {' or '.join(roles)}")
 
 
+def _managed(user: AuthUser, on_date) -> Q | ExpressionWrapper:
+    """HR sees every row; a manager the employees they manage on that date."""
+    if _is_hr(user):
+        return Q()
+    return manages(user.employee_id, F('employee_id'), on_date) if user.employee_id else Q(pk__in=[])
+
+
 def employee_in(company_id: str, id_: str) -> dict:
-    r = one('SELECT id, name_en, join_date, probation_end, confirmed_on, status, exit_date FROM employee WHERE id = %s AND company_id = %s',
-            [id_, company_id])
+    r = (Employee.objects.for_company(company_id).filter(pk=id_)
+         .values('id', 'name_en', 'join_date', 'probation_end', 'confirmed_on', 'status', 'exit_date').first()) if is_uuid(id_) else None
     if not r:
         raise NotFoundError('employee not found')
     return _s(r, 'id')
 
 
 def users_in_company(company_id: str, ids) -> None:
+    """Named people on tasks must be able to act in the company (home accounts, members of the group with access)."""
     lst = list(dict.fromkeys(str(x) for x in ids if x))
     if not lst:
         return
-    r = one("SELECT count(*)::int AS n FROM app_user WHERE company_id = %s AND id = ANY(%s::uuid[]) AND status = 'active'", [company_id, lst])
-    if r['n'] != len(lst):
+    n = AppUser.objects.for_company(company_id).filter(pk__in=lst, status=AppUser.Status.ACTIVE).count()
+    if n != len(lst):
         raise BadRequestError('the chosen person is not an active user in your company')
 
 
@@ -109,27 +134,37 @@ def get_settings(user: AuthUser) -> dict:
 def save_settings(user: AuthUser, body: dict) -> dict:
     _require(user, 'hr')
     company_id = company_id_of(user)
-    policy = parse(POLICY_SCHEMA, body)
+    policy = validate(PolicyIn, body)
     before = lifecycle_policy(company_id)
     with transaction.atomic():
-        execute("""INSERT INTO company_setting (company_id, key, value, updated_by) VALUES (%s, 'lifecycle.policy', %s, %s)
-                   ON CONFLICT (company_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now(), updated_by = EXCLUDED.updated_by""",
-                [company_id, json.dumps(policy), user.id])
-        audit('update', 'company_setting', actor_id=user.id, row_id='lifecycle.policy', before=before, after=policy)
+        put_setting(company_id, svc.POLICY_KEY, policy, updated_by=user.id)
+        audit('update', 'company_setting', actor_id=user.id, row_id=svc.POLICY_KEY, before=before, after=policy)
     return policy
 
 
 # ------------------------------------------------------------ templates
 
+TEMPLATE_COLS = ('id', 'company_id', 'kind', 'name', 'description', 'branch_id', 'org_unit_id', 'is_default', 'active', 'created_at',
+                 'updated_at')
+TEMPLATE_TASK_COLS = ('id', 'template_id', 'sort', 'title', 'description', 'department', 'assignee_type', 'assignee_user_id',
+                      'due_offset_days', 'link')
+
+
 def templates(user: AuthUser, kind: str | None = None) -> list[dict]:
     _require(user, 'hr', 'manager')
-    kind = parse(Enum(('onboarding', 'offboarding'), optional=True), kind) if kind else None
-    out = rows("""SELECT t.*, b.name_en AS branch_name, o.name_en AS org_unit_name,
-                         coalesce((SELECT json_agg(x ORDER BY x.sort) FROM lifecycle_template_task x WHERE x.template_id = t.id), '[]') AS tasks
-                    FROM lifecycle_template t LEFT JOIN branch b ON b.id = t.branch_id LEFT JOIN org_unit o ON o.id = t.org_unit_id
-                   WHERE t.company_id = %s AND (%s::text IS NULL OR t.kind = %s) ORDER BY t.kind, t.is_default DESC, t.name""",
-               [company_id_of(user), kind, kind])
-    return [_s(r, 'id', 'company_id', 'branch_id', 'org_unit_id') for r in out]
+    qs = LifecycleTemplate.objects.for_company(company_id_of(user))
+    if kind:
+        qs = qs.filter(kind=one_of(CASE_KINDS, kind))
+    out = [_s(r, 'id', 'company_id', 'branch_id', 'org_unit_id') for r in
+           qs.annotate(branch_name=F('branch__name_en'), org_unit_name=F('org_unit__name_en'))
+           .order_by('kind', '-is_default', 'name').values(*TEMPLATE_COLS, 'branch_name', 'org_unit_name')]
+    tasks: dict[str, list] = {}
+    for t in (LifecycleTemplateTask.objects.filter(template_id__in=[r['id'] for r in out]).order_by('sort')
+              .values(*TEMPLATE_TASK_COLS)):
+        tasks.setdefault(str(t['template_id']), []).append(_s(t, 'id', 'template_id', 'assignee_user_id'))
+    for r in out:
+        r['tasks'] = tasks.get(r['id'], [])
+    return out
 
 
 def get_template(user: AuthUser, id_: str) -> dict:
@@ -144,40 +179,35 @@ def save_template(user: AuthUser, id_: str | None, body: dict) -> str:
     company_id = company_id_of(user)
     if id_ is not None:
         id_ = parse_uuid(str(id_))
-    b = parse(TEMPLATE_BODY, body)
+    b = plain(validate(TemplateIn, body))
     users_in_company(company_id, [t.get('assigneeUserId') for t in b['tasks']])
-    for table, ref in (('branch', b.get('branchId')), ('org_unit', b.get('orgUnitId'))):
-        if ref and not one(f'SELECT 1 AS x FROM {table} WHERE id = %s AND company_id = %s', [ref, company_id]):
-            raise BadRequestError(f"{table.replace('_', ' ')} not found")
+    for model, ref, label in ((Branch, b.get('branchId'), 'branch'), (OrgUnit, b.get('orgUnitId'), 'org unit')):
+        if ref and not model.objects.for_company(company_id).filter(pk=ref).exists():
+            raise BadRequestError(f'{label} not found')
+    fields = {'name': b['name'], 'description': b.get('description'), 'branch_id': b.get('branchId'), 'org_unit_id': b.get('orgUnitId'),
+              'is_default': b['isDefault'], 'active': b['active']}
+    mine = LifecycleTemplate.objects.for_company(company_id)
     with transaction.atomic():
         tid = id_
         if b['isDefault']:
-            execute('UPDATE lifecycle_template SET is_default = false WHERE company_id = %s AND kind = %s', [company_id, b['kind']])
+            mine.filter(kind=b['kind']).update(is_default=False)
         if tid:
-            u = one("""UPDATE lifecycle_template SET name = %s, description = %s, branch_id = %s, org_unit_id = %s, is_default = %s, active = %s,
-                              updated_at = now()
-                        WHERE id = %s AND company_id = %s AND kind = %s RETURNING id""",
-                    [b['name'], b.get('description'), b.get('branchId'), b.get('orgUnitId'), b['isDefault'], b['active'], tid, company_id, b['kind']])
-            if not u:
+            if not mine.filter(pk=tid, kind=b['kind']).update(**fields, updated_at=Now()):
                 raise NotFoundError('template not found')
-            execute('DELETE FROM lifecycle_template_task WHERE template_id = %s', [tid])
+            LifecycleTemplateTask.objects.filter(template_id=tid).delete()
         else:
             try:
                 with transaction.atomic():
-                    ins = one("""INSERT INTO lifecycle_template (company_id, kind, name, description, branch_id, org_unit_id, is_default, active)
-                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                              [company_id, b['kind'], b['name'], b.get('description'), b.get('branchId'), b.get('orgUnitId'), b['isDefault'], b['active']])
+                    tid = str(LifecycleTemplate.objects.create(company_id=company_id, kind=b['kind'], **fields).pk)
             except IntegrityError as e:
                 if _unique(e):
                     raise ConflictError('a checklist with this name already exists') from e
                 raise
-            tid = str(ins['id'])
-        for i, t in enumerate(b['tasks']):
-            execute("""INSERT INTO lifecycle_template_task (template_id, sort, title, description, department, assignee_type, assignee_user_id,
-                                                           due_offset_days, link)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    [tid, i, t['title'], t.get('description'), t.get('department'), t['assigneeType'],
-                     t.get('assigneeUserId') if t['assigneeType'] == 'user' else None, t['dueOffsetDays'], t.get('link')])
+        LifecycleTemplateTask.objects.bulk_create([
+            LifecycleTemplateTask(template_id=tid, sort=i, title=t['title'], description=t.get('description'), department=t.get('department'),
+                                  assignee_type=t['assigneeType'], assignee_user_id=t.get('assigneeUserId') if t['assigneeType'] == 'user' else None,
+                                  due_offset_days=t['dueOffsetDays'], link=t.get('link'))
+            for i, t in enumerate(b['tasks'])])
         audit('update' if id_ else 'create', 'lifecycle_template', actor_id=user.id, row_id=tid,
               after={'name': b['name'], 'kind': b['kind'], 'tasks': len(b['tasks'])})
     return str(tid)
@@ -185,37 +215,33 @@ def save_template(user: AuthUser, id_: str | None, body: dict) -> str:
 
 # ------------------------------------------------------------ cases and tasks
 
-CASE_KINDS = ('onboarding', 'offboarding')
-
-
 def cases(user: AuthUser, kind: str | None = None, status: str | None = None) -> list[dict]:
     _require(user, 'hr', 'manager')
-    kind = parse(Enum(CASE_KINDS), kind) if kind else None
-    status = parse(Enum(('active', 'completed', 'cancelled')), status) if status else None
-    return [_s(r, 'id', 'exit_id', 'employee_id') for r in rows(
-        """SELECT c.id, c.kind, c.status, c.anchor_date, c.created_at, c.completed_at, c.exit_id, c.employee_id, e.emp_code, e.name_en,
-                  e.designation, e.join_date, t.name AS template_name,
-                  (SELECT count(*)::int FROM lifecycle_task x WHERE x.case_id = c.id) AS total,
-                  (SELECT count(*)::int FROM lifecycle_task x WHERE x.case_id = c.id AND x.status <> 'open') AS done,
-                  (SELECT count(*)::int FROM lifecycle_task x WHERE x.case_id = c.id AND x.status = 'open' AND x.due_date < (now() AT TIME ZONE 'Asia/Kathmandu')::date) AS overdue,
-                  (SELECT min(x.due_date) FROM lifecycle_task x WHERE x.case_id = c.id AND x.status = 'open') AS next_due
-             FROM lifecycle_case c JOIN employee e ON e.id = c.employee_id LEFT JOIN lifecycle_template t ON t.id = c.template_id
-             LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> greatest((now() AT TIME ZONE 'Asia/Kathmandu')::date, c.anchor_date)
-            WHERE c.company_id = %s AND (%s::text IS NULL OR c.kind = %s) AND (%s::text IS NULL OR c.status = %s)
-              AND (%s OR hj_manages(%s::uuid, e.id, greatest((now() AT TIME ZONE 'Asia/Kathmandu')::date, c.anchor_date)))
-            ORDER BY c.status = 'active' DESC, c.anchor_date DESC LIMIT 500""",
-        [company_id_of(user), kind, kind, status, status, _is_hr(user), user.employee_id])]
-
-
-START_CASE = Obj({'employeeId': Uuid(), 'templateId': Uuid(nullish=True), 'anchorDate': IsoDate(optional=True)})
+    qs = LifecycleCase.objects.for_company(company_id_of(user))
+    if kind:
+        qs = qs.filter(kind=one_of(CASE_KINDS, kind))
+    if status:
+        qs = qs.filter(status=one_of(CASE_STATUSES, status))
+    today = npt_today()
+    open_ = Q(lifecycle_tasks__status=TaskStatus.OPEN)
+    qs = (qs.filter(_managed(user, Greatest(Value(today), F('anchor_date'))))
+          .annotate(emp_code=F('employee__emp_code'), name_en=F('employee__name_en'), designation=F('employee__designation'),
+                    join_date=F('employee__join_date'), template_name=F('template__name'),
+                    total=Count('lifecycle_tasks'), done=Count('lifecycle_tasks', filter=~open_),
+                    overdue=Count('lifecycle_tasks', filter=open_ & Q(lifecycle_tasks__due_date__lt=today)),
+                    next_due=Min('lifecycle_tasks__due_date', filter=open_))
+          .order_by(_flag(Q(status=CaseStatus.ACTIVE)).desc(), '-anchor_date')
+          .values('id', 'kind', 'status', 'anchor_date', 'created_at', 'completed_at', 'exit_id', 'employee_id', 'emp_code', 'name_en',
+                  'designation', 'join_date', 'template_name', 'total', 'done', 'overdue', 'next_due'))
+    return [_s(r, 'id', 'exit_id', 'employee_id') for r in qs[:500]]
 
 
 def start_onboarding(user: AuthUser, body: dict) -> str:
     _require(user, 'hr')
     company_id = company_id_of(user)
-    b = parse(START_CASE, body)
+    b = plain(validate(StartCaseIn, body))
     e = employee_in(company_id, b['employeeId'])
-    if e['status'] == 'exited':
+    if e['status'] == Employee.Status.EXITED:
         raise BadRequestError('this employee has left')
     with transaction.atomic():
         return start_case(company_id=company_id, employee_id=b['employeeId'], kind='onboarding', template_id=b.get('templateId'),
@@ -223,8 +249,8 @@ def start_onboarding(user: AuthUser, body: dict) -> str:
 
 
 def load_case(user: AuthUser, id_: str) -> dict:
-    c = _s(one('SELECT * FROM lifecycle_case WHERE id = %s', [parse_uuid(str(id_))]), 'id', 'company_id', 'employee_id', 'exit_id',
-           'template_id', 'started_by')
+    c = _s(LifecycleCase.objects.for_company(user.company_id).filter(pk=parse_uuid(str(id_))).values(*CASE_COLS).first(),
+           'id', 'company_id', 'employee_id', 'exit_id', 'template_id', 'started_by')
     if not c or not can_view_case(user, c):
         raise NotFoundError('checklist not found')
     return c
@@ -232,15 +258,20 @@ def load_case(user: AuthUser, id_: str) -> dict:
 
 def case_detail(user: AuthUser, id_: str) -> dict:
     c = load_case(user, id_)
-    emp = _s(one('SELECT id, emp_code, name_en, designation, join_date, exit_date FROM employee WHERE id = %s', [c['employee_id']]), 'id')
-    tasks = rows("""SELECT t.*, u.name AS assignee_name, d.name AS done_by_name,
-                           (SELECT count(*)::int FROM lifecycle_task_comment m WHERE m.task_id = t.id) AS comments
-                      FROM lifecycle_task t LEFT JOIN app_user u ON u.id = t.assignee_user_id LEFT JOIN app_user d ON d.id = t.done_by
-                     WHERE t.case_id = %s ORDER BY t.sort, t.due_date""", [c['id']])
+    emp = _s(Employee.objects.filter(pk=c['employee_id']).values('id', 'emp_code', 'name_en', 'designation', 'join_date', 'exit_date').first(),
+             'id')
+    tasks = (LifecycleTask.objects.filter(case_id=c['id'])
+             .annotate(assignee_name=F('assignee_user__name'), done_by_name=F('done_by__name'),
+                       comments=count_of(LifecycleTaskComment.objects.filter(task=OuterRef('pk'))))
+             .order_by('sort', 'due_date').values(*TASK_COLS, 'assignee_name', 'done_by_name', 'comments'))
     out = []
+    allowed: dict[tuple, bool] = {}   # the tasks share the case's employee: one check per kind of owner, not per task
     for t in tasks:
         t = task_row(t)
-        t['can_complete'] = can_complete_task(user, t)
+        key = (t['assignee_type'], t['assignee_user_id'])
+        if key not in allowed:
+            allowed[key] = can_complete_task(user, t)
+        t['can_complete'] = allowed[key]
         out.append(t)
     return {'case': c, 'employee': emp, 'tasks': out}
 
@@ -248,37 +279,33 @@ def case_detail(user: AuthUser, id_: str) -> dict:
 def cancel_case(user: AuthUser, id_: str) -> None:
     _require(user, 'hr')
     c = load_case(user, id_)
-    if c['status'] != 'active':
+    if c['status'] != CaseStatus.ACTIVE:
         raise ConflictError(f"checklist is {c['status']}")
     if c['exit_id']:
         raise BadRequestError('cancel the exit instead; its clearance checklist closes with it')
     with transaction.atomic():
-        execute("UPDATE lifecycle_case SET status = 'cancelled', completed_at = now() WHERE id = %s", [c['id']])
+        LifecycleCase.objects.filter(pk=c['id']).update(status=CaseStatus.CANCELLED, completed_at=Now())
         audit('cancel', 'lifecycle_case', actor_id=user.id, row_id=c['id'])
-
-
-ADD_TASK = Obj({
-    'title': Str(trim=True, min=1, max=160), 'description': Str(max=1000, nullish=True), 'department': Str(max=60, nullish=True),
-    'assigneeType': Enum(ASSIGNEES), 'assigneeUserId': Uuid(nullish=True), 'dueDate': IsoDate(nullish=True), 'link': _page_link(nullish=True),
-})
 
 
 def add_task(user: AuthUser, case_id: str, body: dict) -> dict:
     _require(user, 'hr')
     c = load_case(user, case_id)
-    if c['status'] != 'active':
+    if c['status'] != CaseStatus.ACTIVE:
         raise ConflictError(f"checklist is {c['status']}")
-    b = parse(ADD_TASK, body)
+    b = plain(validate(AddTaskIn, body))
     if b['assigneeType'] == 'user' and not b.get('assigneeUserId'):
         raise BadRequestError('choose the person for this task')
     users_in_company(c['company_id'], [b.get('assigneeUserId')])
     with transaction.atomic():
-        t = task_row(one("""INSERT INTO lifecycle_task (case_id, company_id, employee_id, sort, title, description, department, assignee_type,
-                                                       assignee_user_id, due_date, link)
-                            VALUES (%s, %s, %s, (SELECT coalesce(max(sort), 0) + 1 FROM lifecycle_task WHERE case_id = %s), %s, %s, %s, %s, %s, %s, %s)
-                            RETURNING *""",
-                         [c['id'], c['company_id'], c['employee_id'], c['id'], b['title'], b.get('description'), b.get('department'),
-                          b['assigneeType'], b.get('assigneeUserId') if b['assigneeType'] == 'user' else None, b.get('dueDate'), b.get('link')]))
+        LifecycleCase.objects.select_for_update(no_key=True).filter(pk=c['id']).values_list('id', flat=True).first()
+        last = LifecycleTask.objects.filter(case_id=c['id']).aggregate(m=Max('sort'))['m'] or 0
+        created = LifecycleTask.objects.create(
+            case_id=c['id'], company_id=c['company_id'], employee_id=c['employee_id'], sort=last + 1, title=b['title'],
+            description=b.get('description'), department=b.get('department'), assignee_type=b['assigneeType'],
+            assignee_user_id=b.get('assigneeUserId') if b['assigneeType'] == 'user' else None, due_date=b.get('dueDate'),
+            link=b.get('link'))
+        t = task_row(LifecycleTask.objects.filter(pk=created.pk).values(*TASK_COLS).get())
         for uid in responsible_users(t):
             if uid != user.id:
                 notify(company_id=c['company_id'], user_id=uid, template='lifecycle.task.assigned', title='New checklist task',
@@ -287,75 +314,73 @@ def add_task(user: AuthUser, case_id: str, body: dict) -> dict:
 
 
 def load_task(user: AuthUser, id_: str) -> dict:
-    t = task_row(one('SELECT * FROM lifecycle_task WHERE id = %s', [parse_uuid(str(id_))]))
+    t = task_row(LifecycleTask.objects.for_company(user.company_id).filter(pk=parse_uuid(str(id_))).values(*TASK_COLS).first())
     if not t:
         raise NotFoundError('task not found')
     load_case(user, t['case_id'])
     return t
 
 
-UPDATE_TASK = Obj({
-    'status': Enum(('open', 'done', 'skipped'), optional=True), 'note': Str(max=1000, nullish=True), 'dueDate': IsoDate(nullish=True),
-    'assigneeType': Enum(ASSIGNEES, optional=True), 'assigneeUserId': Uuid(nullish=True),
-})
-
-
 def update_task(user: AuthUser, id_: str, body: dict) -> dict:
     t = load_task(user, id_)
-    b = parse(UPDATE_TASK, body)
-    case_row = one('SELECT status FROM lifecycle_case WHERE id = %s', [t['case_id']])
-    if case_row['status'] == 'cancelled':
+    b = plain(validate(UpdateTaskIn, body))
+    case_status = LifecycleCase.objects.filter(pk=t['case_id']).values_list('status', flat=True).get()
+    if case_status == CaseStatus.CANCELLED:
         raise ConflictError('this checklist was cancelled')
     edits_plan = 'dueDate' in b or 'assigneeType' in b or 'assigneeUserId' in b
     if edits_plan and not _is_hr(user):
         raise ForbiddenError('only HR can change due dates and owners')
     if ('status' in b or 'note' in b) and not can_complete_task(user, t):
         raise ForbiddenError('this task is for someone else')
-    if b.get('status') == 'skipped' and not _is_hr(user):
+    if b.get('status') == TaskStatus.SKIPPED and not _is_hr(user):
         raise ForbiddenError('only HR can skip a task')
     if b.get('assigneeType') == 'user' and not b.get('assigneeUserId'):
         raise BadRequestError('choose the person for this task')
     users_in_company(t['company_id'], [b.get('assigneeUserId')])
     status = b.get('status')
+    sets: dict = {}
+    if status:
+        sets['status'] = status
+    if 'note' in b:
+        sets['note'] = b['note']
+    if status in (TaskStatus.DONE, TaskStatus.SKIPPED):
+        sets.update(done_by_id=user.id, done_at=Now())
+    elif status == TaskStatus.OPEN:
+        sets.update(done_by_id=None, done_at=None)
+    if 'dueDate' in b:
+        sets['due_date'] = b['dueDate']
+    if b.get('assigneeType'):
+        sets['assignee_type'] = b['assigneeType']
+        sets['assignee_user_id'] = b.get('assigneeUserId') if b['assigneeType'] == 'user' else None
     with transaction.atomic():
-        u = task_row(one("""UPDATE lifecycle_task SET
-                              status = coalesce(%s, status), note = CASE WHEN %s::boolean THEN %s ELSE note END,
-                              done_by = CASE WHEN %s IN ('done', 'skipped') THEN %s::uuid WHEN %s = 'open' THEN NULL ELSE done_by END,
-                              done_at = CASE WHEN %s IN ('done', 'skipped') THEN now() WHEN %s = 'open' THEN NULL ELSE done_at END,
-                              due_date = CASE WHEN %s::boolean THEN %s::date ELSE due_date END,
-                              assignee_type = coalesce(%s, assignee_type),
-                              assignee_user_id = CASE WHEN %s::text IS NULL THEN assignee_user_id WHEN %s = 'user' THEN %s::uuid ELSE NULL END
-                            WHERE id = %s RETURNING *""",
-                         [status, 'note' in b, b.get('note'), status, user.id, status, status, status, 'dueDate' in b, b.get('dueDate'),
-                          b.get('assigneeType'), b.get('assigneeType'), b.get('assigneeType'), b.get('assigneeUserId'), t['id']]))
+        if sets:
+            LifecycleTask.objects.filter(pk=t['id']).update(**sets)
+        u = task_row(LifecycleTask.objects.filter(pk=t['id']).values(*TASK_COLS).get())
         # Clearance checklists stay open until the exit is completed; onboarding closes itself when everything is ticked.
         completed = False
-        if status in ('done', 'skipped'):
-            k = one('SELECT exit_id FROM lifecycle_case WHERE id = %s', [t['case_id']])
-            if not (k and k['exit_id']):
+        if status in (TaskStatus.DONE, TaskStatus.SKIPPED):
+            exit_id = LifecycleCase.objects.filter(pk=t['case_id']).values_list('exit_id', flat=True).first()
+            if not exit_id:
                 completed = complete_case_if_done(t['case_id'])
-        if status == 'open':
-            execute("UPDATE lifecycle_case SET status = 'active', completed_at = NULL WHERE id = %s AND status = 'completed' AND exit_id IS NULL",
-                    [t['case_id']])
+        if status == TaskStatus.OPEN:
+            (LifecycleCase.objects.filter(pk=t['case_id'], status=CaseStatus.COMPLETED, exit_id__isnull=True)
+             .update(status=CaseStatus.ACTIVE, completed_at=None))
         audit('update', 'lifecycle_task', actor_id=user.id, row_id=t['id'], before={'status': t['status']}, after=b)
     return {'task': u, 'caseCompleted': completed}
 
 
 def comments(user: AuthUser, task_id: str) -> list[dict]:
     t = load_task(user, task_id)
-    return rows("""SELECT m.id, m.body, m.created_at, m.author_id, u.name AS author_name FROM lifecycle_task_comment m
-                     JOIN app_user u ON u.id = m.author_id WHERE m.task_id = %s ORDER BY m.created_at""", [t['id']])
-
-
-COMMENT = Obj({'body': Str(trim=True, min=1, max=2000)})
+    return list(LifecycleTaskComment.objects.filter(task_id=t['id']).annotate(author_name=F('author__name')).order_by('created_at')
+                .values('id', 'body', 'created_at', 'author_id', 'author_name'))
 
 
 def add_comment(user: AuthUser, task_id: str, body: dict) -> dict:
     t = load_task(user, task_id)
-    b = parse(COMMENT, body)
+    b = validate(CommentIn, body)
     with transaction.atomic():
-        ins = one('INSERT INTO lifecycle_task_comment (task_id, author_id, body) VALUES (%s, %s, %s) RETURNING id, body, created_at',
-                  [t['id'], user.id, b['body']])
+        c = LifecycleTaskComment.objects.create(task_id=t['id'], author_id=user.id, body=b['body'])
+        ins = LifecycleTaskComment.objects.filter(pk=c.pk).values('id', 'body', 'created_at').get()
         for uid in responsible_users(t):
             if uid != user.id:
                 notify(company_id=t['company_id'], user_id=uid, template='lifecycle.task.comment', title=f'Comment on "{t["title"]}"',
@@ -364,19 +389,26 @@ def add_comment(user: AuthUser, task_id: str, body: dict) -> dict:
 
 
 def my_tasks(user: AuthUser) -> list[dict]:
-    """Tasks the signed-in person should act on: their own checklist items, tasks for their team or assigned to them,
-    and HR tasks for HR."""
-    return [task_row(r) for r in rows(
-        """SELECT t.*, c.kind, e.name_en AS employee_name, e.emp_code, (t.employee_id = %s::uuid) AS own
-             FROM lifecycle_task t JOIN lifecycle_case c ON c.id = t.case_id JOIN employee e ON e.id = t.employee_id
-             LEFT JOIN employee_assignment a ON a.employee_id = t.employee_id AND a.valid @> greatest((now() AT TIME ZONE 'Asia/Kathmandu')::date, c.anchor_date)
-            WHERE t.company_id = %s AND c.status = 'active' AND t.status = 'open'
-              AND ((t.assignee_type = 'employee' AND t.employee_id = %s::uuid)
-                OR (t.assignee_type = 'user' AND t.assignee_user_id = %s)
-                OR (t.assignee_type = 'manager' AND a.manager_id = %s::uuid)
-                OR (%s AND (t.assignee_type = 'hr' OR (t.assignee_type = 'manager' AND a.manager_id IS NULL))))
-            ORDER BY t.due_date NULLS LAST, t.sort LIMIT 200""",
-        [user.employee_id, company_id_of(user), user.employee_id, user.id, user.employee_id, _is_hr(user)])]
+    """Open checklist tasks for me: as the employee, as the named person, as the line manager (on the later of today
+    and the case's anchor date), and, for HR, HR's tasks and manager tasks of people with no manager."""
+    today = npt_today()
+    manager_then = Subquery(
+        EmployeeAssignment.objects.filter(employee_id=OuterRef('employee_id'),
+                                          valid__contains=Greatest(Value(today), OuterRef('case__anchor_date')))
+        .values('manager_id')[:1])
+    me = user.employee_id
+    A = LifecycleTask.AssigneeType
+    mine = Q(assignee_type=A.USER, assignee_user_id=user.id)
+    if me:
+        mine |= Q(assignee_type=A.EMPLOYEE, employee_id=me) | Q(assignee_type=A.MANAGER, line_manager=me)
+    if _is_hr(user):
+        mine |= Q(assignee_type=A.HR) | Q(assignee_type=A.MANAGER, line_manager__isnull=True)
+    qs = (LifecycleTask.objects.for_company(company_id_of(user)).filter(case__status=CaseStatus.ACTIVE, status=TaskStatus.OPEN)
+          .annotate(line_manager=manager_then, kind=F('case__kind'), employee_name=F('employee__name_en'), emp_code=F('employee__emp_code'),
+                    own=_flag(Q(employee_id=me)) if me else Value(False, output_field=BooleanField()))
+          .filter(mine).order_by(F('due_date').asc(nulls_last=True), 'sort')
+          .values(*TASK_COLS, 'kind', 'employee_name', 'emp_code', 'own'))
+    return [task_row(r) for r in qs[:200]]
 
 
 # ------------------------------------------------------------ one employee at a glance (employee page)
@@ -386,24 +418,26 @@ def employee_summary(user: AuthUser, id_: str) -> dict:
     id_ = parse_uuid(str(id_))
     e = employee_in(company_id, id_)
     assert_manages(user, id_)
-    cs = [_s(r, 'id') for r in rows(
-        """SELECT c.id, c.kind, c.status, c.anchor_date, c.created_at, (SELECT count(*)::int FROM lifecycle_task x WHERE x.case_id = c.id) AS total,
-                  (SELECT count(*)::int FROM lifecycle_task x WHERE x.case_id = c.id AND x.status <> 'open') AS done
-             FROM lifecycle_case c WHERE c.employee_id = %s ORDER BY c.created_at DESC""", [id_])]
-    reviews = [_s(r, 'id') for r in rows(
-        """SELECT r.id, r.rating, r.recommendation, r.extend_to, r.last_working_day, r.status, r.created_at, r.probation_end,
-                  u.name AS submitted_by_name
-             FROM probation_review r JOIN app_user u ON u.id = r.submitted_by WHERE r.employee_id = %s ORDER BY r.created_at DESC""", [id_])]
-    confirmations = [_s(r, 'id', 'review_id') for r in rows(
-        'SELECT id, confirmed_on, review_id, created_at FROM employee_confirmation WHERE employee_id = %s ORDER BY created_at DESC', [id_])]
-    exits = [_s(r, 'id') for r in rows(
-        """SELECT id, kind, status, voluntary, reason_category, proposed_lwd, accepted_lwd, submitted_on FROM employee_exit
-            WHERE employee_id = %s ORDER BY created_at DESC""", [id_])]
-    assets = [_s(r, 'id', 'assignment_id') for r in rows(
-        """SELECT g.id AS assignment_id, g.assigned_on, g.returned_on, g.condition_out, g.condition_in, a.id, a.tag, a.name, a.serial,
-                  t.name AS type_name
-             FROM asset_assignment g JOIN asset a ON a.id = g.asset_id LEFT JOIN asset_type t ON t.id = a.type_id
-            WHERE g.employee_id = %s ORDER BY g.returned_on IS NULL DESC, g.assigned_on DESC""", [id_])]
+    open_ = Q(lifecycle_tasks__status=TaskStatus.OPEN)
+    cs = [_s(r, 'id') for r in LifecycleCase.objects.for_company(company_id).filter(employee_id=id_)
+          .annotate(total=Count('lifecycle_tasks'), done=Count('lifecycle_tasks', filter=~open_)).order_by('-created_at')
+          .values('id', 'kind', 'status', 'anchor_date', 'created_at', 'total', 'done')]
+    reviews = [_s(r, 'id') for r in ProbationReview.objects.for_company(company_id).filter(employee_id=id_)
+               .annotate(submitted_by_name=F('submitted_by__name')).order_by('-created_at')
+               .values('id', 'rating', 'recommendation', 'extend_to', 'last_working_day', 'status', 'created_at', 'probation_end',
+                       'submitted_by_name')]
+    confirmations = [_s(r, 'id', 'review_id') for r in EmployeeConfirmation.objects.for_company(company_id).filter(employee_id=id_)
+                     .order_by('-created_at').values('id', 'confirmed_on', 'review_id', 'created_at')]
+    exits = [_s(r, 'id') for r in EmployeeExit.objects.for_company(company_id).filter(employee_id=id_).order_by('-created_at')
+             .values('id', 'kind', 'status', 'voluntary', 'reason_category', 'proposed_lwd', 'accepted_lwd', 'submitted_on')]
+    assets = [_s(r, 'id', 'assignment_id') for r in AssetAssignment.objects.for_company(company_id).filter(employee_id=id_)
+              .annotate(assignment_id=F('pk'), asset_ref=F('asset_id'), tag=F('asset__tag'), name=F('asset__name'), serial=F('asset__serial'),
+                        type_name=F('asset__type__name'))
+              .order_by(_flag(Q(returned_on__isnull=True)).desc(), '-assigned_on')
+              .values('assignment_id', 'assigned_on', 'returned_on', 'condition_out', 'condition_in', 'asset_ref', 'tag', 'name',
+                      'serial', 'type_name')]
+    for a in assets:
+        a['id'] = str(a.pop('asset_ref'))
     return {'employee': e, 'cases': cs,
             'probation': {'end': e['probation_end'], 'confirmedOn': e['confirmed_on'], 'reviews': reviews, 'confirmations': confirmations},
             'exits': exits, 'assets': assets}
@@ -413,56 +447,59 @@ def employee_summary(user: AuthUser, id_: str) -> dict:
 
 def probation(user: AuthUser, within: int | str | None = 60) -> list[dict]:
     _require(user, 'hr', 'manager')
-    within = parse(Int(min=1, max=365, coerce=True, default=60), MISSING if within in (None, '') else within)
-    return [_s(r, 'id') for r in rows(
-        """SELECT e.id, e.emp_code, e.name_en, e.designation, e.join_date, e.probation_end, (e.probation_end - (now() AT TIME ZONE 'Asia/Kathmandu')::date) AS days_left,
-                  m.name_en AS manager_name,
-                  (SELECT row_to_json(x) FROM (SELECT r.id, r.status, r.recommendation, r.created_at FROM probation_review r
-                                               WHERE r.employee_id = e.id ORDER BY r.created_at DESC LIMIT 1) x) AS last_review
-             FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date LEFT JOIN employee m ON m.id = a.manager_id
-            WHERE e.company_id = %s AND e.status = 'active' AND e.probation_end IS NOT NULL AND e.confirmed_on IS NULL
-              AND (e.exit_date IS NULL OR e.exit_date >= (now() AT TIME ZONE 'Asia/Kathmandu')::date)
-              AND e.probation_end <= (now() AT TIME ZONE 'Asia/Kathmandu')::date + %s::int AND (%s OR hj_manages(%s::uuid, e.id, (now() AT TIME ZONE 'Asia/Kathmandu')::date))
-            ORDER BY e.probation_end""", [company_id_of(user), within, _is_hr(user), user.employee_id])]
-
-
-REVIEW_BODY = Obj({
-    'employeeId': Uuid(), 'rating': Int(min=1, max=5), 'recommendation': Enum(('confirm', 'extend', 'terminate')),
-    'extendTo': IsoDate(nullish=True), 'lastWorkingDay': IsoDate(nullish=True), 'comments': Str(trim=True, min=3, max=4000),
-})
+    within = validate(ProbationQuery, {} if within in (None, '') else {'within': within})['within']
+    today = npt_today()
+    last_review = (ProbationReview.objects.filter(employee=OuterRef('pk')).order_by('-created_at')
+                   .annotate(j=JSONObject(id='id', status='status', recommendation='recommendation', created_at='created_at'))
+                   .values('j')[:1])
+    qs = (Employee.objects.for_company(company_id_of(user))
+          .filter(status=Employee.Status.ACTIVE, probation_end__isnull=False, confirmed_on__isnull=True,
+                  probation_end__lte=today + timedelta(days=within))
+          .filter(Q(exit_date__isnull=True) | Q(exit_date__gte=today))
+          .filter(Q() if _is_hr(user) else (manages(user.employee_id) if user.employee_id else Q(pk__in=[])))
+          .annotate(a=FilteredRelation('employee_assignments', condition=Q(employee_assignments__valid__contains=today)))
+          .annotate(manager_name=F('a__manager__name_en'), last_review=Subquery(last_review))
+          .order_by('probation_end')
+          .values('id', 'emp_code', 'name_en', 'designation', 'join_date', 'probation_end', 'manager_name', 'last_review'))
+    out = []
+    for r in qs:
+        r = _s(r, 'id')
+        r['days_left'] = (r['probation_end'] - today).days
+        out.append(r)
+    return out
 
 
 def submit_review(user: AuthUser, body: dict) -> str:
     from hajiri.workflow.services import start_workflow
     _require(user, 'hr', 'manager')
     company_id = company_id_of(user)
-    b = parse(REVIEW_BODY, body)
+    b = plain(validate(ReviewIn, body))
     e = employee_in(company_id, b['employeeId'])
     if b['employeeId'] == user.employee_id:
         raise ForbiddenError('you cannot review your own probation')
     assert_manages(user, b['employeeId'])
-    if e['status'] != 'active':
+    if e['status'] != Employee.Status.ACTIVE:
         raise BadRequestError('this employee has left')
     if e['confirmed_on']:
         raise ConflictError(f"already confirmed on {bs_label(e['confirmed_on'])}")
-    if b['recommendation'] == 'extend':
+    Rec = ProbationReview.Recommendation
+    if b['recommendation'] == Rec.EXTEND:
         if not b.get('extendTo'):
             raise BadRequestError('choose the new probation end date')
         if date.fromisoformat(b['extendTo']) <= (e['probation_end'] or npt_today()):
             raise BadRequestError('the new end date must be after the current probation end')
-    if b['recommendation'] == 'terminate':
+    if b['recommendation'] == Rec.TERMINATE:
         if not b.get('lastWorkingDay'):
             raise BadRequestError('choose the last working day')
         if e['join_date'] and date.fromisoformat(b['lastWorkingDay']) < e['join_date']:
             raise BadRequestError('the last working day cannot be before the join date')
     try:
         with transaction.atomic():
-            rid = str(one("""INSERT INTO probation_review (company_id, employee_id, probation_end, rating, recommendation, extend_to,
-                                                          last_working_day, comments, submitted_by)
-                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                          [company_id, b['employeeId'], e['probation_end'], b['rating'], b['recommendation'],
-                           b.get('extendTo') if b['recommendation'] == 'extend' else None,
-                           b.get('lastWorkingDay') if b['recommendation'] == 'terminate' else None, b['comments'], user.id])['id'])
+            rid = str(ProbationReview.objects.create(
+                company_id=company_id, employee_id=b['employeeId'], probation_end=e['probation_end'], rating=b['rating'],
+                recommendation=b['recommendation'], extend_to=b.get('extendTo') if b['recommendation'] == Rec.EXTEND else None,
+                last_working_day=b.get('lastWorkingDay') if b['recommendation'] == Rec.TERMINATE else None, comments=b['comments'],
+                submitted_by_id=user.id).pk)
             rec = {'confirm': 'confirm', 'extend': 'extend probation'}.get(b['recommendation'], 'end employment')
             start_workflow(company_id=company_id, object_type='probation_review', object_id=rid, employee_id=b['employeeId'],
                            title='Probation review to approve', body=f"{e['name_en']}: {rec}")
@@ -474,13 +511,10 @@ def submit_review(user: AuthUser, body: dict) -> str:
     return rid
 
 
-CONFIRM_BODY = Obj({'employeeId': Uuid(), 'confirmedOn': IsoDate()})
-
-
 def confirm(user: AuthUser, body: dict) -> str:
     _require(user, 'hr')
     company_id = company_id_of(user)
-    b = parse(CONFIRM_BODY, body)
+    b = plain(validate(ConfirmIn, body))
     e = employee_in(company_id, b['employeeId'])
     if e['confirmed_on']:
         raise ConflictError(f"already confirmed on {bs_label(e['confirmed_on'])}")
@@ -493,15 +527,25 @@ def confirm(user: AuthUser, body: dict) -> str:
 
 # ------------------------------------------------------------ exits
 
-EXIT_COLS = """x.id, x.employee_id, x.kind, x.voluntary, x.reason_category, x.reason, x.submitted_on, x.notice_days, x.proposed_lwd,
-    x.accepted_lwd, x.status, x.decided_at, x.completed_at, x.created_at, e.emp_code, e.name_en, e.designation, e.join_date,
-    (SELECT c.id FROM lifecycle_case c WHERE c.exit_id = x.id ORDER BY c.created_at DESC LIMIT 1) AS case_id,
-    (SELECT count(*)::int FROM lifecycle_task t JOIN lifecycle_case c ON c.id = t.case_id WHERE c.exit_id = x.id AND c.status <> 'cancelled') AS tasks_total,
-    (SELECT count(*)::int FROM lifecycle_task t JOIN lifecycle_case c ON c.id = t.case_id WHERE c.exit_id = x.id AND c.status <> 'cancelled'
-        AND t.status <> 'open') AS tasks_done,
-    (SELECT count(*)::int FROM asset_assignment g WHERE g.employee_id = x.employee_id AND g.returned_on IS NULL) AS assets_held,
-    EXISTS (SELECT 1 FROM exit_interview i WHERE i.exit_id = x.id) AS interview_done"""
-EXIT_STATUSES = ('pending', 'accepted', 'rejected', 'withdrawn', 'cancelled', 'completed', 'open')
+EXIT_STATUSES = (*ExitStatus.values, 'open')
+OPEN_EXIT = (ExitStatus.PENDING, ExitStatus.ACCEPTED)
+EXIT_FIELDS = ('id', 'employee_id', 'kind', 'voluntary', 'reason_category', 'reason', 'submitted_on', 'notice_days', 'proposed_lwd',
+               'accepted_lwd', 'status', 'decided_at', 'completed_at', 'created_at', 'emp_code', 'name_en', 'designation', 'join_date',
+               'case_id', 'tasks_total', 'tasks_done', 'assets_held', 'interview_done')
+
+
+def exit_rows(qs):
+    """Exits with the employee, the clearance checklist and its progress, assets still held and the interview flag
+    (EXIT_COLS of the TS route)."""
+    clearance = LifecycleTask.objects.filter(case__exit_id=OuterRef('pk')).exclude(case__status=CaseStatus.CANCELLED)
+    return (qs.annotate(
+        emp_code=F('employee__emp_code'), name_en=F('employee__name_en'), designation=F('employee__designation'),
+        join_date=F('employee__join_date'),
+        case_id=Subquery(LifecycleCase.objects.filter(exit_id=OuterRef('pk')).order_by('-created_at').values('id')[:1]),
+        tasks_total=count_of(clearance), tasks_done=count_of(clearance.exclude(status=TaskStatus.OPEN)),
+        assets_held=count_of(AssetAssignment.objects.filter(employee_id=OuterRef('employee_id'), returned_on__isnull=True)),
+        interview_done=Exists(ExitInterview.objects.filter(exit=OuterRef('pk'))))
+        .values(*EXIT_FIELDS))
 
 
 def _exit(r):
@@ -513,27 +557,22 @@ def _exit(r):
 
 def exits(user: AuthUser, status: str | None = None) -> list[dict]:
     _require(user, 'hr', 'manager')
-    status = parse(Enum(EXIT_STATUSES), status) if status else None
-    return [_exit(r) for r in rows(
-        f"""SELECT {EXIT_COLS} FROM employee_exit x JOIN employee e ON e.id = x.employee_id
-              LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> least((now() AT TIME ZONE 'Asia/Kathmandu')::date, coalesce(x.accepted_lwd, x.proposed_lwd))
-             WHERE x.company_id = %s AND (%s::text IS NULL OR x.status = %s OR (%s = 'open' AND x.status IN ('pending', 'accepted')))
-               AND (%s OR hj_manages(%s::uuid, e.id, least((now() AT TIME ZONE 'Asia/Kathmandu')::date, coalesce(x.accepted_lwd, x.proposed_lwd))))
-             ORDER BY x.status IN ('pending', 'accepted') DESC, coalesce(x.accepted_lwd, x.proposed_lwd) DESC LIMIT 500""",
-        [company_id_of(user), status, status, status, _is_hr(user), user.employee_id])]
+    qs = EmployeeExit.objects.for_company(company_id_of(user))
+    if status:
+        one_of(EXIT_STATUSES, status)
+        qs = qs.filter(status__in=OPEN_EXIT) if status == 'open' else qs.filter(status=status)
+    lwd = Coalesce(F('accepted_lwd'), F('proposed_lwd'))
+    qs = (qs.filter(_managed(user, Least(Value(npt_today()), lwd)))
+          .order_by(_flag(Q(status__in=OPEN_EXIT)).desc(), lwd.desc()))
+    return [_exit(r) for r in exit_rows(qs)[:500]]
 
 
 def my_exits(user: AuthUser) -> dict:
     policy = lifecycle_policy(company_id_of(user))
     if not user.employee_id:
         return {'exits': [], 'policy': policy}
-    return {'exits': [_exit(r) for r in rows(
-        f'SELECT {EXIT_COLS} FROM employee_exit x JOIN employee e ON e.id = x.employee_id WHERE x.employee_id = %s ORDER BY x.created_at DESC',
-        [user.employee_id])], 'policy': policy}
-
-
-RESIGN_BODY = Obj({'proposedLastWorkingDay': IsoDate(), 'reasonCategory': Str(trim=True, max=60, nullish=True),
-                   'reason': Str(trim=True, max=2000, nullish=True)})
+    qs = EmployeeExit.objects.for_company(company_id_of(user)).filter(employee_id=user.employee_id).order_by('-created_at')
+    return {'exits': [_exit(r) for r in exit_rows(qs)], 'policy': policy}
 
 
 def resign(user: AuthUser, body: dict) -> dict:
@@ -542,9 +581,9 @@ def resign(user: AuthUser, body: dict) -> dict:
     employee_id = user.employee_id
     if not employee_id:
         raise BadRequestError('your account is not linked to an employee record')
-    b = parse(RESIGN_BODY, body)
+    b = plain(validate(ResignIn, body))
     e = employee_in(company_id, employee_id)
-    if e['status'] != 'active':
+    if e['status'] != Employee.Status.ACTIVE:
         raise BadRequestError('your employment has already ended')
     today = npt_today()
     lwd = date.fromisoformat(b['proposedLastWorkingDay'])
@@ -555,10 +594,10 @@ def resign(user: AuthUser, body: dict) -> dict:
     policy = lifecycle_policy(company_id)
     try:
         with transaction.atomic():
-            xid = str(one("""INSERT INTO employee_exit (company_id, employee_id, kind, voluntary, reason_category, reason, submitted_on, notice_days,
-                                                        proposed_lwd, initiated_by)
-                             VALUES (%s, %s, 'resignation', true, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                          [company_id, employee_id, b.get('reasonCategory'), b.get('reason'), today, policy['noticeDays'], lwd, user.id])['id'])
+            xid = str(EmployeeExit.objects.create(
+                company_id=company_id, employee_id=employee_id, kind=EmployeeExit.Kind.RESIGNATION, voluntary=True,
+                reason_category=b.get('reasonCategory'), reason=b.get('reason'), submitted_on=today, notice_days=policy['noticeDays'],
+                proposed_lwd=lwd, initiated_by_id=user.id).pk)
             start_workflow(company_id=company_id, object_type='resignation', object_id=xid, employee_id=employee_id, title='Resignation submitted',
                            body=f"{e['name_en']} has resigned. Proposed last working day {bs_label(lwd)}.")
             audit('resign', 'employee_exit', actor_id=user.id, row_id=xid, after={'proposedLwd': b['proposedLastWorkingDay']})
@@ -570,18 +609,12 @@ def resign(user: AuthUser, body: dict) -> dict:
     return {'id': xid, 'noticeDays': policy['noticeDays'], 'shortfallDays': shortfall}
 
 
-RECORD_EXIT = Obj({
-    'employeeId': Uuid(), 'kind': Enum(EXIT_KINDS), 'lastWorkingDay': IsoDate(), 'voluntary': Bool(optional=True),
-    'reasonCategory': Str(trim=True, max=60, nullish=True), 'reason': Str(trim=True, max=2000, nullish=True), 'templateId': Uuid(nullish=True),
-})
-
-
 def create_exit(user: AuthUser, body: dict) -> str:
     _require(user, 'hr')
     company_id = company_id_of(user)
-    b = parse(RECORD_EXIT, body)
+    b = plain(validate(RecordExitIn, body))
     e = employee_in(company_id, b['employeeId'])
-    if e['status'] != 'active':
+    if e['status'] != Employee.Status.ACTIVE:
         raise BadRequestError('this employee has already left')
     lwd = date.fromisoformat(b['lastWorkingDay'])
     if e['join_date'] and lwd < e['join_date']:
@@ -596,8 +629,9 @@ def create_exit(user: AuthUser, body: dict) -> str:
 
 
 def load_exit(user: AuthUser, id_: str) -> dict:
-    x = one('SELECT id, company_id, employee_id, status, kind, proposed_lwd, accepted_lwd FROM employee_exit WHERE id = %s', [parse_uuid(str(id_))])
-    if not x or str(x['company_id']) != user.company_id:
+    x = (EmployeeExit.objects.for_company(user.company_id).filter(pk=parse_uuid(str(id_)))
+         .values('id', 'company_id', 'employee_id', 'status', 'kind', 'proposed_lwd', 'accepted_lwd').first())
+    if not x:
         raise NotFoundError('exit not found')
     x = _s(x, 'id', 'company_id', 'employee_id')
     lwd = x['accepted_lwd'] or x['proposed_lwd']
@@ -612,32 +646,34 @@ def load_exit(user: AuthUser, id_: str) -> dict:
 
 def exit_detail(user: AuthUser, id_: str) -> dict:
     x = load_exit(user, id_)
-    row = _exit(one(f'SELECT {EXIT_COLS} FROM employee_exit x JOIN employee e ON e.id = x.employee_id WHERE x.id = %s', [x['id']]))
+    row = _exit(exit_rows(EmployeeExit.objects.filter(pk=x['id'])).get())
     return {'exit': row, 'blockers': clearance_blockers(x['id'], x['employee_id']),
             'settlement': settlement_status(x['company_id'], x['employee_id'], x['accepted_lwd'] or x['proposed_lwd']) if _is_hr(user) else None}
-
-
-UPDATE_EXIT = Obj({'lastWorkingDay': IsoDate(optional=True), 'voluntary': Bool(optional=True),
-                   'reasonCategory': Str(trim=True, max=60, nullish=True), 'reason': Str(trim=True, max=2000, nullish=True)})
 
 
 def update_exit(user: AuthUser, id_: str, body: dict) -> None:
     _require(user, 'hr')
     x = load_exit(user, id_)
-    b = parse(UPDATE_EXIT, body)
-    if x['status'] not in ('pending', 'accepted'):
+    b = plain(validate(UpdateExitIn, body))
+    if x['status'] not in OPEN_EXIT:
         raise ConflictError(f"exit is {x['status']}")
+    sets = {col: b[k] for k, col in (('reasonCategory', 'reason_category'), ('reason', 'reason')) if k in b}
+    if b.get('voluntary') is not None:
+        sets['voluntary'] = b['voluntary']
+    if b.get('lastWorkingDay'):
+        sets['accepted_lwd'] = b['lastWorkingDay']
     with transaction.atomic():
-        execute("""UPDATE employee_exit SET voluntary = coalesce(%s, voluntary), reason_category = CASE WHEN %s::boolean THEN %s ELSE reason_category END,
-                          reason = CASE WHEN %s::boolean THEN %s ELSE reason END, accepted_lwd = coalesce(%s::date, accepted_lwd) WHERE id = %s""",
-                [b.get('voluntary'), 'reasonCategory' in b, b.get('reasonCategory'), 'reason' in b, b.get('reason'), b.get('lastWorkingDay'), x['id']])
-        if b.get('lastWorkingDay') and x['status'] == 'accepted':
-            lwd = b['lastWorkingDay']
-            execute('UPDATE employee SET exit_date = %s, updated_at = now() WHERE id = %s', [lwd, x['employee_id']])
+        if sets:
+            EmployeeExit.objects.filter(pk=x['id']).update(**sets)
+        if b.get('lastWorkingDay') and x['status'] == ExitStatus.ACCEPTED:
+            lwd = date.fromisoformat(b['lastWorkingDay'])
+            Employee.objects.filter(pk=x['employee_id']).update(exit_date=lwd, updated_at=Now())
             # Clearance due dates follow the new last working day.
-            execute("""UPDATE lifecycle_task t SET due_date = t.due_date + (%s::date - c.anchor_date) FROM lifecycle_case c
-                        WHERE c.id = t.case_id AND c.exit_id = %s AND c.status = 'active' AND t.due_date IS NOT NULL""", [lwd, x['id']])
-            execute("UPDATE lifecycle_case SET anchor_date = %s WHERE exit_id = %s AND status = 'active'", [lwd, x['id']])
+            for case_id, anchor in (LifecycleCase.objects.filter(exit_id=x['id'], status=CaseStatus.ACTIVE)
+                                    .values_list('id', 'anchor_date')):
+                (LifecycleTask.objects.filter(case_id=case_id, due_date__isnull=False)
+                 .update(due_date=F('due_date') + timedelta(days=(lwd - anchor).days)))
+            LifecycleCase.objects.filter(exit_id=x['id'], status=CaseStatus.ACTIVE).update(anchor_date=lwd)
             own = user_id_for_employee(x['employee_id'])
             if own:
                 notify(company_id=x['company_id'], user_id=own, employee_id=x['employee_id'], template='lifecycle.exit.lwd_changed',
@@ -650,42 +686,37 @@ def withdraw_exit(user: AuthUser, id_: str) -> None:
     x = load_exit(user, id_)
     if x['employee_id'] != user.employee_id:
         raise ForbiddenError('only the employee can withdraw their resignation')
-    if x['status'] != 'pending':
-        raise ConflictError('your resignation was already accepted; ask HR to cancel it' if x['status'] == 'accepted'
+    if x['status'] != ExitStatus.PENDING:
+        raise ConflictError('your resignation was already accepted; ask HR to cancel it' if x['status'] == ExitStatus.ACCEPTED
                             else f"resignation is {x['status']}")
     with transaction.atomic():
-        execute("UPDATE employee_exit SET status = 'withdrawn', decided_at = now() WHERE id = %s", [x['id']])
+        EmployeeExit.objects.filter(pk=x['id']).update(status=ExitStatus.WITHDRAWN, decided_at=Now())
         cancel_workflow('resignation', x['id'])
         audit('withdraw', 'employee_exit', actor_id=user.id, row_id=x['id'])
-
-
-CANCEL_EXIT = Obj({'reason': Str(trim=True, min=3, max=500)})
 
 
 def cancel_exit(user: AuthUser, id_: str, body: dict) -> None:
     from hajiri.workflow.services import cancel_workflow
     _require(user, 'hr')
     x = load_exit(user, id_)
-    b = parse(CANCEL_EXIT, body)
-    if x['status'] not in ('pending', 'accepted'):
+    b = validate(CancelExitIn, body)
+    if x['status'] not in OPEN_EXIT:
         raise ConflictError(f"exit is {x['status']}")
     with transaction.atomic():
-        execute("UPDATE employee_exit SET status = 'cancelled', decided_at = now(), reason = concat_ws(E'\\n', reason, %s::text) WHERE id = %s",
-                [f"Cancelled: {b['reason']}", x['id']])
+        old = EmployeeExit.objects.select_for_update().filter(pk=x['id']).values_list('reason', flat=True).get()
+        reason = '\n'.join(p for p in (old, f"Cancelled: {b['reason']}") if p is not None)    # concat_ws: a missing reason is skipped
+        EmployeeExit.objects.filter(pk=x['id']).update(status=ExitStatus.CANCELLED, decided_at=Now(), reason=reason)
         cancel_workflow('resignation', x['id'])
-        if x['status'] == 'accepted':
-            execute('UPDATE employee SET exit_date = NULL, updated_at = now() WHERE id = %s AND exit_date = %s', [x['employee_id'], x['accepted_lwd']])
-            execute("UPDATE lifecycle_case SET status = 'cancelled', completed_at = now() WHERE exit_id = %s AND status = 'active'", [x['id']])
+        if x['status'] == ExitStatus.ACCEPTED:
+            Employee.objects.filter(pk=x['employee_id'], exit_date=x['accepted_lwd']).update(exit_date=None, updated_at=Now())
+            LifecycleCase.objects.filter(exit_id=x['id'], status=CaseStatus.ACTIVE).update(status=CaseStatus.CANCELLED, completed_at=Now())
         audit('cancel', 'employee_exit', actor_id=user.id, row_id=x['id'], after=b)
-
-
-COMPLETE_EXIT = Obj({'skipOpenTasks': Bool(default=False)})
 
 
 def complete(user: AuthUser, id_: str, body: dict | None = None) -> None:
     _require(user, 'hr')
     x = load_exit(user, id_)
-    b = parse(COMPLETE_EXIT, body or {})
+    b = validate(CompleteExitIn, body or {})
     with transaction.atomic():
         complete_exit(x['id'], user.id, skip_open_tasks=b['skipOpenTasks'])
 
@@ -693,38 +724,29 @@ def complete(user: AuthUser, id_: str, body: dict | None = None) -> None:
 # Exit interview: questions are company-wide; answers are encrypted and only HR can read them.
 
 def questions(user: AuthUser) -> list[dict]:
-    return [_s(r, 'id') for r in rows(
-        'SELECT id, sort, question, kind, options, active FROM exit_interview_question WHERE company_id = %s AND (active OR %s) ORDER BY sort',
-        [company_id_of(user), _is_hr(user)])]
-
-
-QUESTIONS_BODY = Obj({'questions': Arr(Obj({
-    'id': Uuid(optional=True), 'question': Str(trim=True, min=1, max=300), 'kind': Enum(('text', 'rating', 'choice')),
-    'options': Arr(Str(trim=True, min=1, max=80), max=12, default=list), 'active': Bool(default=True),
-}, refine=(lambda q: q['kind'] != 'choice' or len(q['options']) >= 2, 'a choice question needs at least two options')), max=30)})
+    qs = ExitInterviewQuestion.objects.for_company(company_id_of(user))
+    if not _is_hr(user):
+        qs = qs.filter(active=True)
+    return [_s(r, 'id') for r in qs.order_by('sort').values('id', 'sort', 'question', 'kind', 'options', 'active')]
 
 
 def save_questions(user: AuthUser, body: dict) -> None:
     _require(user, 'hr')
     company_id = company_id_of(user)
-    b = parse(QUESTIONS_BODY, body)
+    b = plain(validate(QuestionsIn, body))
+    mine = ExitInterviewQuestion.objects.for_company(company_id)
     with transaction.atomic():
         keep: list[str] = []
         for i, q in enumerate(b['questions']):
+            fields = {'sort': i, 'question': q['question'], 'kind': q['kind'], 'options': q['options'], 'active': q['active']}
             if q.get('id'):
-                u = one("""UPDATE exit_interview_question SET sort = %s, question = %s, kind = %s, options = %s, active = %s
-                            WHERE id = %s AND company_id = %s RETURNING id""",
-                        [i, q['question'], q['kind'], json.dumps(q['options']), q['active'], q['id'], company_id])
-                if not u:
+                if not mine.filter(pk=q['id']).update(**fields):
                     raise BadRequestError('question not found')
                 keep.append(q['id'])
             else:
-                ins = one("""INSERT INTO exit_interview_question (company_id, sort, question, kind, options, active)
-                             VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
-                          [company_id, i, q['question'], q['kind'], json.dumps(q['options']), q['active']])
-                keep.append(str(ins['id']))
+                keep.append(str(ExitInterviewQuestion.objects.create(company_id=company_id, **fields).pk))
         # Questions are never deleted (old answers refer to them); dropped ones are switched off.
-        execute('UPDATE exit_interview_question SET active = false WHERE company_id = %s AND NOT (id = ANY(%s::uuid[]))', [company_id, keep])
+        mine.exclude(pk__in=keep).update(active=False)
         audit('update', 'exit_interview_question', actor_id=user.id, after={'count': len(b['questions'])})
 
 
@@ -735,16 +757,13 @@ def _interview_aad(exit_id: str) -> str:
 def interview(user: AuthUser, id_: str) -> dict | None:
     _require(user, 'hr')
     x = load_exit(user, id_)
-    i = one("""SELECT i.answers_enc, i.by_employee, i.created_at, u.name AS recorded_by_name FROM exit_interview i
-                 JOIN app_user u ON u.id = i.recorded_by WHERE i.exit_id = %s""", [x['id']])
+    i = (ExitInterview.objects.filter(exit_id=x['id']).annotate(recorded_by_name=F('recorded_by__name'))
+         .values('answers_enc', 'by_employee', 'created_at', 'recorded_by_name').first())
     if not i:
         return None
     audit('read_exit_interview', 'exit_interview', actor_id=user.id, row_id=x['id'])
     return {'answers': json.loads(field_cipher().decrypt(bytes(i['answers_enc']), _interview_aad(x['id']))), 'byEmployee': i['by_employee'],
             'createdAt': i['created_at'], 'recordedBy': i['recorded_by_name']}
-
-
-INTERVIEW_BODY = Obj({'answers': Arr(Obj({'questionId': Uuid(), 'answer': Union(Str(max=3000), Int(min=1, max=5))}), min=1, max=30)})
 
 
 def record_interview(user: AuthUser, id_: str, body: dict) -> None:
@@ -754,10 +773,10 @@ def record_interview(user: AuthUser, id_: str, body: dict) -> None:
         raise ForbiddenError('only the leaver or HR can record the exit interview')
     if own and not lifecycle_policy(x['company_id'])['selfExitInterview']:
         raise ForbiddenError('HR will hold your exit interview in person')
-    if x['status'] not in ('pending', 'accepted', 'completed'):
+    if x['status'] not in (ExitStatus.PENDING, ExitStatus.ACCEPTED, ExitStatus.COMPLETED):
         raise ConflictError(f"exit is {x['status']}")
-    b = parse(INTERVIEW_BODY, body)
-    by_id = {str(q['id']): q for q in rows('SELECT id, question, kind, options FROM exit_interview_question WHERE company_id = %s', [x['company_id']])}
+    b = plain(validate(InterviewIn, body))
+    by_id = {str(q['id']): q for q in ExitInterviewQuestion.objects.for_company(x['company_id']).values('id', 'question', 'kind', 'options')}
     answers = []
     for a in b['answers']:
         q = by_id.get(a['questionId'])
@@ -772,36 +791,48 @@ def record_interview(user: AuthUser, id_: str, body: dict) -> None:
             raise BadRequestError(f'"{q["question"]}" needs a written answer')
         answers.append({'questionId': str(q['id']), 'question': q['question'], 'kind': q['kind'], 'answer': ans})
     with transaction.atomic():
-        ins = one("""INSERT INTO exit_interview (exit_id, company_id, answers_enc, by_employee, recorded_by) VALUES (%s, %s, %s, %s, %s)
-                     ON CONFLICT (exit_id) DO NOTHING RETURNING exit_id""",
-                  [x['id'], x['company_id'], field_cipher().encrypt(json.dumps(answers, ensure_ascii=False), _interview_aad(x['id'])), own, user.id])
-        if not ins:
-            raise ConflictError('the exit interview has already been recorded')
-        execute("""UPDATE lifecycle_task t SET status = 'done', done_by = %s, done_at = now() FROM lifecycle_case c
-                    WHERE c.id = t.case_id AND c.exit_id = %s AND t.status = 'open' AND t.title ILIKE 'exit interview%%'""", [user.id, x['id']])
+        try:
+            with transaction.atomic():
+                ExitInterview.objects.create(exit_id=x['id'], company_id=x['company_id'], by_employee=own, recorded_by_id=user.id,
+                                             answers_enc=field_cipher().encrypt(json.dumps(answers, ensure_ascii=False), _interview_aad(x['id'])))
+        except IntegrityError as e:
+            if _unique(e):
+                raise ConflictError('the exit interview has already been recorded') from e
+            raise
+        (LifecycleTask.objects.filter(case__exit_id=x['id'], status=TaskStatus.OPEN, title__istartswith='exit interview')
+         .update(status=TaskStatus.DONE, done_by_id=user.id, done_at=Now()))
         audit('record_exit_interview', 'exit_interview', actor_id=user.id, row_id=x['id'], after={'byEmployee': own})
 
 
 # ------------------------------------------------------------ assets
 
 def asset_types(user: AuthUser) -> list[dict]:
-    return [_s(r, 'id') for r in rows('SELECT id, name FROM asset_type WHERE company_id = %s ORDER BY name', [company_id_of(user)])]
+    return [_s(r, 'id') for r in AssetType.objects.for_company(company_id_of(user)).order_by('name').values('id', 'name')]
 
 
 def add_asset_type(user: AuthUser, body: dict) -> dict:
     _require(user, 'hr')
-    b = parse(Obj({'name': Str(trim=True, min=1, max=80)}), body)
+    b = validate(AssetTypeIn, body)
     try:
         with transaction.atomic():
-            return _s(one('INSERT INTO asset_type (company_id, name) VALUES (%s, %s) RETURNING id, name', [company_id_of(user), b['name']]), 'id')
+            t = AssetType.objects.create(company_id=company_id_of(user), name=b['name'])
     except IntegrityError as e:
         if _unique(e):
             raise ConflictError('this asset type already exists') from e
         raise
+    return {'id': str(t.pk), 'name': t.name}
 
 
-ASSET_COLS = """a.id, a.tag, a.name, a.serial, a.condition, a.status, a.purchase_date, a.cost, a.notes, a.type_id, t.name AS type_name, a.created_at,
-    g.id AS assignment_id, g.employee_id, g.assigned_on, e.name_en AS employee_name, e.emp_code"""
+ASSET_FIELDS = ('id', 'tag', 'name', 'serial', 'condition', 'status', 'purchase_date', 'cost', 'notes', 'type_id', 'type_name', 'created_at',
+                'assignment_id', 'employee_id', 'assigned_on', 'employee_name', 'emp_code')
+
+
+def asset_rows(company_id: str):
+    """Assets with their type and whoever holds them now (the open assignment, a LEFT JOIN)."""
+    return (Asset.objects.for_company(company_id)
+            .annotate(g=FilteredRelation('asset_assignments', condition=Q(asset_assignments__returned_on__isnull=True)))
+            .annotate(type_name=F('type__name'), assignment_id=F('g__id'), employee_id=F('g__employee_id'), assigned_on=F('g__assigned_on'),
+                      employee_name=F('g__employee__name_en'), emp_code=F('g__employee__emp_code')))
 
 
 def _asset(r):
@@ -810,63 +841,46 @@ def _asset(r):
 
 def assets(user: AuthUser, query: dict | None = None) -> list[dict]:
     _require(user, 'hr', 'manager')
-    q = parse(Obj({'status': Enum(('available', 'assigned', 'retired'), optional=True), 'employeeId': Uuid(optional=True),
-                   'search': Str(max=80, optional=True)}), query or {})
+    q = plain(validate(AssetQuery, query or {}))
     if q.get('employeeId'):
         assert_manages(user, q['employeeId'])
     elif not _is_hr(user):
         raise ForbiddenError('choose one of your team members')
-    search = q.get('search')
-    esc = search.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') if search else None
-    return [_asset(r) for r in rows(
-        f"""SELECT {ASSET_COLS} FROM asset a LEFT JOIN asset_type t ON t.id = a.type_id
-              LEFT JOIN asset_assignment g ON g.asset_id = a.id AND g.returned_on IS NULL LEFT JOIN employee e ON e.id = g.employee_id
-             WHERE a.company_id = %s AND (%s::text IS NULL OR a.status = %s) AND (%s::uuid IS NULL OR g.employee_id = %s)
-               AND (%s::text IS NULL OR a.tag ILIKE '%%' || %s || '%%' OR a.name ILIKE '%%' || %s || '%%' OR a.serial ILIKE '%%' || %s || '%%')
-             ORDER BY a.tag LIMIT 1000""",
-        [company_id_of(user), q.get('status'), q.get('status'), q.get('employeeId'), q.get('employeeId'), esc, esc, esc, esc])]
+    qs = AssetFilter(q, queryset=asset_rows(company_id_of(user))).qs.order_by('tag').values(*ASSET_FIELDS)
+    return [_asset(r) for r in qs[:1000]]
 
 
 def my_assets(user: AuthUser) -> list[dict]:
     if not user.employee_id:
         return []
-    return [_asset(r) for r in rows(
-        f"""SELECT {ASSET_COLS} FROM asset_assignment g JOIN asset a ON a.id = g.asset_id LEFT JOIN asset_type t ON t.id = a.type_id
-              JOIN employee e ON e.id = g.employee_id WHERE g.employee_id = %s AND g.returned_on IS NULL ORDER BY g.assigned_on""",
-        [user.employee_id])]
+    qs = asset_rows(company_id_of(user)).filter(g__employee_id=user.employee_id).order_by('g__assigned_on').values(*ASSET_FIELDS)
+    return [_asset(r) for r in qs]
 
 
 def asset_history(user: AuthUser, id_: str) -> list[dict]:
     _require(user, 'hr')
-    return [_s(r, 'id', 'employee_id') for r in rows(
-        """SELECT g.id, g.employee_id, e.name_en, e.emp_code, g.assigned_on, g.returned_on, g.condition_out, g.condition_in, g.notes
-             FROM asset_assignment g JOIN employee e ON e.id = g.employee_id WHERE g.asset_id = %s AND g.company_id = %s ORDER BY g.assigned_on DESC""",
-        [parse_uuid(str(id_)), company_id_of(user)])]
-
-
-ASSET_BODY = Obj({
-    'tag': Str(trim=True, min=1, max=40), 'name': Str(trim=True, min=1, max=120), 'typeId': Uuid(nullish=True),
-    'serial': Str(trim=True, max=80, nullish=True), 'condition': Enum(CONDITIONS, default='good'), 'purchaseDate': IsoDate(nullish=True),
-    'cost': Money(nullish=True), 'notes': Str(max=1000, nullish=True),
-})
+    return [_s(r, 'id', 'employee_id') for r in AssetAssignment.objects.for_company(company_id_of(user)).filter(asset_id=parse_uuid(str(id_)))
+            .annotate(name_en=F('employee__name_en'), emp_code=F('employee__emp_code')).order_by('-assigned_on')
+            .values('id', 'employee_id', 'name_en', 'emp_code', 'assigned_on', 'returned_on', 'condition_out', 'condition_in', 'notes')]
 
 
 def _check_type(company_id: str, type_id) -> None:
-    if type_id and not one('SELECT 1 AS x FROM asset_type WHERE id = %s AND company_id = %s', [type_id, company_id]):
+    if type_id and not AssetType.objects.for_company(company_id).filter(pk=type_id).exists():
         raise BadRequestError('asset type not found')
+
+
+ASSET_MAP = (('tag', 'tag'), ('name', 'name'), ('typeId', 'type_id'), ('serial', 'serial'), ('condition', 'condition'),
+             ('purchaseDate', 'purchase_date'), ('cost', 'cost'), ('notes', 'notes'), ('status', 'status'))
 
 
 def create_asset(user: AuthUser, body: dict) -> str:
     _require(user, 'hr')
     company_id = company_id_of(user)
-    b = parse(ASSET_BODY, body)
+    b = plain(validate(AssetIn, body))
     _check_type(company_id, b.get('typeId'))
     try:
         with transaction.atomic():
-            aid = str(one("""INSERT INTO asset (company_id, type_id, tag, name, serial, condition, purchase_date, cost, notes)
-                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                          [company_id, b.get('typeId'), b['tag'], b['name'], b.get('serial'), b['condition'], b.get('purchaseDate'),
-                           b.get('cost'), b.get('notes')])['id'])
+            aid = str(Asset.objects.create(company_id=company_id, **{col: b.get(k) for k, col in ASSET_MAP if k != 'status'}).pk)
             audit('create', 'asset', actor_id=user.id, row_id=aid, after=b)
     except IntegrityError as e:
         if _unique(e):
@@ -876,30 +890,21 @@ def create_asset(user: AuthUser, body: dict) -> str:
 
 
 def update_asset(user: AuthUser, id_: str, body: dict) -> None:
-    from copy import copy
     _require(user, 'hr')
     company_id = company_id_of(user)
     id_ = parse_uuid(str(id_))
-    fields = {}
-    for k, f in ASSET_BODY.fields.items():
-        f2 = copy(f)
-        f2.optional, f2.default = True, MISSING
-        fields[k] = f2
-    fields['status'] = Enum(('available', 'retired'), optional=True)
-    b = parse(Obj(fields), body)
+    b = plain(validate(AssetUpdateIn, body, partial=True))
     _check_type(company_id, b.get('typeId'))
-    cur = one('SELECT status FROM asset WHERE id = %s AND company_id = %s', [id_, company_id])
+    cur = Asset.objects.for_company(company_id).filter(pk=id_).values_list('status', flat=True).first()
     if not cur:
         raise NotFoundError('asset not found')
-    if b.get('status') and cur['status'] == 'assigned':
+    if b.get('status') and cur == Asset.Status.ASSIGNED:
         raise ConflictError('record the return before changing the status of this asset')
-    cols = [('tag', 'tag'), ('name', 'name'), ('typeId', 'type_id'), ('serial', 'serial'), ('condition', 'condition'),
-            ('purchaseDate', 'purchase_date'), ('cost', 'cost'), ('notes', 'notes'), ('status', 'status')]
-    sets = [(col, b[k]) for k, col in cols if k in b]
+    sets = {col: b[k] for k, col in ASSET_MAP if k in b}
     try:
         with transaction.atomic():
             if sets:
-                execute(f"UPDATE asset SET {', '.join(f'{c} = %s' for c, _ in sets)} WHERE id = %s", [v for _, v in sets] + [id_])
+                Asset.objects.filter(pk=id_).update(**sets)
             audit('update', 'asset', actor_id=user.id, row_id=id_, after=b)
     except IntegrityError as e:
         if _unique(e):
@@ -907,28 +912,25 @@ def update_asset(user: AuthUser, id_: str, body: dict) -> None:
         raise
 
 
-ASSIGN_BODY = Obj({'employeeId': Uuid(), 'assignedOn': IsoDate(optional=True), 'notes': Str(max=500, nullish=True)})
-
-
 def assign_asset(user: AuthUser, id_: str, body: dict) -> None:
     _require(user, 'hr')
     company_id = company_id_of(user)
     id_ = parse_uuid(str(id_))
-    b = parse(ASSIGN_BODY, body)
+    b = plain(validate(AssignAssetIn, body))
     e = employee_in(company_id, b['employeeId'])
-    if e['status'] != 'active':
+    if e['status'] != Employee.Status.ACTIVE:
         raise BadRequestError('this employee has left')
     with transaction.atomic():
-        asset = one('SELECT status, condition, name, tag FROM asset WHERE id = %s AND company_id = %s FOR UPDATE', [id_, company_id])
+        asset = Asset.objects.for_company(company_id).select_for_update().filter(pk=id_).values('status', 'condition', 'name', 'tag').first()
         if not asset:
             raise NotFoundError('asset not found')
-        if asset['status'] != 'available':
-            raise ConflictError('this asset is already with someone; record the return first' if asset['status'] == 'assigned'
+        if asset['status'] != Asset.Status.AVAILABLE:
+            raise ConflictError('this asset is already with someone; record the return first' if asset['status'] == Asset.Status.ASSIGNED
                                 else 'this asset is retired')
-        execute("""INSERT INTO asset_assignment (asset_id, company_id, employee_id, assigned_on, condition_out, notes, assigned_by)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                [id_, company_id, b['employeeId'], b.get('assignedOn') or npt_today(), asset['condition'], b.get('notes'), user.id])
-        execute("UPDATE asset SET status = 'assigned' WHERE id = %s", [id_])
+        AssetAssignment.objects.create(asset_id=id_, company_id=company_id, employee_id=b['employeeId'],
+                                       assigned_on=b.get('assignedOn') or npt_today(), condition_out=asset['condition'], notes=b.get('notes'),
+                                       assigned_by_id=user.id)
+        Asset.objects.filter(pk=id_).update(status=Asset.Status.ASSIGNED)
         audit('assign', 'asset', actor_id=user.id, row_id=id_, after={'employeeId': b['employeeId']})
         own = user_id_for_employee(b['employeeId'])
         if own:
@@ -937,27 +939,27 @@ def assign_asset(user: AuthUser, id_: str, body: dict) -> None:
                    payload={'assetId': id_})
 
 
-RETURN_BODY = Obj({'returnedOn': IsoDate(optional=True), 'condition': Enum(CONDITIONS), 'notes': Str(max=500, nullish=True)})
-
-
 def return_asset(user: AuthUser, id_: str, body: dict) -> None:
     _require(user, 'hr')
     company_id = company_id_of(user)
     id_ = parse_uuid(str(id_))
-    b = parse(RETURN_BODY, body)
+    b = plain(validate(ReturnAssetIn, body))
     with transaction.atomic():
-        g = one("""SELECT g.id, g.assigned_on, g.employee_id FROM asset_assignment g JOIN asset a ON a.id = g.asset_id
-                    WHERE g.asset_id = %s AND a.company_id = %s AND g.returned_on IS NULL FOR UPDATE OF g""", [id_, company_id])
+        g = (AssetAssignment.objects.select_for_update(of=('self',))
+             .filter(asset_id=id_, asset__company_id=company_id, returned_on__isnull=True)
+             .values('id', 'assigned_on', 'employee_id').first())
         if not g:
             raise ConflictError('this asset is not with anyone')
         on = date.fromisoformat(b['returnedOn']) if b.get('returnedOn') else npt_today()
         if on < g['assigned_on']:
             raise BadRequestError('the return date cannot be before it was handed over')
-        execute('UPDATE asset_assignment SET returned_on = %s, condition_in = %s, notes = coalesce(%s, notes), returned_by = %s WHERE id = %s',
-                [on, b['condition'], b.get('notes'), user.id, g['id']])
+        returned = {'returned_on': on, 'condition_in': b['condition'], 'returned_by_id': user.id}
+        if b.get('notes') is not None:
+            returned['notes'] = b['notes']                      # coalesce(new note, old note)
+        AssetAssignment.objects.filter(pk=g['id']).update(**returned)
         # A lost asset leaves service; anything else is available again.
-        execute("UPDATE asset SET status = CASE WHEN %s = 'lost' THEN 'retired' ELSE 'available' END, condition = %s WHERE id = %s",
-                [b['condition'], b['condition'], id_])
+        Asset.objects.filter(pk=id_).update(status=Asset.Status.RETIRED if b['condition'] == Asset.Condition.LOST else Asset.Status.AVAILABLE,
+                                            condition=b['condition'])
         audit('return', 'asset', actor_id=user.id, row_id=id_,
               after={'employeeId': str(g['employee_id']), 'condition': b['condition'], 'returnedOn': on.isoformat()})
 
@@ -965,7 +967,8 @@ def return_asset(user: AuthUser, id_: str, body: dict) -> None:
 # ------------------------------------------------------------ approval inbox summaries
 
 def probation_summary(inst: dict) -> dict:
-    x = one('SELECT rating, recommendation, extend_to, last_working_day, probation_end, comments FROM probation_review WHERE id = %s', [inst['object_id']])
+    x = (ProbationReview.objects.filter(pk=inst['object_id'])
+         .values('rating', 'recommendation', 'extend_to', 'last_working_day', 'probation_end', 'comments').first())
     if not x:
         return {}
     if x['recommendation'] == 'confirm':
@@ -979,7 +982,8 @@ def probation_summary(inst: dict) -> dict:
 
 
 def resignation_summary(inst: dict) -> dict:
-    x = one('SELECT proposed_lwd, accepted_lwd, reason, reason_category, notice_days, submitted_on FROM employee_exit WHERE id = %s', [inst['object_id']])
+    x = (EmployeeExit.objects.filter(pk=inst['object_id'])
+         .values('proposed_lwd', 'accepted_lwd', 'reason', 'reason_category', 'notice_days', 'submitted_on').first())
     if not x:
         return {}
     lwd = x['accepted_lwd'] or x['proposed_lwd']

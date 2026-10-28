@@ -2,13 +2,12 @@
 jurisdiction-wide, not per company; idempotent on (rule_key, valid_from_ad)."""
 from __future__ import annotations
 
-import json
+from django.db import transaction
 
 from engines.payroll import DEFAULT_COMPONENTS, DEFAULT_RULES, TAX_SCHEDULE_2082, TAX_SCHEDULE_2083
 
+from hajiri.db.models import RuleVersion, SalaryComponent, SalaryStructure, SalaryStructureVersion
 from hajiri.worker.registry import company_seeder
-
-from ._db import q1, x
 
 RULES = [
     {'key': 'tax.schedule', 'fromAd': '2025-07-17', 'toAd': '2026-07-16', 'fromBs': '2082-04-01', 'toBs': '2083-03-32', 'value': TAX_SCHEDULE_2082,
@@ -47,24 +46,25 @@ RULES = [
 def seed_payroll_defaults(company_id: str) -> dict[str, int]:
     rules = 0
     for r in RULES:
-        rules += x("""INSERT INTO rule_version (rule_key, jurisdiction, valid_from_ad, valid_to_ad, valid_from_bs, valid_to_bs, value, source_url, note)
-                      SELECT $1, 'NP', $2::date, $3::date, $4, $5, $6, $7, $8
-                       WHERE NOT EXISTS (SELECT 1 FROM rule_version WHERE rule_key = $1 AND jurisdiction = 'NP' AND valid_from_ad = $2::date)""",
-                   [r['key'], r['fromAd'], r['toAd'], r['fromBs'], r['toBs'], json.dumps(r['value']), r['source'], r.get('note')])
-    components = 0
-    for c in DEFAULT_COMPONENTS:
-        components += x("""INSERT INTO salary_component (company_id, code, name_en, name_ne, type, formula, condition, depends_on_payment_days, taxable, statutory, rounding, sort_order)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (company_id, code) DO NOTHING""",
-                        [company_id, c['code'], c['nameEn'], c.get('nameNe'), c['type'], c.get('formula'), c.get('condition'),
-                         c['dependsOnPaymentDays'], c['taxable'], bool(c.get('statutory', False)), c['rounding'], c['sortOrder']])
+        _, created = RuleVersion.objects.get_or_create(
+            rule_key=r['key'], jurisdiction='NP', valid_from_ad=r['fromAd'],
+            defaults={'valid_to_ad': r['toAd'], 'valid_from_bs': r['fromBs'], 'valid_to_bs': r['toBs'], 'value': r['value'],
+                      'source_url': r['source'], 'note': r.get('note')})
+        rules += created
+    have = set(SalaryComponent.objects.for_company(company_id).values_list('code', flat=True))
+    missing = [SalaryComponent(company_id=company_id, code=c['code'], name_en=c['nameEn'], name_ne=c.get('nameNe'), type=c['type'],
+                               formula=c.get('formula'), condition=c.get('condition'), depends_on_payment_days=c['dependsOnPaymentDays'],
+                               taxable=c['taxable'], statutory=bool(c.get('statutory', False)), rounding=c['rounding'],
+                               sort_order=c['sortOrder'])
+               for c in DEFAULT_COMPONENTS if c['code'] not in have]
+    SalaryComponent.objects.bulk_create(missing, ignore_conflicts=True)
     structures = 0
-    s = q1("""INSERT INTO salary_structure (company_id, code, name_en) VALUES ($1, 'STD', 'Standard structure')
-              ON CONFLICT (company_id, code) DO NOTHING RETURNING id""", [company_id])
-    if s:
-        x('INSERT INTO salary_structure_version (structure_id, version, components) VALUES ($1, 1, $2)',
-          [s['id'], json.dumps([{'code': c['code']} for c in DEFAULT_COMPONENTS])])
-        structures = 1
-    return {'rules': rules, 'components': components, 'structures': structures}
+    with transaction.atomic():
+        s, created = SalaryStructure.objects.get_or_create(company_id=company_id, code='STD', defaults={'name_en': 'Standard structure'})
+        if created:
+            SalaryStructureVersion.objects.create(structure=s, version=1, components=[{'code': c['code']} for c in DEFAULT_COMPONENTS])
+            structures = 1
+    return {'rules': rules, 'components': len(missing), 'structures': structures}
 
 
 @company_seeder('payroll', order=10)

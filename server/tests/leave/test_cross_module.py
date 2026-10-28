@@ -6,7 +6,7 @@ roles-flows (specialist roles and leave adjustments).
 import pytest
 
 from hajiri.attendance.service import recompute_day
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.leave.service import ledger_balance
 from tests.core.punches import insert_punch
 

@@ -2,8 +2,9 @@
 Payroll pages (apps/web/src/pages/payroll and employee/{PayslipsPage,PayslipDetailPage,MyTaxPage}): the Payroll hub
 (pay runs, salary structures, employee salaries, tax declarations, loans, reports, optimum CIT, held pay, opening
 balances, rules), the pay run page (/payroll/runs/<id>) and the Payslips hub (/me/payslips, /me/payslips/tax,
-/me/payslips/<id>). HTMX fragments and form posts live under /_/payroll/...; every rule is in api.py, compliance.py
-and tax_savings.py, the same functions the JSON endpoints call.
+/me/payslips/<id>). HTMX fragments and form posts live under /_/payroll/...; forms.py reads the posts and every rule
+is in services.py, runs.py, compliance.py and tax_savings.py, the same functions the JSON API calls. Everything is
+read through the ACTIVE company, so another company's ids are not found.
 """
 from __future__ import annotations
 
@@ -20,12 +21,16 @@ from engines.bs_calendar import BS_MONTH_NAMES_EN, ad_to_bs
 
 from hajiri.core.auth import company_id_of, has_role
 from hajiri.core.errors import BadRequestError, HttpError, NotFoundError
+from hajiri.core.scoping import is_uuid
 from hajiri.web.decorators import login_required, require_module
 from hajiri.web.format import add_days, bs_month_label, fmt_date, fmt_money, fmt_time, today_npt
 from hajiri.web.htmx import close_modal, flash, hx_redirect, is_htmx, refresh, toast
 
-from . import api, compliance, tax_savings
-from .api_views import csv_download, html_response, sheet_response
+from . import compliance, services, tax_savings
+from .forms import (AssignmentForm, BonusForm, CitForm, ComponentForm, DeclarationForm, HoldForm, InputForm, LoanForm, OpeningForm,
+                    OpeningImportForm, OverrideForm, PageQuery, ReleaseForm, ReviewForm, RunForm, StructureForm,
+                    TaxSavingsForm, VerifyForm)
+from .responses import csv_download, html_response, sheet_response
 
 RUN_TYPE_LABEL = {'regular': 'Regular', 'supplementary': 'Supplementary', 'arrears': 'Arrears', 'off_cycle': 'Off-cycle',
                   'final_settlement': 'Final settlement', 'bonus': 'Bonus'}
@@ -48,7 +53,6 @@ CIT_REASON = {'already_optimal': 'Already lowest tax', 'no_tax_left': 'No tax le
               'limit': 'Fills the deduction limit'}
 REPORT_KINDS = [('tax', 'Tax deposit'), ('funds', 'Retirement funds'), ('variance', 'Pay variance'), ('liability', 'Leave liability'),
                 ('annual', 'Annual tax'), ('certs', 'Certificates')]
-AMOUNT_RE = re.compile(r'^\d+(\.\d{1,2})?$')
 
 
 # ---------------------------------------------------------------- helpers
@@ -90,28 +94,6 @@ def fy_options(years) -> list[tuple[int, str]]:
     return [(y, f'FY {y}/{str(y + 1)[-2:]}') for y in years]
 
 
-def _int(v, default=None):
-    try:
-        return int(str(v).strip())
-    except (TypeError, ValueError):
-        return default
-
-
-def _str(v) -> str:
-    return v.strip() if isinstance(v, str) else ''
-
-
-def _num_str(v, default='0') -> str:
-    """A number field as the decimal string the API expects (Number(v).toFixed(2) in the React forms)."""
-    s = _str(v).replace(',', '')
-    if not s:
-        return default
-    try:
-        return f'{Decimal(s):.2f}'
-    except InvalidOperation:
-        return s
-
-
 def _dec(v) -> Decimal:
     try:
         return Decimal(str(v if v not in (None, '') else 0))
@@ -131,6 +113,14 @@ def done(request, message: str, *, url: str | None = None, refresh_id: str | Non
     return toast(request, r, message, 'ok', title)
 
 
+def _employee_param(user, employee_id: str | None) -> str | None:
+    """An employee id from the query string, re-read through the active company: another company's id is not found
+    (before the employee picker draws its name)."""
+    if employee_id and is_uuid(employee_id):     # a malformed id is refused by the service with its own message
+        compliance.assert_employee(company_id_of(user), employee_id)
+    return employee_id or None
+
+
 def _current_url(request, default: str) -> str:
     cur = request.headers.get('HX-Current-URL')
     if cur:
@@ -145,8 +135,8 @@ def _current_url(request, default: str) -> str:
 @require_module('payroll')
 def runs(request):
     user = request.hajiri_user
-    lst = api.list_runs(user)['runs']
-    periods = api.list_periods(user)['periods']
+    lst = services.list_runs(user)['runs']
+    periods = services.list_periods(user)['periods']
     rows = []
     for r in lst:
         t = r.get('totals') or {}
@@ -162,22 +152,14 @@ def run_new(request):
     user = request.hajiri_user
     if request.method == 'GET':
         b = current_bs()
-        locked = [r for r in api.list_runs(user)['runs'] if r['locked_at']]
+        locked = [r for r in services.list_runs(user)['runs'] if r['locked_at']]
         return render(request, 'payroll/partials/run_form.html', {
             'y': b.year, 'm': b.month, 'types': RUN_TYPE_OPTIONS,
             'locked_runs': [(r['id'], f"{bs_month_label(r['bs_year'], r['bs_month'])}, {run_type_label(r['run_type']).lower()}") for r in locked]})
-    p = request.POST
+    form = RunForm(request.POST)
     try:
-        period = api.create_period(user, {'bsYear': _int(p.get('bs_year')), 'bsMonth': _int(p.get('bs_month'))})['period']
-        body = {'periodId': period['id'], 'runType': p.get('run_type') or 'regular'}
-        if p.get('references_run_id') and body['runType'] in ('arrears', 'supplementary'):
-            body['referencesRunId'] = p['references_run_id']
-        if body['runType'] == 'final_settlement':
-            if p.get('employee_id'):
-                body['employeeIds'] = [p['employee_id']]
-            if _str(p.get('notice_pay')):
-                body['noticePay'] = _str(p.get('notice_pay'))
-        r = api.create_run(user, body)
+        period = services.create_period(user, form.period())['period']
+        r = services.create_run(user, form.run(period['id']))
     except HttpError as e:
         return failed(request, e, 'Not saved')
     return done(request, 'Pay run created. Start with the pre-flight checks.', url=f"/payroll/runs/{r['id']}")
@@ -190,11 +172,10 @@ def bonus_new(request):
     if request.method == 'GET':
         b = current_bs()
         return render(request, 'payroll/partials/bonus_form.html', {'y': b.year, 'm': b.month, 'fy': current_fy() - 1})
-    p = request.POST
+    form = BonusForm(request.POST)
     try:
-        period = api.create_period(user, {'bsYear': _int(p.get('bs_year')), 'bsMonth': _int(p.get('bs_month'))})['period']
-        r = api.create_bonus_run(user, {'periodId': period['id'], 'fiscalYearStart': _int(p.get('fiscal_year_start')),
-                                        'netProfit': _num_str(p.get('net_profit'))})
+        period = services.create_period(user, form.period())['period']
+        r = services.create_bonus_run(user, form.bonus(period['id']))
     except HttpError as e:
         return failed(request, e, 'Not saved')
     return done(request, f"Bonus run created with a pool of {money(r['pool'])}.", url=f"/payroll/runs/{r['id']}")
@@ -258,9 +239,9 @@ def _sheet_ctx(s: dict) -> dict:
 
 def _run_ctx(request, id_) -> dict:
     user = request.hajiri_user
-    d = api.run_detail(user, str(id_))
+    d = services.run_detail(user, str(id_))
     run, period, slips = d['run'], d['period'], d['payslips']
-    inputs = api.list_inputs(user, str(id_))['inputs']
+    inputs = services.list_inputs(user, str(id_))['inputs']
     totals = run.get('totals') or {}
     variance = run.get('variance') or None
     by_emp = {v['employeeId']: v for v in (variance or {}).get('byEmployee', [])}
@@ -286,7 +267,7 @@ def _run_ctx(request, id_) -> dict:
     auto = STEP_OF.get(status, 0)
     allow_next = status in ORDER and ORDER.index(status) >= 2
     step = auto
-    req = _int(request.GET.get('step'))
+    req = PageQuery(request.GET).value('step')
     if req is not None and 0 <= req <= 4:
         # The step buttons (Continue, Back, Preview) open any step; the step strip itself follows Stepper's rules.
         step = req
@@ -326,7 +307,7 @@ def _run_ctx(request, id_) -> dict:
                          {'label': 'Net pay', 'value': money(total_net)}]
     if step == 4:
         try:
-            _fmt, sheet = api.salary_sheet_for(user, str(id_), {})
+            _fmt, sheet = services.salary_sheet_for(user, str(id_), {})
             ctx['sheet'] = _sheet_ctx(sheet)
         except HttpError as e:
             ctx['sheet_error'] = e.message
@@ -344,7 +325,7 @@ def run(request, id):
 
 
 def run_status_can_compute(rid: str, user) -> bool:
-    return api.run_detail(user, rid)['run']['status'] in ('draft', 'preflight_failed', 'computed', 'reviewed')
+    return services.run_detail(user, rid)['run']['status'] in ('draft', 'preflight_failed', 'computed', 'reviewed')
 
 
 ACTION_OK = {
@@ -360,24 +341,23 @@ def run_action(request, id, action):
     rid = str(id)
     try:
         if action == 'preflight':
-            pf = api.run_preflight(user, rid)
-            r = render(request, 'payroll/partials/preflight.html', {'pf': _pf_ctx(pf), 'run': api.run_detail(user, rid)['run'],
+            pf = services.run_preflight(user, rid)
+            r = render(request, 'payroll/partials/preflight.html', {'pf': _pf_ctx(pf), 'run': services.run_detail(user, rid)['run'],
                                                                     'is_hr': has_role(user, 'hr'),
                                                                     'can_compute': run_status_can_compute(rid, user)})
             return toast(request, r, 'Pre-flight checks complete.')
         if action == 'lock_attendance':
-            api.run_lock_attendance(user, rid)
+            services.run_lock_attendance(user, rid)
         elif action == 'compute':
-            api.compute(user, rid, {})
+            services.compute(user, rid, {})
         elif action == 'review':
-            notes = _str(request.POST.get('notes'))
-            api.review(user, rid, {'notes': notes} if notes else {})
+            services.review(user, rid, ReviewForm(request.POST).review())
         elif action == 'approve':
-            api.approve(user, rid)
+            services.approve(user, rid)
         elif action == 'lock':
-            api.lock(user, rid)
+            services.lock(user, rid)
         elif action == 'publish':
-            api.publish(user, rid)
+            services.publish(user, rid)
         else:
             raise NotFoundError('not found')
     except HttpError as e:
@@ -390,9 +370,10 @@ def run_action(request, id, action):
 @require_module('payroll')
 def run_override(request, id):
     if request.method == 'GET':
-        return render(request, 'payroll/partials/override_form.html', {'run_id': id})
+        run = services.run_detail(request.hajiri_user, str(id))['run']      # another company's run is not found
+        return render(request, 'payroll/partials/override_form.html', {'run_id': run['id']})
     try:
-        api.compute(request.hajiri_user, str(id), {'overrideReason': _str(request.POST.get('reason'))})
+        services.compute(request.hajiri_user, str(id), OverrideForm(request.POST).compute())
     except HttpError as e:
         return failed(request, e, 'Not saved')
     return done(request, 'Payslips calculated with an override.', url=f'/payroll/runs/{id}?step=2')
@@ -403,14 +384,11 @@ def run_override(request, id):
 def input_new(request, id):
     user = request.hajiri_user
     if request.method == 'GET':
-        comps = [c for c in api.list_components(user)['components'] if c['active'] and c['type'] != 'statistical']
-        return render(request, 'payroll/partials/input_form.html', {'run_id': id, 'components': comps})
-    p = request.POST
-    item = {'employeeId': p.get('employee_id') or '', 'componentCode': p.get('component_code') or 'ALLOWANCE', 'amount': _str(p.get('amount'))}
-    if _str(p.get('note')):
-        item['note'] = _str(p.get('note'))
+        run = services.get_input_run(user, str(id))      # another company's run is not found before the form is drawn
+        comps = [c for c in services.list_components(user)['components'] if c['active'] and c['type'] != 'statistical']
+        return render(request, 'payroll/partials/input_form.html', {'run_id': run['id'], 'components': comps})
     try:
-        api.add_inputs(user, str(id), {'inputs': [item]})
+        services.add_inputs(user, str(id), InputForm(request.POST).inputs())
     except HttpError as e:
         return failed(request, e, 'Not saved')
     return hx_redirect(request, f'/payroll/runs/{id}?step=1')
@@ -421,13 +399,13 @@ def input_new(request, id):
 def hold_new(request, id):
     user = request.hajiri_user
     if request.method == 'GET':
-        slips = api.run_detail(user, str(id))['payslips']
+        slips = services.run_detail(user, str(id))['payslips']
         held = {h['employee_id'] for h in compliance.list_holds(user, {'status': 'open'})['holds'] if h['run_id'] == str(id)}
         options = [(s['employee_id'], f"{s['name_en']} ({s['emp_code']}) · {money(s['net'])}") for s in slips
                    if s['employee_id'] not in held and _dec(s['net']) > 0]
         return render(request, 'payroll/partials/hold_form.html', {'run_id': id, 'options': options})
     try:
-        compliance.hold_pay(user, str(id), {'employeeId': request.POST.get('employee_id') or '', 'reason': _str(request.POST.get('reason'))})
+        compliance.hold_pay(user, str(id), HoldForm(request.POST).hold())
     except HttpError as e:
         return failed(request, e, 'Not saved')
     return done(request, 'Pay held. Release it under Payroll, Held pay once the issue is settled.', url=f'/payroll/runs/{id}?step=2')
@@ -438,13 +416,13 @@ def hold_new(request, id):
 def salary_sheet_file(request, id, fmt):
     if fmt not in ('csv', 'html'):
         raise NotFoundError('not found')
-    return sheet_response(*api.salary_sheet_for(request.hajiri_user, str(id), {'format': fmt}))
+    return sheet_response(*services.salary_sheet_for(request.hajiri_user, str(id), {'format': fmt}))
 
 
 @require_GET
 @require_module('payroll')
 def ssf_sheet_file(request, id):
-    name, text = api.ssf_sheet(request.hajiri_user, str(id))
+    name, text = services.ssf_sheet(request.hajiri_user, str(id))
     return csv_download(name, text)
 
 
@@ -454,8 +432,8 @@ def ssf_sheet_file(request, id):
 @require_module('payroll')
 def structures(request):
     user = request.hajiri_user
-    comps = api.list_components(user)['components']
-    structs = api.list_structures(user)['structures']
+    comps = services.list_components(user)['components']
+    structs = services.list_structures(user)['structures']
     for st in structs:
         st['versions'] = st.get('versions') or []
         for v in st['versions']:
@@ -463,21 +441,9 @@ def structures(request):
     labels = dict(COMPONENT_TYPES)
     for c in comps:
         c['type_label'] = labels.get(c['type'], c['type'])
-    tab = request.GET.get('tab') if request.GET.get('tab') in ('components', 'structures') else 'components'
+    tab = PageQuery(request.GET).value('tab')
+    tab = tab if tab in ('components', 'structures') else 'components'
     return render(request, 'payroll/structures.html', {'components': comps, 'structures': structs, 'tab': tab})
-
-
-def _component_body(p, *, is_new: bool, statutory: bool) -> dict:
-    b = {'nameEn': p.get('name_en') or '', 'condition': p.get('condition') or '', 'dependsOnPaymentDays': p.get('depends') == 'on',
-         'taxable': p.get('taxable') == 'on', 'rounding': p.get('rounding') or 'paisa', 'sortOrder': _int(p.get('sort_order'), 0),
-         'active': p.get('active') == 'on', 'nameNe': p.get('name_ne') or ''}
-    if is_new:
-        b['code'] = re.sub(r'[^A-Z0-9_]', '', (p.get('code') or '').upper())
-    if not statutory:
-        # Statutory components keep their type and formula: the fields are disabled, so the browser does not send them.
-        b['type'] = p.get('type') or 'earning'
-        b['formula'] = p.get('formula') or ''
-    return b
 
 
 @require_http_methods(['GET', 'POST'])
@@ -488,7 +454,7 @@ def component_new(request):
             'c': {'code': '', 'name_en': '', 'name_ne': '', 'type': 'earning', 'formula': '', 'condition': '', 'depends_on_payment_days': False,
                   'taxable': True, 'rounding': 'paisa', 'sort_order': 100, 'active': True}, 'is_new': True, 'types': COMPONENT_TYPES})
     try:
-        api.create_component(request.hajiri_user, _component_body(request.POST, is_new=True, statutory=False))
+        services.create_component(request.hajiri_user, ComponentForm(request.POST).component(is_new=True, statutory=False))
     except HttpError as e:
         return failed(request, e, 'Not saved')
     return done(request, 'Component saved.', url='/payroll/structures')
@@ -498,13 +464,13 @@ def component_new(request):
 @require_module('payroll')
 def component_edit(request, code):
     user = request.hajiri_user
-    c = next((x for x in api.list_components(user)['components'] if x['code'] == code), None)
+    c = next((x for x in services.list_components(user)['components'] if x['code'] == code), None)
     if not c:
         raise NotFoundError('component not found')
     if request.method == 'GET':
         return render(request, 'payroll/partials/component_form.html', {'c': c, 'is_new': False, 'types': COMPONENT_TYPES})
     try:
-        api.update_component(user, code, _component_body(request.POST, is_new=False, statutory=bool(c['statutory'])))
+        services.update_component(user, code, ComponentForm(request.POST).component(is_new=False, statutory=bool(c['statutory'])))
     except HttpError as e:
         return failed(request, e, 'Not saved')
     return done(request, 'Component saved.', url='/payroll/structures')
@@ -514,24 +480,22 @@ def component_edit(request, code):
 @require_module('payroll')
 def structure_new(request):
     user = request.hajiri_user
-    structs = api.list_structures(user)['structures']
+    structs = services.list_structures(user)['structures']
     if request.method == 'GET':
-        code = request.GET.get('code') or ''
+        code = PageQuery(request.GET).value('code', '')
         st = next((x for x in structs if x['code'] == code), None)
         picked = [c['code'] for c in (st.get('versions') or [{}])[-1].get('components', [])] if st else ['BASIC']
         return render(request, 'payroll/partials/structure_form.html', {
             'code': code, 'name_en': (st or {}).get('name_en', ''), 'picked': picked,
-            'components': [c['code'] for c in api.list_components(user)['components']],
+            'components': [c['code'] for c in services.list_components(user)['components']],
             'existing_codes': [x['code'] for x in structs]})
-    p = request.POST
-    code = (p.get('code') or '').upper()
-    picked = [{'code': c} for c in p.getlist('components')]
+    form = StructureForm(request.POST)
     try:
-        existing = next((x for x in structs if x['code'] == code), None)
+        existing = next((x for x in structs if x['code'] == form.code_value()), None)
         if existing:
-            api.add_structure_version(user, existing['id'], {'components': picked})
+            services.add_structure_version(user, existing['id'], form.version())
         else:
-            api.create_structure(user, {'code': code, 'nameEn': p.get('name_en') or '', 'components': picked})
+            services.create_structure(user, form.structure())
     except HttpError as e:
         return failed(request, e, 'Not saved')
     return done(request, 'Structure saved.', url='/payroll/structures?tab=structures')
@@ -555,7 +519,7 @@ def valid_label(rng: str) -> str:
 
 def _versions(user) -> list[dict]:
     out = []
-    for st in api.list_structures(user)['structures']:
+    for st in services.list_structures(user)['structures']:
         for v in st.get('versions') or []:
             out.append({'id': v['id'], 'label': f"{st['code']} v{v['version']}", 'codes': [c['code'] for c in v['components']]})
     return out
@@ -565,8 +529,8 @@ def _versions(user) -> list[dict]:
 @require_module('payroll')
 def assignments(request):
     user = request.hajiri_user
-    emp = request.GET.get('employee_id') or request.GET.get('employeeId') or None
-    rows = api.list_assignments(user, {'employeeId': emp} if emp else {})['assignments']
+    emp = _employee_param(user, PageQuery(request.GET).employee())
+    rows = services.list_assignments(user, {'employeeId': emp} if emp else {})['assignments']
     for a in rows:
         a['valid_label'] = valid_label(a['valid'])
         a['amounts'] = [(k, fmt_money(v, currency=False)) for k, v in (a['base_amounts'] or {}).items()]
@@ -582,12 +546,10 @@ def assignment_new(request):
     user = request.hajiri_user
     if request.method == 'GET':
         return render(request, 'payroll/partials/assignment_form.html', {
-            'versions': _versions(user), 'employee_id': request.GET.get('employee_id') or '', 'today': today_npt()})
-    p = request.POST
-    base = {k[len('amount_'):]: _str(v) for k, v in p.items() if k.startswith('amount_') and AMOUNT_RE.match(_str(v))}
+            'versions': _versions(user), 'employee_id': _employee_param(user, PageQuery(request.GET).value('employee_id')) or '',
+            'today': today_npt()})
     try:
-        api.create_assignment(user, {'employeeId': p.get('employee_id') or '', 'structureVersionId': p.get('structure_version_id') or '',
-                                     'from': p.get('from') or '', 'baseAmounts': base})
+        services.create_assignment(user, AssignmentForm(request.POST).assignment())
     except HttpError as e:
         return failed(request, e, 'Not saved')
     return done(request, 'Salary assigned.', url=_current_url(request, '/payroll/assignments'))
@@ -596,7 +558,8 @@ def assignment_new(request):
 @require_GET
 @require_module('payroll')
 def assignment_amounts(request):
-    v = next((x for x in _versions(request.hajiri_user) if x['id'] == request.GET.get('structure_version_id')), None)
+    picked = PageQuery(request.GET).value('structure_version_id')
+    v = next((x for x in _versions(request.hajiri_user) if x['id'] == picked), None)
     return render(request, 'payroll/partials/assignment_amounts.html', {'codes': v['codes'] if v else []})
 
 
@@ -628,12 +591,13 @@ def _decl_fields(source: dict | None, inputs=DECL_INPUTS) -> list[dict]:
 def declarations(request):
     user = request.hajiri_user
     cur = current_fy()
-    fy = _int(request.GET.get('fy'), cur)
+    q = PageQuery(request.GET)
+    fy = q.value('fy', cur)
     is_verifier = has_role(user, 'hr')
-    employee_id = (request.GET.get('employee_id') if is_verifier and 'employee_id' in request.GET else user.employee_id) or None
+    employee_id = (q.value('employee_id') if is_verifier and 'employee_id' in request.GET else user.employee_id) or None
     ctx = {'fy': fy, 'fy_options': fy_options([cur - 2, cur - 1, cur, cur + 1]), 'employee_id': employee_id, 'is_verifier': is_verifier}
     if employee_id:
-        d = api.get_declaration(user, {'employeeId': employee_id, 'fiscalYearStart': str(fy)})
+        d = services.get_declaration(user, {'employeeId': employee_id, 'fiscalYearStart': str(fy)})
         pending, decl = d['pending'], d['declaration']
         status = 'submitted' if pending else (decl or {}).get('status')
         ctx.update({'pending': pending, 'declaration': decl, 'status': status, 'fields': _decl_fields(pending or decl),
@@ -648,13 +612,10 @@ def declarations(request):
 @require_module('payroll')
 def declaration_save(request):
     user = request.hajiri_user
-    p = request.POST
-    employee_id = p.get('employee_id') or user.employee_id
-    body = {'fiscalYearStart': _int(p.get('fy')), 'submit': True, **{key: _num_str(p.get(col)) for key, col, _l, _h in DECL_INPUTS}}
-    if employee_id != user.employee_id:
-        body['employeeId'] = employee_id
+    form = DeclarationForm(request.POST)
+    employee_id = form.value('employee_id') or user.employee_id
     try:
-        api.put_declaration(user, body)
+        services.put_declaration(user, form.declaration(user.employee_id))
     except HttpError as e:
         return failed(request, e, 'Not saved')
     msg = ('Declaration saved and verified. Payroll uses it from the next run.' if employee_id != user.employee_id
@@ -665,10 +626,10 @@ def declaration_save(request):
 @require_POST
 @require_module('payroll')
 def declaration_verify(request):
-    p = request.POST
-    decision = 'verified' if p.get('decision') == 'verified' else 'rejected'
+    form = VerifyForm(request.POST)
+    decision = form.decision_value()
     try:
-        api.verify_declaration(request.hajiri_user, p.get('employee_id') or '', {'fiscalYearStart': _int(p.get('fy')), 'decision': decision})
+        services.verify_declaration(request.hajiri_user, form.value('employee_id', ''), form.verify())
     except HttpError as e:
         return failed(request, e, 'Not saved')
     if decision == 'verified':
@@ -682,8 +643,8 @@ def declaration_verify(request):
 @require_module('payroll')
 def loans(request):
     user = request.hajiri_user
-    emp = request.GET.get('employee_id') or request.GET.get('employeeId') or None
-    rows = api.list_loans(user, {'employeeId': emp} if emp else {})['loans']
+    emp = _employee_param(user, PageQuery(request.GET).employee())
+    rows = services.list_loans(user, {'employeeId': emp} if emp else {})['loans']
     for ln in rows:
         ln['kind_label'] = {'advance': 'Advance', 'loan': 'Loan'}.get(ln['kind'], ln['kind'])
         ln['start_label'] = bs_month_label(ln['start_bs_year'], ln['start_bs_month'])
@@ -700,14 +661,10 @@ def loan_new(request):
     if request.method == 'GET':
         b = current_bs()
         return render(request, 'payroll/partials/loan_form.html', {'y': b.year, 'm': b.month, 'months': list(enumerate(BS_MONTH_NAMES_EN, 1))})
-    p = request.POST
-    kind = p.get('kind') or 'loan'
-    body = {'employeeId': p.get('employee_id') or '', 'kind': kind, 'principal': _num_str(p.get('principal')), 'emi': _num_str(p.get('emi')),
-            'startBsYear': _int(p.get('start_bs_year')), 'startBsMonth': _int(p.get('start_bs_month'))}
-    if _str(p.get('note')):
-        body['note'] = _str(p.get('note'))
+    body = LoanForm(request.POST).loan()
+    kind = body['kind']
     try:
-        r = api.create_loan(user, body)
+        r = services.create_loan(user, body)
     except HttpError as e:
         return failed(request, e, 'Not saved')
     return done(request, f"{'Advance' if kind == 'advance' else 'Loan'} created with {r['installments']} instalments.",
@@ -723,7 +680,7 @@ def _effective(r: dict) -> str:
 @require_GET
 @require_module('payroll')
 def rules(request):
-    rows = api.list_rules(request.hajiri_user, {})['rules']
+    rows = services.list_rules(request.hajiri_user, {})['rules']
     for r in rows:
         r['effective'] = _effective(r)
     return render(request, 'payroll/rules.html', {'rules': rows, 'is_hr': has_role(request.hajiri_user, 'hr')})
@@ -732,7 +689,7 @@ def rules(request):
 @require_GET
 @require_module('payroll')
 def rule_view(request, id):
-    r = next((x for x in api.list_rules(request.hajiri_user, {})['rules'] if x['id'] == str(id)), None)
+    r = next((x for x in services.list_rules(request.hajiri_user, {})['rules'] if x['id'] == str(id)), None)
     if not r:
         raise NotFoundError('rule not found')
     return render(request, 'payroll/partials/rule_view.html', {'r': {**r, 'effective': _effective(r)},
@@ -743,7 +700,7 @@ def rule_view(request, id):
 @require_module('payroll')
 def rule_approve(request, id):
     try:
-        api.approve_rule(request.hajiri_user, str(id))
+        services.approve_rule(request.hajiri_user, str(id))
     except HttpError as e:
         return failed(request, e, 'Not saved')
     return done(request, 'Rule approved.', url='/payroll/rules')
@@ -772,13 +729,13 @@ def report_table(columns: list[dict], rows: list[dict]) -> dict:
 
 def _report_ctx(request, kind: str) -> dict:
     user = request.hajiri_user
-    g = request.GET
+    g = PageQuery(request.GET)
     b = current_bs()
     cur = current_fy()
     ctx: dict = {'kind': kind, 'kinds': REPORT_KINDS, 'fy_options': fy_options([cur - 2, cur - 1, cur])}
     if kind in ('tax', 'funds'):
-        y = _int(g.get('bs_year'), b.year)
-        m = _int(g.get('bs_month'), 12 if b.month == 1 else b.month - 1)
+        y = g.value('bs_year', b.year)
+        m = g.value('bs_month', 12 if b.month == 1 else b.month - 1)
         fn = compliance.tax_deposit if kind == 'tax' else compliance.retirement_deposit
         report = 'tax-deposit' if kind == 'tax' else 'retirement-deposit'
         try:
@@ -789,10 +746,10 @@ def _report_ctx(request, kind: str) -> dict:
         ctx.update({'y': y, 'm': m, 'month_label': bs_month_label(y, m),
                     'csv_url': f'/api/v1/payroll/reports/{report}?bsYear={y}&bsMonth={m}&format=csv'})
     elif kind == 'variance':
-        regular = [r for r in api.list_runs(user)['runs'] if r['run_type'] == 'regular' and r['computed_at']]
+        regular = [r for r in services.list_runs(user)['runs'] if r['run_type'] == 'regular' and r['computed_at']]
         opts = [(r['id'], (bs_month_label(r['bs_year'], r['bs_month']) if r['bs_year'] and r['bs_month'] else str(r['created_at'])[:10])
                  + ('' if r['locked_at'] else ' (not locked)')) for r in regular]
-        rid = g.get('run_id') if g.get('run_id') in {o[0] for o in opts} else (opts[0][0] if opts else None)
+        rid = g.value('run_id') if g.value('run_id') in {o[0] for o in opts} else (opts[0][0] if opts else None)
         ctx.update({'run_options': opts, 'run_id': rid})
         if rid:
             res = compliance.pay_variance(user, {'runId': rid})
@@ -803,7 +760,7 @@ def _report_ctx(request, kind: str) -> dict:
             ctx['table'] = report_table(cols, res['rows'])
             ctx['csv_url'] = f'/api/v1/payroll/reports/pay-variance?runId={rid}&format=csv'
     elif kind == 'liability':
-        as_of = g.get('as_of') or today_npt()
+        as_of = g.value('as_of') or today_npt()
         res = compliance.leave_liability(user, {'asOf': as_of})
         cols = [{'key': 'empCode', 'header': 'Code'}, {'key': 'name', 'header': 'Name'}, {'key': 'department', 'header': 'Department'},
                 {'key': 'leaveType', 'header': 'Leave type'}, {'key': 'balance', 'header': 'Days'}, {'key': 'dailyRate', 'header': 'Daily rate'},
@@ -813,19 +770,20 @@ def _report_ctx(request, kind: str) -> dict:
                               *[{'label': d['department'], 'value': money0(d['amount'])} for d in res['byDepartment'][:3]]],
                     'csv_url': f'/api/v1/payroll/reports/leave-liability?asOf={as_of}&format=csv'})
     elif kind == 'annual':
-        fy = _int(g.get('fy'), cur)
+        fy = g.value('fy', cur)
         res = compliance.annual_tax(user, {'fiscalYearStart': str(fy)})
         ctx.update({'fy': fy, 'table': report_table(res['columns'], res['rows']),
                     'csv_url': f'/api/v1/payroll/reports/annual-tax?fiscalYearStart={fy}&format=csv'})
     else:
-        ctx['fy'] = _int(g.get('fy'), cur)
+        ctx['fy'] = g.value('fy', cur)
     return ctx
 
 
 @require_GET
 @require_module('payroll')
 def reports(request):
-    kind = request.GET.get('kind') if request.GET.get('kind') in dict(REPORT_KINDS) else 'tax'
+    kind = PageQuery(request.GET).value('kind')
+    kind = kind if kind in dict(REPORT_KINDS) else 'tax'
     return render(request, 'payroll/reports.html', _report_ctx(request, kind))
 
 
@@ -893,11 +851,10 @@ def optimum_apply(request, employee_id):
         return render(request, 'payroll/partials/cit_form.html', {
             'employee_id': employee_id, 'name': emp['name_en'], 'amount': _plain(row.get('optimumMonthly')),
             'saving': money0(row.get('annualSaving')), 'months': _cit_months(), 'month': current_bs().month})
-    p = request.POST
-    month = _int(p.get('from_bs_month'))
-    amount = _num_str(p.get('monthly_cit'))
+    body = CitForm(request.POST).cit(str(employee_id))
+    month, amount = body.get('fromBsMonth'), body['monthlyCit']
     try:
-        compliance.apply_cit(user, {'employeeId': str(employee_id), 'monthlyCit': amount, **({'fromBsMonth': month} if month else {})})
+        compliance.apply_cit(user, body)
     except HttpError as e:
         return failed(request, e, 'Not saved')
     m_name = BS_MONTH_NAMES_EN[(month or current_bs().month) - 1]
@@ -925,7 +882,8 @@ def optimum_card(request):
 @require_GET
 @require_module('payroll')
 def held_pay(request):
-    tab = request.GET.get('status') if request.GET.get('status') in ('open', 'released', 'cancelled') else 'open'
+    tab = PageQuery(request.GET).value('status')
+    tab = tab if tab in ('open', 'released', 'cancelled') else 'open'
     rows = compliance.list_holds(request.hajiri_user, {'status': tab})['holds']
     for h in rows:
         h['status_label'], h['status_tone'] = HOLD_STATUS.get(h['status'], (h['status'], 'idle'))
@@ -945,10 +903,10 @@ def hold_release(request, id):
             raise NotFoundError('hold not found')
         return render(request, 'payroll/partials/release_form.html', {'h': h, 'held_in': bs_month_label(h['bs_year'], h['bs_month']),
                                                                        'amount': fmt_money(h['amount'], currency=False)})
-    mode = 'outside' if request.POST.get('mode') == 'outside' else 'payroll'
-    note = _str(request.POST.get('note'))
+    body = ReleaseForm(request.POST).release()
+    mode = body['mode']
     try:
-        compliance.release_hold(user, str(id), {'mode': mode, **({'note': note} if note else {})})
+        compliance.release_hold(user, str(id), body)
     except HttpError as e:
         return failed(request, e, 'Not saved')
     name = (h or {}).get('name_en', '')
@@ -979,7 +937,7 @@ OPENING_RET = [('retirement_employee', 'Retirement, employee', 'SSF/PF employee 
 @require_module('payroll')
 def openings(request):
     cur = current_fy()
-    fy = _int(request.GET.get('fy'), cur)
+    fy = PageQuery(request.GET).value('fy', cur)
     res = compliance.list_openings(request.hajiri_user, {'fiscalYearStart': str(fy)})
     for r in res['balances']:
         r['source_label'] = OPENING_SOURCE.get(r['source'], r['source'])
@@ -993,8 +951,9 @@ def openings(request):
 def opening_edit(request):
     user = request.hajiri_user
     if request.method == 'GET':
-        fy = _int(request.GET.get('fy'), current_fy())
-        emp = request.GET.get('employee_id') or ''
+        q = PageQuery(request.GET)
+        fy = q.value('fy', current_fy())
+        emp = q.value('employee_id', '')
         row = next((r for r in compliance.list_openings(user, {'fiscalYearStart': str(fy)})['balances'] if r['employee_id'] == emp), None) if emp else None
         v = row or {'employee_id': '', 'gross': '0', 'taxable': '0', 'tds_paid': '0', 'retirement_employee': '0', 'retirement_employer': '0',
                     'festival_paid': False, 'months': 0, 'source': 'previous_employer', 'note': ''}
@@ -1002,13 +961,8 @@ def opening_edit(request):
             'v': v, 'fy': fy, 'sources': list(OPENING_SOURCE.items()),
             'nums': [(k, label, hint, _plain(v.get(k))) for k, label, hint in OPENING_NUMS],
             'rets': [(k, label, hint, _plain(v.get(k))) for k, label, hint in OPENING_RET]})
-    p = request.POST
-    body = {'employeeId': p.get('employee_id') or '', 'fiscalYearStart': _int(p.get('fy')), 'gross': _num_str(p.get('gross')),
-            'taxable': _num_str(p.get('taxable')), 'tdsPaid': _num_str(p.get('tds_paid')), 'retirementEmployee': _num_str(p.get('retirement_employee')),
-            'retirementEmployer': _num_str(p.get('retirement_employer')), 'festivalPaid': p.get('festival_paid') == 'on',
-            'months': _int(p.get('months'), 0), 'source': p.get('source') or 'previous_employer', 'note': _str(p.get('note')) or None}
     try:
-        compliance.put_opening(user, body)
+        compliance.put_opening(user, OpeningForm(request.POST).opening())
     except HttpError as e:
         return failed(request, e, 'Not saved')
     return done(request, 'Opening balance saved. It counts from the next pay run.', url=_current_url(request, '/payroll/opening-balances'))
@@ -1019,7 +973,7 @@ def opening_edit(request):
 def opening_import(request):
     if request.method == 'GET':
         return render(request, 'payroll/partials/opening_import.html', {'csv': OPENING_TEMPLATE, 'errors': []})
-    text = request.POST.get('csv') or ''
+    text = OpeningImportForm(request.POST).value('csv', '')
     try:
         r = compliance.import_openings(request.hajiri_user, text)
     except BadRequestError as e:
@@ -1048,13 +1002,14 @@ def opening_delete(request, id):
 @login_required
 def my_payslips(request):
     user = request.hajiri_user
-    employee_id = request.GET.get('employeeId') or user.employee_id or ''
+    q = PageQuery(request.GET)
+    employee_id = q.value('employeeId') or user.employee_id or ''
     cur = current_fy()
-    fy = _int(request.GET.get('fy'), cur)
+    fy = q.value('fy', cur)
     rows, error = [], None
     if employee_id:
         try:
-            rows = api.list_payslips(user, {'employeeId': employee_id, 'fiscalYearStart': str(fy)})['payslips']
+            rows = services.list_payslips(user, {'employeeId': employee_id, 'fiscalYearStart': str(fy)})['payslips']
         except HttpError as e:
             if e.status == 401:
                 raise
@@ -1081,7 +1036,7 @@ def my_payslips(request):
 def payslip(request, id):
     user = request.hajiri_user
     try:
-        d = api.payslip_detail(user, str(id))
+        d = services.payslip_detail(user, str(id))
     except HttpError as e:
         if e.status == 401:
             raise
@@ -1106,7 +1061,7 @@ def payslip(request, id):
 @require_GET
 @login_required
 def payslip_print(request, id):
-    return html_response(api.payslip_html(request.hajiri_user, str(id)))
+    return html_response(services.payslip_html(request.hajiri_user, str(id)))
 
 
 TAX_INPUTS = [
@@ -1131,7 +1086,7 @@ def _history_declared(r: dict) -> str:
 def my_tax(request):
     user = request.hajiri_user
     cur = current_fy()
-    fy = _int(request.GET.get('fy'), cur)
+    fy = PageQuery(request.GET).value('fy', cur)
     opts = fy_options([cur - 1, cur, cur + 1])
     try:
         data = tax_savings.get_savings(user, {'fiscalYearStart': str(fy)})
@@ -1149,30 +1104,16 @@ def my_tax(request):
         'base_json': json.dumps({f['key']: f['value'] for f in fields}), 'history': data['history'], 'slots': list(range(10))})
 
 
-def _tax_values(p) -> dict:
-    """The six figures; a negative entry counts as 0 (Math.max(0, ...) in MyTaxPage)."""
-    out = {}
-    for key, col, _l, _h in TAX_INPUTS:
-        v = _num_str(p.get(col))
-        try:
-            if Decimal(v) < 0:
-                v = '0.00'
-        except InvalidOperation:
-            pass
-        out[key] = v
-    return out
-
-
 @require_POST
 @login_required
 def tax_estimate(request):
     """The what-if estimate under the figures (MyTaxPage's StatStrip and the deductions line)."""
     user = request.hajiri_user
-    p = request.POST
-    fy = _int(p.get('fy'), current_fy())
+    form = TaxSavingsForm(request.POST)
+    fy = form.value('fy', current_fy())
     if fy != current_fy():
         return render(request, 'payroll/partials/tax_estimate.html', {'not_current': True})
-    proposed = _tax_values(p)
+    proposed = form.proposed()
     try:
         est = tax_savings.estimate(user, {'fiscalYearStart': fy, 'proposed': proposed})
     except HttpError:
@@ -1180,10 +1121,7 @@ def tax_estimate(request):
     ctx: dict = {'est': est}
     if est['available']:
         cur, prop = est['current'], est.get('proposed')
-        try:
-            base = json.loads(p.get('base') or '{}')
-        except ValueError:
-            base = {}
+        base = form.base_figures()
         changed = any(_dec(proposed[k]) != _dec(base.get(k)) for k in proposed)
         saving = _dec(est.get('annualSaving'))
         stats = [{'label': 'Projected taxable income', 'value': money0(cur['projectedAnnualTaxable']), 'hint': f'For FY {fy}/{str(fy + 1)[-2:]}'},
@@ -1205,12 +1143,8 @@ def tax_estimate(request):
 @login_required
 def tax_submit(request):
     user = request.hajiri_user
-    p = request.POST
-    body = {**_tax_values(p), 'fiscalYearStart': _int(p.get('fy')), 'proofFileIds': [f for f in p.getlist('proof_file_ids') if f]}
-    if _str(p.get('note')):
-        body['note'] = _str(p.get('note'))
     try:
-        tax_savings.submit_savings(user, body)
+        tax_savings.submit_savings(user, TaxSavingsForm(request.POST).submission())
     except HttpError as e:
         return failed(request, e, 'Not sent')
     return done(request, 'Sent to HR. Your tax changes once they verify it.', url=_current_url(request, '/me/payslips/tax'),
@@ -1232,4 +1166,4 @@ def tax_cancel(request, id):
 def tax_file(request, id, file_id):
     from hajiri.files.store import stored_file_response
     f = tax_savings.proof_file(request.hajiri_user, str(id), str(file_id))
-    return stored_file_response(f, download=request.GET.get('download') == '1')
+    return stored_file_response(f, download=PageQuery(request.GET).value('download') == '1')

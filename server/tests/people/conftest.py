@@ -10,7 +10,7 @@ import pytest
 
 from hajiri.core.auth import AuthUser
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from tests.web.factories import make_company, make_employee, make_user
 from tests.web.fixtures import *  # noqa: F401,F403
 

@@ -7,7 +7,7 @@ from django.db import IntegrityError, transaction
 from hajiri.company_settings import service
 from hajiri.company_settings.schemas import policy_version
 from hajiri.company_settings.seed import create_company, seed_defaults
-from hajiri.core.db import one, rows
+from tests.support.sql import one, rows
 from hajiri.core.errors import BadRequestError, ForbiddenError, NotFoundError, ValidationError
 
 

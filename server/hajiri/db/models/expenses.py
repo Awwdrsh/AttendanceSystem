@@ -5,137 +5,257 @@ Foreign keys use DO_NOTHING: the database enforces ON DELETE (cascade, set null 
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class ExpenseCategory(models.Model):
+    class Kind(models.TextChoices):
+        AMOUNT = 'amount', 'Amount'
+        MILEAGE = 'mileage', 'Mileage'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='expense_categories')
     code = models.TextField()
     name = models.TextField()
-    kind = models.TextField(db_default='amount')
+    kind = models.TextField(choices=Kind, db_default='amount')
     receipt_required_above = models.DecimalField(max_digits=14, decimal_places=2, blank=True, null=True)
     active = models.BooleanField(db_default=True)
     sort_order = models.IntegerField(db_default=0)
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'expense_category'
         unique_together = (('company', 'code'),)
 
+    def __str__(self):
+        return str(self.name)
+
 
 class ExpenseClaim(models.Model):
+    class PaymentMethod(models.TextChoices):
+        PAYROLL = 'payroll', 'Payroll'
+        CASH = 'cash', 'Cash'
+
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Draft'
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        CANCELLED = 'cancelled', 'Cancelled'
+        PAID = 'paid', 'Paid'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='expense_claims')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='expense_claims')
     title = models.TextField()
-    status = models.TextField(db_default='draft')
+    status = models.TextField(choices=Status, db_default='draft')
     total_claimed = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
     total_approved = models.DecimalField(max_digits=14, decimal_places=2, blank=True, null=True)
-    workflow_instance = models.ForeignKey('WorkflowInstance', models.DO_NOTHING, blank=True, null=True)
+    workflow_instance = models.ForeignKey('WorkflowInstance', models.DO_NOTHING, related_name='expense_claims', blank=True, null=True)
     submitted_at = models.DateTimeField(blank=True, null=True)
     decided_at = models.DateTimeField(blank=True, null=True)
     decision_note = models.TextField(blank=True, null=True)
-    payment_method = models.TextField(blank=True, null=True)
+    payment_method = models.TextField(choices=PaymentMethod, blank=True, null=True)
     paid_at = models.DateTimeField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='expense_claims_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'expense_claim'
 
+    def __str__(self):
+        return str(self.title)
+
 
 class ExpenseItem(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    claim = models.ForeignKey(ExpenseClaim, models.DO_NOTHING)
+    claim = models.ForeignKey(ExpenseClaim, models.DO_NOTHING, related_name='expense_items')
     expense_date = models.DateField()
-    category = models.ForeignKey(ExpenseCategory, models.DO_NOTHING)
+    category = models.ForeignKey(ExpenseCategory, models.DO_NOTHING, related_name='expense_items')
     description = models.TextField()
     amount = models.DecimalField(max_digits=14, decimal_places=2)
     km = models.DecimalField(max_digits=8, decimal_places=1, blank=True, null=True)
-    receipt_file = models.ForeignKey('StoredFile', models.DO_NOTHING, blank=True, null=True)
+    receipt_file = models.ForeignKey('StoredFile', models.DO_NOTHING, related_name='expense_items', blank=True, null=True)
     approved_amount = models.DecimalField(max_digits=14, decimal_places=2, blank=True, null=True)
     adjust_reason = models.TextField(blank=True, null=True)
     sort_order = models.IntegerField(db_default=0)
 
+    company_scope = 'claim__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'expense_item'
+
+    def __str__(self):
+        return f'ExpenseItem {self.id}'
 
 
 class ExpenseLimit(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    category = models.ForeignKey(ExpenseCategory, models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='expense_limits')
+    category = models.ForeignKey(ExpenseCategory, models.DO_NOTHING, related_name='expense_limits')
     grade = models.TextField()
     per_claim = models.DecimalField(max_digits=14, decimal_places=2, blank=True, null=True)
     per_month = models.DecimalField(max_digits=14, decimal_places=2, blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'expense_limit'
         unique_together = (('category', 'grade'),)
 
+    def __str__(self):
+        return f'ExpenseLimit {self.id}'
+
 
 class ExpensePayout(models.Model):
+    class ComponentCode(models.TextChoices):
+        EXP_REIMB = 'EXP_REIMB', 'Expense reimbursement'
+        TRAVEL_ADV = 'TRAVEL_ADV', 'Travel advance'
+        EXP_RECOVERY = 'EXP_RECOVERY', 'Expense recovery'
+
+    class SourceType(models.TextChoices):
+        EXPENSE_CLAIM = 'expense_claim', 'Expense claim'
+        TRAVEL_ADVANCE = 'travel_advance', 'Travel advance'
+        TRAVEL_SETTLEMENT = 'travel_settlement', 'Travel settlement'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        PAID = 'paid', 'Paid'
+        CASH = 'cash', 'Cash'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    source_type = models.TextField()
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='expense_payouts')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='expense_payouts')
+    source_type = models.TextField(choices=SourceType)
     source_id = models.UUIDField()
-    component_code = models.TextField()
+    component_code = models.TextField(choices=ComponentCode)
     amount = models.DecimalField(max_digits=14, decimal_places=2)
     note = models.TextField(blank=True, null=True)
-    status = models.TextField(db_default='pending')
-    payroll_run = models.ForeignKey('PayrollRun', models.DO_NOTHING, blank=True, null=True)
+    status = models.TextField(choices=Status, db_default='pending')
+    payroll_run = models.ForeignKey('PayrollRun', models.DO_NOTHING, related_name='expense_payouts', blank=True, null=True)
     paid_amount = models.DecimalField(max_digits=14, decimal_places=2, blank=True, null=True)
     paid_at = models.DateTimeField(blank=True, null=True)
-    parent_payout = models.ForeignKey('self', models.DO_NOTHING, blank=True, null=True)
+    parent_payout = models.ForeignKey('self', models.DO_NOTHING, related_name='expense_payouts_as_parent_payout', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'expense_payout'
-        unique_together = (('source_type', 'source_id', 'component_code'),)
+        # Balance rows (parent_payout set) repeat the source key; only the original payout is unique.
+        constraints = [models.UniqueConstraint(fields=['source_type', 'source_id', 'component_code'],
+                                              condition=models.Q(parent_payout__isnull=True), name='expense_payout_source_idx')]
+
+    def __str__(self):
+        return f'ExpensePayout {self.id}'
 
 
 class TadaRate(models.Model):
+    class Destination(models.TextChoices):
+        VALLEY = 'valley', 'Valley'
+        CITY = 'city', 'City'
+        RURAL = 'rural', 'Rural'
+        INTERNATIONAL = 'international', 'International'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='tada_rates')
     grade = models.TextField()
-    destination = models.TextField()
+    destination = models.TextField(choices=Destination)
     da_rate = models.DecimalField(max_digits=14, decimal_places=2)
     lodging_rate = models.DecimalField(max_digits=14, decimal_places=2)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'tada_rate'
         unique_together = (('company', 'grade', 'destination'),)
 
+    def __str__(self):
+        return f'TadaRate {self.id}'
+
 
 class TravelBill(models.Model):
+    class Kind(models.TextChoices):
+        TRANSPORT = 'transport', 'Transport'
+        LODGING = 'lodging', 'Lodging'
+        FOOD = 'food', 'Food'
+        OTHER = 'other', 'Other'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    settlement = models.ForeignKey('TravelSettlement', models.DO_NOTHING)
-    kind = models.TextField()
+    settlement = models.ForeignKey('TravelSettlement', models.DO_NOTHING, related_name='travel_bills')
+    kind = models.TextField(choices=Kind)
     bill_date = models.DateField()
     description = models.TextField()
     amount = models.DecimalField(max_digits=14, decimal_places=2)
-    file = models.ForeignKey('hajiri.StoredFile', models.DO_NOTHING, blank=True, null=True)
+    file = models.ForeignKey('hajiri.StoredFile', models.DO_NOTHING, related_name='travel_bills', blank=True, null=True)
+
+    company_scope = 'settlement__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'travel_bill'
 
+    def __str__(self):
+        return f'TravelBill {self.id}'
+
 
 class TravelRequest(models.Model):
+    class AdvanceMethod(models.TextChoices):
+        PAYROLL = 'payroll', 'Payroll'
+        CASH = 'cash', 'Cash'
+
+    class AdvanceStatus(models.TextChoices):
+        NONE = 'none', 'None'
+        PENDING = 'pending', 'Pending'
+        PAID = 'paid', 'Paid'
+
+    class DestinationCategory(models.TextChoices):
+        VALLEY = 'valley', 'Valley'
+        CITY = 'city', 'City'
+        RURAL = 'rural', 'Rural'
+        INTERNATIONAL = 'international', 'International'
+
+    class Mode(models.TextChoices):
+        BUS = 'bus', 'Bus'
+        AIR = 'air', 'Air'
+        OFFICE_VEHICLE = 'office_vehicle', 'Office vehicle'
+        OWN_VEHICLE = 'own_vehicle', 'Own vehicle'
+        OTHER = 'other', 'Other'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        CANCELLED = 'cancelled', 'Cancelled'
+        SETTLING = 'settling', 'Settling'
+        SETTLED = 'settled', 'Settled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='travel_requests')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='travel_requests')
     destination = models.TextField()
-    destination_category = models.TextField()
+    destination_category = models.TextField(choices=DestinationCategory)
     purpose = models.TextField()
     from_date = models.DateField()
     to_date = models.DateField()
-    mode = models.TextField()
+    mode = models.TextField(choices=Mode)
     estimated_cost = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
     advance_requested = models.DecimalField(max_digits=14, decimal_places=2, db_default=0)
     advance_approved = models.DecimalField(max_digits=14, decimal_places=2, blank=True, null=True)
-    advance_method = models.TextField(blank=True, null=True)
-    advance_status = models.TextField(db_default='none')
+    advance_method = models.TextField(choices=AdvanceMethod, blank=True, null=True)
+    advance_status = models.TextField(choices=AdvanceStatus, db_default='none')
     fx_rate = models.DecimalField(max_digits=10, decimal_places=4, blank=True, null=True)
     days = models.IntegerField()
     nights = models.IntegerField()
@@ -143,23 +263,35 @@ class TravelRequest(models.Model):
     lodging_rate = models.DecimalField(max_digits=14, decimal_places=2)
     da_amount = models.DecimalField(max_digits=14, decimal_places=2)
     lodging_limit = models.DecimalField(max_digits=14, decimal_places=2)
-    status = models.TextField(db_default='pending')
-    workflow_instance = models.ForeignKey('WorkflowInstance', models.DO_NOTHING, blank=True, null=True)
+    status = models.TextField(choices=Status, db_default='pending')
+    workflow_instance = models.ForeignKey('WorkflowInstance', models.DO_NOTHING, related_name='travel_requests', blank=True, null=True)
     decided_at = models.DateTimeField(blank=True, null=True)
     decision_note = models.TextField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='travel_requests_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'travel_request'
 
+    def __str__(self):
+        return f'TravelRequest {self.id}'
+
 
 class TravelSettlement(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    travel_request = models.OneToOneField(TravelRequest, models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    status = models.TextField(db_default='pending')
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='travel_settlements')
+    travel_request = models.ForeignKey(TravelRequest, models.DO_NOTHING, related_name='travel_settlements')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='travel_settlements')
+    status = models.TextField(choices=Status, db_default='pending')
     actual_from = models.DateField()
     actual_to = models.DateField()
     days = models.IntegerField()
@@ -172,11 +304,19 @@ class TravelSettlement(models.Model):
     advance = models.DecimalField(max_digits=14, decimal_places=2)
     net = models.DecimalField(max_digits=14, decimal_places=2)
     note = models.TextField(blank=True, null=True)
-    workflow_instance = models.ForeignKey('WorkflowInstance', models.DO_NOTHING, blank=True, null=True)
+    workflow_instance = models.ForeignKey('WorkflowInstance', models.DO_NOTHING, related_name='travel_settlements', blank=True, null=True)
     decided_at = models.DateTimeField(blank=True, null=True)
     decision_note = models.TextField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='travel_settlements_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'travel_settlement'
+        constraints = [models.UniqueConstraint(fields=['travel_request'], condition=models.Q(status__in=['pending', 'approved']),
+                                              name='travel_settlement_active_idx')]
+
+    def __str__(self):
+        return f'TravelSettlement {self.id}'

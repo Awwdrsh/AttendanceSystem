@@ -1,19 +1,23 @@
 """Small JavaScript-semantics helpers, so the gateway answers devices exactly as the TS gateway did.
 
 Terminals send odd input (padded fields, hex ids, BOMs, over-long values). These helpers reproduce what
-String.prototype.trim, Number(), Number.isSafeInteger, Date.UTC and Date.toISOString do with them.
+String.prototype.trim, Number(), Number.isSafeInteger, Date.UTC and Date.toISOString do with them. They stay
+hand-written on purpose: the device protocol must answer byte for byte as the recorded TS gateway did, and Python's
+str.strip(), float() and datetime() accept or refuse different input (str.strip() also strips \x1c-\x1f, float()
+refuses '0x1f', datetime() refuses day 32 instead of rolling over). Calendar arithmetic itself uses datetime.
 """
 from __future__ import annotations
 
 import math
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 # ECMAScript WhiteSpace + LineTerminator (what String.prototype.trim removes).
 _JS_WS = '\t\n\v\f\r                  　﻿'
 
 MAX_SAFE_INTEGER = 2 ** 53 - 1
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_EPOCH_ORDINAL = _EPOCH.date().toordinal()
 
 
 def js_trim(s: str) -> str:
@@ -81,15 +85,6 @@ def js_string_of_number(v: int | float) -> str:
     return r
 
 
-def _days_from_civil(y: int, m: int, d: int) -> int:
-    y -= m <= 2
-    era = (y if y >= 0 else y - 399) // 400
-    yoe = y - era * 400
-    doy = (153 * (m + (-3 if m > 2 else 9)) + 2) // 5 + d - 1
-    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
-    return era * 146097 + doe - 719468
-
-
 def utc_ms(y: int, mo: int, d: int, h: int = 0, mi: int = 0, s: int = 0) -> int:
     """Date.UTC(y, mo - 1, d, h, mi, s): out-of-range parts roll over; years 0..99 mean 1900..1999."""
     if 0 <= y <= 99:
@@ -97,7 +92,10 @@ def utc_ms(y: int, mo: int, d: int, h: int = 0, mi: int = 0, s: int = 0) -> int:
     m0 = mo - 1
     y += m0 // 12
     m0 %= 12
-    days = _days_from_civil(y, m0 + 1, 1) + (d - 1)
+    # The Gregorian calendar repeats every 400 years (146097 days), so any year maps into date()'s 1..9999 range;
+    # a terminal can send year 9999 with month 13, which rolls over to 10000 as Date.UTC does.
+    cycles, y400 = divmod(y - 1, 400)
+    days = date(y400 + 1, m0 + 1, 1).toordinal() + cycles * 146_097 - _EPOCH_ORDINAL + (d - 1)
     return ((days * 24 + h) * 60 + mi) * 60_000 + s * 1000
 
 
@@ -109,8 +107,7 @@ def utc_parts(ms: int) -> tuple[int, int, int, int]:
 
 def iso_ms(ms: int) -> str:
     """Date.prototype.toISOString."""
-    t = _EPOCH + timedelta(milliseconds=ms)
-    return t.strftime('%Y-%m-%dT%H:%M:%S.') + f'{t.microsecond // 1000:03d}Z'
+    return dt_from_ms(ms).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
 
 
 def dt_from_ms(ms: int) -> datetime:

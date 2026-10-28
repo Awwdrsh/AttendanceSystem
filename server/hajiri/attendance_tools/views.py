@@ -15,12 +15,11 @@ from django.http import HttpResponse
 from django.shortcuts import render
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from engines.bs_calendar import ad_to_bs, bs_month_bounds
+from engines.bs_calendar import bs_month_bounds
 
 from hajiri.attendance import api as att_api
 from hajiri.attendance.service import list_days
 from hajiri.core.auth import company_id_of
-from hajiri.core.db import rows
 from hajiri.core.errors import BadRequestError, HttpError
 from hajiri.web.decorators import login_required, require_module, require_role
 from hajiri.web.format import (ad_span_label, bs_month_grid, bs_month_label, fmt_date_long, fmt_date_short, fmt_time,
@@ -30,6 +29,10 @@ from hajiri.web.nav import area
 from hajiri.web.templatetags.hj import live_status, status_label, tone
 
 from . import services
+from .forms import (
+    ApplyPenaltiesForm, BsMonthForm, DayForm, ExceptionsFilterForm, ImportForm, NudgeForm, PolicyForm, RecomputeForm,
+    ReverseForm, TodayFilterForm, UploadFileForm,
+)
 
 ROLES = ('manager', *area('attendance'))
 
@@ -81,32 +84,8 @@ def _add_days(iso: str, n: int) -> str:
     return (date.fromisoformat(iso) + timedelta(days=n)).isoformat()
 
 
-def _iso_or(v: str | None, default: str | None) -> str | None:
-    if v:
-        try:
-            return date.fromisoformat(v).isoformat()
-        except ValueError:
-            return default
-    return default
-
-
-def _int(v, default: int) -> int:
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return default
-
-
 def _bs_ym(request) -> tuple[int, int]:
-    t = ad_to_bs(_today())
-    y, m = _int(request.GET.get('y') or request.GET.get('bs_year'), t.year), _int(request.GET.get('m') or request.GET.get('bs_month'), t.month)
-    if not 1 <= m <= 12:
-        m = t.month
-    try:
-        bs_month_bounds(y, m)
-    except Exception:  # noqa: BLE001 - outside the calendar table
-        y, m = t.year, t.month
-    return y, m
+    return BsMonthForm(request.GET).month()
 
 
 def _day_count(n) -> str:
@@ -125,16 +104,13 @@ def _not_yet_in(r: dict) -> bool:
     return not r['first_in'] and r['status'] not in ('Holiday', 'WeeklyOff', 'OnLeave')
 
 
-TODAY_FILTERS = ('all', 'in', 'late', 'absent', 'notyet', 'remote')
-
-
 @require_GET
 @require_role(*ROLES)
 def today(request):
     user = request.hajiri_user
     t = _today()
-    d = _iso_or(request.GET.get('date'), t)
-    flt = request.GET.get('filter') if request.GET.get('filter') in TODAY_FILTERS else 'all'
+    f = TodayFilterForm(request.GET, initial={'date': t}).values()
+    d, flt = str(f['date']), f['filter']
     data = att_api.today(user, {'date': d})['rows']
     is_today = d == t
     now = datetime.now().astimezone()
@@ -186,7 +162,7 @@ def today(request):
 
 # ================================================================ Exceptions
 
-EXC_FILTERS = ('all', 'missing', 'absent', 'late', 'ot')
+EXC_FILTERS = ExceptionsFilterForm.FILTERS
 
 
 def _exc_match(r: dict, f: str) -> bool:
@@ -206,9 +182,8 @@ def _exc_match(r: dict, f: str) -> bool:
 def exceptions(request):
     user = request.hajiri_user
     t = _today()
-    from_ = _iso_or(request.GET.get('from'), _add_days(t, -7))
-    to = _iso_or(request.GET.get('to'), t)
-    flt = request.GET.get('filter') if request.GET.get('filter') in EXC_FILTERS else 'all'
+    f = ExceptionsFilterForm(request.GET, initial={'from': _add_days(t, -7), 'to': t}).values()
+    from_, to, flt = str(f['from']), str(f['to']), f['filter']
     raw = att_api.exceptions(user, {'from': from_, 'to': to}) if from_ <= to else []
     # Today's open days are people still at work, not missing punches; leave them out until the day is over.
     all_rows = [r for r in raw if not (str(r['local_date']) == t and r['status'] == 'Incomplete')]
@@ -234,9 +209,9 @@ def exceptions(request):
 @require_role(*ROLES)
 def recompute(request):
     """Recalculate selected days (each value 'employee_id|YYYY-MM-DD')."""
-    picked = [v.split('|', 1) for v in request.POST.getlist('exceptions-selected') if '|' in v]
-    for emp, d in picked:
-        att_api.recompute(request.hajiri_user, {'employeeId': emp, 'localDate': d})
+    picked = RecomputeForm(request.POST).days()
+    for day in picked:
+        att_api.recompute(request.hajiri_user, day)
     resp = refresh(HttpResponse(status=204), 'exceptions')
     return toast(request, resp, f"{len(picked)} {'day' if len(picked) == 1 else 'days'} recalculated.")
 
@@ -280,11 +255,8 @@ def issues(request):
 @require_POST
 @require_role(*ROLES)
 def nudge(request):
-    p = request.POST
-    body = ({'target': 'approver', 'instanceId': p.get('instance_id', '')} if p.get('target') == 'approver'
-            else {'target': 'employee', 'employeeId': p.get('employee_id', ''), 'from': p.get('from', ''), 'to': p.get('to', '')})
     try:
-        r = services.nudge(request.hajiri_user, body)
+        r = services.nudge(request.hajiri_user, NudgeForm(request.POST).body())
     except HttpError as e:
         resp = HttpResponse(status=e.status)
         return toast(request, resp, e.message, tone='err', title='Reminder not sent')
@@ -295,12 +267,6 @@ def nudge(request):
 
 
 # ================================================================ Late penalties and attendance rules
-
-def _paid_types(company_id: str) -> list[dict]:
-    return [dict(t, id=str(t['id'])) for t in rows(
-        """SELECT id, code, name_en FROM leave_type WHERE company_id = %s AND paid AND code NOT IN ('MATERNITY', 'PATERNITY', 'MOURNING')
-            ORDER BY sort_order, code""", [company_id])]
-
 
 def _penalty_ctx(request, y: int, m: int) -> dict:
     user = request.hajiri_user
@@ -333,7 +299,7 @@ def _penalty_ctx(request, y: int, m: int) -> dict:
 
 def _policy_ctx(request, policy: dict | None = None, error: str | None = None) -> dict:
     company_id = company_id_of(request.hajiri_user)
-    return {'policy': policy or services.extras_policy(company_id), 'types': _paid_types(company_id), 'policy_error': error,
+    return {'policy': policy or services.extras_policy(company_id), 'types': services.paid_leave_types(company_id), 'policy_error': error,
             'scopes': [('team', "Each person's team"), ('department', "Each person's department"), ('company', 'The whole company')]}
 
 
@@ -347,26 +313,10 @@ def penalties(request):
     return render(request, 'attendance_tools/penalties.html', {**ctx, **_policy_ctx(request)})
 
 
-def _num_or(v, default):
-    try:
-        f = float(v)
-        return int(f) if f.is_integer() else f
-    except (TypeError, ValueError):
-        return default
-
-
 @require_POST
 @require_module('attendance')
 def save_policy(request):
-    p = request.POST
-    body = {
-        'blockLateClockIn': p.get('blockLateClockIn') == 'on', 'blockAfterMin': _num_or(p.get('blockAfterMin'), 0),
-        'whosOutScope': p.get('whosOutScope') or 'team',
-        'latePenalty': {'enabled': p.get('lp_enabled') == 'on', 'lateCount': _num_or(p.get('lp_lateCount'), 1),
-                        'penaltyDays': _num_or(p.get('lp_penaltyDays'), 0.25), 'minLateMinutes': _num_or(p.get('lp_minLateMinutes'), 1),
-                        'leaveTypeIds': [x for x in p.getlist('lp_leaveTypeIds') if x][:5]},
-    }
-    services.put_policy(request.hajiri_user, body)
+    services.put_policy(request.hajiri_user, PolicyForm(request.POST).policy())
     resp = refresh(HttpResponse(status=204), 'late-penalties')
     return toast(request, resp, 'Attendance rules saved.')
 
@@ -374,9 +324,7 @@ def save_policy(request):
 @require_POST
 @require_module('attendance')
 def apply_penalties(request):
-    y, m = _int(request.POST.get('bsYear'), 0), _int(request.POST.get('bsMonth'), 0)
-    ids = [x for x in request.POST.getlist('late-penalties-selected') if x]
-    r = services.apply(request.hajiri_user, {'bsYear': y, 'bsMonth': m, **({'employeeIds': ids} if ids else {})})
+    r = services.apply(request.hajiri_user, ApplyPenaltiesForm(request.POST).body())
     msg = (f"{r['applied']} penalt{'y' if r['applied'] == 1 else 'ies'} applied{', ' + str(r['skipped']) + ' skipped' if r['skipped'] else ''}. "
            'The employees have been told.')
     return toast(request, refresh(HttpResponse(status=204), 'late-penalties'), msg)
@@ -387,17 +335,14 @@ def apply_penalties(request):
 def reverse_penalty(request, id):
     name = request.GET.get('name') or request.POST.get('name') or ''
     if request.method == 'GET':
+        services.penalty(request.hajiri_user, str(id))          # another company's penalty is not found
         return render(request, 'attendance_tools/partials/reverse_form.html', {'id': id, 'name': name})
-    reason = (request.POST.get('reason') or '').strip()
-    services.reverse(request.hajiri_user, str(id), {'reason': reason})
+    services.reverse(request.hajiri_user, str(id), ReverseForm(request.POST).cleaned())
     resp = refresh(close_modal(HttpResponse(status=204)), 'late-penalties')
     return toast(request, resp, 'Penalty reversed.')
 
 
 # ================================================================ Upload
-
-UPLOAD_MAX = 900_000
-
 
 def _history(request) -> list[dict]:
     return services.uploads(request.hajiri_user)['uploads']
@@ -421,17 +366,14 @@ def upload_template(request):
 @require_POST
 @require_module('attendance')
 def upload_check(request):
-    f = request.FILES.get('file')
-    if not f:
-        raise BadRequestError('Choose a CSV file.')
-    if f.size > UPLOAD_MAX:
-        resp = HttpResponse(status=400)
-        return toast(request, resp, 'The file is too large. Upload at most 2,000 rows at a time.', tone='err')
+    form = UploadFileForm(request.POST, request.FILES)
     try:
-        csv = f.read().decode('utf-8-sig')
-    except UnicodeDecodeError:
-        return toast(request, HttpResponse(status=400), 'Save the file as CSV (UTF-8) and choose it again.', tone='err',
-                     title='Could not read the file')
+        csv, filename = form.csv()
+    except BadRequestError as e:
+        if e.message == 'Choose a CSV file.':
+            raise
+        title = e.details.get('title') if isinstance(e.details, dict) else None
+        return toast(request, HttpResponse(status=400), e.message, tone='err', title=title)
     try:
         check = services.upload_check(request.hajiri_user, {'csv': csv})
     except HttpError as e:
@@ -440,16 +382,14 @@ def upload_check(request):
         r['date_label'] = fmt_date_short(r['date']) if r['date'] else None
     stats = [{'label': 'Rows', 'value': len(check['rows'])}, {'label': 'Ready', 'value': check['valid']},
              {'label': 'With errors', 'value': check['invalid'], **({'tone': 'bad'} if check['invalid'] else {})}]
-    return render(request, 'attendance_tools/partials/upload_check.html', {**check, 'csv': csv, 'filename': f.name, 'stats': stats})
+    return render(request, 'attendance_tools/partials/upload_check.html', {**check, 'csv': csv, 'filename': filename, 'stats': stats})
 
 
 @require_POST
 @require_module('attendance')
 def upload_import(request):
-    p = request.POST
     try:
-        r = services.upload_import(request.hajiri_user, {'csv': p.get('csv', ''), 'reason': (p.get('reason') or '').strip(),
-                                                         **({'filename': p['filename']} if p.get('filename') else {})})
+        r = services.upload_import(request.hajiri_user, ImportForm(request.POST).body())
     except HttpError as e:
         return toast(request, HttpResponse(status=e.status), e.message, tone='err', title='Not uploaded')
     msg = f"{r['punches']} punch(es) added for {r['days']} day(s){'; ' + str(r['duplicates']) + ' were already there' if r['duplicates'] else ''}."
@@ -548,9 +488,7 @@ def _late_note(user, y: int, m: int) -> dict | None:
 def my_day(request):
     """The day modal of My attendance: status, times, flags, punches and the correction button."""
     user = request.hajiri_user
-    d = _iso_or(request.GET.get('date'), None)
-    if not d:
-        raise BadRequestError('date: YYYY-MM-DD')
+    d = DayForm(request.GET).day()
     t = _today()
     day = None
     punches = []
@@ -614,8 +552,9 @@ def late_blocked(request):
 @require_module('attendance')
 def payroll_check(request):
     """PayrollAttendanceCheck: the month's open attendance issues in numbers, for the payroll pre-flight."""
-    y, m = _int(request.GET.get('bsYear') or request.GET.get('y'), 0), _int(request.GET.get('bsMonth') or request.GET.get('m'), 0)
-    s = services.issue_summary(request.hajiri_user, {'bsYear': y, 'bsMonth': m})
+    q = request.GET
+    s = services.issue_summary(request.hajiri_user, {'bsYear': q.get('bsYear') or q.get('y') or 0,
+                                                      'bsMonth': q.get('bsMonth') or q.get('m') or 0})
     pending = s['pendingLeave'] + s['pendingTime']
     clean = not s['missing'] and not s['absent'] and not pending
     text = ('No open attendance issues this month.' if clean else

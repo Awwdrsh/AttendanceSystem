@@ -18,8 +18,14 @@ from hajiri.web.decorators import login_required, require_feature, require_role
 from hajiri.web.format import fmt_date
 from hajiri.web.htmx import close_modal, is_htmx, refresh, toast
 
+from hajiri.core.users import company_users
+
 from . import api
+from . import forms as f
 from .api import ASSIGNEE_LABEL, EXIT_KIND_LABEL, RESIGN_REASONS
+
+# Shown on exit rows; 'transfer' is not offered in the record-exit form.
+EXIT_KIND_SHOWN = {**EXIT_KIND_LABEL, 'transfer': 'Transfer to a sister company'}
 
 EXIT_STATUS = {'pending': ('Awaiting approval', 'warn'), 'accepted': ('Serving notice', 'info'), 'completed': ('Left', 'idle'),
                'rejected': ('Not accepted', 'idle'), 'withdrawn': ('Withdrawn', 'idle'), 'cancelled': ('Cancelled', 'idle')}
@@ -47,10 +53,6 @@ def _then_open(request, resp: HttpResponse, message: str, *refreshes: str) -> Ht
     resp['HX-Retarget'] = '#hj-drawer-body'
     resp['HX-Reswap'] = 'innerHTML'
     return toast(request, resp, message)
-
-
-def _b(v):
-    return None if v is None or (isinstance(v, str) and not v.strip()) else (v.strip() if isinstance(v, str) else v)
 
 
 def _seed(request) -> None:
@@ -154,13 +156,7 @@ def _templates_ctx(user, kind: str) -> dict:
 
 
 def _assets_ctx(request) -> dict:
-    status = request.GET.get('status') or 'all'
-    search = (request.GET.get('search') or '').strip()
-    q = {}
-    if status in ('available', 'assigned', 'retired'):
-        q['status'] = status
-    if search:
-        q['search'] = search[:80]
+    q, status, search = f.AssetFilterForm(request.GET).query()
     items = api.assets(request.hajiri_user, q)
     for a in items:
         a['badge'] = ASSET_STATUS.get(a['status'], (a['status'], 'idle'))
@@ -176,10 +172,7 @@ def case_new(request):
     user = request.hajiri_user
     _seed(request)
     if request.method == 'POST':
-        body = {'employeeId': request.POST.get('employee_id') or '', 'templateId': _b(request.POST.get('templateId'))}
-        if _b(request.POST.get('anchorDate')):
-            body['anchorDate'] = request.POST['anchorDate']
-        case_id = api.start_onboarding(user, body)
+        case_id = api.start_onboarding(user, f.StartCaseForm(request.POST).body())
         return _then_open(request, _case_response(request, case_id), 'Onboarding started.', 'joiners', 'lifecycle-section')
     templates = [t for t in api.templates(user, 'onboarding') if t['active']]
     return render(request, 'lifecycle/partials/case_new.html', {'templates': templates, 'employee_id': request.GET.get('employee_id') or ''})
@@ -218,9 +211,7 @@ def case_cancel(request, id):
 @require_role('hr')
 @require_feature('lifecycle')
 def task_add(request, id):
-    body = {'title': (request.POST.get('title') or '').strip(), 'assigneeType': request.POST.get('assigneeType') or 'hr',
-            'dueDate': _b(request.POST.get('dueDate'))}
-    api.add_task(request.hajiri_user, str(id), body)
+    api.add_task(request.hajiri_user, str(id), f.AddTaskForm(request.POST).body())
     return _ok(request, 'Task added.', 'case-' + str(id), 'joiners', 'exits', close=False)
 
 
@@ -229,10 +220,7 @@ def task_add(request, id):
 @require_feature('lifecycle')
 def task_update(request, id):
     user = request.hajiri_user
-    status = request.POST.get('status')
-    if status not in ('open', 'done', 'skipped'):
-        raise BadRequestError('status: Invalid option: expected one of "open"|"done"|"skipped"')
-    r = api.update_task(user, str(id), {'status': status})
+    r = api.update_task(user, str(id), f.TaskStatusForm(request.POST).body())
     t = api.load_task(user, str(id))
     resp = HttpResponse(status=204)
     for x in ('case-' + t['case_id'], 'joiners', 'exits', 'lifecycle-section', 'my-checklist'):
@@ -246,7 +234,7 @@ def task_update(request, id):
 def comments(request, id):
     user = request.hajiri_user
     if request.method == 'POST':
-        api.add_comment(user, str(id), {'body': request.POST.get('body') or ''})
+        api.add_comment(user, str(id), f.CommentForm(request.POST).comment())
     return render(request, 'lifecycle/partials/comments.html', {'task_id': str(id), 'comments': api.comments(user, str(id))})
 
 
@@ -258,15 +246,7 @@ def comments(request, id):
 def review(request, employee_id):
     user = request.hajiri_user
     if request.method == 'POST':
-        rec = request.POST.get('recommendation') or 'confirm'
-        try:
-            rating = int(request.POST.get('rating') or 4)
-        except ValueError:
-            rating = request.POST.get('rating')
-        body = {'employeeId': str(employee_id), 'rating': rating, 'recommendation': rec, 'comments': (request.POST.get('comments') or '').strip(),
-                'extendTo': _b(request.POST.get('extendTo')) if rec == 'extend' else None,
-                'lastWorkingDay': _b(request.POST.get('lastWorkingDay')) if rec == 'terminate' else None}
-        api.submit_review(user, body)
+        api.submit_review(user, f.ReviewForm(request.POST).body(employee_id))
         return _ok(request, 'Review sent to HR for approval.', 'probation', 'lifecycle-section')
     e = api.employee_in(user.company_id, str(employee_id))
     today = npt_today()
@@ -282,7 +262,7 @@ def confirm(request, employee_id):
     user = request.hajiri_user
     e = api.employee_in(user.company_id, str(employee_id))
     if request.method == 'POST':
-        api.confirm(user, {'employeeId': str(employee_id), 'confirmedOn': request.POST.get('confirmedOn') or ''})
+        api.confirm(user, f.ConfirmForm(request.POST).body(employee_id))
         return _ok(request, f"{e['name_en']} is confirmed.", 'probation', 'lifecycle-section')
     return render(request, 'lifecycle/partials/confirm.html', {'e': e})
 
@@ -298,36 +278,12 @@ def template_edit(request, kind, id=None):
     if kind not in ('onboarding', 'offboarding'):
         raise BadRequestError('kind: Invalid option: expected one of "onboarding"|"offboarding"')
     if request.method == 'POST':
-        p = request.POST
-        idx = sorted({int(k.split('-')[1]) for k in p if k.startswith('t-') and k.split('-')[1].isdigit()})
-
-        def position(i: int):
-            # The editor's move up / move down posts each task's place as t-<i>-sort; without it, slot order.
-            v = p.get(f't-{i}-sort') or ''
-            return (int(v), i) if v.lstrip('-').isdigit() else (i, i)
-        idx.sort(key=position)
-        tasks = []
-        for i in idx:
-            title = (p.get(f't-{i}-title') or '').strip()
-            if not title:
-                continue
-            at = p.get(f't-{i}-assigneeType') or 'hr'
-            try:
-                off = int(p.get(f't-{i}-dueOffsetDays') or 0)
-            except ValueError:
-                off = 0
-            tasks.append({'title': title, 'description': _b(p.get(f't-{i}-description')), 'department': _b(p.get(f't-{i}-department')),
-                          'assigneeType': at, 'assigneeUserId': _b(p.get(f't-{i}-assigneeUserId')) if at == 'user' else None,
-                          'dueOffsetDays': off, 'link': _b(p.get(f't-{i}-link'))})
-        body = {'kind': kind, 'name': (p.get('name') or '').strip(), 'description': p.get('description') or '',
-                'isDefault': p.get('isDefault') in ('on', 'true', '1'), 'active': p.get('active') in ('on', 'true', '1'), 'tasks': tasks}
+        body = f.TemplateForm(request.POST).body(kind)
         api.save_template(user, str(id) if id else None, body)
         return _ok(request, 'Checklist saved.', 'templates')
     t = api.get_template(user, str(id)) if id else {'name': '', 'description': '', 'is_default': False, 'active': True,
                                                     'tasks': [{'title': '', 'assignee_type': 'hr', 'due_offset_days': 0}]}
-    from hajiri.core.db import rows
-    users = [(str(u['id']), u['name']) for u in rows("SELECT id, name FROM app_user WHERE company_id = %s AND status = 'active' ORDER BY name",
-                                                     [user.company_id])]
+    users = [(str(u['id']), u['name']) for u in company_users(user.company_id)]
     tasks = list(t['tasks'])
     slots = [{'i': i, 't': tasks[i] if i < len(tasks) else {'title': '', 'assignee_type': 'hr', 'due_offset_days': 0}} for i in range(60)]
     return render(request, 'lifecycle/partials/template_form.html', {
@@ -346,16 +302,7 @@ def asset_new(request):
     user = request.hajiri_user
     _seed(request)
     if request.method == 'POST':
-        p = request.POST
-        cost = (p.get('cost') or '').strip()
-        if cost:
-            try:
-                cost = f'{float(cost):.2f}'
-            except ValueError:
-                pass
-        body = {'tag': (p.get('tag') or '').strip(), 'name': (p.get('name') or '').strip(), 'typeId': _b(p.get('typeId')),
-                'serial': _b(p.get('serial')), 'condition': p.get('condition') or 'good', 'purchaseDate': _b(p.get('purchaseDate')),
-                'cost': cost or None}
+        body = f.AssetForm(request.POST).body()
         api.create_asset(user, body)
         return _ok(request, 'Asset added.', 'assets')
     return render(request, 'lifecycle/partials/asset_new.html', {'types': api.asset_types(user), 'conditions': [c for c in CONDITIONS if c[0] != 'lost']})
@@ -375,10 +322,7 @@ def _asset_row(user, id_: str) -> dict:
 def asset_assign(request, id):
     user = request.hajiri_user
     if request.method == 'POST':
-        body = {'employeeId': request.POST.get('employee_id') or '', 'notes': _b(request.POST.get('notes'))}
-        if _b(request.POST.get('assignedOn')):
-            body['assignedOn'] = request.POST['assignedOn']
-        api.assign_asset(user, str(id), body)
+        api.assign_asset(user, str(id), f.AssignAssetForm(request.POST).body())
         return _ok(request, 'Asset handed over.', 'assets', 'lifecycle-section')
     return render(request, 'lifecycle/partials/asset_assign.html', {'a': _asset_row(user, str(id)), 'today': npt_today()})
 
@@ -389,10 +333,7 @@ def asset_assign(request, id):
 def asset_return(request, id):
     user = request.hajiri_user
     if request.method == 'POST':
-        body = {'condition': request.POST.get('condition') or '', 'notes': _b(request.POST.get('notes'))}
-        if _b(request.POST.get('returnedOn')):
-            body['returnedOn'] = request.POST['returnedOn']
-        api.return_asset(user, str(id), body)
+        api.return_asset(user, str(id), f.ReturnAssetForm(request.POST).body())
         return _ok(request, 'Return recorded.', 'assets', 'lifecycle-section', 'exits')
     return render(request, 'lifecycle/partials/asset_return.html', {'a': _asset_row(user, str(id)), 'today': npt_today(), 'conditions': CONDITIONS})
 
@@ -403,17 +344,7 @@ def asset_return(request, id):
 @require_role('hr')
 @require_feature('lifecycle')
 def settings_save(request):
-    p = request.POST
-    days = []
-    for x in (p.get('probationReminderDays') or '').replace(' ', '').split(','):
-        if x.isdigit() and 0 < int(x) <= 90:
-            days.append(int(x))
-    try:
-        notice = int(p.get('noticeDays') or 0)
-    except ValueError:
-        notice = 0
-    api.save_settings(request.hajiri_user, {'autoStartOnboarding': p.get('autoStartOnboarding') in ('on', 'true', '1'), 'noticeDays': notice,
-                                            'probationReminderDays': days[:4], 'selfExitInterview': p.get('selfExitInterview') in ('on', 'true', '1')})
+    api.save_settings(request.hajiri_user, f.SettingsForm(request.POST).body())
     return _ok(request, 'Settings saved.', close=False)
 
 
@@ -453,7 +384,7 @@ def _exits_ctx(request) -> dict:
     today = npt_today()
     for x in xs:
         x['badge'] = EXIT_STATUS.get(x['status'], (x['status'], 'idle'))
-        x['kind_label'] = EXIT_KIND_LABEL.get(x['kind'], x['kind'])
+        x['kind_label'] = EXIT_KIND_SHOWN.get(x['kind'], x['kind'])
         x['progress'] = _progress(x['tasks_done'], x['tasks_total']) if x['tasks_total'] else None
     stats = [{'label': 'Waiting for approval', 'value': sum(1 for x in xs if x['status'] == 'pending')},
              {'label': 'Serving notice', 'value': sum(1 for x in xs if x['status'] == 'accepted')},
@@ -468,10 +399,7 @@ def _exits_ctx(request) -> dict:
 def exit_new(request):
     user = request.hajiri_user
     if request.method == 'POST':
-        p = request.POST
-        body = {'employeeId': p.get('employee_id') or '', 'kind': p.get('kind') or 'resignation', 'lastWorkingDay': p.get('lastWorkingDay') or '',
-                'voluntary': p.get('voluntary') in ('on', 'true', '1'), 'reasonCategory': _b(p.get('reasonCategory')), 'reason': _b(p.get('reason'))}
-        xid = api.create_exit(user, body)
+        xid = api.create_exit(user, f.ExitForm(request.POST).body())
         return _then_open(request, _exit_response(request, xid), 'Exit recorded and clearance started.', 'exits', 'lifecycle-section')
     return render(request, 'lifecycle/partials/exit_new.html', {
         'kinds': list(EXIT_KIND_LABEL.items()), 'reasons': RESIGN_REASONS + ['Performance', 'Misconduct', 'Redundancy', 'Contract ended']})
@@ -503,7 +431,7 @@ def _exit_response(request, id):
     return render(request, 'lifecycle/partials/exit.html', {
         'x': x, 'b': b, 's': s, 'tasks': tasks, 'case': case, 'interview': interview, 'hr': hr,
         'open': x['status'] in ('pending', 'accepted'), 'past': x['lwd'] <= today,
-        'badge': EXIT_STATUS.get(x['status'], (x['status'], 'idle')), 'kind_label': EXIT_KIND_LABEL.get(x['kind'], x['kind']),
+        'badge': EXIT_STATUS.get(x['status'], (x['status'], 'idle')), 'kind_label': EXIT_KIND_SHOWN.get(x['kind'], x['kind']),
         'clearance_hint': (f"{b['openTasks']} open, {b['assetsHeld']} {'asset' if b['assetsHeld'] == 1 else 'assets'} not returned"
                            if b['openTasks'] or b['assetsHeld'] else 'Everything is cleared.'),
         'questions': [q for q in api.questions(user) if q['active']] if not interview else [],
@@ -519,7 +447,7 @@ def _month(m: int) -> str:
 @require_role('hr')
 @require_feature('lifecycle')
 def exit_update(request, id):
-    api.update_exit(request.hajiri_user, str(id), {'lastWorkingDay': request.POST.get('lastWorkingDay') or ''})
+    api.update_exit(request.hajiri_user, str(id), f.LastDayForm(request.POST).body())
     return _ok(request, 'Last working day changed.', 'exits', 'exit-' + str(id), close=False)
 
 
@@ -528,7 +456,7 @@ def exit_update(request, id):
 @require_feature('lifecycle')
 def exit_cancel(request, id):
     if request.method == 'POST':
-        api.cancel_exit(request.hajiri_user, str(id), {'reason': (request.POST.get('reason') or '').strip()})
+        api.cancel_exit(request.hajiri_user, str(id), f.CancelExitForm(request.POST).body())
         return _ok(request, 'Exit cancelled.', 'exits', 'exit-' + str(id), 'lifecycle-section')
     api.load_exit(request.hajiri_user, str(id))
     return render(request, 'lifecycle/partials/exit_cancel.html', {'id': str(id)})
@@ -538,7 +466,7 @@ def exit_cancel(request, id):
 @require_role('hr')
 @require_feature('lifecycle')
 def exit_complete(request, id):
-    api.complete(request.hajiri_user, str(id), {'skipOpenTasks': request.POST.get('skipOpenTasks') in ('on', 'true', '1')})
+    api.complete(request.hajiri_user, str(id), f.CompleteExitForm(request.POST).body())
     return _ok(request, 'Exit completed.', 'exits', 'exit-' + str(id), 'lifecycle-section', close=False)
 
 
@@ -550,23 +478,12 @@ def exit_withdraw(request, id):
     return _ok(request, 'Resignation withdrawn.', 'my-leaving', close=False)
 
 
-def interview_answers(post, questions: list[dict]) -> list[dict]:
-    out = []
-    for q in questions:
-        v = (post.get(f"q-{q['id']}") or '').strip()
-        if not v:
-            continue
-        out.append({'questionId': q['id'], 'answer': int(v) if q['kind'] == 'rating' and v.isdigit() else v})
-    return out
-
-
 @require_POST
 @login_required
 @require_feature('lifecycle')
 def interview(request, id):
     user = request.hajiri_user
-    answers = interview_answers(request.POST, api.questions(user))
-    api.record_interview(user, str(id), {'answers': answers})
+    api.record_interview(user, str(id), f.InterviewForm(request.POST).answers(api.questions(user)))
     return _ok(request, 'Thank you. Your answers were saved.', 'exits', 'exit-' + str(id), 'my-leaving', close=False)
 
 
@@ -574,20 +491,7 @@ def interview(request, id):
 @require_role('hr')
 @require_feature('lifecycle')
 def questions_save(request):
-    p = request.POST
-    idx = sorted({int(k.split('-')[1]) for k in p if k.startswith('q-') and k.split('-')[1].isdigit()})
-    qs = []
-    for i in idx:
-        text = (p.get(f'q-{i}-question') or '').strip()
-        if not text:
-            continue
-        q = {'question': text, 'kind': p.get(f'q-{i}-kind') or 'text',
-             'options': [o.strip() for o in (p.get(f'q-{i}-options') or '').split(',') if o.strip()],
-             'active': p.get(f'q-{i}-active') in ('on', 'true', '1')}
-        if _b(p.get(f'q-{i}-id')):
-            q['id'] = p[f'q-{i}-id']
-        qs.append(q)
-    api.save_questions(request.hajiri_user, {'questions': qs})
+    api.save_questions(request.hajiri_user, f.QuestionsForm(request.POST).body())
     return _ok(request, 'Questions saved.', close=False)
 
 
@@ -607,7 +511,7 @@ def employee_section(request, id):
         r['rec'] = REC.get(r['recommendation'], r['recommendation'])
         r['tone'] = 'ok' if r['status'] == 'approved' else 'warn' if r['status'] == 'pending' else 'idle'
     for x in d['exits']:
-        x['kind_label'] = EXIT_KIND_LABEL.get(x['kind'], x['kind'])
+        x['kind_label'] = EXIT_KIND_SHOWN.get(x['kind'], x['kind'])
         x['lwd'] = x['accepted_lwd'] or x['proposed_lwd']
     hr = has_role(user, 'hr')
     return render(request, 'lifecycle/partials/employee_section.html', {
@@ -660,7 +564,5 @@ def my_leaving(request):
 @login_required
 @require_feature('lifecycle')
 def resign(request):
-    p = request.POST
-    api.resign(request.hajiri_user, {'proposedLastWorkingDay': p.get('proposedLastWorkingDay') or '', 'reasonCategory': _b(p.get('reasonCategory')),
-                                     'reason': _b(p.get('reason'))})
+    api.resign(request.hajiri_user, f.ResignForm(request.POST).body())
     return _ok(request, 'Your resignation was sent to your manager.', 'my-leaving', close=False)

@@ -5,7 +5,7 @@ import html as _html
 import pytest
 from django.template import Context, Template
 
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.core.errors import BadRequestError
 from hajiri.workflow import flow_admin, service
 from tests.web.factories import htmx, toasts

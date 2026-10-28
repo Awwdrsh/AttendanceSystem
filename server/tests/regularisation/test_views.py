@@ -6,7 +6,7 @@ import json
 from django.test import Client
 
 from hajiri.core import auth
-from hajiri.core.db import one, rows
+from tests.support.sql import one, rows
 from tests.regularisation.test_regularisation import days_ago, npt, workday_ago
 from tests.web.factories import htmx, hx_triggers, toasts
 

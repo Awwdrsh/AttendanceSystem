@@ -9,7 +9,7 @@ import pytest
 from django.test import Client
 
 from hajiri.core import auth
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.core.totp import TOTP_STEP_SECONDS, totp_at
 from hajiri.web import views
 

@@ -1,0 +1,30 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Offer letter: {{ candidate }}</title>
+<style>
+@page{size:A4;margin:18mm}
+body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:13.5px;color:#17191e;margin:32px auto;max-width:760px;line-height:1.65;padding:0 24px}
+.hdr{display:flex;justify-content:space-between;align-items:flex-end;padding-bottom:14px;border-bottom:2px solid #12773a}
+h1{font-size:20px;margin:0;font-weight:700;letter-spacing:-.01em}.muted{color:#6b707b}.ref{text-align:right;font-size:12px}
+h2{font-size:16px;margin:28px 0 12px}table{border-collapse:collapse;margin:12px 0 18px;width:100%}
+td{padding:7px 0;border-bottom:1px solid #eef0f2;vertical-align:top}td:first-child{color:#6b707b;width:38%}
+.sign{display:grid;grid-template-columns:1fr 1fr;gap:48px;margin-top:56px}.sign div{border-top:1px solid #9aa0aa;padding-top:6px;font-size:12px;color:#6b707b}
+.draft{position:fixed;top:40%;left:0;right:0;text-align:center;font-size:96px;color:rgba(200,30,30,.08);transform:rotate(-24deg);font-weight:800;pointer-events:none}
+@media print{body{margin:0 auto}}
+</style></head><body>
+{% if draft %}<div class="draft">DRAFT</div>{% endif %}
+<div class="hdr"><div><h1>{{ company }}</h1><div class="muted">Offer of employment</div></div>
+<div class="ref"><div>Ref. {{ reference }}</div><div>{{ issued_label }}</div></div></div>
+<p style="margin-top:24px">Dear {{ candidate }},</p>
+<p>We are pleased to offer you the {{ kind }} position of <b>{{ designation }}</b>{% if department %} in {{ department }}{% endif %} at {{ company }}. The main terms of this offer are below.</p>
+<table>
+<tr><td>Position</td><td>{{ designation }}</td></tr>
+{% if department %}<tr><td>Department</td><td>{{ department }}</td></tr>{% endif %}
+{% if location %}<tr><td>Work location</td><td>{{ location }}</td></tr>{% endif %}
+<tr><td>Monthly gross salary</td><td>NPR {{ salary }}<div class="muted" style="font-size:12px">{{ salary_words }}</div></td></tr>
+<tr><td>Joining date</td><td>{{ join_label }}</td></tr>
+{% if expires_label %}<tr><td>Please accept by</td><td>{{ expires_label }}</td></tr>{% endif %}
+</table>
+{% for p in paragraphs %}<p>{{ p|linebreaksbr }}</p>{% endfor %}
+<p>Your employment will be governed by the Labour Act 2074, the company's policies and the appointment letter you will receive on joining. Salary is subject to tax and Social Security Fund deductions as required by law.</p>
+<p>Please sign and return a copy of this letter to confirm that you accept the offer. We look forward to welcoming you.</p>
+<div class="sign"><div>For {{ company }}<br>Authorised signatory</div><div>Accepted by {{ candidate }}<br>Signature and date</div></div>
+</body></html>

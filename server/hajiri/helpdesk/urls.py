@@ -17,3 +17,14 @@ urlpatterns = [
     path('_/helpdesk/categories/<uuid:category_id>', views.category_edit, name='category_edit'),
     path('_/helpdesk/settings', views.save_settings, name='settings'),
 ]
+
+# JSON API for Bearer-token clients (TS: /api/v1/helpdesk/...).
+from rest_framework.routers import SimpleRouter  # noqa: E402
+
+from . import api  # noqa: E402
+
+router = SimpleRouter(trailing_slash=False)
+router.register('api/v1/helpdesk/tickets', api.HelpdeskViewSet, basename='api-ticket')
+router.register('api/v1/helpdesk/categories', api.CategoryViewSet, basename='api-category')
+router.register('api/v1/helpdesk/stats', api.StatsViewSet, basename='api-stats')
+urlpatterns += router.urls

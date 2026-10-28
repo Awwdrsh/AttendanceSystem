@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from django.test import Client
 
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.workflow import flow_admin
 from hajiri.workflow.cards import card, register_card
 

@@ -1,29 +1,37 @@
 """
-Public careers site (port of apps/api/src/modules/careers/routes.ts): open jobs and job applications, no session. A
-company is chosen by its code (?company=CODE); an install with a single company needs no code. Nothing but open jobs'
+Public careers site (port of apps/api/src/modules/careers/routes.ts): open jobs and job applications, no session.
+
+Each company has its own careers page, named by its code in the address (/careers/<code>, or ?company=CODE as the
+TS app linked it); an install with a single company needs no code. Several companies of a group on one Hajiri each
+show only their own jobs, and under a company's address only that company's jobs are found. Nothing but open jobs'
 public fields ever leaves this module.
 """
 from __future__ import annotations
 
-import json
 import threading
 import time
 import uuid
 
+import django_filters
 from django.db import transaction
+from django.db.models import Case, F, Q, When
+from django.db.models.functions import Now
 
-from hajiri.core.db import one, rows
+from hajiri.core.clock import npt_today
 from hajiri.core.errors import NotFoundError, TooManyRequestsError
-from hajiri.core.schema import Bool, Enum, Num, Obj, Record, S, Str, Union, _Issue, _Issues, is_uuid, parse
+from hajiri.core.scoping import is_uuid
+from hajiri.core.validation import plain, validate
+from hajiri.db.models import Company, HiringApplication, HiringJob
 from hajiri.features.service import feature_on
-from hajiri.files.store import parse_upload, save_file
-from hajiri.hiring.services import (add_event, clean_answers, email_candidate, hiring_policy, job_watchers, score_application,
-                                    upsert_candidate)
+from hajiri.files.store import ParsedFile, check_file, parse_upload, save_file
+from hajiri.hiring.serializers import ApplyFormIn, ApplyIn, CareersQueryIn
+from hajiri.hiring.services import (add_event, clean_answers, company_name, email_candidate, hiring_policy, job_watchers,
+                                    score_application, upsert_candidate)
 from hajiri.notifications.service import notify
-from hajiri.workflow.service import npt_today
 
 OK_MESSAGE = 'Thank you. Your application has been received.'
 GONE = 'This job is no longer accepting applications.'
+PAGE_GONE = 'careers page not found'
 
 
 class RateLimiter:
@@ -55,43 +63,18 @@ class RateLimiter:
 
 apply_limiter = RateLimiter(5, 60 * 60)
 
-PUBLIC_JOB_COLS = """j.id, j.title, j.description, j.requirements, j.category, j.location, j.work_mode, j.employment_type, j.experience_min,
-  j.experience_max, CASE WHEN j.show_salary THEN j.salary_min END AS salary_min, CASE WHEN j.show_salary THEN j.salary_max END AS salary_max,
-  j.openings, j.deadline, j.published_at, ou.name_en AS department"""
 
-OPEN = "j.status = 'open' AND (j.deadline IS NULL OR j.deadline >= %(today)s::date)"
-
-class _Answers(Record):
-    """z.record(z.string().max(20), ...): a key longer than 20 characters is an 'Invalid key in record' issue."""
-
-    def check(self, v, path):
-        out = super().check(v, path)
-        bad = [k for k in out if len(k) > 20]
-        if bad:
-            raise _Issues([_Issue(path + [k], 'Invalid key in record') for k in bad])
-        return out
+def _public_salary(field: str) -> Case:
+    return Case(When(show_salary=True, then=F(field)), default=None)
 
 
-APPLY_BODY = Obj({
-    'name': Str(trim=True, min=2, max=120),
-    'email': Str(email=True, max=200),
-    'phone': Str(trim=True, regex=r'^[0-9+\- ()]{6,30}$', regex_message='enter a valid phone number'),
-    'experienceYears': Num(min=0, max=60, nullish=True),
-    'currentEmployer': Str(trim=True, max=120, nullish=True),
-    'coverNote': Str(trim=True, max=4000, nullish=True),
-    'answers': _Answers(Union(Str(max=1000), Num(), Bool()), optional=True),
-    'cvFilename': Str(trim=True, min=1, max=200),
-    'cvDataUrl': Str(min=20, max=6_000_000),
-    'consent': S(refine=(lambda v: v is True, 'please agree to the processing of your data')),
-    'source': Enum(('careers', 'job_board', 'referral', 'other'), default='careers'),
-    'website': Str(max=200, optional=True),   # honeypot: hidden from people, filled in by bots
-}, strict=True)
-
-LIST_QUERY = Obj({
-    'company': Str(max=32, optional=True), 'q': Str(trim=True, max=100, optional=True),
-    'workMode': Enum(('onsite', 'remote', 'hybrid'), optional=True), 'category': Str(max=60, optional=True),
-    'experience': Num(coerce=True, min=0, max=60, optional=True),
-})
+# The public fields of a job, keyed as the TS API answered them.
+PUBLIC_JOB = {
+    'id': 'id', 'title': 'title', 'description': 'description', 'requirements': 'requirements', 'category': 'category',
+    'location': 'location', 'work_mode': 'work_mode', 'employment_type': 'employment_type', 'experience_min': 'experience_min',
+    'experience_max': 'experience_max', 'salary_min': _public_salary('salary_min'), 'salary_max': _public_salary('salary_max'),
+    'openings': 'openings', 'deadline': 'deadline', 'published_at': 'published_at', 'department': 'org_unit__name_en',
+}
 
 
 def public_questions(qs: list[dict]) -> list[dict]:
@@ -103,21 +86,72 @@ def _careers_on(company_id: str) -> bool:
     return hiring_policy(company_id)['careersEnabled'] and feature_on(company_id, 'hiring')
 
 
+def _public_values(qs) -> list[dict]:
+    ann = {f'v_{k}': (F(v) if isinstance(v, str) else v) for k, v in PUBLIC_JOB.items()}
+    out = [{k: r[f'v_{k}'] for k in PUBLIC_JOB} for r in qs.annotate(**ann).values(*ann)]
+    for j in out:
+        j['id'] = str(j['id'])
+    return out
+
+
+def _companies_by_code(code: str):
+    return Company.objects.filter(code__iexact=code)
+
+
 def resolve_company(code: str | None) -> dict:
-    found = (rows('SELECT id, code, name_en FROM company WHERE lower(code) = lower(%s)', [code]) if code
-             else rows('SELECT id, code, name_en FROM company ORDER BY created_at LIMIT 2'))
+    """The company whose careers page this is: by its code (any case), or the only company of the install."""
+    qs = _companies_by_code(code) if code else Company.objects.order_by('created_at')
+    found = list(qs.values('id', 'code', 'name_en')[:2])
     if len(found) != 1:
-        raise NotFoundError('careers page not found')
-    c = found[0]
-    c['id'] = str(c['id'])
+        raise NotFoundError(PAGE_GONE)
+    c = {**found[0], 'id': str(found[0]['id'])}
     if not _careers_on(c['id']):
-        raise NotFoundError('careers page not found')
+        raise NotFoundError(PAGE_GONE)
     return c
 
 
-def open_job(job_id: str) -> dict:
-    j = one(f"""SELECT j.id, j.company_id, j.title, j.questions, j.stages, j.experience_min, j.experience_max, j.hiring_manager_id
-                  FROM hiring_job j WHERE j.id = %(id)s AND {OPEN}""", {'id': job_id, 'today': npt_today()})
+def open_jobs(company_id: str | None):
+    """A company's jobs that take applications today (open, deadline not passed in Nepal). Without a company, those
+    of every company: only for the TS address /careers/<job id>, where the job itself names its company."""
+    qs = HiringJob.objects.for_company(company_id) if company_id else HiringJob.objects.all()
+    return qs.filter(status=HiringJob.Status.OPEN).filter(Q(deadline__isnull=True) | Q(deadline__gte=npt_today()))
+
+
+class OpenJobFilter(django_filters.FilterSet):
+    """The careers page's filters: words in the title or description, work mode, category and experience."""
+    q = django_filters.CharFilter(method='search')
+    workMode = django_filters.CharFilter(field_name='work_mode')
+    category = django_filters.CharFilter(field_name='category')
+    experience = django_filters.NumberFilter(method='fits_experience')
+
+    class Meta:
+        model = HiringJob
+        fields: list[str] = []
+
+    def search(self, qs, name, value):
+        # icontains escapes % and _, so they match themselves.
+        return qs.filter(Q(title__icontains=value) | Q(description__icontains=value))
+
+    def fits_experience(self, qs, name, value):
+        return qs.filter(Q(experience_min__isnull=True) | Q(experience_min__lte=value))
+
+
+def _company_id_for(code: str | None) -> str | None:
+    """The company a careers address names (None when it names none). An unknown code finds no job."""
+    if not code:
+        return None
+    found = list(_companies_by_code(code).values_list('id', flat=True)[:2])
+    if len(found) != 1:
+        raise NotFoundError(GONE)
+    return str(found[0])
+
+
+def open_job(job_id: str, company_id: str | None = None) -> dict:
+    """An open job by id (of this company, when given), with what scoring an application needs."""
+    if not is_uuid(job_id):
+        raise NotFoundError(GONE)
+    j = (open_jobs(company_id).filter(pk=job_id.lower())
+         .values('id', 'company_id', 'title', 'questions', 'stages', 'experience_min', 'experience_max', 'hiring_manager_id').first())
     if not j or not _careers_on(str(j['company_id'])):
         raise NotFoundError(GONE)
     j['id'], j['company_id'] = str(j['id']), str(j['company_id'])
@@ -127,79 +161,71 @@ def open_job(job_id: str) -> dict:
 
 
 def _clean_query(query: dict) -> dict:
-    return {k: v for k, v in (query or {}).items() if k in LIST_QUERY.fields and v not in (None,)}
+    known = CareersQueryIn().fields
+    return {k: v for k, v in (query or {}).items() if k in known and v is not None}
 
 
-def list_jobs(query: dict) -> dict:
-    q = parse(LIST_QUERY, _clean_query(query))
-    company = resolve_company(q.get('company'))
-    term = q.get('q')
-    if term:
-        term = ''.join(f'\\{c}' if c in '\\%_' else c for c in term)
-    p = {'co': company['id'], 'today': npt_today(), 'mode': q.get('workMode'), 'cat': q.get('category'),
-         'exp': q.get('experience'), 'q': term or None}
-    jobs = rows(f"""SELECT {PUBLIC_JOB_COLS} FROM hiring_job j LEFT JOIN org_unit ou ON ou.id = j.org_unit_id
-                     WHERE j.company_id = %(co)s AND {OPEN}
-                       AND (%(mode)s::text IS NULL OR j.work_mode = %(mode)s) AND (%(cat)s::text IS NULL OR j.category = %(cat)s)
-                       AND (%(exp)s::numeric IS NULL OR j.experience_min IS NULL OR j.experience_min <= %(exp)s)
-                       AND (%(q)s::text IS NULL OR j.title ILIKE '%%' || %(q)s || '%%' OR j.description ILIKE '%%' || %(q)s || '%%')
-                     ORDER BY j.published_at DESC NULLS LAST LIMIT 200""", p)
-    cats = rows(f"""SELECT DISTINCT j.category FROM hiring_job j WHERE j.company_id = %(co)s AND {OPEN} AND j.category IS NOT NULL
-                     ORDER BY 1""", {'co': company['id'], 'today': npt_today()})
-    for j in jobs:
-        j['id'] = str(j['id'])
-    return {'company': {'name': company['name_en'], 'code': company['code']}, 'jobs': jobs, 'categories': [c['category'] for c in cats]}
+def list_jobs(query: dict, company_code: str | None = None) -> dict:
+    """The open jobs of one company's careers page. `company_code` (from the address) wins over ?company=."""
+    q = plain(validate(CareersQueryIn, _clean_query(query)))
+    company = resolve_company(company_code or q.get('company'))
+    filters = {k: q[k] for k in ('q', 'workMode', 'category', 'experience') if q.get(k) not in (None, '')}
+    qs = open_jobs(company['id'])
+    jobs = OpenJobFilter(filters, queryset=qs).qs.order_by(F('published_at').desc(nulls_last=True))[:200]
+    cats = qs.exclude(category=None).order_by('category').values_list('category', flat=True).distinct()
+    return {'company': {'name': company['name_en'], 'code': company['code']}, 'jobs': _public_values(jobs), 'categories': list(cats)}
 
 
-def get_job(job_id: str) -> dict:
-    if not is_uuid(job_id):
-        raise NotFoundError(GONE)
-    job = open_job(job_id.lower())
-    row = one(f"""SELECT {PUBLIC_JOB_COLS}, co.name_en AS company_name, co.code AS company_code FROM hiring_job j
-                   LEFT JOIN org_unit ou ON ou.id = j.org_unit_id JOIN company co ON co.id = j.company_id WHERE j.id = %s""", [job['id']])
-    name, code = row.pop('company_name'), row.pop('company_code')
-    row['id'] = str(row['id'])
-    return {'company': {'name': name, 'code': code}, 'job': {**row, 'questions': public_questions(job['questions'])}}
+def get_job(job_id: str, company_code: str | None = None) -> dict:
+    """One open job with its public questions; with a company code, only that company's job is found."""
+    job = open_job(job_id, _company_id_for(company_code))
+    row = _public_values(HiringJob.objects.for_company(job['company_id']).filter(pk=job['id']))[0]
+    co = Company.objects.for_company(job['company_id']).values('name_en', 'code').get()
+    return {'company': {'name': co['name_en'], 'code': co['code']}, 'job': {**row, 'questions': public_questions(job['questions'])}}
 
 
-def apply(job_id: str, body: dict, ip: str | None) -> dict:
-    """Store an application (or pretend to, for a bot or a repeat). The answer is always the same 201 message."""
+def apply(job_id: str, body: dict, ip: str | None, company_code: str | None = None, *,
+          cv_upload: ParsedFile | None = None) -> dict:
+    """Store an application (or pretend to, for a bot or a repeat). The answer is always the same 201 message.
+    JSON clients send the CV as `cvDataUrl`; the careers page passes the uploaded file as `cv_upload`."""
     ok = {'ok': True, 'message': OK_MESSAGE}
     if not apply_limiter.allow(ip or 'unknown'):
         raise TooManyRequestsError('Too many applications from this connection. Please try again later.')
     if not is_uuid(job_id):
         raise NotFoundError(GONE)
-    b = parse(APPLY_BODY, body)
+    b = plain(validate(ApplyIn if cv_upload is None else ApplyFormIn, body))
     if b.get('website') and b['website'].strip() != '':
         return ok   # a bot filled the hidden field: pretend, store nothing
-    job = open_job(job_id.lower())
+    job = open_job(job_id, _company_id_for(company_code))
     answers = clean_answers(job['questions'], b.get('answers'))
-    cv = parse_upload(b['cvDataUrl'], allowed=('application/pdf',))
+    cv = (parse_upload(b['cvDataUrl'], allowed=('application/pdf',)) if cv_upload is None
+          else check_file(cv_upload.mime, cv_upload.data, allowed=('application/pdf',)))
+    co = job['company_id']
     with transaction.atomic():
-        cand = upsert_candidate(job['company_id'], b['name'], b['email'], b['phone'])
-        if one('SELECT 1 AS x FROM hiring_application WHERE job_id = %s AND candidate_id = %s', [job['id'], cand]):
+        cand = upsert_candidate(co, b['name'], b['email'], b['phone'])
+        if HiringApplication.objects.for_company(co).filter(job_id=job['id'], candidate_id=cand).exists():
             # Same answer either way, so the form never reveals whether an address has applied before.
             transaction.set_rollback(True)
             return ok
-        app_id = str(uuid.uuid4())
-        f = save_file(company_id=job['company_id'], purpose='hiring_cv', filename=b['cvFilename'], file=cv, uploaded_by=None,
+        app_id = str(uuid.uuid4())   # the CV is stored attached to the application, so the id comes first
+        f = save_file(company_id=co, purpose='hiring_cv', filename=b['cvFilename'], file=cv, uploaded_by=None,
                       attached_to=f'hiring_application:{app_id}')
         score = score_application(job, b.get('experienceYears'), answers)
-        one("""INSERT INTO hiring_application (id, company_id, job_id, candidate_id, stage, source, cv_file_id, cover_note, answers,
-                      experience_years, current_employer, score, score_detail, knocked_out, consent_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now()) RETURNING id""",
-            [app_id, job['company_id'], job['id'], cand, job['stages'][0], b['source'], f['id'], b.get('coverNote'), json.dumps(answers),
-             b.get('experienceYears'), b.get('currentEmployer'), score['score'], json.dumps(score['detail']), score['knockedOut']])
-        add_event(company_id=job['company_id'], application_id=app_id, actor_id=None, kind='applied',
+        HiringApplication.objects.create(
+            id=app_id, company_id=co, job_id=job['id'], candidate_id=cand, stage=job['stages'][0], source=b['source'],
+            cv_file_id=f['id'], cover_note=b.get('coverNote'), answers=answers,
+            experience_years=None if b.get('experienceYears') is None else str(b['experienceYears']),
+            current_employer=b.get('currentEmployer'), score=score['score'], score_detail=score['detail'],
+            knocked_out=score['knockedOut'], consent_at=Now())
+        add_event(company_id=co, application_id=app_id, actor_id=None, kind='applied',
                   body=f"Applied through the careers page ({b['source'].replace('_', ' ', 1)})")
-        company = one('SELECT name_en FROM company WHERE id = %s', [job['company_id']])['name_en']
+        company = company_name(co)
         email_candidate(
-            company_id=job['company_id'], application_id=app_id, to=b['email'].lower(), actor_id=None, template='hiring.received',
+            company_id=co, application_id=app_id, to=b['email'].lower(), actor_id=None, template='hiring.received',
             title=f"We received your application for {job['title']}",
             body=(f"Dear {b['name']},\n\nThank you for applying for the {job['title']} role at {company}. Our team will review your "
                   f"application and contact you if your profile matches what we are looking for.\n\n{company}"))
-        for user_id in job_watchers(job['company_id'], job['hiring_manager_id'] and str(job['hiring_manager_id'])):
-            notify(company_id=job['company_id'], user_id=user_id, template='hiring.applied', title=f"New application: {job['title']}",
+        for user_id in job_watchers(co, job['hiring_manager_id'] and str(job['hiring_manager_id'])):
+            notify(company_id=co, user_id=user_id, template='hiring.applied', title=f"New application: {job['title']}",
                    body=f"{b['name']} applied for {job['title']}.", payload={'applicationId': app_id, 'jobId': job['id']})
     return ok
-

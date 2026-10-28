@@ -6,7 +6,7 @@ from django.http import HttpResponse
 from django.test import RequestFactory
 
 from hajiri.core import auth
-from hajiri.core.db import one
+from tests.support.sql import one
 from hajiri.core.errors import FeatureOffError, ForbiddenError, ValidationError
 from hajiri.features.service import (
     FEATURE_KEYS, assert_feature, disabled_features, feature_on, get_features, invalidate_features, require_feature,
@@ -91,7 +91,7 @@ def test_a_saved_change_is_audited_and_takes_effect_at_once(people):
 
 
 def test_unknown_stored_keys_are_ignored(people):
-    from hajiri.core.db import execute
+    from tests.support.sql import execute
     execute("""INSERT INTO company_setting (company_id, key, value) VALUES (%s, 'features', '{"off": ["time", "bogus", 3]}')""",
             [people['hr'].company_id])
     assert disabled_features(people['hr'].company_id) == {'time'}

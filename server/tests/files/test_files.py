@@ -7,7 +7,7 @@ import pytest
 from django.test import Client
 
 from hajiri.core.clock import now as _now
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.core.errors import BadRequestError, ForbiddenError, NotFoundError, TooManyRequestsError
 from hajiri.files import service
 from hajiri.files.store import attach_file, clean_filename, parse_upload, purge_unattached_files, read_file

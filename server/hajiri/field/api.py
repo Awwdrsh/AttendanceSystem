@@ -1,191 +1,227 @@
-"""JSON endpoints of the field module under /api/v1/field (the TS paths): the phone app and Bearer clients. Breaks,
-visits, kiosks and the kiosk PIN/badge answer 404 'feature off' when the company switched field work off (featureGate)."""
+"""JSON endpoints of the field module under /api/v1/field (the TS paths): DRF views with the project defaults
+(HajiriAuthentication, IsSignedIn, the TS error shape). Breaks, visits, kiosks and the kiosk PIN/badge also need the
+company's field feature (FeatureEnabled('field'): 404 'feature off', the TS featureGate). Rules live in services.py."""
 from __future__ import annotations
 
-from functools import wraps
+from drf_spectacular.utils import extend_schema
+from rest_framework.decorators import api_view, parser_classes, permission_classes
+from rest_framework.negotiation import DefaultContentNegotiation
+from rest_framework.response import Response
 
-from hajiri.core.errors import FeatureOffError
-from hajiri.core.http import api_view, json_response, read_json
+from hajiri.core.api import FeatureEnabled, IsSignedIn
+from hajiri.files.parsers import json_parser
 from hajiri.punch.api import photo_response
 from hajiri.web.csv import csv_response
 from hajiri.web.views import client_ip
 
+from . import serializers as s
 from . import services
 
+GATED = [IsSignedIn, FeatureEnabled('field')]
 
-def gated(view):
-    @wraps(view)
-    def wrapped(request, *args, **kwargs):
-        from hajiri.features.service import feature_on
-        u = request.hajiri_user
-        if u and u.company_id and not feature_on(u.company_id, 'field'):
-            raise FeatureOffError('field')
-        return view(request, *args, **kwargs)
-    return wrapped
+
+class _JsonOnly(DefaultContentNegotiation):
+    """The reports take ?format=json|csv as their own parameter (the TS query), not DRF's renderer override."""
+
+    def select_renderer(self, request, renderers, format_suffix=None):
+        return renderers[0], renderers[0].media_type
+
+
+def own_format_param(view):
+    view.content_negotiation_class = _JsonOnly
+    return view
 
 
 def _report(out):
     if isinstance(out, dict) and 'filename' in out and 'columns' in out:
         return csv_response(f"{out['filename']}.csv", out['columns'], out['rows'])
-    return out
+    return Response(out)
 
 
-@api_view(methods=('GET', 'PUT'))
+@extend_schema(request=s.FieldPolicyIn, responses=dict)
+@api_view(['GET', 'PUT'])
 def policy(request):
     if request.method == 'PUT':
-        return services.put_policy(request.hajiri_user, read_json(request))
-    return services.get_policy(request.hajiri_user)
+        return Response(services.put_policy(request.user, request.data))
+    return Response(services.get_policy(request.user))
 
 
-@api_view()
+@extend_schema(responses=dict)
+@api_view(['GET'])
 def me(request):
-    return services.me(request.hajiri_user)
+    return Response(services.me(request.user))
 
 
-@api_view(methods=('POST',))
-@gated
+@extend_schema(request=s.BreakStartIn, responses={201: dict})
+@api_view(['POST'])
+@permission_classes(GATED)
 def breaks_start(request):
-    return json_response(services.start_break(request.hajiri_user, read_json(request)), status=201)
+    return Response(services.start_break(request.user, request.data), status=201)
 
 
-@api_view(methods=('POST',))
-@gated
+@extend_schema(request=None, responses=dict)
+@api_view(['POST'])
+@permission_classes(GATED)
 def breaks_end(request):
-    return services.end_break(request.hajiri_user)
+    return Response(services.end_break(request.user))
 
 
-@api_view()
-@gated
+@extend_schema(parameters=[s.BreaksQueryIn], responses=dict)
+@api_view(['GET'])
+@permission_classes(GATED)
+@own_format_param
 def breaks(request):
-    return _report(services.list_breaks(request.hajiri_user, request.GET.dict()))
+    return _report(services.list_breaks(request.user, request.query_params.dict()))
 
 
-@api_view(methods=('POST',))
-@gated
+@extend_schema(request=s.VisitStartIn, responses={201: dict})
+@api_view(['POST'])
+@permission_classes(GATED)
+@parser_classes([json_parser(2_000_000)])
 def visits_start(request):
-    return json_response(services.start_visit(request.hajiri_user, read_json(request, 2_000_000), client_ip(request)), status=201)
+    return Response(services.start_visit(request.user, request.data, client_ip(request)), status=201)
 
 
-@api_view(methods=('POST',))
-@gated
+@extend_schema(request=s.VisitEndIn, responses=dict)
+@api_view(['POST'])
+@permission_classes(GATED)
 def visit_end(request, id):
-    return services.end_visit(request.hajiri_user, id, read_json(request))
+    return Response(services.end_visit(request.user, id, request.data))
 
 
-@api_view()
-@gated
+@extend_schema(parameters=[s.ReportQueryIn], responses=dict)
+@api_view(['GET'])
+@permission_classes(GATED)
+@own_format_param
 def visits(request):
-    return _report(services.list_visits(request.hajiri_user, request.GET.dict()))
+    return _report(services.list_visits(request.user, request.query_params.dict()))
 
 
-@api_view()
-@gated
+@extend_schema(responses={(200, 'image/jpeg'): bytes})
+@api_view(['GET'])
+@permission_classes(GATED)
 def visit_photo(request, id):
-    return photo_response(services.visit_photo(request.hajiri_user, id))
+    return photo_response(services.visit_photo(request.user, id))
 
 
-@api_view(methods=('GET', 'POST'))
+@extend_schema(request=s.FieldLocationIn, responses=dict)
+@api_view(['GET', 'POST'])
 def locations(request):
     if request.method == 'POST':
-        return json_response(services.create_location(request.hajiri_user, read_json(request)), status=201)
-    return services.locations(request.hajiri_user)
+        return Response(services.create_location(request.user, request.data), status=201)
+    return Response(services.locations(request.user))
 
 
-@api_view(methods=('PUT', 'DELETE'))
+@extend_schema(request=s.FieldLocationIn, responses=dict)
+@api_view(['PUT', 'DELETE'])
 def location(request, id):
     if request.method == 'DELETE':
-        return services.delete_location(request.hajiri_user, id)
-    return services.update_location(request.hajiri_user, id, read_json(request))
+        return Response(services.delete_location(request.user, id))
+    return Response(services.update_location(request.user, id, request.data))
 
 
-@api_view()
+@extend_schema(responses=dict)
+@api_view(['GET'])
 def staff(request):
-    return services.staff(request.hajiri_user)
+    return Response(services.staff(request.user))
 
 
-@api_view(methods=('PUT',))
+@extend_schema(request=s.StaffIn, responses=dict)
+@api_view(['PUT'])
 def staff_update(request, employee_id):
-    return services.update_staff(request.hajiri_user, employee_id, read_json(request))
+    return Response(services.update_staff(request.user, employee_id, request.data))
 
 
-@api_view(methods=('POST',))
+@extend_schema(request=None, responses=dict)
+@api_view(['POST'])
 def staff_kiosk_reset(request, employee_id):
-    return services.reset_kiosk_pin(request.hajiri_user, employee_id)
+    return Response(services.reset_kiosk_pin(request.user, employee_id))
 
 
-@api_view(methods=('GET', 'POST'))
-@gated
+@extend_schema(request=s.KioskIn, responses=dict)
+@api_view(['GET', 'POST'])
+@permission_classes(GATED)
 def kiosks(request):
     if request.method == 'POST':
-        return json_response(services.create_kiosk(request.hajiri_user, read_json(request)), status=201)
-    return services.kiosks(request.hajiri_user)
+        return Response(services.create_kiosk(request.user, request.data), status=201)
+    return Response(services.kiosks(request.user))
 
 
-@api_view(methods=('PUT',))
-@gated
+@extend_schema(request=s.KioskIn, responses=dict)
+@api_view(['PUT'])
+@permission_classes(GATED)
 def kiosk(request, id):
-    return services.update_kiosk(request.hajiri_user, id, read_json(request))
+    return Response(services.update_kiosk(request.user, id, request.data))
 
 
-@api_view(methods=('POST',))
-@gated
+@extend_schema(request=None, responses=dict)
+@api_view(['POST'])
+@permission_classes(GATED)
 def kiosk_pairing_code(request, id):
-    return services.kiosk_pairing_code(request.hajiri_user, id)
+    return Response(services.kiosk_pairing_code(request.user, id))
 
 
-@api_view(methods=('POST',))
-@gated
+@extend_schema(request=None, responses=dict)
+@api_view(['POST'])
+@permission_classes(GATED)
 def kiosk_revoke(request, id):
-    return services.revoke_kiosk(request.hajiri_user, id)
+    return Response(services.revoke_kiosk(request.user, id))
 
 
-@api_view(methods=('POST',))
-@gated
+@extend_schema(request=None, responses=dict)
+@api_view(['POST'])
+@permission_classes(GATED)
 def kiosk_unlock(request, id):
-    return services.unlock_kiosk(request.hajiri_user, id)
+    return Response(services.unlock_kiosk(request.user, id))
 
 
-@api_view(methods=('PUT',))
-@gated
+@extend_schema(request=s.PinIn, responses=dict)
+@api_view(['PUT'])
+@permission_classes(GATED)
 def kiosk_pin(request):
-    return services.set_kiosk_pin(request.hajiri_user, read_json(request))
+    return Response(services.set_kiosk_pin(request.user, request.data))
 
 
-@api_view()
-@gated
+@extend_schema(responses=dict)
+@api_view(['GET'])
+@permission_classes(GATED)
 def kiosk_qr(request):
-    res = json_response(services.kiosk_qr(request.hajiri_user))
-    res['Cache-Control'] = 'no-store'
-    return res
+    return Response(services.kiosk_qr(request.user), headers={'Cache-Control': 'no-store'})
 
 
-@api_view()
+@extend_schema(parameters=[s.RosterQueryIn], responses=dict)
+@api_view(['GET'])
 def my_roster(request):
-    return services.my_roster(request.hajiri_user, request.GET.dict())
+    return Response(services.my_roster(request.user, request.query_params.dict()))
 
 
-@api_view()
+@extend_schema(parameters=[s.DateQueryIn], responses=dict)
+@api_view(['GET'])
 def swap_colleagues(request):
-    return services.swap_colleagues(request.hajiri_user, request.GET.dict())
+    return Response(services.swap_colleagues(request.user, request.query_params.dict()))
 
 
-@api_view(methods=('GET', 'POST'))
+@extend_schema(request=s.SwapIn, parameters=[s.SwapsQueryIn], responses=dict)
+@api_view(['GET', 'POST'])
 def swaps(request):
     if request.method == 'POST':
-        return json_response(services.request_swap(request.hajiri_user, read_json(request)), status=201)
-    return services.swaps(request.hajiri_user, request.GET.dict())
+        return Response(services.request_swap(request.user, request.data), status=201)
+    return Response(services.swaps(request.user, request.query_params.dict()))
 
 
-@api_view(methods=('POST',))
+@extend_schema(request=s.SwapNoteIn, responses=dict)
+@api_view(['POST'])
 def swap_accept(request, id):
-    return services.accept_swap(request.hajiri_user, id, read_json(request))
+    return Response(services.accept_swap(request.user, id, request.data))
 
 
-@api_view(methods=('POST',))
+@extend_schema(request=s.SwapNoteIn, responses=dict)
+@api_view(['POST'])
 def swap_decline(request, id):
-    return services.decline_swap(request.hajiri_user, id, read_json(request))
+    return Response(services.decline_swap(request.user, id, request.data))
 
 
-@api_view(methods=('POST',))
+@extend_schema(request=None, responses=dict)
+@api_view(['POST'])
 def swap_cancel(request, id):
-    return services.cancel_swap(request.hajiri_user, id)
+    return Response(services.cancel_swap(request.user, id))

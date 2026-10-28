@@ -10,7 +10,7 @@ import pytest
 from engines.attendance import local_date_of
 
 from hajiri.attendance import api as att_api
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.core.auth import create_user
 from hajiri.worker.tasks import purge_expired_photos
 from tests.core.fixtures import PW

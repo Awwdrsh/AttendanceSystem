@@ -2,48 +2,39 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import cmp_to_key
+from functools import lru_cache
 from typing import Iterable, Optional
+
+from pyuca import Collator
 
 from .models import Pair, PairingMode, Punch
 
-# String.prototype.localeCompare under Node's ICU (en-US = CLDR root collation, tertiary strength, punctuation not
-# ignorable), which the TS uses to order punches with the same timestamp. Reproduced exactly for ASCII ids: these ASCII
-# characters in primary order (a letter and its capital share a weight; lowercase sorts first at the tertiary level),
-# C0 controls other than \t-\r and DEL ignored. Measured from Node 26 / ICU 78 and checked by the parity fixture.
-_PRIMARY_ORDER = '\t\n\x0b\x0c\r _-,;:!?.\'"()[]{}@*/\\&#%`^+<=>|~$0123456789abcdefghijklmnopqrstuvwxyz'
-_PRIMARY = {c: i for i, c in enumerate(_PRIMARY_ORDER)}
-for _c in 'abcdefghijklmnopqrstuvwxyz':
-    _PRIMARY[_c.upper()] = _PRIMARY[_c]
+# String.prototype.localeCompare under Node's ICU (en-US = CLDR root collation, tertiary strength), which the TS uses to
+# order punches with the same timestamp. The Unicode Collation Algorithm through pyuca gives the same order: it agrees
+# with all 3,000 recorded Node comparisons in the parity fixture and with the earlier hand-written ASCII table on a
+# 200,000-pair fuzz, and unlike that table it also orders non-ASCII ids the way ICU does (accents, scripts).
+@lru_cache(maxsize=1)
+def _collator() -> Collator:
+    return Collator()
 
 
-def _collation_key(s: str) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    chars = [c for c in s if c in _PRIMARY]
-    return tuple(_PRIMARY[c] for c in chars), tuple(1 if 'A' <= c <= 'Z' else 0 for c in chars)
+@lru_cache(maxsize=4096)
+def _collation_key(s: str) -> tuple[int, ...]:
+    return _collator().sort_key(s)
 
 
 def locale_compare(a: str, b: str) -> int:
-    """a.localeCompare(b) as -1, 0 or 1. Exact for ASCII strings. With any non-ASCII character it falls back to code
-    point order, which can differ from ICU (accents, scripts, case of non-Latin letters); punch ids are ASCII."""
+    """a.localeCompare(b) as -1, 0 or 1. Strings that differ only in ignorable characters (C0 controls) compare
+    equal, as in ICU; there is deliberately no code-point tie-break."""
     if a == b:
         return 0
-    if a.isascii() and b.isascii():
-        ka, kb = _collation_key(a), _collation_key(b)
-    else:
-        ka, kb = a, b
+    ka, kb = _collation_key(a), _collation_key(b)
     return (ka > kb) - (ka < kb)
 
 
-def _cmp_punch(a: Punch, b: Punch) -> int:
-    # a.at - b.at || a.id.localeCompare(b.id)
-    if a.at != b.at:
-        return -1 if a.at < b.at else 1
-    return locale_compare(a.id, b.id)
-
-
 def sort_punches(punches: Iterable[Punch]) -> list[Punch]:
-    """Stable sort by time, then id, as the TS comparator does."""
-    return sorted(punches, key=cmp_to_key(_cmp_punch))
+    """Stable sort by time, then id (a.at - b.at || a.id.localeCompare(b.id), as the TS comparator does)."""
+    return sorted(punches, key=lambda p: (p.at, _collation_key(p.id)))
 
 
 @dataclass(frozen=True, slots=True)

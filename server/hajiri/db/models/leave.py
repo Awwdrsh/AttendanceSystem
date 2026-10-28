@@ -5,61 +5,107 @@ Foreign keys use DO_NOTHING: the database enforces ON DELETE (cascade, set null 
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class LeaveLedger(models.Model):
+    class Reason(models.TextChoices):
+        ALLOCATION = 'allocation', 'Allocation'
+        ACCRUAL = 'accrual', 'Accrual'
+        USAGE = 'usage', 'Usage'
+        CANCELLATION = 'cancellation', 'Cancellation'
+        CARRY_FORWARD = 'carry_forward', 'Carry forward'
+        EXPIRY = 'expiry', 'Expiry'
+        ENCASHMENT = 'encashment', 'Encashment'
+        ADJUSTMENT = 'adjustment', 'Adjustment'
+        COMP_OFF = 'comp_off', 'Comp off'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    leave_type = models.ForeignKey('LeaveType', models.DO_NOTHING)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='leave_ledgers')
+    leave_type = models.ForeignKey('LeaveType', models.DO_NOTHING, related_name='leave_ledgers')
     posted_at = models.DateTimeField(db_default=Now())
     effective_date = models.DateField()
     delta_days = models.DecimalField(max_digits=6, decimal_places=2)
-    reason = models.TextField()
+    reason = models.TextField(choices=Reason)
     ref_type = models.TextField(blank=True, null=True)
     ref_id = models.UUIDField(blank=True, null=True)
     expires_on = models.DateField(blank=True, null=True)
     note = models.TextField(blank=True, null=True)
-    posted_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='posted_by', blank=True, null=True)
+    posted_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='leave_ledgers_as_posted_by', db_column='posted_by', blank=True, null=True)
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'leave_ledger'
 
+    def __str__(self):
+        return f'LeaveLedger {self.id}'
+
 
 class LeaveRequest(models.Model):
+    class HalfDay(models.TextChoices):
+        FIRST_HALF = 'first_half', 'First half'
+        SECOND_HALF = 'second_half', 'Second half'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    leave_type = models.ForeignKey('LeaveType', models.DO_NOTHING)
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='leave_requests')
+    leave_type = models.ForeignKey('LeaveType', models.DO_NOTHING, related_name='leave_requests')
     from_date = models.DateField()
     to_date = models.DateField()
-    half_day = models.TextField(blank=True, null=True)
+    half_day = models.TextField(choices=HalfDay, blank=True, null=True)
     days_requested = models.DecimalField(max_digits=6, decimal_places=2)
     reason = models.TextField(blank=True, null=True)
     attachment_key = models.TextField(blank=True, null=True)
-    status = models.TextField(db_default='pending')
+    status = models.TextField(choices=Status, db_default='pending')
     workflow_instance_id = models.UUIDField(blank=True, null=True)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='leave_requests_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     decided_at = models.DateTimeField(blank=True, null=True)
     from_time = models.TimeField(blank=True, null=True)
     to_time = models.TimeField(blank=True, null=True)
     hours = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True)
     bridge_days = models.DecimalField(max_digits=5, decimal_places=2, db_default=0)
-    bridge_type = models.ForeignKey('LeaveType', models.DO_NOTHING, related_name='leaverequest_bridge_type_set', blank=True, null=True)
+    bridge_type = models.ForeignKey('LeaveType', models.DO_NOTHING, related_name='leave_requests_as_bridge_type', blank=True, null=True)
     bridge_from = models.DateField(blank=True, null=True)
     bridge_to = models.DateField(blank=True, null=True)
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'leave_request'
 
+    def __str__(self):
+        return f'LeaveRequest {self.id}'
+
 
 class LeaveType(models.Model):
+    class AccrualBasis(models.TextChoices):
+        NONE = 'none', 'None'
+        WORKED_DAYS = 'worked_days', 'Worked days'
+        MONTHLY = 'monthly', 'Monthly'
+        ANNUAL = 'annual', 'Annual'
+
+    class GenderScope(models.TextChoices):
+        ALL = 'all', 'All'
+        FEMALE = 'female', 'Female'
+        MALE = 'male', 'Male'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='leave_types')
     code = models.TextField()
     name_en = models.TextField()
     name_ne = models.TextField(blank=True, null=True)
     paid = models.BooleanField(db_default=True)
     statutory = models.BooleanField(db_default=False)
-    accrual_basis = models.TextField(db_default='none')
+    accrual_basis = models.TextField(choices=AccrualBasis, db_default='none')
     accrual_days = models.DecimalField(max_digits=6, decimal_places=2, db_default=0)
     accrual_per_worked_days = models.IntegerField(blank=True, null=True)
     max_balance = models.DecimalField(max_digits=6, decimal_places=2, blank=True, null=True)
@@ -70,14 +116,20 @@ class LeaveType(models.Model):
     max_consecutive_days = models.IntegerField(blank=True, null=True)
     min_service_days = models.IntegerField(db_default=0)
     negative_balance_limit = models.DecimalField(max_digits=6, decimal_places=2, db_default=0)
-    gender_scope = models.TextField(db_default='all')
+    gender_scope = models.TextField(choices=GenderScope, db_default='all')
     sandwich_rule = models.BooleanField(db_default=False)
     expiry_days = models.IntegerField(blank=True, null=True)
     sort_order = models.IntegerField(db_default=0)
     event_days = models.DecimalField(max_digits=6, decimal_places=2, blank=True, null=True)
     allow_hourly = models.BooleanField(db_default=False)
-    club_with = models.ForeignKey('self', models.DO_NOTHING, blank=True, null=True)
+    club_with = models.ForeignKey('self', models.DO_NOTHING, related_name='leave_types_as_club_with', blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'leave_type'
         unique_together = (('company', 'code'),)
+
+    def __str__(self):
+        return str(self.name_en)

@@ -2,7 +2,7 @@
 from engines.attendance import local_date_of, local_time_ms
 
 from hajiri.attendance.repo import from_ms
-from hajiri.core.db import one
+from tests.support.sql import one
 
 DEVICE = '00000000-0000-7000-8000-000000000021'
 

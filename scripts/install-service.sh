@@ -1,26 +1,39 @@
 #!/usr/bin/env bash
 # Install Hajiri as always-on services: start at boot, restart on crash.
-#   macOS: launchd user agents  (~/Library/LaunchAgents/com.hajiri.{api,gateway}.plist)
-#   Linux: systemd units        (/etc/systemd/system/hajiri-{api,gateway}.service)
+#   macOS: launchd user agents  (~/Library/LaunchAgents/com.hajiri.{web,worker,gateway}.plist)
+#   Linux: systemd units        (/etc/systemd/system/hajiri-{web,worker,gateway}.service)
+# With WORKER_MODE=split in server/.env the worker unit is replaced by a scheduler unit and TASK_WORKERS task-worker
+# units (tasks, tasks-2, ...); units of the other mode are removed, so re-running after changing the mode switches.
 # Remove with: ./scripts/install-service.sh --uninstall
+# Any other com.hajiri.* agent or hajiri-*.service unit (the retired TypeScript api/gateway units, or the earlier
+# com.hajiri.django-* / hajiri-django-* names) is removed, so re-running this script also cleans up an old install.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$ROOT"
 setup_path
-mkdir -p logs
-# Logs hold employee names and request details: owner-only.
-chmod 700 logs
-for f in logs/*.log; do [ -f "$f" ] && chmod 600 "$f"; done
+secure_logs
 
 UNINSTALL=0
-for a in "$@"; do case "$a" in --uninstall) UNINSTALL=1 ;; -h|--help) sed -n '2,6p' "$0"; exit 0 ;; *) fail "unknown option $a" ;; esac; done
+for a in "$@"; do case "$a" in --uninstall) UNINSTALL=1 ;; --replace-ts) ;; -h|--help) sed -n '2,9p' "$0"; exit 0 ;; *) fail "unknown option $a" ;; esac; done
+[ "$UNINSTALL" = 1 ] || require_venv
+
+# Units of services this install no longer runs (the other WORKER_MODE, fewer TASK_WORKERS, retired names), or all of
+# them on --uninstall.
+wanted() { [ "$UNINSTALL" = 0 ] && case " $DJANGO_SERVICES " in *" $1 "*) return 0 ;; esac; return 1; }
 
 if [ "$OS" = mac ]; then
   AGENTS="$HOME/Library/LaunchAgents"; mkdir -p "$AGENTS"
-  for s in api gateway; do
+  for plist in "$AGENTS"/com.hajiri.*.plist; do
+    [ -f "$plist" ] || continue
+    label="$(basename "$plist" .plist)"; s="${label#com.hajiri.}"
+    wanted "$s" && continue
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    rm -f "$plist"; ok "removed $label"
+  done
+  [ "$UNINSTALL" = 1 ] && exit 0
+  for s in $DJANGO_SERVICES; do
     label="com.hajiri.$s"; plist="$AGENTS/$label.plist"
     launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-    if [ "$UNINSTALL" = 1 ]; then rm -f "$plist"; ok "removed $label"; continue; fi
     cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -32,35 +45,44 @@ if [ "$OS" = mac ]; then
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>5</integer>
-  <key>StandardOutPath</key><string>$ROOT/logs/$s.log</string>
-  <key>StandardErrorPath</key><string>$ROOT/logs/$s.log</string>
+  <key>StandardOutPath</key><string>$LOG_DIR/$s.log</string>
+  <key>StandardErrorPath</key><string>$LOG_DIR/$s.log</string>
 </dict></plist>
 PLIST
     launchctl bootstrap "gui/$(id -u)" "$plist"
     ok "installed $label (logs/$s.log)"
   done
-  [ "$UNINSTALL" = 1 ] || echo "  manage: launchctl kickstart -k gui/$(id -u)/com.hajiri.api   |   launchctl bootout gui/$(id -u)/com.hajiri.api"
+  echo "  manage: launchctl kickstart -k gui/$(id -u)/com.hajiri.web   |   launchctl bootout gui/$(id -u)/com.hajiri.web"
 else
-  for s in api gateway; do
+  for file in /etc/systemd/system/hajiri-*.service; do
+    [ -f "$file" ] || continue
+    unit="$(basename "$file" .service)"; s="${unit#hajiri-}"
+    wanted "$s" && continue
+    sudo systemctl disable --now "$unit" 2>/dev/null || true; sudo rm -f "$file"; ok "removed $unit"
+  done
+  if [ "$UNINSTALL" = 1 ]; then sudo systemctl daemon-reload; exit 0; fi
+  for s in $DJANGO_SERVICES; do
     unit="hajiri-$s"; file="/etc/systemd/system/$unit.service"
-    if [ "$UNINSTALL" = 1 ]; then sudo systemctl disable --now "$unit" 2>/dev/null || true; sudo rm -f "$file"; ok "removed $unit"; continue; fi
+    after="network-online.target postgresql.service"; [ "$s" = web ] || after="$after hajiri-web.service"
     sudo tee "$file" >/dev/null <<UNIT
 [Unit]
 Description=Hajiri $s
-After=network-online.target postgresql.service
+After=$after
 Wants=postgresql.service
 
 [Service]
 Type=simple
 User=$(whoami)
 WorkingDirectory=$ROOT
-Environment=PATH=$PATH
-Environment=HOME=$HOME
-ExecStart=/bin/bash $ROOT/scripts/run.sh $s
+Environment="PATH=$PATH"
+Environment="HOME=$HOME"
+ExecStart=/bin/bash "$ROOT/scripts/run.sh" $s
 Restart=always
 RestartSec=5
-StandardOutput=append:$ROOT/logs/$s.log
-StandardError=append:$ROOT/logs/$s.log
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:$LOG_DIR/$s.log
+StandardError=append:$LOG_DIR/$s.log
 
 [Install]
 WantedBy=multi-user.target
@@ -69,6 +91,6 @@ UNIT
     sudo systemctl enable --now "$unit"
     ok "installed $unit (logs/$s.log)"
   done
-  [ "$UNINSTALL" = 1 ] || sudo systemctl daemon-reload
-  [ "$UNINSTALL" = 1 ] || echo "  manage: sudo systemctl status hajiri-api   |   sudo journalctl -u hajiri-api -f"
+  sudo systemctl daemon-reload
+  echo "  manage: sudo systemctl status hajiri-web   |   sudo journalctl -u hajiri-web -f"
 fi

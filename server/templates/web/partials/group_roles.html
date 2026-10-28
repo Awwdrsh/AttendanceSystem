@@ -1,0 +1,20 @@
+<div id="group-roles" hx-get="{% url 'web:group_roles' %}" hx-trigger="hj:refresh-group-roles from:body" hx-swap="outerHTML">
+{% if group_roles %}
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Person</th><th>Home company</th><th>Group roles</th><th>Since</th><th></th></tr></thead>
+    <tbody>
+    {% for g in group_roles %}
+      <tr>
+        <td><span class="hj-strong">{{ g.name }}</span><div class="hj-small hj-muted">{{ g.email }}</div></td>
+        <td>{{ g.homeCompany|default:"—" }}</td>
+        <td>{% for r in g.roles %}{{ r|role_label }}{% if not forloop.last %}, {% endif %}{% endfor %}{% if g.status != 'active' %} {% badge "Disabled" "idle" %}{% endif %}</td>
+        <td>{{ g.createdAt|bs_date }}</td>
+        <td class="right">{% if g.userId != hj_user.id %}<button class="hj-btn danger subtle xs" hx-post="{% url 'web:group_role_revoke' g.userId %}" {% confirm_attrs "Remove this person's group roles? Access they have in their own company is not affected." label="Remove" %}>Remove</button>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div></div>
+{% else %}
+  {% empty_state title="No group roles yet" hint="Give group HR to the people who run HR for every company." icon="users" compact=True %}
+{% endif %}
+</div>

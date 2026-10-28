@@ -1,5 +1,5 @@
 """Service functions other modules call (OT comp-off, final settlement, the worker hooks) and decision side effects."""
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.leave import accrual, services
 from hajiri.leave.service import encashable_balances, ledger_balance, post_encashment
 

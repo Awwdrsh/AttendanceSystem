@@ -12,12 +12,13 @@ from pathlib import Path
 from django.conf import settings
 from django.http import FileResponse, Http404, HttpResponse, HttpResponseRedirect, JsonResponse
 from django.shortcuts import render
+from django.db.models import Q
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from hajiri.core import auth
 from hajiri.core.crypto import password_policy_error, sha256_hex
-from hajiri.core.db import execute, rows
+from hajiri.db.models import Employee, Session
 from hajiri.core.errors import BadRequestError, ForbiddenError, HttpError, UnauthorizedError, ValidationError
 
 from . import format as fmt
@@ -140,7 +141,7 @@ def sample_morning() -> dict:
     marks = []
     for _ in range(64):
         g = (rnd() + rnd() + rnd()) / 3
-        m = fmt._round_half_up(9 * 60 + 10 + g * 75)
+        m = fmt.round_half_up(9 * 60 + 10 + g * 75)
         marks.append((m, m > 10 * 60 + 15))
     marks.sort(key=lambda k: k[0])
     frm, to = 8 * 60 + 30, 11 * 60
@@ -353,7 +354,7 @@ def two_factor_enable(request):
         return _setup_partial(request, {**ctx, 'error': e.message}, status=422)
     # The current session has just proved the second factor; sessions opened before it existed may be someone else's.
     if request.session_token:
-        execute('UPDATE session SET two_factor = true WHERE token_hash = %s', [sha256_hex(request.session_token)])
+        Session.objects.filter(token_hash=sha256_hex(request.session_token)).update(two_factor=True)
     auth.revoke_other_sessions(user.id, request.session_token)
     resp = render(request, 'web/partials/recovery_codes.html', {'codes': codes, 'done_url': done_url,
                                                                 'done_label': 'I have saved these codes'})
@@ -446,24 +447,18 @@ def sessions_revoke_others(request):
 READ_ALL = ('payroll_admin', 'attendance_admin')
 
 
-def _like(s: str) -> str:
-    return s.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-
-
 def search_employees(user: auth.AuthUser, q: str = '', status: str | None = 'active', limit: int = 20) -> list[dict]:
     """Same scope as GET /employees: HR and the read-all roles company-wide, managers the people they manage, and self."""
     if not auth.has_role(user, 'hr', 'manager', *READ_ALL):
         raise ForbiddenError(f'requires role {" or ".join(("hr", "manager", *READ_ALL))}')
-    company = auth.company_id_of(user)
-    return rows(
-        """SELECT e.id, e.emp_code, e.name_en, e.status FROM employee e
-            WHERE e.company_id = %s AND (%s::text IS NULL OR e.status = %s)
-              AND (%s::text IS NULL OR e.emp_code ILIKE '%%' || %s || '%%' OR e.name_en ILIKE '%%' || %s || '%%'
-                   OR e.name_ne ILIKE '%%' || %s || '%%')
-              AND (%s OR e.id = %s::uuid OR hj_manages(%s::uuid, e.id, (now() AT TIME ZONE 'Asia/Kathmandu')::date))
-            ORDER BY e.name_en, e.emp_code LIMIT %s""",
-        [company, status, status, *([_like(q)] * 4 if q else [None] * 4),
-         auth.has_role(user, 'hr', *READ_ALL), user.employee_id, user.employee_id, limit])
+    qs = Employee.objects.for_company(auth.company_id_of(user))
+    if status:
+        qs = qs.filter(status=status)
+    if q:
+        qs = qs.filter(Q(emp_code__icontains=q) | Q(name_en__icontains=q) | Q(name_ne__icontains=q))
+    if not auth.has_role(user, 'hr', *READ_ALL):
+        qs = qs.filter(Q(pk=user.employee_id) | auth.manages(user.employee_id)) if user.employee_id else qs.none()
+    return list(qs.order_by('name_en', 'emp_code').values('id', 'emp_code', 'name_en', 'status')[:limit])
 
 
 @require_GET
@@ -526,7 +521,7 @@ def root_file(request, name):
 @require_GET
 def health(request):
     try:
-        execute('SELECT 1')
+        Session.objects.exists()            # one round trip to the database
         return JsonResponse({'ok': True, 'db': 'up'})
     except Exception:  # noqa: BLE001
         return JsonResponse({'ok': False, 'db': 'down'}, status=503)

@@ -12,7 +12,10 @@
       <button type="button" class="hj-iconbtn" data-nav-toggle aria-label="Open menu"><i class="ti ti-menu-2" aria-hidden="true"></i></button>
       <a href="/" aria-label="Home">{% include "components/brand.html" with height=18 %}</a>
     </div>
-    <button type="button" class="hj-iconbtn" data-palette-open aria-label="Search"><i class="ti ti-search" aria-hidden="true"></i></button>
+    <div class="hj-row nowrap hj-gap-sm">
+      {% include "components/company_switch.html" with menu_id="hj-companymenu-top" compact=True %}
+      <button type="button" class="hj-iconbtn" data-palette-open aria-label="Search"><i class="ti ti-search" aria-hidden="true"></i></button>
+    </div>
   </header>
   <div class="hj-backdrop" data-nav-toggle></div>
 
@@ -23,6 +26,7 @@
     </div>
     <button type="button" class="hj-search" data-palette-open aria-label="Search pages"><i class="ti ti-search" aria-hidden="true"></i> Search or jump to <span class="hj-kbd">⌘K</span></button>
 
+    {% include "components/company_switch.html" with menu_id="hj-companymenu" %}
     <div class="hj-nav-scroll">
       {% for title, hubs in n.groups %}
         {% if n.groups|length > 1 %}<div class="hj-nav-section">{{ title }}</div>{% else %}<div style="height:8px"></div>{% endif %}
@@ -47,6 +51,8 @@
       <div class="hj-menu up" id="hj-usermenu" role="menu" hidden>
         <div class="hj-menu-label">Signed in as {% for r in hj_user.roles %}{{ r }}{% if not forloop.last %}, {% endif %}{% endfor %}</div>
         {% for a in n.account %}<a class="hj-menu-item" role="menuitem" href="{{ a.url }}"><i class="ti ti-{{ a.icon }}" aria-hidden="true"></i>{{ a.label }}</a>{% endfor %}
+        {% if hj_user.multi_company %}<form method="post" action="{% url 'web:default_company' %}" hx-post="{% url 'web:default_company' %}" hx-swap="none">{% csrf_token %}<input type="hidden" name="company_id" value="{{ hj_user.company_id }}"><button type="submit" class="hj-menu-item" role="menuitem"><i class="ti ti-pin" aria-hidden="true"></i>Start in this company</button></form>{% endif %}
+        {% if hj_group_link %}<a class="hj-menu-item" role="menuitem" href="{% url 'web:group' %}"><i class="ti ti-building-community" aria-hidden="true"></i>{% if hj_user.multi_company %}Group overview{% else %}Companies{% endif %}</a>{% endif %}
         <button type="button" class="hj-menu-item" role="menuitem" data-theme-toggle><i class="ti ti-moon" data-theme-icon aria-hidden="true"></i><span data-theme-label>Dark mode</span></button>
         <div class="hj-menu-sep"></div>
         <form method="post" action="/logout">{% csrf_token %}<button type="submit" class="hj-menu-item danger" role="menuitem"><i class="ti ti-logout" aria-hidden="true"></i>Sign out</button></form>

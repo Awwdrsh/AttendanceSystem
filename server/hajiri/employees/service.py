@@ -1,80 +1,39 @@
 """
 The employee master (port of apps/api/src/modules/employees/routes.ts): list, read, sensitive fields, create, edit with
 effective-dated assignments and field history, CSV import, assignment history and the employee-visible audit trail.
+Everything is scoped to the ACTIVE company; an employee of another company is not found.
 """
 from __future__ import annotations
 
+import csv
+import io
 from datetime import date
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from django.db.backends.postgresql.psycopg_any import DateRange
+from django.db.models import BooleanField, ExpressionWrapper, F, FilteredRelation, OuterRef, Q, Subquery
+from django.db.models.functions import Now
 
 from hajiri.core.audit import audit
-from hajiri.core.auth import AuthUser, assert_manages, company_id_of, has_role
+from hajiri.core.auth import AuthUser, assert_manages, company_id_of, has_role, manages
 from hajiri.core.clock import npt_today
 from hajiri.core.crypto import field_cipher
-from hajiri.core.db import execute, one, rows
-from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
-from hajiri.core.schema import MISSING, Arr, Bool, Enum, Int, IsoDate, Obj, Str, Uuid, parse, parse_uuid, safe_parse
+from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError, ValidationError
+from hajiri.core.validation import parse_uuid, plain, validate
+from hajiri.db.models import (AppUser, AuditLog, Branch, Designation, Employee, EmployeeAssignment, OrgUnit, Shift,
+                              ShiftAssignment)
+
+from .filters import EmployeeFilter
+from .serializers import EMPLOYMENT_TYPES, EmployeeIn, EmployeeListQuery  # noqa: F401
 
 PAN_RE = r'^\d{9}$'
-EMPLOYMENT_TYPES = ('regular', 'work_based', 'time_based', 'casual', 'part_time')
+Status = Employee.Status
 
-EMPLOYEE_FIELDS = {
-    'empCode': Str(min=1, max=32),
-    'nameEn': Str(min=1, max=120),
-    'nameNe': Str(max=120, optional=True),
-    'gender': Enum(('male', 'female', 'other'), optional=True),
-    'dob': IsoDate(optional=True),
-    'maritalStatus': Enum(('single', 'couple'), optional=True),
-    'joinDate': IsoDate(optional=True),
-    'exitDate': IsoDate(nullable=True, optional=True),
-    'designation': Str(max=120, optional=True),
-    'grade': Str(max=40, optional=True),
-    'phone': Str(max=30, optional=True),
-    'email': Str(email=True, optional=True),
-    'otEligible': Bool(optional=True),
-    'workFromHome': Bool(optional=True),
-    'weeklyOffDays': Arr(Int(min=0, max=6), optional=True),
-    'regime': Enum(('ssf', 'pf', 'none'), optional=True),
-    'ssfId': Str(max=20, optional=True),
-    'pfId': Str(max=40, optional=True),
-    'citId': Str(max=40, optional=True),
-    'pan': Str(regex=PAN_RE, regex_message='PAN must be 9 digits', optional=True),
-    'bankCode': Str(max=20, optional=True),
-    'bankBranch': Str(max=80, optional=True),
-    'bankAccount': Str(min=4, max=40, optional=True),
-    'isResident': Bool(optional=True),
-    'remoteAreaClass': Enum(('A', 'B', 'C', 'D'), nullable=True, optional=True),
-    'disability': Bool(optional=True),
-    'festivalMonth': Int(min=1, max=12, nullable=True, optional=True),
-    'probationEnd': IsoDate(nullable=True, optional=True),
-    'branchId': Uuid(optional=True),
-    'orgUnitId': Uuid(nullable=True, optional=True),
-    'managerId': Uuid(nullable=True, optional=True),
-    'employmentType': Enum(EMPLOYMENT_TYPES, optional=True),
-    'shiftId': Uuid(optional=True),
-}
-EMPLOYEE_BODY = Obj(EMPLOYEE_FIELDS)
-
-
-def _partial_body() -> Obj:
-    from copy import copy
-    out = {}
-    for k, f in EMPLOYEE_FIELDS.items():
-        f2 = copy(f)
-        f2.optional = True
-        out[k] = f2
-    return Obj(out)
-
-
-EMPLOYEE_PATCH = _partial_body()
-
-PUBLIC_COLS = """e.id, e.company_id, e.emp_code, e.name_en, e.name_ne, e.gender, e.dob, e.marital_status, e.join_date, e.exit_date, e.designation,
-  e.grade, e.phone, e.email, e.ot_eligible, e.work_from_home, e.weekly_off_days, e.status, e.regime, e.ssf_id, e.pf_id, e.cit_id, e.bank_code,
-  e.bank_branch, e.bank_account_last4, e.is_resident, e.remote_area_class, e.disability, e.festival_month, e.probation_end, e.created_at,
-  (e.pan_enc IS NOT NULL) AS has_pan,
-  a.branch_id, a.org_unit_id, a.manager_id, a.employment_type,
-  (SELECT s.shift_id FROM shift_assignment s WHERE s.employee_id = e.id AND s.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date) AS shift_id"""
+PUBLIC_FIELDS = ('id', 'company_id', 'emp_code', 'name_en', 'name_ne', 'gender', 'dob', 'marital_status', 'join_date', 'exit_date',
+                 'designation', 'grade', 'phone', 'email', 'ot_eligible', 'work_from_home', 'weekly_off_days', 'status', 'regime',
+                 'ssf_id', 'pf_id', 'cit_id', 'bank_code', 'bank_branch', 'bank_account_last4', 'is_resident', 'remote_area_class',
+                 'disability', 'festival_month', 'probation_end', 'created_at', 'has_pan', 'branch_id', 'org_unit_id',
+                 'manager_id', 'employment_type', 'shift_id')
 _IDS = ('id', 'company_id', 'branch_id', 'org_unit_id', 'manager_id', 'shift_id')
 
 # Specialist admins need the employee list and cards (not PAN, bank or edits) to do payroll and attendance work.
@@ -91,26 +50,31 @@ def _row(r: dict | None) -> dict | None:
     return r
 
 
-def like_escape(s: str) -> str:
-    """Search text is matched literally: % and _ typed by the user are not wildcards."""
-    return s.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+def public_rows(qs=None, today: date | None = None):
+    """Employees as the TS route returns them (PUBLIC_COLS): the record, whether a PAN is on file, today's assignment
+    (a LEFT JOIN on the period covering today) and today's shift."""
+    today = today or npt_today()
+    qs = Employee.objects.all() if qs is None else qs
+    shift = ShiftAssignment.objects.filter(employee=OuterRef('pk'), valid__contains=today).values('shift_id')[:1]
+    return (qs.annotate(a=FilteredRelation('employee_assignments', condition=Q(employee_assignments__valid__contains=today)))
+            .annotate(has_pan=ExpressionWrapper(Q(pan_enc__isnull=False), output_field=BooleanField()),
+                      branch_id=F('a__branch_id'), org_unit_id=F('a__org_unit_id'), manager_id=F('a__manager_id'),
+                      employment_type=F('a__employment_type'), shift_id=Subquery(shift))
+            .values(*PUBLIC_FIELDS))
 
 
 def _d(s) -> date | None:
     return date.fromisoformat(s) if isinstance(s, str) else s
 
 
+_REFS = ((Shift, 'shiftId', 'shift'), (Branch, 'branchId', 'branch'), (OrgUnit, 'orgUnitId', 'org unit'), (Employee, 'managerId', 'manager'))
+
+
 def validate_refs(company_id: str, b: dict, self_id: str | None = None) -> None:
     """Referenced records (shift, branch, org unit, manager) must belong to the caller's company; dates must be sane."""
-    def check(table: str, id_, label: str) -> None:
-        if not id_:
-            return
-        if not one(f'SELECT 1 AS x FROM {table} WHERE id = %s AND company_id = %s', [id_, company_id]):
+    for model, key, label in _REFS:
+        if b.get(key) and not model.objects.for_company(company_id).filter(pk=b[key]).exists():
             raise BadRequestError(f'{label} does not exist in your company')
-    check('shift', b.get('shiftId'), 'shift')
-    check('branch', b.get('branchId'), 'branch')
-    check('org_unit', b.get('orgUnitId'), 'org unit')
-    check('employee', b.get('managerId'), 'manager')
     if b.get('managerId') and self_id and b['managerId'] == self_id:
         raise BadRequestError('an employee cannot be their own manager')
     if b.get('joinDate') and b.get('exitDate') and b['exitDate'] < b['joinDate']:
@@ -121,16 +85,17 @@ def validate_refs(company_id: str, b: dict, self_id: str | None = None) -> None:
 
 def link_designation(employee_id: str) -> None:
     """Keep designation_id in step with the free-text designation: link it to the catalogue entry of the same name, if any."""
-    execute("""UPDATE employee e SET designation_id = (SELECT d.id FROM designation d WHERE d.company_id = e.company_id
-                                                       AND lower(d.name_en) = lower(e.designation) ORDER BY d.active DESC LIMIT 1)
-                WHERE e.id = %s""", [employee_id])
+    match = (Designation.objects.filter(company=OuterRef('company'), name_en__iexact=OuterRef('designation'))
+             .order_by('-active').values('id')[:1])
+    Employee.objects.filter(pk=employee_id).update(designation_ref=Subquery(match))
 
 
 def pan_owner(company_id: str, pan: str, except_id: str | None = None) -> str | None:
     """emp_code of the employee already holding this PAN in the company (other than except_id), via the blind index."""
-    r = one('SELECT emp_code FROM employee WHERE company_id = %s AND pan_bidx = %s AND (%s::uuid IS NULL OR id <> %s) LIMIT 1',
-            [company_id, field_cipher().blind_index(pan), except_id, except_id])
-    return r['emp_code'] if r else None
+    qs = Employee.objects.for_company(company_id).filter(pan_bidx=field_cipher().blind_index(pan))
+    if except_id:
+        qs = qs.exclude(pk=except_id)
+    return qs.values_list('emp_code', flat=True).first()
 
 
 def assert_pan_free(company_id: str, pan: str, except_id: str | None = None) -> None:
@@ -139,41 +104,37 @@ def assert_pan_free(company_id: str, pan: str, except_id: str | None = None) -> 
         raise ConflictError(f'this PAN is already recorded for employee {owner}')
 
 
-LIST_QUERY = Obj({'status': Enum(('active', 'exited'), optional=True), 'search': Str(max=100, optional=True),
-                  'branchId': Uuid(optional=True), 'pan': Str(regex=PAN_RE, optional=True)})
+def _list_query(query: dict | None) -> dict:
+    return plain(validate(EmployeeListQuery, {k: v for k, v in (query or {}).items() if v not in (None, '')}))
+
+
+def employees_queryset(user: AuthUser, query: dict | None = None):
+    """The employee list as a queryset (values rows in the PUBLIC_COLS shape, ordered by code): HR and the payroll and
+    attendance admins see the whole active company; a manager the people they manage and themselves."""
+    if not has_role(user, 'hr', 'manager', *READ_ALL):
+        raise ForbiddenError(f"requires role {' or '.join(('hr', 'manager', *READ_ALL))}")
+    q = _list_query(query)
+    if q.get('pan') and not has_role(user, 'hr'):
+        raise ForbiddenError('PAN lookup requires HR')
+    qs = Employee.objects.for_company(company_id_of(user))
+    if not has_role(user, 'hr', *READ_ALL):
+        qs = qs.filter(Q(pk=user.employee_id) | manages(user.employee_id)) if user.employee_id else qs.none()
+    return EmployeeFilter(q, queryset=public_rows(qs)).qs.order_by('emp_code')
 
 
 def list_employees(user: AuthUser, query: dict | None = None) -> list[dict]:
     """HR (and the payroll and attendance admins, read-only) list the whole company; a manager lists the people they
     manage and themselves."""
-    if not has_role(user, 'hr', 'manager', *READ_ALL):
-        raise ForbiddenError(f"requires role {' or '.join(('hr', 'manager', *READ_ALL))}")
-    q = parse(LIST_QUERY, {k: v for k, v in (query or {}).items() if v not in (None, '')})
-    if q.get('pan') and not has_role(user, 'hr'):
-        raise ForbiddenError('PAN lookup requires HR')
-    search = like_escape(q['search']) if q.get('search') else None
-    out = [_row(r) for r in rows(
-        f"""SELECT {PUBLIC_COLS} FROM employee e
-              LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date
-             WHERE e.company_id = %s AND (%s::text IS NULL OR e.status = %s)
-               AND (%s::text IS NULL OR e.emp_code ILIKE '%%' || %s || '%%' OR e.name_en ILIKE '%%' || %s || '%%' OR e.name_ne ILIKE '%%' || %s || '%%')
-               AND (%s::uuid IS NULL OR a.branch_id = %s) AND (%s::text IS NULL OR e.pan_bidx = %s)
-               AND (%s OR e.id = %s::uuid OR hj_manages(%s::uuid, e.id, (now() AT TIME ZONE 'Asia/Kathmandu')::date))
-             ORDER BY e.emp_code""",
-        [user.company_id, q.get('status'), q.get('status'), search, search, search, search, q.get('branchId'), q.get('branchId'),
-         *([field_cipher().blind_index(q['pan'])] * 2 if q.get('pan') else [None, None]),
-         has_role(user, 'hr', *READ_ALL), user.employee_id, user.employee_id])]
-    if q.get('pan'):
+    qs = employees_queryset(user, query)
+    out = [_row(r) for r in qs]
+    if (query or {}).get('pan'):
         audit('pan_lookup', 'employee', actor_id=user.id, after={'matches': len(out)})
     return out
 
 
 def _public(id_: str, company_id: str | None = None) -> dict | None:
-    if company_id is None:
-        return _row(one(f"""SELECT {PUBLIC_COLS} FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date
-                            WHERE e.id = %s""", [id_]))
-    return _row(one(f"""SELECT {PUBLIC_COLS} FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date
-                        WHERE e.id = %s AND e.company_id = %s""", [id_, company_id]))
+    qs = Employee.objects.filter(pk=id_) if company_id is None else Employee.objects.for_company(company_id).filter(pk=id_)
+    return _row(public_rows(qs).first())
 
 
 def get_employee(user: AuthUser, id_: str) -> dict:
@@ -195,7 +156,7 @@ def sensitive(user: AuthUser, id_: str) -> dict:
     """Sensitive fields (PAN, full bank account) decrypted on demand, HR only, audited."""
     _require_hr(user)
     id_ = parse_uuid(str(id_))
-    row = one('SELECT pan_enc, bank_account_enc FROM employee WHERE id = %s AND company_id = %s', [id_, user.company_id])
+    row = Employee.objects.for_company(user.company_id).filter(pk=id_).values('pan_enc', 'bank_account_enc').first()
     if not row:
         raise NotFoundError('employee not found')
     audit('read_sensitive', 'employee', actor_id=user.id, row_id=id_)
@@ -215,38 +176,45 @@ def _masked(b: dict) -> dict:
     return out
 
 
+def _secrets(id_: str, b: dict) -> dict:
+    """Encrypted PAN (with its blind index) and bank account for an employee row; the AAD names the row."""
+    c = field_cipher()
+    out = {}
+    if b.get('pan'):
+        out.update(pan_enc=c.encrypt(b['pan'], f'employee:{id_}:pan'), pan_bidx=c.blind_index(b['pan']))
+    if b.get('bankAccount'):
+        out.update(bank_account_enc=c.encrypt(b['bankAccount'], f'employee:{id_}:bank'), bank_account_last4=b['bankAccount'][-4:])
+    return out
+
+
 def create_employee(user: AuthUser, body: dict) -> str:
     from hajiri.lifecycle.service import auto_start_onboarding
     from hajiri.people.career import record_career_event
     _require_hr(user)
     company_id = company_id_of(user)
-    b = parse(EMPLOYEE_BODY, body)
+    b = plain(validate(EmployeeIn, body))
     validate_refs(company_id, b)
     if b.get('pan'):
         assert_pan_free(company_id, b['pan'])
-    c = field_cipher()
     with transaction.atomic():
-        id_ = str(one("""INSERT INTO employee (company_id, emp_code, name_en, name_ne, gender, dob, marital_status, join_date, designation, grade,
-                                               phone, email, ot_eligible, weekly_off_days, regime, ssf_id, pf_id, cit_id, bank_code, bank_branch,
-                                               is_resident, remote_area_class, disability, festival_month, probation_end, work_from_home)
-                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                      [company_id, b['empCode'], b['nameEn'], b.get('nameNe'), b.get('gender'), b.get('dob'), b.get('maritalStatus'),
-                       b.get('joinDate'), b.get('designation'), b.get('grade'), b.get('phone'), b.get('email'), b.get('otEligible', True),
-                       b.get('weeklyOffDays', [6]), b.get('regime', 'ssf'), b.get('ssfId'), b.get('pfId'), b.get('citId'), b.get('bankCode'),
-                       b.get('bankBranch'), b.get('isResident', True), b.get('remoteAreaClass'), b.get('disability', False),
-                       b.get('festivalMonth'), b.get('probationEnd'), b.get('workFromHome', False)])['id'])
-        if b.get('pan'):
-            execute('UPDATE employee SET pan_enc = %s, pan_bidx = %s WHERE id = %s',
-                    [c.encrypt(b['pan'], f'employee:{id_}:pan'), c.blind_index(b['pan']), id_])
-        if b.get('bankAccount'):
-            execute('UPDATE employee SET bank_account_enc = %s, bank_account_last4 = %s WHERE id = %s',
-                    [c.encrypt(b['bankAccount'], f'employee:{id_}:bank'), b['bankAccount'][-4:], id_])
-        frm = b.get('joinDate') or npt_today().isoformat()
-        execute("""INSERT INTO employee_assignment (employee_id, valid, branch_id, org_unit_id, manager_id, employment_type)
-                   VALUES (%s, daterange(%s, NULL), %s, %s, %s, %s)""",
-                [id_, frm, b.get('branchId'), b.get('orgUnitId'), b.get('managerId'), b.get('employmentType', 'regular')])
+        emp = Employee.objects.create(
+            company_id=company_id, emp_code=b['empCode'], name_en=b['nameEn'], name_ne=b.get('nameNe'), gender=b.get('gender'),
+            dob=b.get('dob'), marital_status=b.get('maritalStatus'), join_date=b.get('joinDate'), designation=b.get('designation'),
+            grade=b.get('grade'), phone=b.get('phone'), email=b.get('email'), ot_eligible=b.get('otEligible', True),
+            weekly_off_days=b.get('weeklyOffDays', [6]), regime=b.get('regime', Employee.Regime.SSF), ssf_id=b.get('ssfId'),
+            pf_id=b.get('pfId'), cit_id=b.get('citId'), bank_code=b.get('bankCode'), bank_branch=b.get('bankBranch'),
+            is_resident=b.get('isResident', True), remote_area_class=b.get('remoteAreaClass'), disability=b.get('disability', False),
+            festival_month=b.get('festivalMonth'), probation_end=b.get('probationEnd'), work_from_home=b.get('workFromHome', False))
+        id_ = str(emp.pk)
+        secrets = _secrets(id_, b)
+        if secrets:
+            Employee.objects.filter(pk=id_).update(**secrets)
+        frm = _d(b.get('joinDate')) or npt_today()
+        EmployeeAssignment.objects.create(employee_id=id_, valid=DateRange(frm, None), branch_id=b.get('branchId'),
+                                          org_unit_id=b.get('orgUnitId'), manager_id=b.get('managerId'),
+                                          employment_type=b.get('employmentType', EmployeeAssignment.EmploymentType.REGULAR))
         if b.get('shiftId'):
-            execute('INSERT INTO shift_assignment (employee_id, shift_id, valid) VALUES (%s, %s, daterange(%s, NULL))', [id_, b['shiftId'], frm])
+            ShiftAssignment.objects.create(employee_id=id_, shift_id=b['shiftId'], valid=DateRange(frm, None))
         if b.get('designation'):
             link_designation(id_)
         details = {**({'designation': b['designation']} if b.get('designation') else {}), **({'grade': b['grade']} if b.get('grade') else {})}
@@ -266,13 +234,40 @@ _PATCH_MAP = [
 ]
 
 
+def _move_assignment(id_: str, b: dict, today: date) -> None:
+    """Effective-dated: close the current assignment today and open a new one (plan §9.1 decision 2)."""
+    periods = EmployeeAssignment.objects.filter(employee_id=id_)
+    cur = periods.filter(valid__contains=today).values('valid', 'branch_id', 'org_unit_id', 'manager_id', 'employment_type').first()
+    nxt = {
+        'branch_id': b.get('branchId') or (cur and cur['branch_id']) or None,
+        'org_unit_id': b['orgUnitId'] if 'orgUnitId' in b else (cur and cur['org_unit_id']) or None,
+        'manager_id': b['managerId'] if 'managerId' in b else (cur and cur['manager_id']) or None,
+        'employment_type': b.get('employmentType') or (cur and cur['employment_type']) or EmployeeAssignment.EmploymentType.REGULAR,
+    }
+    if cur:
+        if cur['valid'].lower == today:
+            periods.filter(valid__contains=today).delete()
+        else:
+            periods.filter(valid__contains=today).update(valid=DateRange(cur['valid'].lower, today))
+    EmployeeAssignment.objects.create(employee_id=id_, valid=DateRange(today, None), **nxt)
+
+
+def _move_shift(id_: str, shift_id: str, today: date) -> None:
+    periods = ShiftAssignment.objects.filter(employee_id=id_)
+    cur = periods.filter(valid__contains=today, valid__startswith__lt=today).values_list('valid', flat=True).first()
+    if cur:
+        periods.filter(valid__contains=today, valid__startswith__lt=today).update(valid=DateRange(cur.lower, today))
+    periods.filter(valid__startswith=today).delete()
+    ShiftAssignment.objects.create(employee_id=id_, shift_id=shift_id, valid=DateRange(today, None))
+
+
 def update_employee(user: AuthUser, id_: str, body: dict) -> dict:
     from hajiri.people.history import diff_employee_rows, record_field_changes
     from hajiri.people.service import people_policy
     _require_hr(user)
     id_ = parse_uuid(str(id_))
     company_id = company_id_of(user)
-    b = parse(EMPLOYEE_PATCH, body)
+    b = plain(validate(EmployeeIn, body, partial=True))
     validate_refs(company_id, b, id_)
     before = _public(id_, company_id)
     if not before:
@@ -282,53 +277,22 @@ def update_employee(user: AuthUser, id_: str, body: dict) -> dict:
     stored_join = before['join_date']
     if b.get('exitDate') and stored_join and not b.get('joinDate') and _d(b['exitDate']) < stored_join:
         raise BadRequestError('exit date cannot be before join date')
-    c = field_cipher()
     with transaction.atomic():
-        sets: list[str] = []
-        vals: list = []
-        for k, col in _PATCH_MAP:
-            if k in b:
-                sets.append(f'{col} = %s')
-                vals.append(b[k])
+        sets = {col: b[k] for k, col in _PATCH_MAP if k in b}
         if b.get('exitDate'):
-            sets.append("status = 'exited'")
+            sets['status'] = Status.EXITED
         elif 'exitDate' in b and b['exitDate'] is None:
-            sets.append("status = 'active'")
+            sets['status'] = Status.ACTIVE
         if b.get('pan'):
             assert_pan_free(company_id, b['pan'], id_)
-            sets += ['pan_enc = %s', 'pan_bidx = %s']
-            vals += [c.encrypt(b['pan'], f'employee:{id_}:pan'), c.blind_index(b['pan'])]
-        if b.get('bankAccount'):
-            sets += ['bank_account_enc = %s', 'bank_account_last4 = %s']
-            vals += [c.encrypt(b['bankAccount'], f'employee:{id_}:bank'), b['bankAccount'][-4:]]
+        sets.update(_secrets(id_, b))
         if sets:
-            execute(f"UPDATE employee SET {', '.join(sets)}, updated_at = now() WHERE id = %s", vals + [id_])
+            Employee.objects.filter(pk=id_).update(**sets, updated_at=Now())
+        today = npt_today()
         if any(k in b for k in ('branchId', 'orgUnitId', 'managerId', 'employmentType')):
-            # Effective-dated: close the current assignment today and open a new one (plan §9.1 decision 2).
-            today = npt_today()
-            cur = one("""SELECT lower(valid) AS lo, branch_id, org_unit_id, manager_id, employment_type FROM employee_assignment
-                          WHERE employee_id = %s AND valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date""", [id_])
-            nxt = {
-                'branch_id': b.get('branchId') or (cur and cur['branch_id']) or None,
-                'org_unit_id': b['orgUnitId'] if 'orgUnitId' in b else (cur and cur['org_unit_id']) or None,
-                'manager_id': b['managerId'] if 'managerId' in b else (cur and cur['manager_id']) or None,
-                'employment_type': b.get('employmentType') or (cur and cur['employment_type']) or 'regular',
-            }
-            if cur:
-                if cur['lo'] == today:
-                    execute('DELETE FROM employee_assignment WHERE employee_id = %s AND valid @> (now() AT TIME ZONE \'Asia/Kathmandu\')::date', [id_])
-                else:
-                    execute('UPDATE employee_assignment SET valid = daterange(lower(valid), %s::date) WHERE employee_id = %s AND valid @> (now() AT TIME ZONE \'Asia/Kathmandu\')::date',
-                            [today, id_])
-            execute("""INSERT INTO employee_assignment (employee_id, valid, branch_id, org_unit_id, manager_id, employment_type)
-                       VALUES (%s, daterange(%s, NULL), %s, %s, %s, %s)""",
-                    [id_, today, nxt['branch_id'], nxt['org_unit_id'], nxt['manager_id'], nxt['employment_type']])
+            _move_assignment(id_, b, today)
         if b.get('shiftId'):
-            today = npt_today()
-            execute("""UPDATE shift_assignment SET valid = daterange(lower(valid), %s::date)
-                        WHERE employee_id = %s AND valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date AND lower(valid) < %s::date""", [today, id_, today])
-            execute('DELETE FROM shift_assignment WHERE employee_id = %s AND lower(valid) = %s::date', [id_, today])
-            execute('INSERT INTO shift_assignment (employee_id, shift_id, valid) VALUES (%s, %s, daterange(%s, NULL))', [id_, b['shiftId'], today])
+            _move_shift(id_, b['shiftId'], today)
         if 'designation' in b:
             link_designation(id_)
         after_row = _public(id_)
@@ -342,42 +306,12 @@ def update_employee(user: AuthUser, id_: str, body: dict) -> dict:
 
 
 def parse_csv(text: str) -> list[list[str]]:
-    """Minimal RFC 4180 CSV parser (quotes, escaped quotes, CRLF), as the TS one."""
-    out: list[list[str]] = []
-    row: list[str] = []
-    field = ''
-    in_q = False
-    i = 0
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        if in_q:
-            if ch == '"':
-                if i + 1 < n and text[i + 1] == '"':
-                    field += '"'
-                    i += 1
-                else:
-                    in_q = False
-            else:
-                field += ch
-        elif ch == '"':
-            in_q = True
-        elif ch == ',':
-            row.append(field)
-            field = ''
-        elif ch in '\n\r':
-            if ch == '\r' and i + 1 < n and text[i + 1] == '\n':
-                i += 1
-            row.append(field)
-            out.append(row)
-            row, field = [], ''
-        else:
-            field += ch
-        i += 1
-    if field or row:
-        row.append(field)
-        out.append(row)
-    return [r for r in out if any(f.strip() != '' for f in r)]
+    """RFC 4180 CSV (quotes, escaped quotes, CRLF) with the csv module; rows with nothing but blanks are dropped."""
+    return [r for r in csv.reader(io.StringIO(text, newline='')) if any(f.strip() != '' for f in r)]
+
+
+def _bool_text(v: str, *truthy: str) -> bool:
+    return v.lower() in truthy
 
 
 def import_csv(user: AuthUser, text: str | None, *, dry_run: bool = False) -> tuple[int, dict]:
@@ -397,39 +331,29 @@ def import_csv(user: AuthUser, text: str | None, *, dry_run: bool = False) -> tu
             raise BadRequestError(f'missing column {h}')
     errors: list[dict] = []
     valid: list[dict] = []
+    columns = {'nameNe': 'name_ne', 'gender': 'gender', 'dob': 'dob', 'maritalStatus': 'marital_status', 'joinDate': 'join_date',
+               'designation': 'designation', 'grade': 'grade', 'phone': 'phone', 'email': 'email', 'regime': 'regime',
+               'ssfId': 'ssf_id', 'pan': 'pan', 'bankCode': 'bank_code', 'bankBranch': 'bank_branch', 'bankAccount': 'bank_account'}
     for i in range(1, len(data)):
         rec = {h: (data[i][j].strip() if j < len(data[i]) else '') for j, h in enumerate(header)}
-        cand = {
-            'empCode': rec.get('emp_code', ''), 'nameEn': rec.get('name_en', ''), 'nameNe': rec.get('name_ne') or MISSING,
-            'gender': rec.get('gender') or MISSING, 'dob': rec.get('dob') or MISSING, 'maritalStatus': rec.get('marital_status') or MISSING,
-            'joinDate': rec.get('join_date') or MISSING, 'designation': rec.get('designation') or MISSING, 'grade': rec.get('grade') or MISSING,
-            'phone': rec.get('phone') or MISSING, 'email': rec.get('email') or MISSING, 'regime': rec.get('regime') or MISSING,
-            'ssfId': rec.get('ssf_id') or MISSING, 'pan': rec.get('pan') or MISSING, 'bankCode': rec.get('bank_code') or MISSING,
-            'bankBranch': rec.get('bank_branch') or MISSING, 'bankAccount': rec.get('bank_account') or MISSING,
-            'otEligible': (rec['ot_eligible'].lower() == 'true' or rec['ot_eligible'] == '1') if rec.get('ot_eligible') else MISSING,
-            'workFromHome': rec['work_from_home'].lower() in ('true', '1', 'yes') if rec.get('work_from_home') else MISSING,
-        }
+        cand = {'empCode': rec.get('emp_code', ''), 'nameEn': rec.get('name_en', ''),
+                **{k: rec[col] for k, col in columns.items() if rec.get(col)}}
+        if rec.get('ot_eligible'):
+            cand['otEligible'] = rec['ot_eligible'].lower() == 'true' or rec['ot_eligible'] == '1'
+        if rec.get('work_from_home'):
+            cand['workFromHome'] = _bool_text(rec['work_from_home'], 'true', '1', 'yes')
         if 'emp_code' not in rec:
-            cand['empCode'] = MISSING
-        ok, res = safe_parse(EMPLOYEE_BODY, {k: v for k, v in cand.items() if v is not MISSING})
-        if not ok:
+            del cand['empCode']
+        try:
+            valid.append(plain(validate(EmployeeIn, cand)))
+        except ValidationError as res:
             for iss in res.issues:
                 errors.append({'row': i + 1, 'message': f"{iss['path']}: {iss['message']}"})
-            continue
-        valid.append(res)
     codes = [v['empCode'] for v in valid]
-    seen_dup: list[str] = []
-    for j, cd in enumerate(codes):
-        if codes.index(cd) != j and cd not in seen_dup:
-            seen_dup.append(cd)
-    for d in seen_dup:
+    for d in dict.fromkeys(cd for j, cd in enumerate(codes) if codes.index(cd) != j):
         errors.append({'row': 0, 'message': f'duplicate emp_code in file: {d}'})
     pans = [v['pan'] for v in valid if v.get('pan')]
-    dup_pans: list[str] = []
-    for j, p in enumerate(pans):
-        if pans.index(p) != j and p not in dup_pans:
-            dup_pans.append(p)
-    for d in dup_pans:
+    for d in dict.fromkeys(p for j, p in enumerate(pans) if pans.index(p) != j):
         errors.append({'row': 0, 'message': f'duplicate PAN in file: *****{d[-4:]}'})
     company_id = company_id_of(user)
     for v in valid:
@@ -440,29 +364,29 @@ def import_csv(user: AuthUser, text: str | None, *, dry_run: bool = False) -> tu
             errors.append({'row': 0, 'message': f"PAN of {v['empCode']} is already recorded for {taken}"})
     if errors or dry_run:
         return (400 if errors else 200), {'imported': 0, 'valid': len(valid), 'errors': errors}
-    c = field_cipher()
     imported = 0
     with transaction.atomic():
         for b in valid:
-            ins = one("""INSERT INTO employee (company_id, emp_code, name_en, name_ne, gender, dob, marital_status, join_date, designation, grade, phone,
-                                               email, ot_eligible, regime, ssf_id, bank_code, bank_branch, work_from_home)
-                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                         ON CONFLICT (company_id, emp_code) DO NOTHING RETURNING id""",
-                      [company_id, b['empCode'], b['nameEn'], b.get('nameNe'), b.get('gender'), b.get('dob'), b.get('maritalStatus'),
-                       b.get('joinDate'), b.get('designation'), b.get('grade'), b.get('phone'), b.get('email'), b.get('otEligible', True),
-                       b.get('regime', 'ssf'), b.get('ssfId'), b.get('bankCode'), b.get('bankBranch'), b.get('workFromHome', False)])
-            if not ins:
+            try:
+                with transaction.atomic():           # a savepoint: a duplicate code skips this row only
+                    emp = Employee.objects.create(
+                        company_id=company_id, emp_code=b['empCode'], name_en=b['nameEn'], name_ne=b.get('nameNe'), gender=b.get('gender'),
+                        dob=b.get('dob'), marital_status=b.get('maritalStatus'), join_date=b.get('joinDate'),
+                        designation=b.get('designation'), grade=b.get('grade'), phone=b.get('phone'), email=b.get('email'),
+                        ot_eligible=b.get('otEligible', True), regime=b.get('regime', Employee.Regime.SSF), ssf_id=b.get('ssfId'),
+                        bank_code=b.get('bankCode'), bank_branch=b.get('bankBranch'), work_from_home=b.get('workFromHome', False))
+            except IntegrityError as e:
+                if getattr(getattr(e, '__cause__', None), 'sqlstate', None) != '23505':
+                    raise
                 errors.append({'row': 0, 'message': f"emp_code {b['empCode']} already exists; skipped"})
                 continue
-            id_ = str(ins['id'])
-            if b.get('pan'):
-                execute('UPDATE employee SET pan_enc = %s, pan_bidx = %s WHERE id = %s',
-                        [c.encrypt(b['pan'], f'employee:{id_}:pan'), c.blind_index(b['pan']), id_])
-            if b.get('bankAccount'):
-                execute('UPDATE employee SET bank_account_enc = %s, bank_account_last4 = %s WHERE id = %s',
-                        [c.encrypt(b['bankAccount'], f'employee:{id_}:bank'), b['bankAccount'][-4:], id_])
-            frm = b.get('joinDate') or npt_today().isoformat()
-            execute('INSERT INTO employee_assignment (employee_id, valid, employment_type) VALUES (%s, daterange(%s, NULL), %s)', [id_, frm, 'regular'])
+            id_ = str(emp.pk)
+            secrets = _secrets(id_, b)
+            if secrets:
+                Employee.objects.filter(pk=id_).update(**secrets)
+            frm = _d(b.get('joinDate')) or npt_today()
+            EmployeeAssignment.objects.create(employee_id=id_, valid=DateRange(frm, None),
+                                              employment_type=EmployeeAssignment.EmploymentType.REGULAR)
             if b.get('designation'):
                 link_designation(id_)
             details = {**({'designation': b['designation']} if b.get('designation') else {}), **({'grade': b['grade']} if b.get('grade') else {})}
@@ -472,22 +396,34 @@ def import_csv(user: AuthUser, text: str | None, *, dry_run: bool = False) -> tu
     return 201, {'imported': imported, 'errors': errors}
 
 
+def _range_text(r) -> str:
+    """A daterange as PostgreSQL prints it: [2025-01-01,) or [2025-01-01,2026-01-01)."""
+    lo = r.lower.isoformat() if r.lower else ''
+    hi = r.upper.isoformat() if r.upper else ''
+    return f"{'[' if r.lower_inc else '('}{lo},{hi}{']' if r.upper_inc else ')'}"
+
+
 def assignments(user: AuthUser, id_: str) -> list[dict]:
     """Effective-dated assignment history."""
     id_ = parse_uuid(str(id_))
     assert_manages(user, id_)
-    return [{**r, 'employee_id': str(r['employee_id']), 'branch_id': r['branch_id'] and str(r['branch_id']),
-             'org_unit_id': r['org_unit_id'] and str(r['org_unit_id']), 'manager_id': r['manager_id'] and str(r['manager_id'])}
-            for r in rows("""SELECT a.employee_id, a.valid::text AS valid, lower(a.valid) AS valid_from, upper(a.valid) AS valid_to, a.branch_id,
-                                    a.org_unit_id, a.manager_id, a.employment_type, a.probation_end, b.name_en AS branch_name, m.name_en AS manager_name
-                               FROM employee_assignment a LEFT JOIN branch b ON b.id = a.branch_id LEFT JOIN employee m ON m.id = a.manager_id
-                              WHERE a.employee_id = %s ORDER BY lower(a.valid)""", [id_])]
+    qs = (EmployeeAssignment.objects.for_company(company_id_of(user)).filter(employee_id=id_)
+          .annotate(branch_name=F('branch__name_en'), manager_name=F('manager__name_en')).order_by('valid__startswith')
+          .values('employee_id', 'valid', 'branch_id', 'org_unit_id', 'manager_id', 'employment_type', 'probation_end',
+                  'branch_name', 'manager_name'))
+    out = []
+    for r in qs:
+        v = r.pop('valid')
+        out.append({**r, 'valid': _range_text(v), 'valid_from': v.lower, 'valid_to': v.upper, 'employee_id': str(r['employee_id']),
+                    'branch_id': r['branch_id'] and str(r['branch_id']), 'org_unit_id': r['org_unit_id'] and str(r['org_unit_id']),
+                    'manager_id': r['manager_id'] and str(r['manager_id'])})
+    return out
 
 
 def audit_events(user: AuthUser, id_: str) -> list[dict]:
     """Employee-visible audit of their own record (plan §5.11)."""
     id_ = parse_uuid(str(id_))
     assert_manages(user, id_)
-    return rows("""SELECT l.id, l.occurred_at, l.actor_id, l.action, l.table_name, l.row_id, u.name AS actor_name
-                     FROM audit_log l LEFT JOIN app_user u ON u.id::text = l.actor_id::text WHERE l.row_id = %s ORDER BY l.id DESC LIMIT 200""",
-                [id_])
+    actor = AppUser.objects.filter(pk=OuterRef('actor_id')).values('name')[:1]
+    return list(AuditLog.objects.filter(row_id=id_).annotate(actor_name=Subquery(actor)).order_by('-id')
+                .values('id', 'occurred_at', 'actor_id', 'action', 'table_name', 'row_id', 'actor_name')[:200])

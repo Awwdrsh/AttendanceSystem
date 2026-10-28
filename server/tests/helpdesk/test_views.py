@@ -2,7 +2,7 @@
 import pytest
 from django.test import Client
 
-from hajiri.core.db import one
+from tests.support.sql import one
 from hajiri.helpdesk import services as hd
 from tests.web.factories import htmx, hx_triggers, set_features_off, sign_in, toasts
 

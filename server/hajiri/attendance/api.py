@@ -1,15 +1,21 @@
 """
 Attendance actions with their access rules (port of apps/api/src/modules/attendance/routes.ts). Pages call these
-with the signed-in user; each checks roles, company and manager scope exactly as the TS route did.
+with the signed-in user; each checks roles, the ACTIVE company and manager scope exactly as the TS route did.
 """
 from __future__ import annotations
 
-from hajiri.core.auth import MODULE_ROLES, AuthUser, assert_manages, has_module, has_role
-from hajiri.core.clock import npt_today
-from hajiri.core.db import one, rows
-from hajiri.core.errors import BadRequestError, ForbiddenError
-from hajiri.core.schema import Arr, IsoDate, Obj, Str, Uuid, parse
+from django.db.models import BooleanField, Exists, ExpressionWrapper, F, IntegerField, OuterRef, Q, Subquery, Sum, Value
+from django.db.models.fields.json import KT
+from django.db.models.functions import Cast, Coalesce, Extract, Floor, Now
+from rest_framework import serializers
 
+from hajiri.core.auth import MODULE_ROLES, AuthUser, assert_manages, company_id_of, has_module, has_role, manages
+from hajiri.core.clock import npt_today
+from hajiri.core.errors import BadRequestError, ForbiddenError
+from hajiri.core.validation import IsoDateField, plain, validate
+from hajiri.db.models import AttendanceDay, Employee, FieldVisit, PunchEvent, PunchPhoto, WorkBreak
+
+from .repo import latest_days
 from .service import INLINE_RECOMPUTE_MAX, date_range, enqueue_recompute, list_days, recompute_day
 
 
@@ -18,17 +24,29 @@ def _require(user: AuthUser, *roles: str) -> None:
         raise ForbiddenError(f'requires role {" or ".join(roles)}')
 
 
-RECOMPUTE = Obj({'employeeId': Uuid(), 'localDate': IsoDate()})
-RECOMPUTE_RANGE = Obj({'employeeIds': Arr(Uuid(), min=1, max=5000), 'from': IsoDate(), 'to': IsoDate()})
-EMP_RANGE = Obj({'employeeId': Uuid(), 'from': IsoDate(), 'to': IsoDate()})
-EXCEPTIONS = Obj({'from': IsoDate(), 'to': IsoDate(), 'status': Str(optional=True)})
-TODAY = Obj({'date': IsoDate()})
+def _serializer(name: str, fields: dict) -> type[serializers.Serializer]:
+    """A serializer whose field names include `from` (a Python keyword, so it cannot be a class attribute)."""
+    return type(name, (serializers.Serializer,), fields)
+
+
+RecomputeIn = _serializer('RecomputeIn', {'employeeId': serializers.UUIDField(), 'localDate': IsoDateField()})
+RecomputeRangeIn = _serializer('RecomputeRangeIn', {
+    'employeeIds': serializers.ListField(child=serializers.UUIDField(), min_length=1, max_length=5000),
+    'from': IsoDateField(), 'to': IsoDateField()})
+EmployeeRangeIn = _serializer('EmployeeRangeIn', {'employeeId': serializers.UUIDField(), 'from': IsoDateField(),
+                                                  'to': IsoDateField()})
+ExceptionsIn = _serializer('ExceptionsIn', {'from': IsoDateField(), 'to': IsoDateField(),
+                                            'status': serializers.CharField(required=False, trim_whitespace=False)})
+TodayIn = _serializer('TodayIn', {'date': IsoDateField()})
+
+# Flags that make a day an exception besides being Incomplete or Absent.
+EXCEPTION_FLAGS = ('OTCapExceeded', 'OTPreapprovalMissing', 'UnpairedPunch', 'AutoClockOut')
 
 
 def recompute(user: AuthUser, body: dict) -> dict:
     """Recompute one day now (attendance team or a manager for someone they manage)."""
     _require(user, *MODULE_ROLES['attendance'], 'manager')
-    b = parse(RECOMPUTE, body)
+    b = plain(validate(RecomputeIn, body))
     assert_manages(user, b['employeeId'], 'attendance')
     return recompute_day(b['employeeId'], b['localDate']).to_dict()
 
@@ -36,13 +54,12 @@ def recompute(user: AuthUser, body: dict) -> dict:
 def recompute_range(user: AuthUser, body: dict) -> dict:
     """Bulk: small ranges are recomputed at once so the result is visible on return; larger ones go to the worker."""
     _require(user, *MODULE_ROLES['attendance'])
-    b = parse(RECOMPUTE_RANGE, body)
+    b = plain(validate(RecomputeRangeIn, body))
     dates = date_range(b['from'], b['to'])
     if not dates or len(dates) > 62:
         raise BadRequestError('range must be 1 to 62 days')
     ids = list(dict.fromkeys(b['employeeIds']))
-    owned = one('SELECT count(*)::int AS n FROM employee WHERE company_id = %s AND id = ANY(%s::uuid[])', [user.company_id, ids])
-    if owned['n'] != len(ids):
+    if Employee.objects.for_company(company_id_of(user)).filter(pk__in=ids).count() != len(ids):
         raise ForbiddenError('some employees are not in your company')
     if len(ids) * len(dates) <= INLINE_RECOMPUTE_MAX:
         for e in ids:
@@ -54,64 +71,89 @@ def recompute_range(user: AuthUser, body: dict) -> dict:
 
 
 def days(user: AuthUser, query: dict) -> list[dict]:
-    q = parse(EMP_RANGE, query)
+    q = plain(validate(EmployeeRangeIn, query))
     assert_manages(user, q['employeeId'], 'attendance')
     return list_days(q['employeeId'], q['from'], q['to'])
 
 
+def superseded():
+    """`superseded`: a later correction replaced this punch."""
+    return Exists(PunchEvent.objects.filter(supersedes_id=OuterRef('id')))
+
+
 def punches(user: AuthUser, query: dict) -> list[dict]:
     """Raw punches someone may see (their own, their team's, or anyone's for the attendance team)."""
-    q = parse(EMP_RANGE, query)
+    q = plain(validate(EmployeeRangeIn, query))
     assert_manages(user, q['employeeId'], 'attendance')
-    return rows("""SELECT p.id, p.punched_at, p.local_date, p.direction, p.verify_mode, p.source, p.device_sn, p.supersedes_id,
-                          (SELECT count(*) FROM punch_event s WHERE s.supersedes_id = p.id) > 0 AS superseded
-                     FROM punch_event p WHERE p.employee_id = %s AND p.local_date BETWEEN %s AND %s ORDER BY p.punched_at""",
-                [q['employeeId'], q['from'], q['to']])
+    return list(PunchEvent.objects.filter(employee_id=q['employeeId'], local_date__range=(q['from'], q['to']))
+                .annotate(superseded=superseded()).order_by('punched_at')
+                .values('id', 'punched_at', 'local_date', 'direction', 'verify_mode', 'source', 'device_sn', 'supersedes_id',
+                        'superseded'))
+
+
+def _team(user: AuthUser, company_wide: bool, on_date, employee='employee_id') -> Q:
+    """Everyone for the company-wide roles; otherwise the viewer and the people they manage on that date."""
+    if company_wide:
+        return Q()
+    return Q(**{employee: user.employee_id}) | Q(manages(user.employee_id, F(employee), on_date))
 
 
 def exceptions(user: AuthUser, query: dict) -> list[dict]:
     """Latest days with anomalies in a range; the attendance team company-wide, a manager for the people they manage."""
     _require(user, *MODULE_ROLES['attendance'], 'manager')
-    q = parse(EXCEPTIONS, query)
-    return rows("""
-        SELECT v.id, v.employee_id, e.emp_code, e.name_en, e.name_ne, v.local_date, v.bs_date, v.status, v.worked_min,
-               v.late_min, v.early_min, v.ot_min, v.flags
-          FROM v_attendance_latest v JOIN employee e ON e.id = v.employee_id
-         WHERE e.company_id = %(c)s AND v.local_date BETWEEN %(f)s AND %(t)s AND v.locked_at IS NULL
-           AND (v.status IN ('Incomplete', 'Absent') OR v.flags @> '[{"kind":"OTCapExceeded"}]'
-                OR v.flags @> '[{"kind":"OTPreapprovalMissing"}]' OR v.flags @> '[{"kind":"UnpairedPunch"}]'
-                OR v.flags @> '[{"kind":"AutoClockOut"}]')
-           AND (%(s)s::text IS NULL OR v.status = %(s)s)
-           AND (%(all)s OR e.id = %(me)s::uuid OR hj_manages(%(me)s::uuid, e.id, v.local_date))
-         ORDER BY v.local_date DESC, e.emp_code LIMIT 1000""",
-        {'c': user.company_id, 'f': q['from'], 't': q['to'], 's': q.get('status'), 'all': has_module(user, 'attendance'),
-         'me': user.employee_id})
+    q = validate(ExceptionsIn, query)
+    flagged = Q(status__in=(AttendanceDay.Status.INCOMPLETE, AttendanceDay.Status.ABSENT))
+    for kind in EXCEPTION_FLAGS:
+        flagged |= Q(flags__contains=[{'kind': kind}])
+    qs = (latest_days().for_company(company_id_of(user))
+          .filter(flagged, local_date__range=(q['from'], q['to']), locked_at__isnull=True)
+          .filter(_team(user, has_module(user, 'attendance'), F('local_date'))))
+    if q.get('status') is not None:
+        qs = qs.filter(status=q['status'])
+    return list(qs.annotate(emp_code=F('employee__emp_code'), name_en=F('employee__name_en'), name_ne=F('employee__name_ne'))
+                .order_by('-local_date', 'employee__emp_code')
+                .values('id', 'employee_id', 'emp_code', 'name_en', 'name_ne', 'local_date', 'bs_date', 'status',
+                        'worked_min', 'late_min', 'early_min', 'ot_min', 'flags')[:1000])
+
+
+DAY_KEYS = ('status', 'first_in', 'last_out', 'late_min', 'worked_min', 'flags')
 
 
 def today(user: AuthUser, query: dict) -> dict:
     """Team Today: everyone's latest status for one date. The attendance team and executives see the company; a
     manager sees the people they manage and themselves."""
     _require(user, *MODULE_ROLES['attendance'], 'manager', 'executive')
-    q = parse(TODAY, query)
+    q = validate(TodayIn, query)
+    d = q['date']
+    cid = company_id_of(user)
     company_wide = has_module(user, 'attendance') or has_role(user, 'executive')
-    found = rows("""
-        SELECT e.id AS employee_id, e.emp_code, e.name_en, e.name_ne, v.status, v.first_in, v.last_out, v.late_min,
-               v.worked_min, v.flags,
-               coalesce(v.status = 'WFH', false) OR EXISTS (SELECT 1 FROM punch_event p WHERE p.employee_id = e.id
-                 AND p.local_date = %(d)s AND p.raw->>'remote' = 'true') AS remote,
-               (SELECT ph.id FROM punch_photo ph WHERE ph.employee_id = e.id AND ph.local_date = %(d)s AND ph.image_enc IS NOT NULL
-                 ORDER BY ph.punched_at LIMIT 1) AS photo_id,
-               (SELECT wb.kind FROM work_break wb WHERE wb.employee_id = e.id AND wb.ended_at IS NULL AND wb.local_date = %(d)s) AS on_break,
-               (SELECT coalesce(sum(coalesce(wb.minutes, floor(extract(epoch FROM now() - wb.started_at) / 60)::int)), 0)::int
-                  FROM work_break wb WHERE wb.employee_id = e.id AND wb.local_date = %(d)s) AS break_min,
-               (SELECT fv.place FROM field_visit fv WHERE fv.employee_id = e.id AND fv.local_date = %(d)s
-                 ORDER BY fv.ended_at IS NULL DESC, fv.started_at DESC LIMIT 1) AS field_place
-          FROM employee e LEFT JOIN v_attendance_latest v ON v.employee_id = e.id AND v.local_date = %(d)s
-         WHERE e.company_id = %(c)s AND e.status = 'active'
-           AND (%(all)s OR e.id = %(me)s::uuid OR hj_manages(%(me)s::uuid, e.id, %(d)s::date))
-         ORDER BY e.emp_code""",
-        {'c': user.company_id, 'd': q['date'], 'all': company_wide, 'me': user.employee_id})
-    return {'date': q['date'], 'rows': found}
+    day = {r['employee_id']: r for r in latest_days().for_company(cid).filter(local_date=d).values('employee_id', *DAY_KEYS)}
+    here = {'employee': OuterRef('pk'), 'local_date': d}
+    breaks = WorkBreak.objects.filter(**here)
+    open_minutes = Cast(Floor(Extract(Now() - F('started_at'), 'epoch') / Value(60)), IntegerField())
+    people = (Employee.objects.for_company(cid).filter(status=Employee.Status.ACTIVE)
+              .filter(_team(user, company_wide, d, employee='pk'))
+              .annotate(
+                  remote_punch=Exists(PunchEvent.objects.filter(**here).annotate(remote=KT('raw__remote')).filter(remote='true')),
+                  photo_id=Subquery(PunchPhoto.objects.filter(**here, image_enc__isnull=False).order_by('punched_at')
+                                    .values('id')[:1]),
+                  on_break=Subquery(breaks.filter(ended_at__isnull=True).values('kind')[:1]),
+                  break_min=Coalesce(Subquery(breaks.values('employee').annotate(n=Sum(Coalesce('minutes', open_minutes)))
+                                              .values('n')[:1], output_field=IntegerField()), 0),
+                  field_place=Subquery(FieldVisit.objects.filter(**here)
+                                       .order_by(ExpressionWrapper(Q(ended_at__isnull=True), output_field=BooleanField()).desc(),
+                                                 '-started_at').values('place')[:1]))
+              .order_by('emp_code')
+              .values('id', 'emp_code', 'name_en', 'name_ne', 'remote_punch', 'photo_id', 'on_break', 'break_min', 'field_place'))
+    rows = []
+    for p in people:
+        v = day.get(p['id']) or {}
+        rows.append({'employee_id': p['id'], 'emp_code': p['emp_code'], 'name_en': p['name_en'], 'name_ne': p['name_ne'],
+                     **{k: v.get(k) for k in DAY_KEYS},
+                     'remote': v.get('status') == AttendanceDay.Status.WFH or p['remote_punch'],
+                     'photo_id': p['photo_id'], 'on_break': p['on_break'], 'break_min': p['break_min'],
+                     'field_place': p['field_place']})
+    return {'date': d, 'rows': rows}
 
 
 def today_npt() -> str:

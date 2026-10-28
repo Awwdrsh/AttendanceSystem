@@ -1,0 +1,30 @@
+{% comment %}
+  The active company, always visible (name and code), and the switcher for people who work in more than one company
+  of a group. menu_id: id of the menu (unique on the page); compact: the mobile top bar version (code only).
+  Switching posts to web:switch_company with the current page as `next`: the page reloads in the new company, or
+  goes to the hub's first page when it showed a record (records belong to one company).
+{% endcomment %}
+{% if hj_company %}
+<div class="hj-company-switch{% if compact %} compact{% endif %}">
+  {% if hj_companies|length > 1 %}
+    <button type="button" class="hj-company-btn" data-menu-toggle="{{ menu_id }}" aria-haspopup="menu" aria-expanded="false" aria-label="Working in {{ hj_company.name }} ({{ hj_company.code }}). Switch company" title="{{ hj_company.name }}">
+      <i class="ti ti-building" aria-hidden="true"></i>{% if not compact %}<span class="hj-truncate hj-grow">{{ hj_company.name }}</span>{% endif %}<span class="hj-company-code">{{ hj_company.code }}</span><i class="ti ti-selector hj-muted" aria-hidden="true"></i>
+    </button>
+    <div class="hj-menu" id="{{ menu_id }}" role="menu" hidden>
+      <div class="hj-menu-label">Work in</div>
+      {% for c in hj_companies %}
+        <form method="post" action="{% url 'web:switch_company' %}" hx-post="{% url 'web:switch_company' %}" hx-swap="none">{% csrf_token %}
+          <input type="hidden" name="company_id" value="{{ c.id }}"><input type="hidden" name="next" value="{{ request.get_full_path }}">
+          <button type="submit" class="hj-menu-item" role="menuitem" {% if c.active %}aria-current="true"{% endif %}><i class="ti ti-{% if c.active %}check{% else %}building{% endif %}" aria-hidden="true"></i><span class="hj-grow hj-truncate">{{ c.name }}</span><span class="hj-muted hj-small">{{ c.code }}{% if c.home %} · home{% endif %}</span></button>
+        </form>
+      {% endfor %}
+      {% if hj_group_link %}
+        <div class="hj-menu-sep"></div>
+        <a class="hj-menu-item" role="menuitem" href="{% url 'web:group' %}"><i class="ti ti-building-community" aria-hidden="true"></i>Group overview</a>
+      {% endif %}
+    </div>
+  {% else %}
+    <div class="hj-company-btn static" title="{{ hj_company.name }}"><i class="ti ti-building" aria-hidden="true"></i>{% if not compact %}<span class="hj-truncate hj-grow">{{ hj_company.name }}</span>{% endif %}<span class="hj-company-code">{{ hj_company.code }}</span></div>
+  {% endif %}
+</div>
+{% endif %}

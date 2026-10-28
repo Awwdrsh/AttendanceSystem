@@ -1,4 +1,4 @@
-"""The Django-stack scripts (scripts/*-django.sh, scripts/django_ops.py) and the Docker files."""
+"""The shell scripts (scripts/*.sh, scripts/django_ops.py) and the Docker files."""
 import base64
 import importlib.util
 import os
@@ -10,8 +10,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[3]
 SCRIPTS = REPO / 'scripts'
-SHELL_SCRIPTS = ['lib-django.sh', 'setup-django.sh', 'start-django.sh', 'stop-django.sh', 'run-django.sh', 'install-service-django.sh',
-                 'update-django.sh']
+SHELL_SCRIPTS = ['lib.sh', 'setup.sh', 'start.sh', 'stop.sh', 'run.sh', 'install-service.sh', 'update.sh']
 
 
 def ops_module():
@@ -35,24 +34,27 @@ def test_shell_scripts_parse(name):
     assert path.is_file()
     r = subprocess.run(['bash', '-n', str(path)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    if name != 'lib-django.sh':
+    if name != 'lib.sh':
         assert os.access(path, os.X_OK), f'{name} is not executable'
 
 
 def test_docker_entrypoint_parses():
-    r = subprocess.run(['sh', '-n', str(REPO / 'infra' / 'docker-django' / 'entrypoint.sh')], capture_output=True, text=True)
+    r = subprocess.run(['sh', '-n', str(REPO / 'infra' / 'docker' / 'entrypoint.sh')], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
 
-def test_the_ts_scripts_are_still_there():
-    for name in ('setup.sh', 'start.sh', 'stop.sh', 'run.sh', 'install-service.sh', 'update.sh', 'lib.sh'):
-        assert (SCRIPTS / name).is_file()
+def test_no_script_runs_node_or_reads_the_ts_env_files():
+    for path in SCRIPTS.glob('*.sh'):
+        text = path.read_text()
+        assert 'pnpm' not in text and 'node ' not in text and '-django.sh' not in text, path.name
+        # apps/api/.env and apps/gateway/.env are only read by setup.sh, once, to move an old install's secrets over.
+        assert path.name == 'setup.sh' or 'apps/' not in text, path.name
 
 
-def test_run_django_rejects_an_unknown_service():
-    r = subprocess.run(['bash', str(SCRIPTS / 'run-django.sh'), 'api'], capture_output=True, text=True, timeout=30)
+def test_run_rejects_an_unknown_service():
+    r = subprocess.run(['bash', str(SCRIPTS / 'run.sh'), 'api'], capture_output=True, text=True, timeout=30)
     assert r.returncode == 1
-    assert 'usage: run-django.sh web|worker|gateway' in r.stderr
+    assert 'usage: run.sh web|worker|gateway' in r.stderr
 
 
 def test_env_helpers_work_in_a_folder_with_spaces(tmp_path):
@@ -60,7 +62,7 @@ def test_env_helpers_work_in_a_folder_with_spaces(tmp_path):
     folder.mkdir()
     f = folder / '.env'
     f.write_text('PORT=3000\nEMPTY=\n')
-    script = f'''source "{SCRIPTS / 'lib-django.sh'}"
+    script = f'''source "{SCRIPTS / 'lib.sh'}"
 env_set "{f}" EMPTY filled
 env_set "{f}" NEW 'a=b/c+d'
 env_set "{f}" PORT 3100
@@ -74,7 +76,7 @@ env_has_value "{f}" NEW && echo has
 
 
 def test_service_ports_come_from_the_env_files(tmp_path):
-    script = f'''source "{SCRIPTS / 'lib-django.sh'}"
+    script = f'''source "{SCRIPTS / 'lib.sh'}"
 WEB_ENV="{tmp_path}/web.env"; GW_ENV="{tmp_path}/gw.env"; ROOT="{tmp_path}"
 echo "$(web_port) $(gateway_port) $(web_threads)"
 printf 'PORT=3100\\nWEB_THREADS=4\\n' > "$WEB_ENV"; printf 'PORT=8180\\n' > "$GW_ENV"
@@ -86,7 +88,7 @@ echo "$(web_port) $(gateway_port) $(web_threads)"
 
 
 def test_python_313_is_found():
-    script = f'source "{SCRIPTS / "lib-django.sh"}"; p="$(find_python313)" && "$p" -c "import sys; print(sys.version_info[:2])"'
+    script = f'source "{SCRIPTS / "lib.sh"}"; p="$(find_python313)" && "$p" -c "import sys; print(sys.version_info[:2])"'
     r = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=30)
     if r.returncode:
         pytest.skip('no Python 3.13 on PATH on this machine')
@@ -120,7 +122,7 @@ def test_ops_health_fails_without_a_server(monkeypatch):
 
 
 def test_ops_ensure_company_creates_the_company_and_its_head_office(db):
-    from hajiri.core.db import rows
+    from .sql import rows
     mod = ops_module()
     cid = mod.ensure_company('ACME', "Acme's Pvt. Ltd.")
     assert mod.ensure_company('ACME', 'Other name') == cid
@@ -131,17 +133,23 @@ def test_ops_ensure_company_creates_the_company_and_its_head_office(db):
 
 
 def test_compose_runs_web_worker_and_gateway_from_one_image():
-    text = (REPO / 'infra' / 'docker-compose.django.yml').read_text()
+    text = (REPO / 'infra' / 'docker-compose.yml').read_text()
     for svc in ('postgres:', 'web:', 'worker:', 'gateway:'):
         assert f'\n  {svc}' in text
-    assert text.count('dockerfile: infra/docker-django/Dockerfile') == 1
+    assert text.count('dockerfile: infra/docker/Dockerfile') == 1
     for cmd in ('["web"]', '["worker"]', '["gateway"]'):
         assert f'command: {cmd}' in text
-    # The worker and the gateway wait for the web container, which applies the migrations.
-    assert text.count('web: { condition: service_healthy }') == 2
-    docker = (REPO / 'infra' / 'docker-django' / 'Dockerfile').read_text()
-    assert docker.startswith('# The Django stack') and 'FROM python:3.13-' in docker
-    ignore = (REPO / 'infra' / 'docker-django' / 'Dockerfile.dockerignore').read_text().split()
+    # The worker, the gateway and the split profile's scheduler and task workers wait for the web container, which
+    # applies the migrations.
+    assert text.count('web: { condition: service_healthy }') == 4
+    # The split deployment: one scheduler and any number of task workers, only with --profile split.
+    for svc in ('scheduler', 'tasks'):
+        block = text.split(f'\n  {svc}:\n', 1)[1].split('\n  gateway:', 1)[0].split('\n  tasks:', 1)[0]
+        assert f'command: ["{svc}"]' in block and 'profiles: ["split"]' in block and f'HAJIRI_SERVICE: {svc}' in block
+    assert '--profile split' in text and '--scale worker=0' in text
+    docker = (REPO / 'infra' / 'docker' / 'Dockerfile').read_text()
+    assert docker.startswith('# Hajiri in one image') and 'FROM python:3.13-' in docker
+    ignore = (REPO / 'infra' / 'docker' / 'Dockerfile.dockerignore').read_text().split()
     for pattern in ('**/.env', '**/gateway.env', '**/.venv', '.git'):
         assert pattern in ignore
 
@@ -150,13 +158,13 @@ def test_docker_entrypoint_drops_blank_optional_settings(tmp_path):
     # Compose passes DJANGO_SECRET_KEY= (left blank in env.example) as an empty string; Django refuses an empty
     # SECRET_KEY, so the entrypoint unsets it and the settings fall back to PASSWORD_PEPPER.
     env = {'PATH': os.environ['PATH'], 'HAJIRI_SERVER_DIR': str(tmp_path), 'DJANGO_SECRET_KEY': '', 'ALLOWED_HOSTS': '', 'PASSWORD_PEPPER': 'p'}
-    r = subprocess.run(['sh', str(REPO / 'infra' / 'docker-django' / 'entrypoint.sh'), 'env'], capture_output=True, text=True, env=env, timeout=30)
+    r = subprocess.run(['sh', str(REPO / 'infra' / 'docker' / 'entrypoint.sh'), 'env'], capture_output=True, text=True, env=env, timeout=30)
     assert r.returncode == 0, r.stderr
     lines = r.stdout.splitlines()
     assert not any(line.startswith(('DJANGO_SECRET_KEY=', 'ALLOWED_HOSTS=')) for line in lines)
     assert 'HAJIRI_SERVICE=env' in lines and 'PASSWORD_PEPPER=p' in lines
     env.update(DJANGO_SECRET_KEY='kept', ALLOWED_HOSTS='hr.example.com')
-    lines = subprocess.run(['sh', str(REPO / 'infra' / 'docker-django' / 'entrypoint.sh'), 'env'], capture_output=True, text=True, env=env,
+    lines = subprocess.run(['sh', str(REPO / 'infra' / 'docker' / 'entrypoint.sh'), 'env'], capture_output=True, text=True, env=env,
                            timeout=30).stdout.splitlines()
     assert 'DJANGO_SECRET_KEY=kept' in lines and 'ALLOWED_HOSTS=hr.example.com' in lines
 
@@ -170,5 +178,57 @@ def test_ops_starts_django_with_a_blank_secret_key():
 
 
 def test_setup_tells_how_to_reset_the_admin_password():
-    text = (SCRIPTS / 'setup-django.sh').read_text()
+    text = (SCRIPTS / 'setup.sh').read_text()
     assert 'reset_password --email $ADMIN_EMAIL --password <new>' in text
+
+
+def test_worker_mode_picks_the_background_services(tmp_path):
+    script = f'''source "{SCRIPTS / 'lib.sh'}"
+WEB_ENV="{tmp_path}/web.env"
+echo "$(django_services)"
+printf 'WORKER_MODE=split\\n' > "$WEB_ENV"; echo "$(django_services)"
+printf 'WORKER_MODE=split\\nTASK_WORKERS=3\\n' > "$WEB_ENV"; echo "$(django_services)"
+printf 'WORKER_MODE=split\\nTASK_WORKERS=many\\n' > "$WEB_ENV"; echo "$(django_services)"
+for s in worker scheduler tasks tasks-2 web gateway; do is_background_service "$s" && printf '%s ' "$s"; done; echo
+'''
+    r = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == [
+        'gateway worker web',
+        'gateway scheduler tasks web',
+        'gateway scheduler tasks tasks-2 tasks-3 web',
+        'gateway scheduler tasks web',
+        'worker scheduler tasks tasks-2 ',
+    ]
+
+
+def test_run_knows_the_split_services():
+    text = (SCRIPTS / 'run.sh').read_text()
+    assert 'web|worker|gateway|scheduler|tasks|tasks-[0-9]*)' in text
+    lib = (SCRIPTS / 'lib.sh').read_text()
+    assert 'manage.py run_scheduler' in lib and 'manage.py db_worker --queue-name default' in lib
+
+
+def test_docker_entrypoint_runs_the_split_services(tmp_path):
+    text = (REPO / 'infra' / 'docker' / 'entrypoint.sh').read_text()
+    assert 'exec python manage.py run_scheduler' in text
+    assert 'exec python manage.py db_worker --queue-name default' in text
+
+
+def test_ops_health_of_the_background_services(monkeypatch):
+    mod = ops_module()
+    calls = []
+    monkeypatch.setattr(mod, 'wait_db', lambda seconds: calls.append(seconds) or True)
+    for svc in ('worker', 'scheduler', 'tasks'):
+        monkeypatch.setenv('HAJIRI_SERVICE', svc)
+        assert mod.health() == 0
+    assert calls == [3, 3, 3]
+
+
+def test_ops_has_user_and_has_company(db):
+    from hajiri.core import auth
+    mod = ops_module()
+    cid = mod.ensure_company('ACME', 'Acme')
+    auth.create_user(company_id=cid, email='Ops.Person@Acme.test', name='Ops', password='correct-horse-battery-staple', roles=['admin'])
+    assert mod.has_user('OPS.person@acme.test') and not mod.has_user('nobody@acme.test')
+    assert mod.has_company('ACME') and not mod.has_company('acme-not')

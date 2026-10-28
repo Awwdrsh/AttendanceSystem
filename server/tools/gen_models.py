@@ -1,7 +1,8 @@
 """Generate hajiri/db/models/*.py from a database built by the TS SQL migrations.
 
-Used once for the initial models and again if the TS schema changes on main before cutover. After cutover the models
-are edited by hand and this script is deleted.
+Used for the initial models. Since migration 0002 (TextChoices, related names, company managers, __str__) the
+models are edited by hand: do NOT run this over hajiri/db/models any more; generate into a scratch folder and port
+differences by hand if the TS schema changes before cutover.
 
     DATABASE_URL=postgres://localhost:5433/hajiri_schema_ref .venv/bin/python tools/gen_models.py
 

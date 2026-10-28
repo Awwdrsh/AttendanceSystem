@@ -6,159 +6,270 @@ from django.contrib.postgres.fields import ArrayField, DateRangeField
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class DisciplinaryCase(models.Model):
+    class Category(models.TextChoices):
+        ATTENDANCE = 'attendance', 'Attendance'
+        CONDUCT = 'conduct', 'Conduct'
+        PERFORMANCE = 'performance', 'Performance'
+        POLICY = 'policy', 'Policy'
+        SAFETY = 'safety', 'Safety'
+        MISCONDUCT = 'misconduct', 'Misconduct'
+        OTHER = 'other', 'Other'
+
+    class Status(models.TextChoices):
+        OPEN = 'open', 'Open'
+        SHOW_CAUSE = 'show_cause', 'Show cause'
+        RESPONDED = 'responded', 'Responded'
+        DECIDED = 'decided', 'Decided'
+        WITHDRAWN = 'withdrawn', 'Withdrawn'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='disciplinary_cases')
     number = models.IntegerField()
-    employee = models.ForeignKey('Employee', models.DO_NOTHING)
-    category = models.TextField()
+    employee = models.ForeignKey('Employee', models.DO_NOTHING, related_name='disciplinary_cases')
+    category = models.TextField(choices=Category)
     incident_date = models.DateField()
     incident_enc = models.BinaryField()
-    status = models.TextField(db_default='open')
+    status = models.TextField(choices=Status, db_default='open')
     show_cause_enc = models.BinaryField(blank=True, null=True)
     show_cause_at = models.DateTimeField(blank=True, null=True)
     response_due = models.DateField(blank=True, null=True)
     response_enc = models.BinaryField(blank=True, null=True)
     responded_at = models.DateTimeField(blank=True, null=True)
-    stage = models.ForeignKey('DisciplinaryStage', models.DO_NOTHING, blank=True, null=True)
+    stage = models.ForeignKey('DisciplinaryStage', models.DO_NOTHING, related_name='disciplinary_cases', blank=True, null=True)
     decision_note_enc = models.BinaryField(blank=True, null=True)
     suspension_from = models.DateField(blank=True, null=True)
     suspension_to = models.DateField(blank=True, null=True)
     exit_id = models.UUIDField(blank=True, null=True)
-    letter = models.ForeignKey('IssuedLetter', models.DO_NOTHING, blank=True, null=True)
-    opened_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='opened_by', blank=True, null=True)
-    decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='decided_by', related_name='disciplinarycase_decided_by_set', blank=True, null=True)
+    letter = models.ForeignKey('IssuedLetter', models.DO_NOTHING, related_name='disciplinary_cases', blank=True, null=True)
+    opened_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='disciplinary_cases_as_opened_by', db_column='opened_by', blank=True, null=True)
+    decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='disciplinary_cases_as_decided_by', db_column='decided_by', blank=True, null=True)
     decided_at = models.DateTimeField(blank=True, null=True)
     overdue_notified = models.BooleanField(db_default=False)
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'disciplinary_case'
         unique_together = (('company', 'number'),)
 
+    def __str__(self):
+        return str(self.number)
+
 
 class DisciplinaryStage(models.Model):
+    class Effect(models.TextChoices):
+        NONE = 'none', 'None'
+        SUSPENSION = 'suspension', 'Suspension'
+        TERMINATION = 'termination', 'Termination'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='disciplinary_stages')
     code = models.TextField()
     name = models.TextField()
     severity = models.SmallIntegerField(db_default=1)
-    effect = models.TextField(db_default='none')
+    effect = models.TextField(choices=Effect, db_default='none')
     letter_template_code = models.TextField(blank=True, null=True)
     sort = models.SmallIntegerField(db_default=0)
     active = models.BooleanField(db_default=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'disciplinary_stage'
         unique_together = (('company', 'code'),)
 
+    def __str__(self):
+        return str(self.name)
+
 
 class Grievance(models.Model):
+    class AppealOutcome(models.TextChoices):
+        DECISION_UPHELD = 'decision_upheld', 'Decision upheld'
+        DECISION_CHANGED = 'decision_changed', 'Decision changed'
+
+    class Category(models.TextChoices):
+        HARASSMENT = 'harassment', 'Harassment'
+        DISCRIMINATION = 'discrimination', 'Discrimination'
+        SAFETY = 'safety', 'Safety'
+        PAY_BENEFITS = 'pay_benefits', 'Pay benefits'
+        MANAGEMENT = 'management', 'Management'
+        POLICY = 'policy', 'Policy'
+        OTHER = 'other', 'Other'
+
+    class Outcome(models.TextChoices):
+        UPHELD = 'upheld', 'Upheld'
+        PARTLY_UPHELD = 'partly_upheld', 'Partly upheld'
+        NOT_UPHELD = 'not_upheld', 'Not upheld'
+
+    class Status(models.TextChoices):
+        SUBMITTED = 'submitted', 'Submitted'
+        UNDER_REVIEW = 'under_review', 'Under review'
+        HEARING_SCHEDULED = 'hearing_scheduled', 'Hearing scheduled'
+        DECIDED = 'decided', 'Decided'
+        APPEALED = 'appealed', 'Appealed'
+        CLOSED = 'closed', 'Closed'
+        WITHDRAWN = 'withdrawn', 'Withdrawn'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='grievances')
     number = models.IntegerField()
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
-    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
-    category = models.TextField()
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='grievances')
+    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='grievances')
+    category = models.TextField(choices=Category)
     subject_enc = models.BinaryField()
     description_enc = models.BinaryField()
     concerns_enc = models.BinaryField(blank=True, null=True)
-    status = models.TextField(db_default='submitted')
+    status = models.TextField(choices=Status, db_default='submitted')
     excluded_user_ids = ArrayField(models.UUIDField(), db_default=[])
     hearing_at = models.DateTimeField(blank=True, null=True)
     hearing_place = models.TextField(blank=True, null=True)
-    outcome = models.TextField(blank=True, null=True)
+    outcome = models.TextField(choices=Outcome, blank=True, null=True)
     findings_enc = models.BinaryField(blank=True, null=True)
-    decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='decided_by', related_name='grievance_decided_by_set', blank=True, null=True)
+    decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='grievances_as_decided_by', db_column='decided_by', blank=True, null=True)
     decided_at = models.DateTimeField(blank=True, null=True)
     appeal_reason_enc = models.BinaryField(blank=True, null=True)
     appealed_at = models.DateTimeField(blank=True, null=True)
-    appeal_outcome = models.TextField(blank=True, null=True)
+    appeal_outcome = models.TextField(choices=AppealOutcome, blank=True, null=True)
     appeal_note_enc = models.BinaryField(blank=True, null=True)
-    appeal_decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='appeal_decided_by', related_name='grievance_appeal_decided_by_set', blank=True, null=True)
+    appeal_decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='grievances_as_appeal_decided_by', db_column='appeal_decided_by', blank=True, null=True)
     appeal_decided_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'grievance'
         unique_together = (('company', 'number'),)
 
+    def __str__(self):
+        return str(self.number)
+
 
 class GrievanceCommitteeMember(models.Model):
     pk = models.CompositePrimaryKey('company_id', 'user_id')
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
-    added_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='added_by', related_name='grievancecommitteemember_added_by_set', blank=True, null=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='grievance_committee_members')
+    user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='grievance_committee_members')
+    added_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='grievance_committee_members_as_added_by', db_column='added_by', blank=True, null=True)
     added_at = models.DateTimeField(db_default=Now())
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'grievance_committee_member'
 
+    def __str__(self):
+        return f'GrievanceCommitteeMember {self.pk}'
+
 
 class GrievanceFile(models.Model):
     pk = models.CompositePrimaryKey('grievance_id', 'file_id')
-    grievance = models.ForeignKey(Grievance, models.DO_NOTHING)
-    file = models.ForeignKey('StoredFile', models.DO_NOTHING)
+    grievance = models.ForeignKey(Grievance, models.DO_NOTHING, related_name='grievance_files')
+    file = models.ForeignKey('StoredFile', models.DO_NOTHING, related_name='grievance_files')
+
+    company_scope = 'file__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'grievance_file'
 
+    def __str__(self):
+        return f'GrievanceFile {self.pk}'
+
 
 class GrievanceNote(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    grievance = models.ForeignKey(Grievance, models.DO_NOTHING)
-    author = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
+    grievance = models.ForeignKey(Grievance, models.DO_NOTHING, related_name='grievance_notes')
+    author = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='grievance_notes_as_author')
     shared = models.BooleanField(db_default=False)
     body_enc = models.BinaryField()
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'author__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'grievance_note'
+
+    def __str__(self):
+        return f'GrievanceNote {self.id}'
 
 
 class HelpdeskCategory(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='helpdesk_categories')
     name = models.TextField()
     description = models.TextField(blank=True, null=True)
     confidential = models.BooleanField(db_default=False)
-    owner_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, blank=True, null=True)
+    owner_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='helpdesk_categories_as_owner', blank=True, null=True)
     sort = models.SmallIntegerField(db_default=0)
     active = models.BooleanField(db_default=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'helpdesk_category'
         unique_together = (('company', 'name'),)
 
+    def __str__(self):
+        return str(self.name)
+
 
 class HelpdeskMessage(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    ticket = models.ForeignKey('HelpdeskTicket', models.DO_NOTHING)
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    author_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
+    ticket = models.ForeignKey('HelpdeskTicket', models.DO_NOTHING, related_name='helpdesk_messages')
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='helpdesk_messages')
+    author_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='helpdesk_messages_as_author')
     body = models.TextField()
     internal = models.BooleanField(db_default=False)
     file_ids = ArrayField(models.UUIDField(), db_default=[])
     created_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'helpdesk_message'
 
+    def __str__(self):
+        return f'HelpdeskMessage {self.id}'
+
 
 class HelpdeskTicket(models.Model):
+    class Priority(models.TextChoices):
+        LOW = 'low', 'Low'
+        NORMAL = 'normal', 'Normal'
+        HIGH = 'high', 'High'
+        URGENT = 'urgent', 'Urgent'
+
+    class Status(models.TextChoices):
+        OPEN = 'open', 'Open'
+        IN_PROGRESS = 'in_progress', 'In progress'
+        WAITING = 'waiting', 'Waiting'
+        RESOLVED = 'resolved', 'Resolved'
+        CLOSED = 'closed', 'Closed'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='helpdesk_tickets')
     number = models.IntegerField()
-    requester_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, blank=True, null=True)
-    category = models.ForeignKey(HelpdeskCategory, models.DO_NOTHING)
+    requester_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='helpdesk_tickets_as_requester')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='helpdesk_tickets', blank=True, null=True)
+    category = models.ForeignKey(HelpdeskCategory, models.DO_NOTHING, related_name='helpdesk_tickets')
     subject = models.TextField()
-    priority = models.TextField(db_default='normal')
-    status = models.TextField(db_default='open')
-    assignee_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='helpdeskticket_assignee_user_set', blank=True, null=True)
+    priority = models.TextField(choices=Priority, db_default='normal')
+    status = models.TextField(choices=Status, db_default='open')
+    assignee_user = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='helpdesk_tickets_as_assignee', blank=True, null=True)
     sla_due_at = models.DateTimeField()
     first_response_at = models.DateTimeField(blank=True, null=True)
     resolved_at = models.DateTimeField(blank=True, null=True)
@@ -169,17 +280,29 @@ class HelpdeskTicket(models.Model):
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'helpdesk_ticket'
         unique_together = (('company', 'number'),)
 
+    def __str__(self):
+        return str(self.subject)
+
 
 class RelationsReminderSent(models.Model):
     pk = models.CompositePrimaryKey('company_id', 'kind', 'ref')
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='relations_reminder_sents')
     kind = models.TextField()
     ref = models.TextField()
     sent_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'relations_reminder_sent'
+
+    def __str__(self):
+        return f'RelationsReminderSent {self.pk}'

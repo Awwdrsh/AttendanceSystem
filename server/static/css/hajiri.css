@@ -567,3 +567,23 @@ dialog[open].hj-modal { animation: hj-pop .14s ease; }
   .hj-shell { display: block; } .hj-main { background: none; } .hj-page { padding: 0; max-width: none; }
   body { background: #fff; color: #000; }
 }
+
+/* Company switcher (groups of companies): the sidebar button opens a menu of the person's companies. */
+.hj-company-switch { position: relative; margin: 0 0 8px; }
+.hj-company-btn {
+  width: 100%; height: 32px; border: 1px solid var(--hj-line); background: var(--hj-surface); border-radius: 6px; padding: 0 8px 0 10px;
+  color: var(--hj-text); font: inherit; font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 8px; min-width: 0;
+}
+button.hj-company-btn { cursor: pointer; }
+button.hj-company-btn:hover { border-color: var(--hj-line-strong); }
+.hj-company-btn.static { background: transparent; }
+.hj-company-code {
+  font-family: var(--hj-mono); font-size: 10.5px; font-weight: 500; color: var(--hj-muted); border: 1px solid var(--hj-line);
+  border-radius: 4px; padding: 0 5px; line-height: 18px; white-space: nowrap; flex: none;
+}
+.hj-company-switch .hj-menu { left: 0; right: 0; top: calc(100% + 4px); }
+.hj-company-switch .hj-menu-item { gap: 8px; }
+.hj-company-switch form { margin: 0; }
+.hj-company-switch.compact { margin: 0; }
+.hj-company-switch.compact .hj-company-btn { width: auto; max-width: 46vw; padding: 0 6px 0 8px; }
+.hj-company-switch.compact .hj-menu { left: auto; right: 0; width: min(80vw, 280px); }

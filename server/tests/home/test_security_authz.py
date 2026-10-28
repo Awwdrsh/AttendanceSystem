@@ -12,7 +12,7 @@ from django.test import Client
 
 from hajiri.core import auth
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError, ValidationError
 from tests.core.fixtures import PW
 from tests.web.factories import bearer, htmx

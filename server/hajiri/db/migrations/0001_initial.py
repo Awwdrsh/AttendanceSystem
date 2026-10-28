@@ -6,28 +6,49 @@ import django.db.models.deletion
 import django.db.models.functions.datetime
 from django.db import migrations, models
 
+import hashlib
 from pathlib import Path
 
 LAST_TS_MIGRATION = '0030_features_reports.sql'
 SCHEMA_SQL = Path(__file__).with_name('0001_schema.sql')
 
 
+TS_SQL_DIR = Path(__file__).with_name('ts_sql')
+
+
+def _catch_up_ts_schema(cur, latest):
+    """
+    Bring a database built by an older TypeScript release up to LAST_TS_MIGRATION by applying the original SQL
+    migrations it is missing, exactly as the TS runner did: in name order, each recorded with its sha256, and an
+    already-applied file whose contents changed is an error.
+    """
+    cur.execute('SELECT name, checksum FROM schema_migrations')
+    applied = dict(cur.fetchall())
+    for f in sorted(TS_SQL_DIR.glob('[0-9][0-9][0-9][0-9]_*.sql')):
+        sql = f.read_bytes()
+        checksum = hashlib.sha256(sql).hexdigest()
+        if f.name in applied:
+            if applied[f.name] != checksum:
+                raise RuntimeError(f'Migration {f.name} was modified after being applied (checksum mismatch)')
+            continue
+        cur.execute(sql.decode('utf-8'))
+        cur.execute('INSERT INTO schema_migrations (name, checksum) VALUES (%s, %s)', [f.name, checksum])
+
+
 def apply_schema(apps, schema_editor):
-    """Create the schema on an empty database; adopt it as-is on one built by the TS SQL migrations."""
+    """Create the schema on an empty database; adopt one built by the TS SQL migrations, catching it up if older."""
     with schema_editor.connection.cursor() as cur:
         cur.execute("SELECT to_regclass('public.schema_migrations') IS NOT NULL, to_regclass('public.employee') IS NOT NULL")
         has_ts_log, has_tables = cur.fetchone()
         if not has_tables:
             cur.execute(SCHEMA_SQL.read_bytes().decode('utf-8'))  # bytes: a CHECK holds a literal \r
             return
-        latest = None
-        if has_ts_log:
-            cur.execute('SELECT max(name) FROM schema_migrations')
-            latest = cur.fetchone()[0]
+        if not has_ts_log:
+            raise RuntimeError('This database has Hajiri tables but no schema_migrations log, so its version is unknown.')
+        cur.execute('SELECT max(name) FROM schema_migrations')
+        latest = cur.fetchone()[0]
         if latest != LAST_TS_MIGRATION:
-            raise RuntimeError(
-                f'This database has Hajiri tables but its TS schema is at {latest or "an unknown version"}, not '
-                f'{LAST_TS_MIGRATION}. Run `pnpm db:migrate` first, then migrate again.')
+            _catch_up_ts_schema(cur, latest)
 
 
 class Migration(migrations.Migration):

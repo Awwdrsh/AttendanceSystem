@@ -5,17 +5,19 @@ it off, so the setting stores only the keys that are off (a module added later s
 """
 from __future__ import annotations
 
-import json
 import time
 from functools import wraps
 
 from django.db import transaction
+from rest_framework import serializers
 
 from hajiri.core.audit import audit
 from hajiri.core.auth import AuthUser, company_id_of, has_role
-from hajiri.core.db import execute, one
 from hajiri.core.errors import FeatureOffError, ForbiddenError
-from hajiri.core.schema import Bool, Obj, Record, parse
+from hajiri.core.settings_store import get_setting, put_setting
+from hajiri.core.validation import validate
+
+from hajiri.company_settings.fields import JsonBool, StrictSerializer
 
 FEATURES = (
     {'key': 'time', 'label': 'Time tracking & timesheets', 'description': 'Project timer, weekly timesheets, projects and clients.', 'group': 'Time & attendance'},
@@ -52,8 +54,7 @@ def disabled_features(company_id: str) -> frozenset[str]:
     hit = _cache.get(cid)
     if hit and time.monotonic() - hit[0] < _TTL:
         return hit[1]
-    r = one('SELECT value FROM company_setting WHERE company_id = %s AND key = %s', [cid, FEATURE_SETTING])
-    raw = (r or {}).get('value') or {}
+    raw = get_setting(cid, FEATURE_SETTING) or {}
     off_raw = raw.get('off') if isinstance(raw, dict) else None
     off = frozenset(k for k in (off_raw if isinstance(off_raw, list) else []) if isinstance(k, str) and k in FEATURE_KEYS)
     _cache[cid] = (time.monotonic(), off)
@@ -92,7 +93,15 @@ def get_features(user: AuthUser) -> dict:
     return view(disabled_features(company_id_of(user)))
 
 
-SET_BODY = Obj({'enabled': Record(Bool(), keys=FEATURE_KEYS)}, strict=True)
+class FeaturesIn(StrictSerializer):
+    """{'enabled': {key: bool}} for the keys to change (z.partialRecord(z.enum(keys), z.boolean()).strict())."""
+    enabled = serializers.DictField(child=JsonBool())
+
+    def validate_enabled(self, value):
+        unknown = [k for k in value if k not in FEATURE_KEYS]
+        if unknown:
+            raise serializers.ValidationError({k: 'Invalid key in record' for k in unknown})
+        return value
 
 
 @transaction.atomic
@@ -101,15 +110,13 @@ def set_features(user: AuthUser, body: dict) -> dict:
     if not has_role(user, 'hr'):
         raise ForbiddenError('requires role hr or admin')
     company_id = company_id_of(user)
-    b = parse(SET_BODY, body)
+    b = validate(FeaturesIn, body)
     before = disabled_features(company_id)
     off = set(before)
     for k, on in b['enabled'].items():
         (off.discard if on else off.add)(k)
     value = {'off': [k for k in FEATURE_KEYS if k in off]}
-    execute("""INSERT INTO company_setting (company_id, key, value, updated_by) VALUES (%s, %s, %s, %s)
-               ON CONFLICT (company_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now(), updated_by = EXCLUDED.updated_by""",
-            [company_id, FEATURE_SETTING, json.dumps(value), user.id])
+    put_setting(company_id, FEATURE_SETTING, value, updated_by=user.id)
     invalidate_features(company_id)
     audit('update', 'company_setting', actor_id=user.id, row_id=FEATURE_SETTING,
           before={'off': [k for k in FEATURE_KEYS if k in before]}, after=value)

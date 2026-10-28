@@ -1,9 +1,10 @@
 """
-Leave pages: Time off (/me/leave), the Leave hub (/leave team calendar, /leave/balances, /leave/policies), their HTMX
-fragments under /_/leave/..., and the JSON API under /api/v1/leave/... (documented in docs/api.md for Bearer-token
-integrations, same paths and shapes as the TS API).
+Leave pages: Time off (/me/leave), the Leave hub (/leave team calendar, /leave/balances, /leave/policies) and their
+HTMX fragments under /_/leave/.... The JSON API under /api/v1/leave/... is in api.py.
 """
 from __future__ import annotations
+
+from datetime import timedelta
 
 from django.http import HttpResponse
 from django.shortcuts import render
@@ -12,17 +13,17 @@ from django.utils.html import format_html
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from hajiri.core.auth import company_id_of
-from hajiri.core.db import one, rows
-from hajiri.core.errors import BadRequestError, HttpError, NotFoundError, ValidationError, error_body
-from hajiri.core.http import api_view, json_response, read_json
-from hajiri.core.schema import is_uuid, parse_uuid
+from hajiri.core.errors import BadRequestError, HttpError, NotFoundError, ValidationError
+from hajiri.core.scoping import is_uuid
+from hajiri.db.models import Holiday
 from hajiri.web import format as fmt
 from hajiri.web.decorators import login_required, require_module, require_role
-from hajiri.web.htmx import close_modal, is_htmx, refresh, toast, trigger
+from hajiri.web.htmx import close_modal, refresh, toast, trigger
 from hajiri.web.tables import Column, Table, table_response
 
 from . import services
-from .forms import adjust_body, apply_body, preview_query, type_body
+from .forms import AdjustForm, ApplyForm, PreviewForm, TypeForm
+from .service import day, hhmm
 
 LEAVE_HUB_ROLES = ('manager', 'hr', 'attendance_admin')
 
@@ -54,18 +55,23 @@ def _half_label(h) -> str:
     return 'first half' if h == 'first_half' else 'second half'
 
 
+def _holiday_names(company_id: str, start, end) -> dict[str, list[str]]:
+    """Every holiday of the company in [start, end] (all branches, gender scopes and optional ones), by date."""
+    out: dict[str, list[str]] = {}
+    for d, name in (Holiday.objects.for_company(company_id).filter(local_date__range=(day(start), day(end)))
+                    .order_by('local_date', 'name_en').values_list('local_date', 'name_en')):
+        out.setdefault(fmt.iso_of(d), []).append(name)
+    return out
+
+
 def _holidays_for(company_id: str) -> dict[str, str]:
     """
     Holidays 60 days back to 120 ahead for the date pickers. LeaveApplyForm read GET /shifts/calendar, which lists every
     holiday of the company in the window (all branches, gender scopes and optional ones), names joined with ', '.
     """
-    today = fmt.today_npt()
-    hol = rows("""SELECT local_date, name_en FROM holiday WHERE company_id = %s AND local_date BETWEEN %s::date - 60 AND %s::date + 120
-                   ORDER BY local_date, name_en""", [company_id, today, today])
-    out: dict[str, list[str]] = {}
-    for h in hol:
-        out.setdefault(fmt.iso_of(h['local_date']), []).append(h['name_en'])
-    return {d: ', '.join(names) for d, names in out.items()}
+    today = day(fmt.today_npt())
+    names = _holiday_names(company_id, today - timedelta(days=60), today + timedelta(days=120))
+    return {d: ', '.join(n) for d, n in names.items()}
 
 
 # ================================================================ Time off (/me/leave)
@@ -75,7 +81,7 @@ def _request_dates(r) -> str:
     if r.get('half_day'):
         text = format_html('{}<span class="hj-sm hj-muted"> ({})</span>', text, _half_label(r['half_day']))
     if r.get('from_time'):
-        text = format_html('{}<span class="hj-sm hj-muted num"> {}–{}</span>', text, r['from_time'], r['to_time'])
+        text = format_html('{}<span class="hj-sm hj-muted num"> {}–{}</span>', text, hhmm(r['from_time']), hhmm(r['to_time']))
     return text
 
 
@@ -116,7 +122,7 @@ def _my_stats(balances: list[dict]) -> list[dict]:
 def my_leave(request):
     user = request.hajiri_user
     company_id_of(user)
-    reqs = services.list_requests(user, {'scope': 'own'}) if user.employee_id else []
+    reqs = services.request_values(services.requests_queryset(user, {'scope': 'own'})) if user.employee_id else []
     table = Table(request, reqs, MY_COLUMNS, id='my-leave', page_size=25, empty_title='No time off requested yet',
                   empty_hint='Use Request time off to ask for leave. Your manager is notified straight away.')
     if table.is_partial or table.wants_csv:
@@ -196,14 +202,13 @@ def apply(request):
     if not is_uuid(employee_id):
         raise NotFoundError('employee not found')
     inline = (request.GET.get('inline') or request.POST.get('inline')) == '1'
-    emp = services.get_employee_lite(employee_id)
-    if not emp or emp['company_id'] != user.company_id:
+    if not services.get_employee_lite(employee_id, user.company_id):
         raise NotFoundError('employee not found')
     services.assert_manages(user, employee_id, 'attendance')
     if request.method == 'GET':
         return render(request, 'leave/partials/apply.html', _apply_ctx(request, employee_id, inline))
     try:
-        r = services.create_request(user, apply_body(request.POST, employee_id))
+        r = services.create_request(user, ApplyForm(request.POST).body(employee_id))
     except services.LeaveSuggestionError as e:
         ctx = _apply_ctx(request, employee_id, inline, request.POST.dict(),
                          {'msg': e.message, 'paidDays': e.suggestion.get('paidDays'),
@@ -236,7 +241,7 @@ def _err_text(e: HttpError) -> str:
 def preview(request):
     """The deduction line under the apply form; nothing when the inputs are incomplete or not allowed (TS: setPreview(null))."""
     user = request.hajiri_user
-    q = preview_query(request.GET)
+    q = PreviewForm(request.GET).query()
     if not q:
         return HttpResponse('')
     try:
@@ -277,10 +282,7 @@ def calendar(request):
     cells = fmt.bs_month_grid(y, m)
     start, end = cells[0].ad, cells[-1].ad
     off_map = {d['date']: d['off'] for d in services.team_calendar(user, start, end)}
-    hol: dict[str, list[str]] = {}
-    for h in rows("""SELECT local_date, name_en FROM holiday WHERE company_id = %s AND local_date BETWEEN %s AND %s
-                      ORDER BY local_date, name_en""", [company, start, end]):
-        hol.setdefault(fmt.iso_of(h['local_date']), []).append(h['name_en'])
+    hol = _holiday_names(company, start, end)
     in_month = [c for c in cells if c.in_month]
     grid = []
     for i, c in enumerate(cells):
@@ -333,6 +335,7 @@ def _balances_ctx(request, employee_id: str | None) -> dict:
         for b in ctx['balances']:
             b['balance_text'] = services.fixed(b['balance'], 2)
             b['available_text'] = services.fixed(b['available'], 2)
+        # A list (newest 500), so entries of the same day keep their posting order when sorted by date.
         ctx['ledger'] = Table(request, services.ledger(user, employee_id), LEDGER_COLUMNS, id='leave-ledger', page_size=25,
                               default_sort='-effective_date', empty_title='No ledger entries yet',
                               empty_hint='Entries appear here when leave is allocated, taken or adjusted.',
@@ -351,7 +354,7 @@ def balances(request):
         return ctx['ledger'].csv_response()
     if employee_id and ctx['ledger'].is_partial:
         return render(request, 'components/data_table.html', {'table': ctx['ledger']})
-    if is_htmx(request) and request.headers.get('HX-Target') == 'leave-balances':
+    if request.htmx.target == 'leave-balances':
         return render(request, 'leave/partials/balances_panel.html', ctx)
     return render(request, 'leave/balances.html', ctx)
 
@@ -359,7 +362,7 @@ def balances(request):
 @require_POST
 @require_module('attendance')
 def adjust(request):
-    r = services.adjust(request.hajiri_user, adjust_body(request.POST))
+    r = services.adjust(request.hajiri_user, AdjustForm(request.POST).body())
     resp = HttpResponse(status=204)
     refresh(resp, 'leave-balances')
     return toast(request, resp, f"Adjustment posted. New balance is {services.fixed(r['balance'], 2)} days.")
@@ -398,7 +401,7 @@ def policies(request):
         t['accrual_text'] = _accrual_text(t)
         t['cite'] = CITATION.get(t['code'], 'Company policy')
     ctx = {'types': types}
-    if is_htmx(request) and request.headers.get('HX-Target') == 'leave-types':
+    if request.htmx.target == 'leave-types':
         return render(request, 'leave/partials/types_table.html', ctx)
     return render(request, 'leave/policies.html', ctx)
 
@@ -444,24 +447,17 @@ def _type_saved(request) -> HttpResponse:
 def type_new(request):
     if request.method == 'GET':
         return render(request, 'leave/partials/type_form.html', _type_form_ctx(request, None))
-    services.create_type(request.hajiri_user, type_body(request.POST, locked=False, partial=False))
+    services.create_type(request.hajiri_user, TypeForm(request.POST, locked=False, partial=False).body())
     return _type_saved(request)
-
-
-def _own_type(request, id) -> dict:
-    t = one('SELECT * FROM leave_type WHERE id = %s AND company_id = %s', [str(id), request.hajiri_user.company_id])
-    if not t:
-        raise NotFoundError('leave type not found')
-    return services._type_row(t)
 
 
 @require_http_methods(['GET', 'POST'])
 @require_module('attendance')
 def type_edit(request, id):
-    t = _own_type(request, id)
+    t = services.own_type(request.hajiri_user, id)
     if request.method == 'GET':
         return render(request, 'leave/partials/type_form.html', _type_form_ctx(request, t))
-    services.update_type(request.hajiri_user, t['id'], type_body(request.POST, locked=t['statutory'], partial=True))
+    services.update_type(request.hajiri_user, t['id'], TypeForm(request.POST, locked=t['statutory'], partial=True).body())
     return _type_saved(request)
 
 
@@ -480,110 +476,3 @@ def type_move(request, id):
         services.reorder_types(request.hajiri_user, ids)
     resp = HttpResponse(status=204)
     return refresh(resp, 'leave-types')
-
-
-# ================================================================ JSON API (/api/v1/leave, TS paths and shapes)
-
-def _api_error(e: HttpError):
-    body = error_body(e)
-    if isinstance(e, services.LeaveSuggestionError):
-        body['suggestion'] = e.suggestion
-    return json_response(body, status=e.status)
-
-
-def _api(methods):
-    def deco(fn):
-        @api_view(methods=methods)
-        def view(request, *args, **kwargs):
-            try:
-                return fn(request, *args, **kwargs)
-            except services.LeaveSuggestionError as e:
-                return _api_error(e)
-        view.__name__ = fn.__name__
-        return view
-    return deco
-
-
-def _module_gate(request, area='attendance'):
-    services._require_module(request.hajiri_user, area)
-
-
-@_api(('GET', 'POST'))
-def api_types(request):
-    if request.method == 'GET':
-        return {'types': services.list_types(request.hajiri_user)}
-    _module_gate(request)
-    return json_response({'id': services.create_type(request.hajiri_user, read_json(request))}, status=201)
-
-
-@_api(('PATCH',))
-def api_type(request, id):
-    _module_gate(request)
-    services.update_type(request.hajiri_user, parse_uuid(id), read_json(request))
-    return {'ok': True}
-
-
-@_api(('POST',))
-def api_types_order(request):
-    from hajiri.core.schema import Arr, Obj, Uuid, parse
-    if not services.has_role(request.hajiri_user, 'hr'):
-        from hajiri.core.errors import ForbiddenError
-        raise ForbiddenError('requires role hr')
-    b = parse(Obj({'ids': Arr(Uuid(), min=1, max=100)}), read_json(request))
-    services.reorder_types(request.hajiri_user, b['ids'])
-    return {'ok': True}
-
-
-def _query(request, keys) -> dict:
-    return {k: request.GET[k] for k in keys if k in request.GET}
-
-
-@_api(('GET',))
-def api_balances(request):
-    from hajiri.core.schema import IsoDate, Obj, Uuid, parse
-    q = parse(Obj({'employeeId': Uuid(optional=True), 'asOf': IsoDate(optional=True)}), _query(request, ('employeeId', 'asOf')))
-    return services.get_balances(request.hajiri_user, q.get('employeeId'), q.get('asOf'))
-
-
-@_api(('GET',))
-def api_preview(request):
-    return services.preview(request.hajiri_user, _query(request, ('employeeId', 'leaveTypeId', 'from', 'to', 'halfDay', 'fromTime', 'toTime')))
-
-
-@_api(('GET', 'POST'))
-def api_requests(request):
-    if request.method == 'GET':
-        return {'requests': services.list_requests(request.hajiri_user, _query(request, ('employeeId', 'status', 'from', 'to', 'scope')))}
-    return json_response(services.create_request(request.hajiri_user, read_json(request)), status=201)
-
-
-@_api(('POST',))
-def api_cancel(request, id):
-    services.cancel_request(request.hajiri_user, parse_uuid(id), read_json(request) or {})
-    return {'ok': True}
-
-
-@_api(('POST',))
-def api_accrual_run(request):
-    _module_gate(request)
-    return services.run_accrual(request.hajiri_user)
-
-
-@_api(('POST',))
-def api_adjust(request):
-    _module_gate(request)
-    return json_response(services.adjust(request.hajiri_user, read_json(request)), status=201)
-
-
-@_api(('GET',))
-def api_ledger(request):
-    from hajiri.core.schema import Obj, Uuid, parse
-    q = parse(Obj({'employeeId': Uuid(optional=True), 'leaveTypeId': Uuid(optional=True)}), _query(request, ('employeeId', 'leaveTypeId')))
-    return {'ledger': services.ledger(request.hajiri_user, q.get('employeeId'), q.get('leaveTypeId'))}
-
-
-@_api(('GET',))
-def api_team_calendar(request):
-    q = _query(request, ('from', 'to'))
-    return {'days': services.team_calendar(request.hajiri_user, q.get('from'), q.get('to'))}
-

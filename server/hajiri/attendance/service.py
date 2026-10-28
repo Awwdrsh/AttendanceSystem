@@ -6,12 +6,12 @@ and recompute_queued_for after their transaction commits so the corrected day sh
 """
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 
-from django.db import transaction
+from django.db import connection, transaction
+from django.db.models.functions import Now
 
 from engines.attendance import (
     DEFAULT_POLICY, NPT_OFFSET_MIN, MIN_MS, AttendanceDay, AttendancePolicy, ComputeDayInput, DayContext, Flag,
@@ -19,10 +19,11 @@ from engines.attendance import (
 )
 from engines.bs_calendar import weekday_of
 
-from hajiri.core.db import execute, one, rows
 from hajiri.core.errors import BadRequestError, NotFoundError
+from hajiri.db.models import AttendanceDay, Employee, OtSlip, PayrollPeriod, RecomputeQueue
 
 from . import repo
+from .repo import latest_days  # noqa: F401 - the queryset of latest day versions, used by other modules
 
 log = logging.getLogger('hajiri.attendance')
 
@@ -65,7 +66,10 @@ def policy_from_settings(v: dict) -> AttendancePolicy:
 def recompute_day(employee_id: str, local_date: str) -> RecomputeResult:
     """Recompute one (employee, date) under an advisory lock, in its own transaction (a savepoint when nested)."""
     with transaction.atomic():
-        execute('SELECT pg_advisory_xact_lock(hashtext(%s))', [f'recompute:{employee_id}:{local_date}'])
+        with connection.cursor() as cur:
+            # Raw SQL: a PostgreSQL advisory lock, with the same key the TS stack takes, so the two never recompute
+            # one day at once.
+            cur.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', [f'recompute:{employee_id}:{local_date}'])
         return _recompute_in_tx(str(employee_id), str(local_date))
 
 
@@ -109,40 +113,39 @@ def _recompute_in_tx(employee_id: str, local_date: str) -> RecomputeResult:
         return RecomputeResult(day, latest['version'], False, False)
 
     version = (latest['version'] if latest else 0) + 1
-    ins = one("""
-        INSERT INTO attendance_day (employee_id, local_date, bs_date, version, shift_id, status, first_in, last_out,
-          worked_min, break_min, late_min, early_min, ot_min, ot, flags, punch_ids, inputs_hash)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::uuid[], %s) RETURNING id""",
-        [employee_id, local_date, repo.bs_date_for(local_date), version, shift.id if shift else None, day.status,
-         None if day.first_in_ms is None else repo.from_ms(day.first_in_ms),
-         None if day.last_out_ms is None else repo.from_ms(day.last_out_ms),
-         day.worked_min, day.break_min, day.late_min, day.early_min, day.ot.minutes, json.dumps(day.ot.to_dict()),
-         json.dumps([f.to_dict() for f in flags]), list(day.punch_ids), day.inputs_hash])
+    row = AttendanceDay.objects.create(
+        employee_id=employee_id, local_date=local_date, bs_date=repo.bs_date_for(local_date), version=version,
+        shift_id=shift.id if shift else None, status=day.status,
+        first_in=None if day.first_in_ms is None else repo.from_ms(day.first_in_ms),
+        last_out=None if day.last_out_ms is None else repo.from_ms(day.last_out_ms),
+        worked_min=day.worked_min, break_min=day.break_min, late_min=day.late_min, early_min=day.early_min,
+        ot_min=day.ot.minutes, ot=day.ot.to_dict(), flags=[f.to_dict() for f in flags], punch_ids=list(day.punch_ids),
+        inputs_hash=day.inputs_hash)
 
-    # OT detected -> slip. An already approved or posted slip is never overwritten by a recompute.
+    # OT detected -> slip. An already approved or posted slip is never overwritten by a recompute (the advisory lock
+    # above keeps this update-or-insert from racing another recompute of the day).
+    slip = OtSlip.objects.filter(employee_id=employee_id, local_date=local_date)
     if day.ot.minutes > 0:
-        execute("""
-            INSERT INTO ot_slip (employee_id, local_date, attendance_day_id, detected_min, multiplier, day_type)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (employee_id, local_date) DO UPDATE SET attendance_day_id = EXCLUDED.attendance_day_id,
-              detected_min = EXCLUDED.detected_min, multiplier = EXCLUDED.multiplier, day_type = EXCLUDED.day_type
-            WHERE ot_slip.status = 'detected'""",
-            [employee_id, local_date, ins['id'], day.ot.minutes, day.ot.multiplier, day.ot.day_type])
+        fields = {'attendance_day_id': row.pk, 'detected_min': day.ot.minutes, 'multiplier': day.ot.multiplier,
+                  'day_type': day.ot.day_type}
+        if not slip.filter(status=OtSlip.Status.DETECTED).update(**fields):
+            OtSlip.objects.bulk_create([OtSlip(employee_id=employee_id, local_date=local_date, **fields)],
+                                       ignore_conflicts=True)
     else:
-        execute("DELETE FROM ot_slip WHERE employee_id = %s AND local_date = %s AND status = 'detected'", [employee_id, local_date])
+        slip.filter(status=OtSlip.Status.DETECTED).delete()
     return RecomputeResult(replace(day, flags=flags), version, True, False)
 
 
 def enqueue_recompute(items, reason: str) -> None:
-    """Queue (employee, date) pairs for the worker. Idempotent; one statement per 5,000 pairs.
-    `items` holds (employee_id, local_date) tuples or {'employeeId', 'localDate'} dicts."""
-    pairs = [(str(x['employeeId']), str(x['localDate'])) if isinstance(x, dict) else (str(x[0]), str(x[1])) for x in items]
+    """Queue (employee, date) pairs for the worker. Idempotent (a queued pair gets the new time and reason); one
+    statement per 5,000 pairs. `items` holds (employee_id, local_date) tuples or {'employeeId', 'localDate'} dicts."""
+    pairs = list(dict.fromkeys((str(x['employeeId']), str(x['localDate'])) if isinstance(x, dict) else (str(x[0]), str(x[1]))
+                               for x in items))
     for i in range(0, len(pairs), 5000):
-        chunk = pairs[i:i + 5000]
-        execute("""INSERT INTO recompute_queue (employee_id, local_date, reason)
-                   SELECT e, d, %s FROM unnest(%s::uuid[], %s::date[]) AS t(e, d)
-                   ON CONFLICT (employee_id, local_date) DO UPDATE SET enqueued_at = now(), reason = EXCLUDED.reason""",
-                [reason, [p[0] for p in chunk], [p[1] for p in chunk]])
+        # enqueued_at is left to its database default (now()), which the conflict update copies too.
+        RecomputeQueue.objects.bulk_create([RecomputeQueue(employee_id=e, local_date=d, reason=reason) for e, d in pairs[i:i + 5000]],
+                                           update_conflicts=True, unique_fields=['employee', 'local_date'],
+                                           update_fields=['enqueued_at', 'reason'])
 
 
 def date_range(from_: str | date, to: str | date) -> list[str]:
@@ -157,26 +160,31 @@ def date_range(from_: str | date, to: str | date) -> list[str]:
     return out
 
 
+DAY_FIELDS = ('id', 'employee_id', 'local_date', 'bs_date', 'version', 'status', 'shift_id', 'first_in', 'last_out',
+              'worked_min', 'break_min', 'late_min', 'early_min', 'ot_min', 'ot', 'flags', 'computed_at', 'locked_at')
+
+
 def list_days(employee_id: str, from_: str, to: str) -> list[dict]:
     """Latest version of each day in [from, to]."""
-    return rows("""SELECT id, employee_id, local_date, bs_date, version, status, shift_id, first_in, last_out,
-                          worked_min, break_min, late_min, early_min, ot_min, ot, flags, computed_at, locked_at
-                     FROM v_attendance_latest WHERE employee_id = %s AND local_date BETWEEN %s AND %s ORDER BY local_date""",
-                [employee_id, from_, to])
+    return list(latest_days().filter(employee_id=employee_id, local_date__range=(from_, to)).order_by('local_date')
+                .values(*DAY_FIELDS))
+
+
+def _locked_periods(company_id, local_date):
+    return PayrollPeriod.objects.for_company(company_id).filter(attendance_locked_at__isnull=False, start_ad__lte=local_date,
+                                                                end_ad__gte=local_date)
 
 
 def _period_locked(company_id: str, local_date: str) -> bool:
-    return one("""SELECT 1 AS x FROM payroll_period WHERE company_id = %s AND attendance_locked_at IS NOT NULL
-                   AND %s::date BETWEEN start_ad AND end_ad LIMIT 1""", [company_id, local_date]) is not None
+    return _locked_periods(company_id, local_date).exists()
 
 
 def is_attendance_locked(employee_id: str, local_date: str) -> bool:
     """Frozen by payroll: the day's latest version is locked, or its payroll period's attendance is."""
-    return one("""SELECT 1 AS x FROM v_attendance_latest WHERE employee_id = %(e)s AND local_date = %(d)s AND locked_at IS NOT NULL
-                  UNION ALL
-                  SELECT 1 FROM payroll_period p JOIN employee e ON e.company_id = p.company_id
-                   WHERE e.id = %(e)s AND p.attendance_locked_at IS NOT NULL AND %(d)s::date BETWEEN p.start_ad AND p.end_ad
-                  LIMIT 1""", {'e': employee_id, 'd': local_date}) is not None
+    if latest_days().filter(employee_id=employee_id, local_date=local_date, locked_at__isnull=False).exists():
+        return True
+    company_id = Employee.objects.filter(pk=employee_id).values_list('company_id', flat=True).first()
+    return company_id is not None and _period_locked(company_id, local_date)
 
 
 def dates_for_punch(at_ms: int) -> list[str]:
@@ -198,25 +206,23 @@ def recompute_for_punch(employee_id: str, at_ms: int, punch_id: str) -> Recomput
 def recompute_queued_for(employee_id: str) -> int:
     """Process this employee's queued recomputes now (after an approval commits). Skipped when more than
     INLINE_RECOMPUTE_MAX days are queued; a failure stays queued for the worker."""
-    q = rows("""SELECT local_date::text AS d FROM recompute_queue WHERE employee_id = %s AND enqueued_at <= now()
-                 ORDER BY local_date LIMIT %s""", [employee_id, INLINE_RECOMPUTE_MAX + 1])
+    q = [d.isoformat() for d in RecomputeQueue.objects.filter(employee_id=employee_id, enqueued_at__lte=Now())
+         .order_by('local_date').values_list('local_date', flat=True)[:INLINE_RECOMPUTE_MAX + 1]]
     if not q or len(q) > INLINE_RECOMPUTE_MAX:
         return 0
     n = 0
-    for r in q:
+    for d in q:
         try:
             with transaction.atomic():
-                recompute_day(employee_id, r['d'])
-                execute('DELETE FROM recompute_queue WHERE employee_id = %s AND local_date = %s', [employee_id, r['d']])
+                recompute_day(employee_id, d)
+                RecomputeQueue.objects.filter(employee_id=employee_id, local_date=d).delete()
             n += 1
         except Exception:  # noqa: BLE001 - left queued; the worker retries with backoff
-            log.warning('inline recompute failed for %s %s; left queued', employee_id, r['d'], exc_info=True)
+            log.warning('inline recompute failed for %s %s; left queued', employee_id, d, exc_info=True)
     return n
 
 
 def lock_attendance(company_id: str, from_: str, to: str) -> int:
     """Lock every latest attendance_day in a period for a company (payroll pre-flight). Returns rows locked."""
-    return execute("""UPDATE attendance_day a SET locked_at = now()
-                        FROM v_attendance_latest v JOIN employee e ON e.id = v.employee_id
-                       WHERE a.id = v.id AND e.company_id = %s AND v.local_date BETWEEN %s AND %s AND a.locked_at IS NULL""",
-                   [company_id, from_, to])
+    return (latest_days().for_company(company_id).filter(local_date__range=(from_, to), locked_at__isnull=True)
+            .update(locked_at=Now()))

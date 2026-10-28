@@ -14,21 +14,23 @@ from django.utils.html import format_html
 from django.utils.safestring import mark_safe
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from engines.bs_calendar import BS_MONTH_NAMES_EN
+from engines.bs_calendar import BS_MONTH_NAMES_EN, BsRangeError, bs_month_bounds
 from hajiri.core.auth import MODULE_ROLES, company_id_of
-from hajiri.core.errors import BadRequestError
+from hajiri.db.models import ShiftSwap
 from hajiri.web.decorators import login_required, require_module, require_role
 from hajiri.web.format import fmt_date_short, fmt_gregorian, minutes_to_hm, safe_ad_to_bs, today_npt
-from hajiri.web.htmx import close_modal, htmx_target, is_htmx, refresh, toast
+from hajiri.web.htmx import close_modal, htmx_target, refresh, toast
 from hajiri.web.tables import Column, Table, table_response
 
 from . import services
-from .forms import AssignForm, HolidayForm, ShiftForm
+from .forms import AssignForm, HolidayForm, HolidayImportForm, RosterCellForm, ShiftForm
 
 WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-SWAP_LABEL = {'awaiting_colleague': 'Waiting for colleague', 'pending': 'Waiting for approval', 'approved': 'Approved',
-              'rejected': 'Not approved', 'declined': 'Declined', 'cancelled': 'Cancelled'}
-SWAP_TONE = {'approved': 'ok', 'pending': 'info'}
+SwapStatus = ShiftSwap.Status
+SWAP_LABEL = {SwapStatus.AWAITING_COLLEAGUE: 'Waiting for colleague', SwapStatus.PENDING: 'Waiting for approval',
+              SwapStatus.APPROVED: 'Approved', SwapStatus.REJECTED: 'Not approved', SwapStatus.DECLINED: 'Declined',
+              SwapStatus.CANCELLED: 'Cancelled'}
+SWAP_TONE = {SwapStatus.APPROVED: 'ok', SwapStatus.PENDING: 'info'}
 
 
 def _done(request, message: str | None, *refreshes: str, close: bool = False) -> HttpResponse:
@@ -140,6 +142,14 @@ def shift_delete(request, id):
 
 # ================================================================ holidays
 
+def _bs_year_span(year: int) -> dict:
+    """{from, to}: the AD dates of the BS year (1 Baishakh to the last of Chaitra); {} outside the BS table."""
+    try:
+        return {'from': bs_month_bounds(year, 1)['startAd'], 'to': bs_month_bounds(year, 12)['endAd']}
+    except BsRangeError:
+        return {}
+
+
 def _holidays_ctx(request) -> dict:
     user = request.hajiri_user
     today = today_npt()
@@ -149,7 +159,7 @@ def _holidays_ctx(request) -> dict:
     except ValueError:
         year = cur.year if cur else 2083
     in_year = []
-    for h in services.holidays(user):
+    for h in services.holidays(user, _bs_year_span(year)):
         iso = h['local_date'].isoformat() if isinstance(h['local_date'], date) else str(h['local_date'])
         b = safe_ad_to_bs(iso)
         if not b or b.year != year:
@@ -220,11 +230,7 @@ def holiday_delete(request, id):
 @require_POST
 @login_required
 def holiday_import(request):
-    try:
-        year = int(request.POST.get('bs_year') or 2083)
-    except ValueError:
-        raise BadRequestError('bsYear: Expected number')
-    r = services.import_default_holidays(request.hajiri_user, {'bsYear': year})
+    r = services.import_default_holidays(request.hajiri_user, HolidayImportForm(request.POST).body())
     return _done(request, f"{r['inserted']} of {r['total']} public holidays added.", 'holidays')
 
 
@@ -299,12 +305,11 @@ def roster_grid(request):
 def roster_cell(request):
     """One cell changed: '' follows the normal shift (the row is removed), 'off' rosters the person off, else a shift id."""
     user = request.hajiri_user
-    employee_id, local_date, value = request.POST.get('employee_id', ''), request.POST.get('date', ''), request.POST.get('value', '')
-    if value == '':
-        services.clear_roster(user, {'employeeId': employee_id, 'localDate': local_date})
+    form = RosterCellForm(request.POST)
+    if form.is_clear():
+        services.clear_roster(user, form.clear_body())
     else:
-        services.save_roster(user, {'rows': [{'employeeId': employee_id, 'localDate': local_date,
-                                              'shiftId': None if value == 'off' else value}]})
+        services.save_roster(user, form.save_body())
     return render(request, 'shifts/partials/roster_grid.html', _grid_ctx(request, _week_start(request)))
 
 

@@ -1,0 +1,11 @@
+<form class="hj-form" data-modal-title="Give access to this company" data-modal-size="lg" hx-post="{% url 'web:group_access_new' %}" hx-target="this" hx-swap="outerHTML">
+  {% form_errors form %}
+  <p class="hj-help">The person signs in as usual and switches to this company from the sidebar. What they can do here depends only on the roles below.</p>
+  {% form_field form.email %}
+  <fieldset class="hj-fieldset"><legend class="hj-label">Roles in this company <span class="req">*</span></legend>
+    {% for choice in form.roles %}<label class="hj-check">{{ choice.tag }} <span>{{ choice.choice_label }}</span> <span class="hj-help">{{ role_help|get_item:choice.data.value }}</span></label>{% endfor %}
+    {% if form.roles.errors %}<div class="hj-error">{{ form.roles.errors|first }}</div>{% endif %}
+  </fieldset>
+  {% employee_picker "employee_id" value=form.employee_id.value label="Employee record in this company (optional)" %}
+  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit">Give access</button></div>
+</form>

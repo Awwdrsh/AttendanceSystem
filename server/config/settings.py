@@ -1,9 +1,11 @@
 """
 Django settings for Hajiri.
 
-Reads the same environment as the TypeScript API (apps/api/.env) so both can run against one database during the
-migration. DATA_ENCRYPTION_KEY and PASSWORD_PEPPER must stay the same: they decrypt stored PAN, bank and ID numbers
-and verify existing password hashes.
+Settings come from the environment and server/.env (scripts/setup.sh writes it; a value already in the environment
+wins). DATA_ENCRYPTION_KEY and PASSWORD_PEPPER must never change on an existing install: they decrypt stored PAN, bank
+and ID numbers and verify existing password hashes. An install that ran the retired TypeScript stack keeps them in
+apps/api/.env, which is no longer read: setup.sh copies them into server/.env (see README.md, "Moving from the
+TypeScript stack").
 """
 import os
 from pathlib import Path
@@ -13,17 +15,14 @@ from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-REPO_DIR = BASE_DIR.parent
 
-# server/.env wins; apps/api/.env is the fallback while both stacks exist.
 load_dotenv(BASE_DIR / '.env')
-load_dotenv(REPO_DIR / 'apps' / 'api' / '.env')
 
 
 def env(name: str, default: str | None = None) -> str:
     value = os.environ.get(name, default)
     if value is None:
-        raise ImproperlyConfigured(f'{name} is not set (server/.env or apps/api/.env)')
+        raise ImproperlyConfigured(f'{name} is not set (server/.env or the environment)')
     return value
 
 
@@ -53,8 +52,8 @@ SECRET_KEY = env('DJANGO_SECRET_KEY', os.environ.get('PASSWORD_PEPPER') or 'dev-
 DEBUG = env_bool('DJANGO_DEBUG', False)
 ALLOWED_HOSTS = [h for h in env('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if h]
 
-# Field encryption and password hashing secrets shared with the TS API. Checked when first used, not at import, so
-# migrations and tests run before secrets are configured (as loadDatabaseUrl does in the TS API).
+# Field encryption and password hashing secrets (the ciphertext and hash formats are those the TypeScript API wrote).
+# Checked when first used, not at import, so migrations and tests run before secrets are configured.
 DATA_ENCRYPTION_KEY = os.environ.get('DATA_ENCRYPTION_KEY', '')
 PASSWORD_PEPPER = os.environ.get('PASSWORD_PEPPER', '')
 RUN_WORKER = env_bool('RUN_WORKER', True)
@@ -73,6 +72,11 @@ INSTALLED_APPS = [
     'django.contrib.contenttypes',
     'django.contrib.postgres',
     'django.contrib.staticfiles',
+    'rest_framework',
+    'drf_spectacular',
+    'django_filters',
+    'django_htmx',
+    'django_tasks_db',
     'hajiri.db',
     'hajiri.web',
     'hajiri.files',
@@ -112,6 +116,8 @@ INSTALLED_APPS = [
     'hajiri.kiosk',
     'hajiri.payroll',
     'hajiri.home',
+    'hajiri.group',
+    'hajiri.group_admin',
     'demo',
 ]
 
@@ -121,6 +127,9 @@ MIDDLEWARE = [
     # Serves /static/ itself (inside the security headers), so a single-machine install needs no web server in front.
     'hajiri.web.middleware.StaticFilesMiddleware',
     'django.middleware.common.CommonMiddleware',
+    'django_htmx.middleware.HtmxMiddleware',
+    # CORS for /api/ (CORS_ORIGINS), answered before CSRF so a preflight never reaches a view.
+    'hajiri.web.middleware.ApiCorsMiddleware',
     'hajiri.web.middleware.BearerCsrfMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -154,8 +163,8 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 
 DATABASES = {'default': database_from_url(env('DATABASE_URL', 'postgres://localhost:5433/hajiri'))}
-# Not DATABASE_URL_TEST: the test runner drops and recreates this database, and that one belongs to the TS suite.
-DATABASES['default']['TEST'] = {'NAME': env('DJANGO_TEST_DATABASE', 'hajiri_django_test')}
+# The test runner drops and recreates this database; give each parallel pytest process its own name.
+DATABASES['default']['TEST'] = {'NAME': env('DJANGO_TEST_DATABASE', 'hajiri_test')}
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
@@ -182,6 +191,68 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', Fals
 SECURE_HSTS_PRELOAD = env_bool('SECURE_HSTS_PRELOAD', False)
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = 'Lax'
+
+# ---------------------------------------------------------------- JSON API (Django REST framework)
+# Endpoints for non-browser clients (terminals, kiosk tablets, Bearer-token integrations) under /api/. Pages and HTMX
+# partials are plain Django views. See hajiri/core/api.py and docs/django-conventions.md.
+REST_FRAMEWORK = {
+    # ?format= is a report parameter in the TS API (csv, json), not DRF's renderer override.
+    'URL_FORMAT_OVERRIDE': None,
+    'DEFAULT_AUTHENTICATION_CLASSES': ['hajiri.core.api.HajiriAuthentication'],
+    'DEFAULT_PERMISSION_CLASSES': ['hajiri.core.api.IsSignedIn'],
+    'DEFAULT_RENDERER_CLASSES': ['hajiri.core.api.JsonRenderer'],
+    'DEFAULT_PARSER_CLASSES': ['rest_framework.parsers.JSONParser', 'rest_framework.parsers.FormParser',
+                               'rest_framework.parsers.MultiPartParser'],
+    'DEFAULT_PAGINATION_CLASS': 'hajiri.core.api.Pagination',
+    'PAGE_SIZE': 50,
+    'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'EXCEPTION_HANDLER': 'hajiri.core.api.exception_handler',
+    # No django.contrib.auth: request.user is the hajiri AuthUser, or None when signed out.
+    'UNAUTHENTICATED_USER': None,
+    'UNAUTHENTICATED_TOKEN': None,
+    # Timestamps reach the renderer as datetimes, which it writes like JSON.stringify (UTC, milliseconds, Z).
+    'DATETIME_FORMAT': None,
+    'DATE_FORMAT': 'iso-8601',
+    'COERCE_DECIMAL_TO_STRING': True,
+    'UNICODE_JSON': True,
+}
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Hajiri API',
+    'DESCRIPTION': 'Attendance, HR and payroll. JSON endpoints for terminals, kiosk tablets and integrations.',
+    'VERSION': '1',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
+    # One schema name per shared choice set (the same values appear in several serializers).
+    'ENUM_NAME_OVERRIDES': {
+        'ApprovalStatusEnum': ['pending', 'approved', 'rejected', 'cancelled'],
+        'TicketStatusEnum': ['open', 'in_progress', 'waiting', 'resolved', 'closed'],
+        'RegularisationKindEnum': ['missed_punch', 'wfh', 'on_duty', 'half_day', 'shift_change'],
+        'ExpenseItemKindEnum': ['amount', 'mileage'],
+        'InOutEnum': ['in', 'out'],
+        'ApproveRejectEnum': ['approve', 'reject'],
+        'CompanyRoleEnum': ['admin', 'hr', 'manager', 'employee', 'payroll_admin', 'attendance_admin', 'recruiter',
+                            'executive'],
+        'TravelDestinationEnum': ['valley', 'city', 'rural', 'international'],
+        'RoundingModeEnum': ['nearest', 'up', 'down'],
+    },
+}
+
+# ---------------------------------------------------------------- background work (django.tasks)
+# Tasks are rows in the database (django_tasks_db), so a single-machine install still needs only PostgreSQL.
+# `manage.py run_worker` runs the scheduler and a task worker in one process; larger installs run
+# `manage.py run_scheduler` once and `manage.py db_worker` as often as needed.
+TASKS = {
+    'default': {
+        'BACKEND': env('TASKS_BACKEND', 'django_tasks_db.DatabaseBackend'),
+        'QUEUES': ['default'],
+    },
+}
+
+# ---------------------------------------------------------------- email (SMTP_URL, as the TS API)
+from hajiri.core.mail import email_settings  # noqa: E402
+
+globals().update(email_settings(SMTP_URL))
 
 _LOG_LEVEL = {'trace': 'DEBUG', 'fatal': 'CRITICAL'}.get(env('LOG_LEVEL', 'info'), env('LOG_LEVEL', 'info').upper())
 LOGGING = {

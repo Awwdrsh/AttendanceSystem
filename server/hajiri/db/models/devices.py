@@ -6,34 +6,64 @@ from django.contrib.postgres.fields import ArrayField, DateRangeField
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class BiometricTemplate(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    employee = models.ForeignKey('Employee', models.DO_NOTHING, blank=True, null=True)
+    employee = models.ForeignKey('Employee', models.DO_NOTHING, related_name='biometric_templates', blank=True, null=True)
     device_user_pin = models.TextField(blank=True, null=True)
     modality = models.TextField()
     vendor_format = models.TextField()
     ciphertext = models.BinaryField()
     key_version = models.IntegerField(db_default=1)
     aad_hash = models.TextField()
-    enrolled_on_device = models.ForeignKey('Device', models.DO_NOTHING, blank=True, null=True)
-    consent = models.ForeignKey('ConsentRecord', models.DO_NOTHING, blank=True, null=True)
+    enrolled_on_device = models.ForeignKey('Device', models.DO_NOTHING, related_name='biometric_templates', blank=True, null=True)
+    consent = models.ForeignKey('ConsentRecord', models.DO_NOTHING, related_name='biometric_templates', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     shredded_at = models.DateTimeField(blank=True, null=True)
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'biometric_template'
 
+    def __str__(self):
+        return f'BiometricTemplate {self.id}'
+
 
 class Device(models.Model):
+    class Protocol(models.TextChoices):
+        ADMS = 'adms', 'ADMS'
+        ISAPI = 'isapi', 'ISAPI'
+        GSDK = 'gsdk', 'GSDK'
+        CROSSCHEX = 'crosschex', 'CrossChex'
+        APP = 'app', 'App'
+        MANUAL = 'manual', 'Manual'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        ACTIVE = 'active', 'Active'
+        DISABLED = 'disabled', 'Disabled'
+
+    class Vendor(models.TextChoices):
+        ZKTECO = 'zkteco', 'ZKTeco'
+        HIKVISION = 'hikvision', 'Hikvision'
+        SUPREMA = 'suprema', 'Suprema'
+        ANVIZ = 'anviz', 'Anviz'
+        MOBILE = 'mobile', 'Mobile'
+        KIOSK = 'kiosk', 'Kiosk'
+        MANUAL = 'manual', 'Manual'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, blank=True, null=True)
-    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='devices', blank=True, null=True)
+    branch = models.ForeignKey('hajiri.Branch', models.DO_NOTHING, related_name='devices', blank=True, null=True)
     serial_no = models.TextField(unique=True)
-    vendor = models.TextField()
-    protocol = models.TextField()
+    vendor = models.TextField(choices=Vendor)
+    protocol = models.TextField(choices=Protocol)
     name = models.TextField(blank=True, null=True)
-    status = models.TextField(db_default='pending')
+    status = models.TextField(choices=Status, db_default='pending')
     comm_key_hash = models.TextField(blank=True, null=True)
     fw_version = models.TextField(blank=True, null=True)
     tz_offset_min = models.SmallIntegerField(db_default=345)
@@ -45,31 +75,55 @@ class Device(models.Model):
     created_at = models.DateTimeField(db_default=Now())
     clock_drift_sec = models.IntegerField(blank=True, null=True)
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'device'
 
+    def __str__(self):
+        return str(self.name)
+
 
 class DeviceCommand(models.Model):
+    class Status(models.TextChoices):
+        QUEUED = 'queued', 'Queued'
+        SENT = 'sent', 'Sent'
+        ACKED = 'acked', 'Acked'
+        FAILED = 'failed', 'Failed'
+
     id = models.BigAutoField(primary_key=True)
-    device = models.ForeignKey(Device, models.DO_NOTHING)
+    device = models.ForeignKey(Device, models.DO_NOTHING, related_name='device_commands')
     command = models.TextField()
-    status = models.TextField(db_default='queued')
+    status = models.TextField(choices=Status, db_default='queued')
     return_code = models.IntegerField(blank=True, null=True)
     queued_at = models.DateTimeField(db_default=Now())
     sent_at = models.DateTimeField(blank=True, null=True)
     acked_at = models.DateTimeField(blank=True, null=True)
     attempts = models.IntegerField(db_default=0)
 
+    company_scope = 'device__company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'device_command'
+
+    def __str__(self):
+        return f'DeviceCommand {self.id}'
 
 
 class DeviceUserMap(models.Model):
     pk = models.CompositePrimaryKey('device_id', 'device_user_pin', 'valid')
-    device = models.ForeignKey(Device, models.DO_NOTHING)
+    device = models.ForeignKey(Device, models.DO_NOTHING, related_name='device_user_maps')
     device_user_pin = models.TextField()
-    employee = models.ForeignKey('Employee', models.DO_NOTHING)
+    employee = models.ForeignKey('Employee', models.DO_NOTHING, related_name='device_user_maps')
     valid = DateRangeField()
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'device_user_map'
+
+    def __str__(self):
+        return f'DeviceUserMap {self.pk}'

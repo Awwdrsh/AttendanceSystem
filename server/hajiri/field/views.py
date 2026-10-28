@@ -19,15 +19,19 @@ from engines.attendance import local_date_of
 from hajiri.attendance.repo import to_ms
 from hajiri.core.auth import company_id_of
 from hajiri.core.clock import now as _now
-from hajiri.core.db import rows
-from hajiri.core.errors import HttpError
+from hajiri.core.errors import BadRequestError, HttpError, NotFoundError
 from hajiri.web.csv import csv_response
 from hajiri.web.decorators import login_required, require_feature, require_module, require_role
 from hajiri.web.format import fmt_date_long, fmt_date_short, fmt_time, minutes_to_hm, relative_time
 from hajiri.web.htmx import close_modal, htmx_target, refresh, toast
 from hajiri.web.nav import area
+from hajiri.web.views import client_ip
 
 from . import services
+from .forms import (
+    DateFilterForm, FieldRulesForm, KioskForm, KioskPinForm, LocationForm, StaffForm, SwapForm, VisitEndForm,
+    VisitsFilterForm, VisitStartForm,
+)
 
 ROLES = ('manager', *area('attendance'))
 MODE_HINT = {
@@ -48,23 +52,12 @@ def _today() -> str:
     return local_date_of(to_ms(_now()))
 
 
-def _iso(v: str | None, default: str) -> str:
-    try:
-        return date.fromisoformat(v).isoformat() if v else default
-    except ValueError:
-        return default
-
-
 def _add(iso: str, n: int) -> str:
     return (date.fromisoformat(iso) + timedelta(days=n)).isoformat()
 
 
 def _since(iso_or_dt, now: datetime) -> int:
     return max(0, int((now - iso_or_dt).total_seconds() // 60))
-
-
-def _bool(v) -> bool:
-    return v in ('on', 'true', '1', True)
 
 
 def _err(request, e: HttpError, title: str | None = None) -> HttpResponse:
@@ -83,10 +76,9 @@ def _csv(out: dict) -> HttpResponse:
 def visits(request):
     user = request.hajiri_user
     t = _today()
-    view = 'breaks' if request.GET.get('view') == 'breaks' else 'visits'
-    d = min(_iso(request.GET.get('date'), t), t)
-    span = 'week' if request.GET.get('span') == 'week' else 'day'
-    over = request.GET.get('over') == '1'
+    f = VisitsFilterForm(request.GET, initial={'date': t}).values()
+    view, span, over = f['view'], f['span'], request.GET.get('over') == '1'
+    d = min(str(f['date']), t)
     from_ = _add(d, -6) if span == 'week' else d
     q = {'from': from_, 'to': d}
     if request.GET.get('export') == 'csv':
@@ -160,19 +152,6 @@ def kiosks(request):
     return render(request, tpl, ctx)
 
 
-def _branches(company_id: str) -> list[dict]:
-    return [dict(b, id=str(b['id'])) for b in rows('SELECT id, name_en FROM branch WHERE company_id = %s ORDER BY name_en', [company_id])]
-
-
-def _locations(company_id: str) -> list[dict]:
-    return [dict(x, id=str(x['id'])) for x in rows('SELECT id, name FROM location WHERE company_id = %s ORDER BY active DESC, name', [company_id])]
-
-
-def _kiosk_body(p) -> dict:
-    return {'name': (p.get('name') or '').strip(), 'branchId': p.get('branch_id') or None, 'locationId': p.get('location_id') or None,
-            'selfieRequired': _bool(p.get('selfie_required'))}
-
-
 def _pairing_fragment(request, name: str, pairing: dict) -> HttpResponse:
     return render(request, 'field/partials/pairing_code.html', {'name': name, 'code': pairing['pairingCode'],
                                                                 'expires': fmt_time(pairing['expiresAt']),
@@ -187,9 +166,9 @@ def kiosk_form(request, id=None):
     company_id = company_id_of(user)
     if request.method == 'GET':
         k = services.kiosk_detail(user, str(id)) if id else {'name': '', 'branch_id': None, 'location_id': None, 'selfie_required': True}
-        return render(request, 'field/partials/kiosk_form.html', {'k': k, 'id': id, 'branches': _branches(company_id),
-                                                                   'locations': _locations(company_id)})
-    body = _kiosk_body(request.POST)
+        return render(request, 'field/partials/kiosk_form.html', {'k': k, 'id': id, 'branches': services.branch_options(company_id),
+                                                                   'locations': services.location_options(company_id)})
+    body = KioskForm(request.POST).body()
     if id:
         services.update_kiosk(user, str(id), body)
         return toast(request, refresh(close_modal(HttpResponse(status=204)), 'kiosks'), 'Kiosk saved.')
@@ -212,7 +191,6 @@ def kiosk_action(request, id, action):
     if action == 'revoke':
         services.revoke_kiosk(user, kid)
         return toast(request, refresh(HttpResponse(status=204), 'kiosks'), 'Kiosk revoked.')
-    from hajiri.core.errors import BadRequestError
     raise BadRequestError('unknown action')
 
 
@@ -250,20 +228,6 @@ def locations(request):
     return render(request, 'field/locations.html', ctx)
 
 
-def _float(v):
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return v
-
-
-def _int(v, default=None):
-    try:
-        return int(float(v))
-    except (TypeError, ValueError):
-        return default
-
-
 @require_http_methods(['GET', 'POST'])
 @require_role('hr')
 def location_form(request, id=None):
@@ -272,15 +236,11 @@ def location_form(request, id=None):
     if request.method == 'GET':
         loc = next((x for x in services.locations(user)['locations'] if x['id'] == str(id)), None) if id else None
         if id and not loc:
-            from hajiri.core.errors import NotFoundError
             raise NotFoundError('location not found')
         return render(request, 'field/partials/location_form.html', {
             'loc': loc or {'name': '', 'address': '', 'branch_id': None, 'lat': '', 'lng': '', 'radius_m': 150, 'active': True},
-            'id': id, 'branches': _branches(company_id)})
-    p = request.POST
-    body = {'name': (p.get('name') or '').strip(), 'address': (p.get('address') or '').strip() or None, 'branchId': p.get('branch_id') or None,
-            'lat': _float(p.get('lat')), 'lng': _float(p.get('lng')), 'radiusM': _int(p.get('radius_m'), 150) or 150,
-            'active': _bool(p.get('active'))}
+            'id': id, 'branches': services.branch_options(company_id)})
+    body = LocationForm(request.POST).body()
     if id:
         services.update_location(user, str(id), body)
     else:
@@ -300,26 +260,15 @@ def location_delete(request, id):
 @require_POST
 @require_role('hr')
 def field_rules(request):
-    p = request.POST
-    body = {'geofenceMode': p.get('geofenceMode') or 'flag',
-            'breaks': {k: {'enabled': _bool(p.get(f'{k}_enabled')), 'paid': _bool(p.get(f'{k}_paid')),
-                           'maxMin': _int(p.get(f'{k}_maxMin'), 5) or 5} for k in services.BREAK_KINDS},
-            'fieldVisitClockIn': _bool(p.get('fieldVisitClockIn')), 'fieldPhotoRequired': _bool(p.get('fieldPhotoRequired'))}
-    services.put_policy(request.hajiri_user, body)
+    services.put_policy(request.hajiri_user, FieldRulesForm(request.POST).policy())
     return toast(request, HttpResponse(status=204), 'Rules saved.')
 
 
 @require_POST
 @require_role('hr')
 def staff_update(request, employee_id):
-    p = request.POST
-    body = {}
-    if 'field_work' in p or p.get('which') == 'field':
-        body['fieldWork'] = _bool(p.get('field_work'))
-    if p.get('which') == 'locations':
-        body['locationIds'] = [x for x in p.getlist('location_ids') if x]
     try:
-        services.update_staff(request.hajiri_user, str(employee_id), body)
+        services.update_staff(request.hajiri_user, str(employee_id), StaffForm(request.POST).body())
     except HttpError as e:
         return refresh(_err(request, e), 'field-staff')
     return HttpResponse(status=204)
@@ -329,7 +278,7 @@ def staff_update(request, employee_id):
 @require_role('hr')
 def staff_kiosk_reset(request, employee_id):
     eid = str(employee_id)
-    name = next((s['name_en'] for s in services.staff(request.hajiri_user)['staff'] if s['id'] == eid), '')
+    name = services.staff_name(request.hajiri_user, eid)
     services.reset_kiosk_pin(request.hajiri_user, eid)
     return toast(request, refresh(HttpResponse(status=204), 'field-staff'),
                  f'Kiosk PIN reset for {name}. They can set a new one in the app.')
@@ -386,7 +335,7 @@ def swap_new(request):
     user = request.hajiri_user
     t = _today()
     if request.method == 'GET':
-        d = _iso(request.GET.get('date'), _add(t, 1))
+        d = str(DateFilterForm(request.GET, initial={'date': _add(t, 1)}).values()['date'])
         opts = services.swap_colleagues(user, {'date': d})
         mine = opts['mine']['shift']
         return render(request, 'field/partials/swap_form.html', {
@@ -394,10 +343,7 @@ def swap_new(request):
             'mine': f"{mine['name_en'] or mine['code']}, {mine['start']} to {mine['end']}" if mine else 'an off day',
             'colleagues': [{'id': c['id'], 'label': f"{c['name_en']} ({(c['shift']['name_en'] or c['shift']['code']) + ' ' + c['shift']['start'] + '–' + c['shift']['end'] if c['shift'] else 'off'})"}
                            for c in opts['colleagues'] if not c['sameAsMine']]})
-    p = request.POST
-    body = {'colleagueId': p.get('colleague_id', ''), 'localDate': p.get('date', ''),
-            **({'reason': p['reason'].strip()} if (p.get('reason') or '').strip() else {})}
-    services.request_swap(user, body)
+    services.request_swap(user, SwapForm(request.POST).body())
     return toast(request, refresh(close_modal(HttpResponse(status=204)), 'my-roster'), 'Swap request sent to your colleague.')
 
 
@@ -416,7 +362,6 @@ def swap_action(request, id, action):
         services.cancel_swap(user, sid)
         msg = 'Request cancelled.'
     else:
-        from hajiri.core.errors import BadRequestError
         raise BadRequestError('unknown action')
     return toast(request, refresh(HttpResponse(status=204), 'my-roster'), msg)
 
@@ -471,10 +416,10 @@ def my_kiosk(request):
 @login_required
 @require_feature('field')
 def kiosk_pin(request):
-    pin = request.POST.get('pin', '')
-    if pin != request.POST.get('again', ''):
+    form = KioskPinForm(request.POST)
+    if not form.is_valid():
         return toast(request, HttpResponse(status=400), 'The PINs do not match', tone='err')
-    services.set_kiosk_pin(request.hajiri_user, {'pin': pin})
+    services.set_kiosk_pin(request.hajiri_user, {'pin': form.cleaned_data['pin']})
     resp = HttpResponse(status=204)
     resp['HX-Refresh'] = 'true'
     from hajiri.web.htmx import flash
@@ -539,18 +484,6 @@ def home_card(request):
     return render(request, 'field/partials/home_card.html', ctx)
 
 
-def _geo(p) -> dict:
-    out = {}
-    try:
-        if p.get('lat') not in (None, '') and p.get('lng') not in (None, ''):
-            out = {'lat': float(p['lat']), 'lng': float(p['lng'])}
-            if p.get('accuracy') not in (None, ''):
-                out['accuracyM'] = round(float(p['accuracy']))
-    except ValueError:
-        out = {}
-    return out
-
-
 def _home_refresh(resp: HttpResponse) -> HttpResponse:
     return refresh(resp, 'home-field')
 
@@ -577,12 +510,11 @@ def home_visit_start(request):
         d = services.me(user)
         return render(request, 'field/partials/visit_start_form.html', {'photo_required': d['fieldPhotoRequired'],
                                                                          'first_clocks_in': not d['visits'] and not d['clockedIn']})
-    p = request.POST
-    geo = _geo(p)
-    body = {'place': (p.get('place') or '').strip(), **({'purpose': p['purpose'].strip()} if (p.get('purpose') or '').strip() else {}),
-            **({'photo': p['photo']} if p.get('photo') else {}), **geo}
+    form = VisitStartForm(request.POST)
+    body = form.body()
+    geo = form.geo()
     try:
-        r = services.start_visit(user, body, request.META.get('REMOTE_ADDR'))
+        r = services.start_visit(user, body, client_ip(request))
     except HttpError as e:
         if isinstance(e.details, dict) and e.details.get('code') == 'photo_required':
             resp = HttpResponse(status=204)
@@ -604,8 +536,8 @@ def home_visit_end(request, id):
     if request.method == 'GET':
         d = services.me(user)
         ov = d['openVisit'] if d['openVisit'] and d['openVisit']['id'] == str(id) else None
-        return render(request, 'field/partials/visit_end_form.html', {'id': id, 'place': ov['place'] if ov else None})
-    p = request.POST
-    body = {**({'outcome': p['outcome'].strip()} if (p.get('outcome') or '').strip() else {}), **_geo(p)}
-    v = services.end_visit(user, str(id), body)['visit']
+        if not ov:
+            raise NotFoundError('No visit in progress with that id.')
+        return render(request, 'field/partials/visit_end_form.html', {'id': id, 'place': ov['place']})
+    v = services.end_visit(user, str(id), VisitEndForm(request.POST).body())['visit']
     return toast(request, _home_refresh(close_modal(HttpResponse(status=204))), f"Visit to {v['place']} ended.")

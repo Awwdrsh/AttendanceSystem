@@ -1,4 +1,5 @@
 """All Hajiri models, one module per domain. Import from here: `from hajiri.db.models import Employee`."""
+from .base import AppUserQuerySet, CompanyQuerySet, IsHead, Manages  # noqa: F401
 from .attendance import *  # noqa: F401,F403
 from .devices import *  # noqa: F401,F403
 from .documents import *  # noqa: F401,F403

@@ -6,7 +6,7 @@ import pytest
 from django.db import connection
 from django.test import Client
 
-from hajiri.core.db import execute, one, rows
+from tests.support.sql import execute, one, rows
 from hajiri.leave.accrual import run_monthly_accrual
 from hajiri.leave.service import ledger_balance
 

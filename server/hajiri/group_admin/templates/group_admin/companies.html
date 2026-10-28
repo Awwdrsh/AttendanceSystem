@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Companies · Group · Hajiri{% endblock %}
+{% block content %}
+{% page_header "Companies" subtitle="Every company of the group. Each keeps its own people, payroll and settings." %}
+  {% if can_attach %}<button class="hj-btn default" hx-get="{% url 'group_admin:company_attach' %}" hx-target="#hj-modal-body"><i class="ti ti-link" aria-hidden="true"></i>Attach a company</button>{% endif %}
+  <button class="hj-btn" hx-get="{% url 'group_admin:company_new' %}" hx-target="#hj-modal-body"><i class="ti ti-building-plus" aria-hidden="true"></i>Add a company</button>
+{% endpage_header %}
+{% include "group_admin/partials/companies_table.html" %}
+{% endblock %}

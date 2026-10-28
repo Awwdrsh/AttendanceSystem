@@ -14,33 +14,20 @@ Steps are plain dicts in the stored (camelCase) shape: {'kind', 'role', 'userId'
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
+from django.db import connection
+from django.db.models import Case, Exists, F, OuterRef, Q, Subquery, UUIDField, When
+
 from hajiri.core.clock import npt_today
-from hajiri.core.db import rows
 from hajiri.core.errors import ValidationError
-from hajiri.core.schema import Arr, Enum, Num, Obj, Str, Uuid, parse
-from hajiri.notifications.service import user_ids_with_role
+from hajiri.core.users import user_ids_with_role
+from hajiri.core.validation import issues_from, plain
+from hajiri.db.models import (AppUser, ApprovalFlow, ApproverDelegate, CompanyMembership, Employee, EmployeeAssignment,
+                              LeaveRequest, UserGroupMember, WorkflowDefinition)
 
-APPROVER_KINDS = ('manager', 'manager2', 'department_head', 'branch_head', 'role', 'user', 'group')
-STEP_ROLES = ('hr', 'admin', 'payroll_admin', 'attendance_admin', 'recruiter')
-
-_STEP = Obj({
-    'kind': Enum(APPROVER_KINDS),
-    'role': Enum(STEP_ROLES, optional=True),
-    'userId': Uuid(optional=True),
-    'groupId': Uuid(optional=True),
-    'minAmount': Num(min=0, max=1e10, optional=True),
-    'label': Str(trim=True, max=60, optional=True),
-})
-CONDITION_KEYS = ('employeeIds', 'groupIds', 'designationIds', 'orgUnitIds', 'branchIds')
-CONDITIONS_SCHEMA = Obj({
-    'employeeIds': Arr(Uuid(), max=500, default=list),
-    'groupIds': Arr(Uuid(), max=50, default=list),
-    'designationIds': Arr(Uuid(), max=100, default=list),
-    'orgUnitIds': Arr(Uuid(), max=100, default=list),
-    'branchIds': Arr(Uuid(), max=100, default=list),
-})
+from .serializers import APPROVER_KINDS, CONDITION_KEYS, STEP_ROLES, ConditionsIn, StepIn  # noqa: F401  (re-exported)
 
 
 def empty_conditions() -> dict:
@@ -54,7 +41,14 @@ def parse_steps(data: Any, path: str = 'steps') -> list[dict]:
             raise ValidationError([{'path': path, 'message': 'a flow needs at least one step'}])
         if len(data) > 6:
             raise ValidationError([{'path': path, 'message': 'at most 6 steps'}])
-    out = parse(Arr(_STEP), data)
+    elif data is None:
+        raise ValidationError([{'path': '', 'message': 'Required'}])
+    else:
+        raise ValidationError([{'path': '', 'message': 'Expected array'}])
+    ser = StepIn(data=data, many=True)
+    if not ser.is_valid():
+        raise ValidationError(issues_from(ser.errors, ser))
+    out = [plain(dict(s)) for s in ser.validated_data]
     issues = []
     for i, s in enumerate(out):
         if s['kind'] == 'role' and not s.get('role'):
@@ -151,21 +145,56 @@ def _s(v) -> str | None:
     return None if v is None else str(v)
 
 
+def _day(d) -> date:
+    return date.fromisoformat(d) if isinstance(d, str) else d
+
+
+def _assignment(employee_id, on_date):
+    """The employee's assignment on that day (employee_assignment.valid is a daterange)."""
+    return EmployeeAssignment.objects.filter(employee_id=employee_id, valid__contains=_day(on_date))
+
+
+def org_unit_chain(org_unit_id) -> list[tuple[str, str | None]]:
+    """(id, head_employee_id) of a department and each parent above it, nearest first (at most 20 levels)."""
+    if not org_unit_id:
+        return []
+    with connection.cursor() as cur:
+        # Raw SQL: a recursive CTE walking org_unit.parent_id upwards; the ORM has no recursive queries.
+        cur.execute("""WITH RECURSIVE up(id, parent_id, head, depth) AS (
+                         SELECT id, parent_id, head_employee_id, 1 FROM org_unit WHERE id = %s
+                         UNION ALL SELECT o.id, o.parent_id, o.head_employee_id, up.depth + 1
+                           FROM org_unit o JOIN up ON o.id = up.parent_id WHERE up.depth < 20)
+                       SELECT id, head FROM up ORDER BY depth""", [str(org_unit_id)])
+        return [(str(i), _s(h)) for i, h in cur.fetchall()]
+
+
+def employee_users(employee_ids, *, active_only: bool = True):
+    """Accounts that act as these employee records: the home account (app_user.employee_id) or a member of the group
+    whose company_membership points at the record (an employee record belongs to exactly one company)."""
+    ids = [str(e) for e in employee_ids if e]
+    if not ids:
+        return AppUser.objects.none()
+    member = CompanyMembership.objects.filter(user=OuterRef('pk'), employee_id__in=ids)
+    if active_only:
+        member = member.filter(status=CompanyMembership.Status.ACTIVE)
+    qs = AppUser.objects.filter(Q(employee_id__in=ids) | Exists(member))
+    return qs.filter(status=AppUser.Status.ACTIVE) if active_only else qs
+
+
 def subject_of(employee_id: str, on_date=None) -> Subject:
-    r = rows("""SELECT (SELECT u.id FROM app_user u WHERE u.employee_id = e.id AND u.status = 'active' LIMIT 1) AS user_id,
-                       e.designation_id, a.org_unit_id, a.branch_id
-                  FROM employee e LEFT JOIN employee_assignment a ON a.employee_id = e.id AND a.valid @> %s::date
-                 WHERE e.id = %s""", [on_date or npt_today(), employee_id])
-    if not r:
+    on_date = on_date or npt_today()
+    here = _assignment(OuterRef('pk'), on_date)
+    e = (Employee.objects.filter(pk=employee_id)
+         .annotate(unit=Subquery(here.values('org_unit_id')[:1]), branch=Subquery(here.values('branch_id')[:1]))
+         .values('company_id', 'designation_ref_id', 'unit', 'branch').first())
+    if e is None:
         return Subject()
-    row = r[0]
-    units = [str(x['id']) for x in rows(
-        """WITH RECURSIVE up(id, parent_id, depth) AS (SELECT id, parent_id, 1 FROM org_unit WHERE id = %s
-             UNION ALL SELECT o.id, o.parent_id, up.depth + 1 FROM org_unit o JOIN up ON o.id = up.parent_id WHERE up.depth < 20)
-           SELECT id FROM up""", [row['org_unit_id']])] if row['org_unit_id'] else []
-    groups = [str(x['group_id']) for x in rows('SELECT group_id FROM user_group_member WHERE user_id = %s', [row['user_id']])] \
-        if row['user_id'] else []
-    return Subject(_s(row['user_id']), _s(row['designation_id']), units, _s(row['branch_id']), groups)
+    user_id = _s(employee_users([employee_id]).values_list('id', flat=True).first())
+    units = [u for u, _h in org_unit_chain(e['unit'])]
+    groups = [str(g) for g in UserGroupMember.objects.for_company(e['company_id']).filter(user_id=user_id)
+              .values_list('group_id', flat=True)] \
+        if user_id else []
+    return Subject(user_id, _s(e['designation_ref_id']), units, _s(e['branch']), groups)
 
 
 def match_score(c: dict, subject_employee_id: str | None, s: Subject) -> int:
@@ -195,25 +224,60 @@ class ChosenFlow:
     flow_name: str | None
 
 
+_FLOW_FIELDS = ('id', 'name', 'conditions', 'steps', 'priority')
+
+
+def _active_flows(company_id: str):
+    return (ApprovalFlow.objects.for_company(company_id).filter(active=True).order_by('-priority', 'created_at'))
+
+
+def _pick(flows: list[dict], employee_id: str | None, subject) -> dict | None:
+    """The most specific matching flow (ties: higher priority, then the earlier one). `subject` is called only when
+    there is a flow to match against."""
+    if not flows:
+        return None
+    s = subject(employee_id) if employee_id else Subject()
+    best = None
+    for row in flows:
+        score = match_score(row['conditions'] or {}, employee_id, s)
+        if score < 0:
+            continue
+        if best is None or score > best[1] or (score == best[1] and row['priority'] > best[0]['priority']):
+            best = (row, score)
+    return best[0] if best and best[0]['steps'] else None
+
+
 def choose_flow(company_id: str, object_type: str, employee_id: str | None) -> ChosenFlow:
     """The flow for this request: most specific matching conditional flow, else the company default, else the reporting line."""
-    flows = rows("""SELECT id, name, conditions, steps, priority FROM approval_flow
-                     WHERE company_id = %s AND object_type = %s AND active ORDER BY priority DESC, created_at""",
-                 [company_id, object_type])
-    if flows:
-        subject = subject_of(employee_id) if employee_id else Subject()
-        best = None
-        for row in flows:
-            score = match_score(row['conditions'] or {}, employee_id, subject)
-            if score < 0:
-                continue
-            if best is None or score > best[1] or (score == best[1] and row['priority'] > best[0]['priority']):
-                best = (row, score)
-        if best and best[0]['steps']:
-            return ChosenFlow(best[0]['steps'], str(best[0]['id']), best[0]['name'])
-    d = rows('SELECT steps FROM workflow_definition WHERE company_id = %s AND object_type = %s', [company_id, object_type])
-    steps = d[0]['steps'] if d and d[0]['steps'] else DEFAULT_STEPS
-    return ChosenFlow(steps, None, None)
+    row = _pick(list(_active_flows(company_id).filter(object_type=object_type).values(*_FLOW_FIELDS)), employee_id, subject_of)
+    if row:
+        return ChosenFlow(row['steps'], str(row['id']), row['name'])
+    steps = (WorkflowDefinition.objects.for_company(company_id).filter(object_type=object_type)
+             .values_list('steps', flat=True).first())
+    return ChosenFlow(steps or DEFAULT_STEPS, None, None)
+
+
+class FlowChooser:
+    """choose_flow for many requests of one company (the verify report): the company's flows and default chains are
+    read once and each employee's subject once."""
+
+    def __init__(self, company_id: str):
+        self.flows: dict[str, list[dict]] = {}
+        for row in _active_flows(company_id).values('object_type', *_FLOW_FIELDS):
+            self.flows.setdefault(row['object_type'], []).append(row)
+        self.defaults = dict(WorkflowDefinition.objects.for_company(company_id).values_list('object_type', 'steps'))
+        self._subjects: dict[str, Subject] = {}
+
+    def _subject(self, employee_id: str) -> Subject:
+        if employee_id not in self._subjects:
+            self._subjects[employee_id] = subject_of(employee_id)
+        return self._subjects[employee_id]
+
+    def choose(self, object_type: str, employee_id: str | None) -> ChosenFlow:
+        row = _pick(self.flows.get(object_type, []), employee_id, self._subject)
+        if row:
+            return ChosenFlow(row['steps'], str(row['id']), row['name'])
+        return ChosenFlow(self.defaults.get(object_type) or DEFAULT_STEPS, None, None)
 
 
 def steps_for_amount(steps: list[dict], amount) -> list[dict]:
@@ -231,33 +295,22 @@ class Resolution:
 
 
 def _users_of_employees(employee_ids: list[str]) -> list[str]:
-    if not employee_ids:
-        return []
-    return [str(r['id']) for r in rows("SELECT id FROM app_user WHERE employee_id = ANY(%s::uuid[]) AND status = 'active'",
-                                       [list(employee_ids)])]
+    return [str(u) for u in employee_users(employee_ids).values_list('id', flat=True)]
 
 
 def line_manager(employee_id: str, on_date) -> str | None:
-    r = rows('SELECT manager_id FROM employee_assignment WHERE employee_id = %s AND valid @> %s::date', [employee_id, on_date])
-    return _s(r[0]['manager_id']) if r else None
+    return _s(_assignment(employee_id, on_date).values_list('manager_id', flat=True).first())
 
 
 def department_head(employee_id: str, on_date) -> str | None:
     """Nearest head above the employee who is not the employee: their department, then each parent department."""
-    r = rows("""WITH RECURSIVE up(id, parent_id, head, depth) AS (
-                  SELECT o.id, o.parent_id, o.head_employee_id, 1 FROM employee_assignment a JOIN org_unit o ON o.id = a.org_unit_id
-                   WHERE a.employee_id = %s AND a.valid @> %s::date
-                  UNION ALL SELECT p.id, p.parent_id, p.head_employee_id, up.depth + 1 FROM org_unit p JOIN up ON p.id = up.parent_id WHERE up.depth < 20)
-                SELECT head FROM up WHERE head IS NOT NULL AND head <> %s ORDER BY depth LIMIT 1""",
-             [employee_id, on_date, employee_id])
-    return _s(r[0]['head']) if r else None
+    unit = _assignment(employee_id, on_date).values_list('org_unit_id', flat=True).first()
+    return next((h for _u, h in org_unit_chain(unit) if h and h != str(employee_id)), None)
 
 
 def branch_head(employee_id: str, on_date) -> str | None:
-    r = rows("""SELECT b.head_employee_id AS head FROM employee_assignment a JOIN branch b ON b.id = a.branch_id
-                 WHERE a.employee_id = %s AND a.valid @> %s::date AND b.head_employee_id IS NOT NULL AND b.head_employee_id <> %s""",
-             [employee_id, on_date, employee_id])
-    return _s(r[0]['head']) if r else None
+    return _s(_assignment(employee_id, on_date).filter(branch__head_employee__isnull=False)
+              .exclude(branch__head_employee_id=employee_id).values_list('branch__head_employee_id', flat=True).first())
 
 
 KIND_LABEL = {
@@ -278,25 +331,19 @@ def step_label(s: dict) -> str:
 def named_approvers(company_id: str, employee_id: str | None, step: dict, on_date) -> list[str]:
     """The people named by the step before anyone is checked for absence."""
     kind = kind_of(step)
+    if kind in ('manager', 'manager2', 'department_head', 'branch_head') and not employee_id:
+        return []
     if kind == 'manager':
-        if not employee_id:
-            return []
         m = line_manager(employee_id, on_date)
         return _users_of_employees([m]) if m else []
     if kind == 'manager2':
-        if not employee_id:
-            return []
         m = line_manager(employee_id, on_date)
         m2 = line_manager(m, on_date) if m else None
         return _users_of_employees([m2]) if m2 and m2 != str(employee_id) else []
     if kind == 'department_head':
-        if not employee_id:
-            return []
         h = department_head(employee_id, on_date)
         return _users_of_employees([h]) if h else []
     if kind == 'branch_head':
-        if not employee_id:
-            return []
         h = branch_head(employee_id, on_date)
         return _users_of_employees([h]) if h else []
     if kind == 'role':
@@ -304,33 +351,45 @@ def named_approvers(company_id: str, employee_id: str | None, step: dict, on_dat
     if kind == 'user':
         if not step.get('userId'):
             return []
-        return [str(r['id']) for r in rows("SELECT id FROM app_user WHERE id = %s AND company_id = %s AND status = 'active'",
-                                           [step['userId'], company_id])]
+        return [str(u) for u in AppUser.objects.for_company(company_id)
+                .filter(pk=step['userId'], status=AppUser.Status.ACTIVE).values_list('id', flat=True)]
     if kind == 'group':
         if not step.get('groupId'):
             return []
-        return [str(r['id']) for r in rows(
-            """SELECT u.id FROM user_group_member m JOIN user_group g ON g.id = m.group_id JOIN app_user u ON u.id = m.user_id
-                WHERE m.group_id = %s AND g.company_id = %s AND u.status = 'active' ORDER BY u.name""",
-            [step['groupId'], company_id])]
+        return [str(u) for u in UserGroupMember.objects.for_company(company_id)
+                .filter(group_id=step['groupId'], user__status=AppUser.Status.ACTIVE)
+                .order_by('user__name').values_list('user_id', flat=True)]
     return []
 
 
-def presence_of(user_ids: list[str], on_date) -> dict[str, dict]:
-    """Who of these users is away today (full-day leave or exited) and whom they delegated to."""
+def _employee_here(company_id):
+    """The employee record an account acts as in this company: the home record at home, the membership's elsewhere."""
+    if company_id is None:
+        return F('employee_id')
+    return Case(When(company_id=company_id, then=F('employee_id')),
+                default=Subquery(CompanyMembership.objects.filter(user=OuterRef('pk'), company_id=company_id)
+                                 .values('employee_id')[:1]), output_field=UUIDField())
+
+
+def presence_of(user_ids: list[str], on_date, company_id: str | None = None) -> dict[str, dict]:
+    """Who of these users is away today (full-day leave or exited) and whom they delegated to (in this company)."""
     if not user_ids:
         return {}
-    found = rows("""
-        SELECT u.id, u.name,
-               CASE WHEN e.id IS NOT NULL AND (e.status = 'exited' OR (e.exit_date IS NOT NULL AND e.exit_date < %(d)s::date)) THEN 'has left'
-                    WHEN EXISTS (SELECT 1 FROM leave_request l WHERE l.employee_id = e.id AND l.status = 'approved' AND l.from_time IS NULL
-                                   AND %(d)s::date BETWEEN l.from_date AND l.to_date AND l.half_day IS NULL) THEN 'is on leave' END AS away,
-               (SELECT d.delegate_id FROM approver_delegate d JOIN app_user du ON du.id = d.delegate_id AND du.status = 'active'
-                 WHERE d.user_id = u.id AND d.cancelled_at IS NULL AND %(d)s::date BETWEEN d.from_date AND d.to_date
-                 ORDER BY d.created_at DESC LIMIT 1) AS delegate
-          FROM app_user u LEFT JOIN employee e ON e.id = u.employee_id WHERE u.id = ANY(%(ids)s::uuid[])""",
-                 {'d': on_date, 'ids': list(user_ids)})
-    return {str(r['id']): {'id': str(r['id']), 'name': r['name'], 'away': r['away'], 'delegate': _s(r['delegate'])} for r in found}
+    delegations = ApproverDelegate.objects.filter(user=OuterRef('pk'), cancelled_at__isnull=True, from_date__lte=on_date,
+                                                  to_date__gte=on_date, delegate__status=AppUser.Status.ACTIVE)
+    if company_id is not None:
+        delegations = delegations.for_company(company_id)
+    has_left = Employee.objects.filter(pk=OuterRef('emp')).filter(Q(status=Employee.Status.EXITED) | Q(exit_date__lt=on_date))
+    on_leave = LeaveRequest.objects.filter(employee_id=OuterRef('emp'), status=LeaveRequest.Status.APPROVED,
+                                           from_time__isnull=True, half_day__isnull=True, from_date__lte=on_date,
+                                           to_date__gte=on_date)
+    found = (AppUser.objects.filter(pk__in=list(user_ids)).annotate(emp=_employee_here(company_id))
+             .annotate(left=Exists(has_left), leave=Exists(on_leave),
+                       delegate=Subquery(delegations.order_by('-created_at').values('delegate_id')[:1]))
+             .values('id', 'name', 'left', 'leave', 'delegate'))
+    return {str(r['id']): {'id': str(r['id']), 'name': r['name'],
+                           'away': 'has left' if r['left'] else 'is on leave' if r['leave'] else None,
+                           'delegate': _s(r['delegate'])} for r in found}
 
 
 def _dedupe(xs: list[str]) -> list[str]:
@@ -344,13 +403,13 @@ def resolve_step(company_id: str, employee_id: str | None, step: dict, on_date=N
     """
     on_date = on_date or npt_today()
     notes: list[str] = []
-    subject_user = [str(r['id']) for r in rows('SELECT id FROM app_user WHERE employee_id = %s', [employee_id])] \
+    subject_user = [str(u) for u in employee_users([employee_id], active_only=False).values_list('id', flat=True)] \
         if employee_id else []
     named = [u for u in named_approvers(company_id, employee_id, step, on_date) if u not in subject_user]
     label = step_label(step)
     if not named and kind_of(step) != 'role':
         notes.append(f'No {label.lower()} is set')
-    presence = presence_of(named, on_date)
+    presence = presence_of(named, on_date, company_id)
     users: list[str] = []
 
     def add(u):

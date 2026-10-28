@@ -26,6 +26,8 @@ from django.http import HttpResponse
 from django.shortcuts import render
 from django.utils.html import format_html
 
+from hajiri.core.collation import collate_key
+
 from . import format as fmt
 from .csv import csv_response
 from .htmx import htmx_target
@@ -281,7 +283,7 @@ class Table:
 
 def _sortable(v: Any):
     if isinstance(v, str):
-        return (0, v.casefold())
+        return (0, collate_key(v))         # localeCompare order (pyuca)
     if isinstance(v, bool):
         return (1, int(v))
     try:

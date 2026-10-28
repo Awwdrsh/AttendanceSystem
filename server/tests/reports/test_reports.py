@@ -3,7 +3,7 @@ qa-foundation.test.ts and the attendance reports (reports/routes.ts)."""
 import pytest
 
 from hajiri.core import auth
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.core.errors import BadRequestError, ForbiddenError, NotFoundError, ValidationError
 from hajiri.reports import service
 from hajiri.reports.csv import Column, csv_cell, send_table, to_csv
@@ -276,7 +276,7 @@ def test_neutralises_spreadsheet_formula_injection_in_csv_cells():
 def test_numbers_round_like_to_fixed():
     """Hours, leave liability and statistics shares use Number.prototype.toFixed, which rounds exact ties up."""
     from decimal import Decimal
-    from hajiri.reports.csv import _to_fixed, hours
+    from hajiri.reports.csv import hours, to_fixed
     assert hours(7.5) == '0.13' and hours(Decimal('7.5')) == '0.13'
     assert hours(None) == '0.00' and hours(0) == '0.00' and hours(90) == '1.50'
-    assert _to_fixed(6.25, 1) == '6.3' and _to_fixed(1.005, 2) == '1.00' and _to_fixed(-0.125, 2) == '-0.13'
+    assert to_fixed(6.25, 1) == '6.3' and to_fixed(1.005, 2) == '1.00' and to_fixed(-0.125, 2) == '-0.13'

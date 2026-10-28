@@ -5,59 +5,91 @@ Foreign keys use DO_NOTHING: the database enforces ON DELETE (cascade, set null 
 from django.db import models
 from django.db.models.functions import Now
 
+from .base import CompanyQuerySet
+
 
 class TimeActivity(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    project = models.ForeignKey('TimeProject', models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='time_activities')
+    project = models.ForeignKey('TimeProject', models.DO_NOTHING, related_name='time_activities', blank=True, null=True)
     name = models.TextField()
     archived = models.BooleanField(db_default=False)
     created_at = models.DateTimeField(db_default=Now())
 
     # A unique constraint could not be introspected.
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'time_activity'
+
+    def __str__(self):
+        return str(self.name)
 
 
 class TimeClient(models.Model):
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='time_clients')
     name = models.TextField()
     notes = models.TextField(blank=True, null=True)
     archived = models.BooleanField(db_default=False)
     created_at = models.DateTimeField(db_default=Now())
 
     # A unique constraint could not be introspected.
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'time_client'
 
+    def __str__(self):
+        return str(self.name)
+
 
 class TimeEntry(models.Model):
+    class Source(models.TextChoices):
+        TIMER = 'timer', 'Timer'
+        MANUAL = 'manual', 'Manual'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.OneToOneField('hajiri.Employee', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='time_entries')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='time_entries')
     local_date = models.DateField()
     started_at = models.DateTimeField(blank=True, null=True)
     ended_at = models.DateTimeField(blank=True, null=True)
     duration_min = models.IntegerField(blank=True, null=True)
-    project = models.ForeignKey('TimeProject', models.DO_NOTHING, blank=True, null=True)
-    activity = models.ForeignKey(TimeActivity, models.DO_NOTHING, blank=True, null=True)
+    project = models.ForeignKey('TimeProject', models.DO_NOTHING, related_name='time_entries', blank=True, null=True)
+    activity = models.ForeignKey(TimeActivity, models.DO_NOTHING, related_name='time_entries', blank=True, null=True)
     note = models.TextField(blank=True, null=True)
     billable = models.BooleanField(db_default=False)
-    source = models.TextField()
+    source = models.TextField(choices=Source)
     auto_stopped = models.BooleanField(db_default=False)
-    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='created_by', blank=True, null=True)
+    created_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='time_entries_as_created_by', db_column='created_by', blank=True, null=True)
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
 
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'time_entry'
+        constraints = [models.UniqueConstraint(fields=['employee'], condition=models.Q(ended_at__isnull=True, duration_min__isnull=True),
+                                              name='time_entry_one_running_idx')]
+
+    def __str__(self):
+        return f'TimeEntry {self.id}'
 
 
 class TimeProject(models.Model):
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        ARCHIVED = 'archived', 'Archived'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    client = models.ForeignKey(TimeClient, models.DO_NOTHING, blank=True, null=True)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='time_projects')
+    client = models.ForeignKey(TimeClient, models.DO_NOTHING, related_name='time_projects', blank=True, null=True)
     code = models.TextField()
     name = models.TextField()
     color = models.TextField(db_default='#12773a')
@@ -65,39 +97,66 @@ class TimeProject(models.Model):
     bill_rate = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
     budget_hours = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     all_members = models.BooleanField(db_default=True)
-    status = models.TextField(db_default='active')
+    status = models.TextField(choices=Status, db_default='active')
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
 
     # A unique constraint could not be introspected.
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
+
     class Meta:
         db_table = 'time_project'
+
+    def __str__(self):
+        return str(self.name)
 
 
 class TimeProjectMember(models.Model):
     pk = models.CompositePrimaryKey('project_id', 'employee_id')
-    project = models.ForeignKey(TimeProject, models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    project = models.ForeignKey(TimeProject, models.DO_NOTHING, related_name='time_project_members')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='time_project_members')
+
+    company_scope = 'employee__company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'time_project_member'
 
+    def __str__(self):
+        return f'TimeProjectMember {self.pk}'
+
 
 class Timesheet(models.Model):
+    class Status(models.TextChoices):
+        SUBMITTED = 'submitted', 'Submitted'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     id = models.UUIDField(primary_key=True, db_default=models.Func(function='uuidv7', output_field=models.UUIDField()))
-    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING)
-    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING)
+    company = models.ForeignKey('hajiri.Company', models.DO_NOTHING, related_name='timesheets')
+    employee = models.ForeignKey('hajiri.Employee', models.DO_NOTHING, related_name='timesheets')
     week_start = models.DateField()
-    status = models.TextField(db_default='submitted')
+    status = models.TextField(choices=Status, db_default='submitted')
     total_min = models.IntegerField(db_default=0)
     note = models.TextField(blank=True, null=True)
     submitted_at = models.DateTimeField(db_default=Now())
-    submitted_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='submitted_by', blank=True, null=True)
+    submitted_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='timesheets_as_submitted_by', db_column='submitted_by', blank=True, null=True)
     decided_at = models.DateTimeField(blank=True, null=True)
-    decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, db_column='decided_by', related_name='timesheet_decided_by_set', blank=True, null=True)
+    decided_by = models.ForeignKey('hajiri.AppUser', models.DO_NOTHING, related_name='timesheets_as_decided_by', db_column='decided_by', blank=True, null=True)
     decision_comment = models.TextField(blank=True, null=True)
-    workflow_instance = models.ForeignKey('WorkflowInstance', models.DO_NOTHING, blank=True, null=True)
+    workflow_instance = models.ForeignKey('WorkflowInstance', models.DO_NOTHING, related_name='timesheets', blank=True, null=True)
+
+    company_scope = 'company'
+    objects = CompanyQuerySet.as_manager()
 
     class Meta:
         db_table = 'timesheet'
-        unique_together = (('employee', 'week_start'),)
+        # Each submission is its own row; only one live (submitted or approved) sheet per week.
+        constraints = [models.UniqueConstraint(fields=['employee', 'week_start'], condition=models.Q(status__in=['submitted', 'approved']),
+                                              name='timesheet_live_week_idx')]
+
+    def __str__(self):
+        return f'Timesheet {self.id}'

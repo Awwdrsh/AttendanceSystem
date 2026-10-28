@@ -1,10 +1,13 @@
-"""Gateway environment (port of apps/gateway/src/config.ts). Read from the process environment, which Django settings
-have already filled from server/.env and apps/api/.env."""
+"""Gateway environment (port of the TS gateway's config). Read from the process environment, which Django settings have
+already filled from server/.env, plus the gateway's own server/gateway.env."""
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
+
+from rest_framework import serializers
+
+from hajiri.core.validation import choice_message
 
 LOG_LEVELS = ('fatal', 'error', 'warn', 'info', 'debug', 'trace')
 
@@ -27,50 +30,65 @@ class GatewayConfig:
     GATEWAY_ALLOW_DANGEROUS_COMMANDS: bool = False
 
 
-def _pos_int(env, name, default, issues) -> int:
-    v = env.get(name)
-    if v is None:
-        return default
-    s = v.strip()
-    try:
-        n = float(s) if s else 0.0     # z.coerce.number(): Number('') is 0
-    except ValueError:
-        issues.append(f'{name}: Invalid input: expected number, received NaN')
-        return default
-    if not n.is_integer():
-        issues.append(f'{name}: Invalid input: expected int, received number')
-    elif n <= 0:
-        issues.append(f'{name}: Too small: expected number to be >0')
-    return int(n) if n.is_integer() else default
+class PositiveIntEnv(serializers.Field):
+    """z.coerce.number().int().positive(): Number('') is 0, so an empty value is "too small"."""
+    default_error_messages = {
+        'nan': 'Invalid input: expected number, received NaN',
+        'int': 'Invalid input: expected int, received number',
+        'small': 'Too small: expected number to be >0',
+    }
+
+    def to_internal_value(self, data) -> int:
+        s = str(data).strip()
+        try:
+            n = float(s) if s else 0.0
+        except ValueError:
+            self.fail('nan')
+        if not n.is_integer():
+            self.fail('int')
+        if n <= 0:
+            self.fail('small')
+        return int(n)
+
+    def to_representation(self, value):
+        return value
+
+
+def _text(**kw) -> serializers.CharField:
+    """An env string as given (no trimming); unset means the default."""
+    return serializers.CharField(required=False, trim_whitespace=False, **kw)
+
+
+class GatewayEnv(serializers.Serializer):
+    """The gateway's environment, with the TS gateway's (zod) messages."""
+    PORT = PositiveIntEnv(required=False, default=8080)
+    LOG_LEVEL = serializers.ChoiceField(LOG_LEVELS, required=False, default='info', error_messages={
+        'invalid_choice': choice_message(LOG_LEVELS), 'blank': choice_message(LOG_LEVELS)})
+    DATABASE_URL = _text(error_messages={'blank': 'Too small: expected string to have >=1 characters'})
+    GATEWAY_SIGNING_KEY = _text(allow_blank=True)
+    DATA_ENCRYPTION_KEY = _text(min_length=40, error_messages={
+        'min_length': 'Too small: expected string to have >=40 characters',
+        'blank': 'Too small: expected string to have >=40 characters'})
+    GATEWAY_MAX_PENDING_DEVICES = PositiveIntEnv(required=False, default=50)
+    GATEWAY_MAX_CLOCK_SKEW_MIN = PositiveIntEnv(required=False, default=10)
+    GATEWAY_RAW_DIR = _text(allow_blank=True, default='data/raw')
+    GATEWAY_ALLOW_DANGEROUS_COMMANDS = serializers.ChoiceField(('true', 'false'), required=False, default='false', error_messages={
+        'invalid_choice': choice_message(('true', 'false')), 'blank': choice_message(('true', 'false'))})
 
 
 def load_config(env: dict | None = None) -> GatewayConfig:
     env = dict(os.environ if env is None else env)
-    issues: list[str] = []
-    port = _pos_int(env, 'PORT', 8080, issues)
-    level = env.get('LOG_LEVEL', 'info')
-    if level not in LOG_LEVELS:
-        issues.append('LOG_LEVEL: Invalid option: expected one of ' + '|'.join(f'"{x}"' for x in LOG_LEVELS))
-    db_url = env.get('DATABASE_URL')
-    if db_url is not None and len(db_url) < 1:
-        issues.append('DATABASE_URL: Too small: expected string to have >=1 characters')
-    dek = env.get('DATA_ENCRYPTION_KEY')
-    if dek is not None and len(dek) < 40:
-        issues.append('DATA_ENCRYPTION_KEY: Too small: expected string to have >=40 characters')
-    pending = _pos_int(env, 'GATEWAY_MAX_PENDING_DEVICES', 50, issues)
-    skew = _pos_int(env, 'GATEWAY_MAX_CLOCK_SKEW_MIN', 10, issues)
-    dangerous = env.get('GATEWAY_ALLOW_DANGEROUS_COMMANDS', 'false')
-    if dangerous not in ('true', 'false'):
-        issues.append('GATEWAY_ALLOW_DANGEROUS_COMMANDS: Invalid option: expected one of "true"|"false"')
-    if issues:
+    form = GatewayEnv(data={k: env[k] for k in GatewayEnv._declared_fields if k in env})
+    if not form.is_valid():
+        issues = [f'{name}: {msg}' for name, msgs in form.errors.items() for msg in msgs]
         raise ValueError(f'Invalid environment: {"; ".join(issues)}')
+    v = form.validated_data
     return GatewayConfig(
-        PORT=port, DATABASE_URL=db_url, LOG_LEVEL=level, GATEWAY_SIGNING_KEY=env.get('GATEWAY_SIGNING_KEY'),
-        DATA_ENCRYPTION_KEY=dek, GATEWAY_MAX_PENDING_DEVICES=pending, GATEWAY_MAX_CLOCK_SKEW_MIN=skew,
-        GATEWAY_RAW_DIR=env.get('GATEWAY_RAW_DIR', 'data/raw'), GATEWAY_ALLOW_DANGEROUS_COMMANDS=dangerous == 'true',
+        PORT=v['PORT'], DATABASE_URL=v.get('DATABASE_URL'), LOG_LEVEL=v['LOG_LEVEL'],
+        GATEWAY_SIGNING_KEY=v.get('GATEWAY_SIGNING_KEY'), DATA_ENCRYPTION_KEY=v.get('DATA_ENCRYPTION_KEY'),
+        GATEWAY_MAX_PENDING_DEVICES=v['GATEWAY_MAX_PENDING_DEVICES'], GATEWAY_MAX_CLOCK_SKEW_MIN=v['GATEWAY_MAX_CLOCK_SKEW_MIN'],
+        GATEWAY_RAW_DIR=v['GATEWAY_RAW_DIR'], GATEWAY_ALLOW_DANGEROUS_COMMANDS=v['GATEWAY_ALLOW_DANGEROUS_COMMANDS'] == 'true',
     )
-
-
 
 
 #: The keys the gateway reads (GatewayConfig fields plus NODE_ENV for the production start-up check).
@@ -78,24 +96,22 @@ GATEWAY_KEYS = tuple(GatewayConfig.__dataclass_fields__) + ('NODE_ENV',)
 
 
 def gateway_env_files() -> list:
-    """The gateway's own env files, first wins: server/gateway.env, then apps/gateway/.env (what scripts/setup.sh
-    writes: PORT=8080, GATEWAY_SIGNING_KEY, the shared DATA_ENCRYPTION_KEY ...)."""
+    """The gateway's own env file, server/gateway.env (what scripts/setup.sh writes: PORT=8080, GATEWAY_SIGNING_KEY,
+    the shared DATA_ENCRYPTION_KEY ...)."""
     from django.conf import settings
-    base = settings.BASE_DIR
-    return [base / 'gateway.env', base.parent / 'apps' / 'gateway' / '.env']
+    return [settings.BASE_DIR / 'gateway.env']
 
 
 def _web_env_files() -> list:
     from django.conf import settings
-    base = settings.BASE_DIR
-    return [base / '.env', base.parent / 'apps' / 'api' / '.env']
+    return [settings.BASE_DIR / '.env']
 
 
 def gateway_environ(environ: dict | None = None, files: list | None = None, web_files: list | None = None) -> tuple[dict, dict]:
-    """The environment the TS gateway saw: the process environment plus apps/gateway/.env (dotenv never overrides a
-    variable the process already has).
+    """The gateway's environment: the process environment plus server/gateway.env (dotenv never overrides a variable
+    the process already has).
 
-    Django settings have already copied server/.env and apps/api/.env into os.environ; those values belong to the web
+    Django settings have already copied server/.env into os.environ; those values belong to the web
     app (PORT there is the API's port), so for the gateway's keys a value from the gateway's own env file wins over
     one that only came from a web env file, and a web-only PORT is dropped so the gateway keeps its 8080 default.
     Returns (env, origin) where origin maps a key taken from a gateway env file to that file's directory."""

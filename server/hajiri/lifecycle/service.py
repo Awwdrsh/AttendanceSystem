@@ -4,38 +4,48 @@ exit checklists, probation decisions, exits and the daily job.
 """
 from __future__ import annotations
 
-import json
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import (BooleanField, Count, DecimalField, Exists, ExpressionWrapper, F, OuterRef, Q, Subquery, Sum,
+                              Value)
+from django.db.models.functions import Coalesce, Now
 
 from hajiri.core.audit import audit
 from hajiri.core.auth import AuthUser, has_role
 from hajiri.core.bsdate import bs_label
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute, one, rows
-from hajiri.core.errors import BadRequestError, ConflictError, NotFoundError
-from hajiri.core.schema import Arr, Bool, Int, Obj, safe_parse, parse
-from hajiri.notifications.service import notify, notify_role, user_id_for_employee, user_ids_with_role
+from hajiri.core.errors import BadRequestError, ConflictError, NotFoundError, ValidationError
+from hajiri.core.settings_store import add_setting_if_missing, get_setting
+from hajiri.core.users import user_ids_with_role
+from hajiri.core.validation import validate
+from hajiri.db.models import (AssetAssignment, AssetType, Company, Employee, EmployeeAssignment, EmployeeConfirmation,
+                              EmployeeExit, ExitInterviewQuestion, LeaveLedger, LifecycleCase, LifecycleReminder, LifecycleTask,
+                              LifecycleTemplate, LifecycleTemplateTask, Loan, LoanInstallment, PayrollPeriod, PayrollRun,
+                              ProbationReview)
+from hajiri.notifications.service import notify
+from hajiri.people.accounts import user_id_for_employee
 from hajiri.people.career import log_career_event
 
-# ---------------------------------------------------------------- policy
-POLICY_SCHEMA = Obj({
-    # Notice an employee gives when resigning, in calendar days.
-    'noticeDays': Int(min=0, max=180, default=30),
-    # Start the default onboarding checklist when HR adds an employee.
-    'autoStartOnboarding': Bool(default=True),
-    # Days before probation ends on which the manager is reminded.
-    'probationReminderDays': Arr(Int(min=1, max=90), max=4, default=lambda: [14, 7]),
-    # Let leavers fill in the exit interview themselves.
-    'selfExitInterview': Bool(default=True),
-})
+from .serializers import EXIT_KINDS, PolicyIn  # noqa: F401
 
+CaseStatus = LifecycleCase.Status
+TaskStatus = LifecycleTask.Status
+ExitStatus = EmployeeExit.Status
+POLICY_KEY = 'lifecycle.policy'
+TASK_COLS = ('id', 'case_id', 'company_id', 'employee_id', 'sort', 'title', 'description', 'department', 'assignee_type',
+             'assignee_user_id', 'due_date', 'link', 'status', 'note', 'done_by', 'done_at', 'created_at')
+
+
+# ---------------------------------------------------------------- policy
 
 def lifecycle_policy(company_id: str) -> dict:
-    r = one("SELECT value FROM company_setting WHERE company_id = %s AND key = 'lifecycle.policy'", [company_id])
-    ok, out = safe_parse(POLICY_SCHEMA, (r and r['value']) or {})
-    return out if ok else parse(POLICY_SCHEMA, {})
+    """The company's lifecycle settings; a stored value that no longer validates falls back to the defaults."""
+    try:
+        return validate(PolicyIn, get_setting(company_id, POLICY_KEY) or {})
+    except ValidationError:
+        return validate(PolicyIn, {})
 
 
 # ---------------------------------------------------------------- defaults
@@ -77,34 +87,33 @@ ASSET_TYPES = ['Laptop', 'Desktop', 'Mobile phone', 'SIM card', 'ID card', 'Keys
 
 
 def ensure_lifecycle_defaults(company_id: str) -> bool:
-    """Idempotent per-company defaults; the marker row makes concurrent first visits seed only once."""
-    n = execute("""INSERT INTO company_setting (company_id, key, value) VALUES (%s, 'lifecycle.seeded', '{"version":1}')
-                   ON CONFLICT DO NOTHING""", [company_id])
-    if not n:
+    """Idempotent per-company defaults; the marker setting makes concurrent first visits seed only once."""
+    if not add_setting_if_missing(company_id, 'lifecycle.seeded', {'version': 1}):
         return False
-    for kind, name, tasks in (('onboarding', 'Standard onboarding', ONBOARDING), ('offboarding', 'Standard exit clearance', OFFBOARDING)):
-        t = one("""INSERT INTO lifecycle_template (company_id, kind, name, description, is_default) VALUES (%s, %s, %s, %s, true)
-                   ON CONFLICT (company_id, kind, name) DO NOTHING RETURNING id""",
-                [company_id, kind, name, 'Checklist for every new joiner. Due dates count from the join date.' if kind == 'onboarding'
-                 else 'Clearance for every leaver. Due dates count from the last working day.'])
-        if not t:
+    for kind, name, tasks in ((LifecycleCase.Kind.ONBOARDING, 'Standard onboarding', ONBOARDING),
+                              (LifecycleCase.Kind.OFFBOARDING, 'Standard exit clearance', OFFBOARDING)):
+        t, created = LifecycleTemplate.objects.get_or_create(
+            company_id=company_id, kind=kind, name=name,
+            defaults={'is_default': True, 'description': 'Checklist for every new joiner. Due dates count from the join date.'
+                      if kind == 'onboarding' else 'Clearance for every leaver. Due dates count from the last working day.'})
+        if not created:
             continue
-        for i, (title, assignee, offset, dept, link, description) in enumerate(tasks):
-            execute("""INSERT INTO lifecycle_template_task (template_id, sort, title, description, department, assignee_type, due_offset_days, link)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""", [t['id'], i, title, description, dept, assignee, offset, link])
-    for i, (q, kind, options) in enumerate(EXIT_QUESTIONS):
-        execute('INSERT INTO exit_interview_question (company_id, sort, question, kind, options) VALUES (%s, %s, %s, %s, %s)',
-                [company_id, i, q, kind, json.dumps(options)])
-    for name in ASSET_TYPES:
-        execute('INSERT INTO asset_type (company_id, name) VALUES (%s, %s) ON CONFLICT DO NOTHING', [company_id, name])
+        LifecycleTemplateTask.objects.bulk_create([
+            LifecycleTemplateTask(template=t, sort=i, title=title, description=description, department=dept, assignee_type=assignee,
+                                  due_offset_days=offset, link=link)
+            for i, (title, assignee, offset, dept, link, description) in enumerate(tasks)])
+    ExitInterviewQuestion.objects.bulk_create([
+        ExitInterviewQuestion(company_id=company_id, sort=i, question=q, kind=kind, options=options)
+        for i, (q, kind, options) in enumerate(EXIT_QUESTIONS)])
+    AssetType.objects.bulk_create([AssetType(company_id=company_id, name=n) for n in ASSET_TYPES], ignore_conflicts=True)
     return True
 
 
 # ---------------------------------------------------------------- reminders
 def remind_once(company_id: str, kind: str, ref_id: str, key: str) -> bool:
     """Record a reminder; False when it was already sent (callers skip the notification)."""
-    return execute('INSERT INTO lifecycle_reminder (company_id, kind, ref_id, key) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING',
-                   [company_id, kind, ref_id, key]) > 0
+    _, created = LifecycleReminder.objects.get_or_create(company_id=company_id, kind=kind, ref_id=ref_id, key=key)
+    return created
 
 
 # ---------------------------------------------------------------- checklists
@@ -118,11 +127,20 @@ def task_row(r: dict | None) -> dict | None:
     return out
 
 
+def _now_or_later(today: date) -> Q:
+    """Assignment periods that cover today or start later (pre-joining onboarding)."""
+    return Q(valid__contains=today) | Q(valid__startswith__gt=today)
+
+
 def manager_user_of(employee_id: str) -> str | None:
-    r = one("""SELECT u.id FROM employee_assignment a JOIN app_user u ON u.employee_id = a.manager_id AND u.status = 'active'
-                WHERE a.employee_id = %s AND (a.valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date OR lower(a.valid) > (now() AT TIME ZONE 'Asia/Kathmandu')::date) ORDER BY lower(a.valid) LIMIT 1""",
-            [employee_id])
-    return str(r['id']) if r else None
+    """The account of the employee's line manager now (or the first one they will have), if that manager can sign in."""
+    managers = (EmployeeAssignment.objects.filter(employee_id=employee_id, manager__isnull=False)
+                .filter(_now_or_later(npt_today())).order_by('valid__startswith').values_list('manager_id', flat=True))
+    for m in managers:
+        uid = user_id_for_employee(m)
+        if uid:
+            return uid
+    return None
 
 
 def responsible_users(t: dict) -> list[str]:
@@ -141,8 +159,8 @@ def responsible_users(t: dict) -> list[str]:
 
 def manages_now_or_soon(manager_employee_id: str, employee_id: str) -> bool:
     """The employee's current line manager, or the manager they will have once they join (pre-joining onboarding)."""
-    return bool(one("""SELECT 1 AS x FROM employee_assignment WHERE employee_id = %s AND manager_id = %s
-                        AND (valid @> (now() AT TIME ZONE 'Asia/Kathmandu')::date OR lower(valid) > (now() AT TIME ZONE 'Asia/Kathmandu')::date) LIMIT 1""", [employee_id, manager_employee_id]))
+    return (EmployeeAssignment.objects.filter(employee_id=employee_id, manager_id=manager_employee_id)
+            .filter(_now_or_later(npt_today())).exists())
 
 
 def can_complete_task(user: AuthUser, t: dict) -> bool:
@@ -171,8 +189,15 @@ def can_view_case(user: AuthUser, c: dict) -> bool:
         return True
     if user.employee_id and has_role(user, 'manager') and manages_now_or_soon(user.employee_id, str(c['employee_id'])):
         return True
-    return bool(one('SELECT 1 AS x FROM lifecycle_task WHERE case_id = %s AND assignee_type = %s AND assignee_user_id = %s LIMIT 1',
-                    [c['id'], 'user', user.id]))
+    return LifecycleTask.objects.filter(case_id=c['id'], assignee_type=LifecycleTask.AssigneeType.USER, assignee_user_id=user.id).exists()
+
+
+def _d(v) -> date:
+    return v if isinstance(v, date) else date.fromisoformat(str(v)[:10])
+
+
+def _flag(q: Q) -> ExpressionWrapper:
+    return ExpressionWrapper(q, output_field=BooleanField())
 
 
 def start_case(*, company_id: str, employee_id: str, kind: str, anchor_date, started_by: str | None,
@@ -182,38 +207,42 @@ def start_case(*, company_id: str, employee_id: str, kind: str, anchor_date, sta
     given). Due dates count from the anchor date: the join date for onboarding, the last working day for exits.
     """
     ensure_lifecycle_defaults(company_id)
+    anchor = _d(anchor_date)
+    templates = LifecycleTemplate.objects.for_company(company_id).filter(kind=kind, active=True)
     if template_id:
-        if not one('SELECT 1 AS x FROM lifecycle_template WHERE id = %s AND company_id = %s AND kind = %s AND active',
-                   [template_id, company_id, kind]):
+        if not templates.filter(pk=template_id).exists():
             raise BadRequestError('checklist template not found')
     else:
-        t = one("""SELECT t.id FROM lifecycle_template t
-                     LEFT JOIN employee_assignment a ON a.employee_id = %s AND a.valid @> greatest((now() AT TIME ZONE 'Asia/Kathmandu')::date, %s::date)
-                    WHERE t.company_id = %s AND t.kind = %s AND t.active
-                      AND (t.branch_id IS NULL OR t.branch_id = a.branch_id) AND (t.org_unit_id IS NULL OR t.org_unit_id = a.org_unit_id)
-                    ORDER BY (t.org_unit_id IS NOT NULL) DESC, (t.branch_id IS NOT NULL) DESC, t.is_default DESC, t.created_at LIMIT 1""",
-                [employee_id, anchor_date, company_id, kind])
-        template_id = str(t['id']) if t else None
-    if one('SELECT 1 AS x FROM lifecycle_case WHERE employee_id = %s AND kind = %s AND status = %s', [employee_id, kind, 'active']):
+        a = (EmployeeAssignment.objects.filter(employee_id=employee_id, valid__contains=max(npt_today(), anchor))
+             .values('branch_id', 'org_unit_id').first()) or {}
+        best = (templates.filter(Q(branch__isnull=True) | Q(branch_id=a.get('branch_id')) if a.get('branch_id') else Q(branch__isnull=True))
+                .filter(Q(org_unit__isnull=True) | Q(org_unit_id=a.get('org_unit_id')) if a.get('org_unit_id') else Q(org_unit__isnull=True))
+                .order_by(_flag(Q(org_unit__isnull=False)).desc(), _flag(Q(branch__isnull=False)).desc(), '-is_default', 'created_at')
+                .values_list('id', flat=True).first())
+        template_id = str(best) if best else None
+    if LifecycleCase.objects.filter(employee_id=employee_id, kind=kind, status=CaseStatus.ACTIVE).exists():
         raise ConflictError('onboarding is already in progress for this employee' if kind == 'onboarding'
                             else 'an exit clearance is already in progress for this employee')
-    case_id = str(one("""INSERT INTO lifecycle_case (company_id, employee_id, kind, template_id, anchor_date, started_by, exit_id)
-                         VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                      [company_id, employee_id, kind, template_id, anchor_date, started_by, exit_id])['id'])
+    case = LifecycleCase.objects.create(company_id=company_id, employee_id=employee_id, kind=kind, template_id=template_id,
+                                        anchor_date=anchor, started_by_id=started_by, exit_id=exit_id)
+    case_id = str(case.pk)
     if template_id:
-        execute("""INSERT INTO lifecycle_task (case_id, company_id, employee_id, sort, title, description, department, assignee_type,
-                                              assignee_user_id, due_date, link)
-                   SELECT %s, %s, %s, sort, title, description, department, assignee_type, assignee_user_id, %s::date + due_offset_days, link
-                     FROM lifecycle_template_task WHERE template_id = %s ORDER BY sort""",
-                [case_id, company_id, employee_id, anchor_date, template_id])
+        LifecycleTask.objects.bulk_create([
+            LifecycleTask(case=case, company_id=company_id, employee_id=employee_id, sort=x.sort, title=x.title, description=x.description,
+                          department=x.department, assignee_type=x.assignee_type, assignee_user_id=x.assignee_user_id,
+                          due_date=anchor + timedelta(days=x.due_offset_days), link=x.link)
+            for x in LifecycleTemplateTask.objects.filter(template_id=template_id).order_by('sort')])
     audit('start', 'lifecycle_case', actor_id=started_by, row_id=case_id,
           after={'kind': kind, 'employeeId': str(employee_id), 'templateId': template_id})
-    emp = one('SELECT name_en FROM employee WHERE id = %s', [employee_id])
-    name = emp['name_en'] if emp else 'An employee'
+    name = Employee.objects.filter(pk=employee_id).values_list('name_en', flat=True).first() or 'An employee'
     # Tell each person once that they have something to do, with their own count.
     per_user: dict[str, int] = {}
-    for t in rows('SELECT * FROM lifecycle_task WHERE case_id = %s', [case_id]):
-        for u in responsible_users(task_row(t)):
+    resolved: dict[tuple, list[str]] = {}   # every task of a case shares the employee: resolve each assignee kind once
+    for t in LifecycleTask.objects.filter(case_id=case_id).values(*TASK_COLS):
+        key = (t['assignee_type'], t['assignee_user_id'])
+        if key not in resolved:
+            resolved[key] = responsible_users(task_row(t))
+        for u in resolved[key]:
             per_user[u] = per_user.get(u, 0) + 1
     own_user = user_id_for_employee(str(employee_id))
     for user_id, n in per_user.items():
@@ -231,23 +260,23 @@ def start_case(*, company_id: str, employee_id: str, kind: str, anchor_date, sta
 
 def complete_case_if_done(case_id: str) -> bool:
     """Mark a case completed once nothing is left open."""
-    return execute("""UPDATE lifecycle_case SET status = 'completed', completed_at = now()
-                       WHERE id = %s AND status = 'active' AND NOT EXISTS (SELECT 1 FROM lifecycle_task WHERE case_id = %s AND status = 'open')""",
-                   [case_id, case_id]) > 0
+    open_tasks = LifecycleTask.objects.filter(case_id=OuterRef('pk'), status=TaskStatus.OPEN)
+    return (LifecycleCase.objects.filter(pk=case_id, status=CaseStatus.ACTIVE).exclude(Exists(open_tasks))
+            .update(status=CaseStatus.COMPLETED, completed_at=Now())) > 0
 
 
 # ---------------------------------------------------------------- probation
 def apply_confirmation(*, company_id: str, employee_id: str, confirmed_on, review_id: str | None, actor_id: str | None) -> str:
     """The confirmation effect of an approved probation review (or a direct HR confirmation): stamps the employee as
     confirmed, keeps a confirmation record and logs it on the career timeline."""
-    execute('UPDATE employee SET confirmed_on = %s, updated_at = now() WHERE id = %s', [confirmed_on, employee_id])
-    r = one("""INSERT INTO employee_confirmation (company_id, employee_id, confirmed_on, review_id, created_by)
-               VALUES (%s, %s, %s, %s, %s) RETURNING id""", [company_id, employee_id, confirmed_on, review_id, actor_id])
+    Employee.objects.filter(pk=employee_id).update(confirmed_on=confirmed_on, updated_at=Now())
+    r = EmployeeConfirmation.objects.create(company_id=company_id, employee_id=employee_id, confirmed_on=confirmed_on,
+                                            review_id=review_id, created_by_id=actor_id)
     on = confirmed_on.isoformat() if isinstance(confirmed_on, date) else str(confirmed_on)
     audit('confirm', 'employee', actor_id=actor_id, row_id=employee_id, after={'confirmedOn': on, 'reviewId': review_id})
     log_career_event(company_id=company_id, employee_id=employee_id, kind='confirmation', effective_date=on,
                      note='Confirmed after the probation review' if review_id else None, actor_id=actor_id)
-    return str(r['id'])
+    return str(r.pk)
 
 
 def _iso(d) -> str | None:
@@ -257,52 +286,51 @@ def _iso(d) -> str | None:
 
 
 def apply_probation_decision(review_id: str, state: str, ctx) -> None:
-    rv = one('SELECT * FROM probation_review WHERE id = %s FOR UPDATE', [review_id])
+    rv = ProbationReview.objects.select_for_update().filter(pk=review_id).first()
     if not rv:
         raise NotFoundError('probation review not found')
-    if rv['status'] != 'pending':
-        raise ConflictError(f"review already {rv['status']}")
-    company_id, employee_id = str(rv['company_id']), str(rv['employee_id'])
-    execute('UPDATE probation_review SET status = %s, decided_at = now() WHERE id = %s', [state, review_id])
-    emp = one('SELECT name_en FROM employee WHERE id = %s', [employee_id])
-    name = emp['name_en'] if emp else 'the employee'
+    if rv.status != ProbationReview.Status.PENDING:
+        raise ConflictError(f'review already {rv.status}')
+    company_id, employee_id = str(rv.company_id), str(rv.employee_id)
+    ProbationReview.objects.filter(pk=review_id).update(status=state, decided_at=Now())
+    name = Employee.objects.filter(pk=employee_id).values_list('name_en', flat=True).first() or 'the employee'
     outcome = 'was not approved'
+    Rec = ProbationReview.Recommendation
     if state == 'approved':
         today = npt_today()
-        if rv['recommendation'] == 'confirm':
-            on = rv['probation_end'] if rv['probation_end'] and rv['probation_end'] > today else today
+        own = user_id_for_employee(employee_id)
+        if rv.recommendation == Rec.CONFIRM:
+            on = rv.probation_end if rv.probation_end and rv.probation_end > today else today
             apply_confirmation(company_id=company_id, employee_id=employee_id, confirmed_on=on, review_id=str(review_id), actor_id=ctx.actor_id)
             outcome = f'confirmed from {bs_label(on)}'
-            own = user_id_for_employee(employee_id)
             if own:
                 notify(company_id=company_id, user_id=own, employee_id=employee_id, template='lifecycle.confirmed',
                        title='Congratulations, your employment is confirmed',
                        body=f'Your probation is complete. You are confirmed from {bs_label(on)}.', payload={'reviewId': str(review_id)},
                        channels=('push',))
-        elif rv['recommendation'] == 'extend':
-            execute('UPDATE employee SET probation_end = %s, updated_at = now() WHERE id = %s', [rv['extend_to'], employee_id])
+        elif rv.recommendation == Rec.EXTEND:
+            Employee.objects.filter(pk=employee_id).update(probation_end=rv.extend_to, updated_at=Now())
             audit('extend_probation', 'employee', actor_id=ctx.actor_id, row_id=employee_id,
-                  before={'probationEnd': _iso(rv['probation_end'])}, after={'probationEnd': _iso(rv['extend_to'])})
-            outcome = f"probation extended to {bs_label(rv['extend_to'])}"
-            own = user_id_for_employee(employee_id)
+                  before={'probationEnd': _iso(rv.probation_end)}, after={'probationEnd': _iso(rv.extend_to)})
+            outcome = f'probation extended to {bs_label(rv.extend_to)}'
             if own:
                 notify(company_id=company_id, user_id=own, employee_id=employee_id, template='lifecycle.probation_extended',
                        title='Probation extended',
-                       body=f"Your probation now ends on {bs_label(rv['extend_to'])}. Your manager will talk you through the next steps.",
+                       body=f'Your probation now ends on {bs_label(rv.extend_to)}. Your manager will talk you through the next steps.',
                        payload={'reviewId': str(review_id)})
         else:
             record_exit(company_id=company_id, employee_id=employee_id, kind='termination', voluntary=False,
-                        reason_category='Probation not successful', reason='Probation review', last_working_day=rv['last_working_day'],
+                        reason_category='Probation not successful', reason='Probation review', last_working_day=rv.last_working_day,
                         actor_id=ctx.actor_id)
-            outcome = f"employment ends on {bs_label(rv['last_working_day'])}"
+            outcome = f'employment ends on {bs_label(rv.last_working_day)}'
     body = (f'Your review was approved: {outcome}.' if state == 'approved'
             else f"Your review was not approved: {ctx.reason or 'no reason given'}.")
-    notify(company_id=company_id, user_id=str(rv['submitted_by']), template=f'lifecycle.probation_review.{state}',
+    notify(company_id=company_id, user_id=str(rv.submitted_by_id), template=f'lifecycle.probation_review.{state}',
            title=f'Probation review for {name}', body=body, payload={'reviewId': str(review_id)})
 
 
 # ---------------------------------------------------------------- exits
-EXIT_KINDS = ('resignation', 'termination', 'retirement', 'contract_end', 'death', 'other')
+IN_PROGRESS = (ExitStatus.PENDING, ExitStatus.ACCEPTED)
 
 
 def record_exit(*, company_id: str, employee_id: str, kind: str, voluntary: bool, last_working_day, actor_id: str | None,
@@ -311,44 +339,46 @@ def record_exit(*, company_id: str, employee_id: str, kind: str, voluntary: bool
     An accepted exit: the last working day becomes the employee's exit date (sign-in stops the day after) and the exit
     clearance checklist starts. Used for HR-initiated exits and terminations after a failed probation.
     """
-    if one('SELECT 1 AS x FROM employee_exit WHERE employee_id = %s AND status IN (%s, %s)', [employee_id, 'pending', 'accepted']):
+    if EmployeeExit.objects.filter(employee_id=employee_id, status__in=IN_PROGRESS).exists():
         raise ConflictError('an exit is already in progress for this employee')
-    r = one("""INSERT INTO employee_exit (company_id, employee_id, kind, voluntary, reason_category, reason, submitted_on, notice_days,
-                                         proposed_lwd, accepted_lwd, status, initiated_by, decided_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, 0, %s, %s, 'accepted', %s, now()) RETURNING id""",
-            [company_id, employee_id, kind, voluntary, reason_category, reason, npt_today(), last_working_day, last_working_day, actor_id])
-    exit_id = str(r['id'])
+    x = EmployeeExit.objects.create(company_id=company_id, employee_id=employee_id, kind=kind, voluntary=voluntary,
+                                    reason_category=reason_category, reason=reason, submitted_on=npt_today(), notice_days=0,
+                                    proposed_lwd=last_working_day, accepted_lwd=last_working_day, status=ExitStatus.ACCEPTED,
+                                    initiated_by_id=actor_id, decided_at=Now())
+    exit_id = str(x.pk)
     accept_exit(exit_id, last_working_day, actor_id, template_id)
     return exit_id
 
 
 def accept_exit(exit_id: str, lwd, actor_id: str | None, template_id: str | None = None) -> None:
-    ex = one("""UPDATE employee_exit SET status = 'accepted', accepted_lwd = %s, decided_at = coalesce(decided_at, now()) WHERE id = %s
-                RETURNING company_id, employee_id, kind""", [lwd, exit_id])
+    EmployeeExit.objects.filter(pk=exit_id).update(status=ExitStatus.ACCEPTED, accepted_lwd=lwd,
+                                                   decided_at=Coalesce(F('decided_at'), Now()))
+    ex = EmployeeExit.objects.filter(pk=exit_id).values('company_id', 'employee_id', 'kind').get()
     company_id, employee_id = str(ex['company_id']), str(ex['employee_id'])
-    execute('UPDATE employee SET exit_date = %s, updated_at = now() WHERE id = %s', [lwd, employee_id])
+    Employee.objects.filter(pk=employee_id).update(exit_date=lwd, updated_at=Now())
     audit('accept_exit', 'employee_exit', actor_id=actor_id, row_id=exit_id, after={'lastWorkingDay': _iso(lwd), 'kind': ex['kind']})
-    if not one('SELECT 1 AS x FROM lifecycle_case WHERE employee_id = %s AND kind = %s AND status = %s', [employee_id, 'offboarding', 'active']):
+    if not LifecycleCase.objects.filter(employee_id=employee_id, kind=LifecycleCase.Kind.OFFBOARDING, status=CaseStatus.ACTIVE).exists():
         start_case(company_id=company_id, employee_id=employee_id, kind='offboarding', template_id=template_id, anchor_date=lwd,
                    started_by=actor_id, exit_id=exit_id)
     own = user_id_for_employee(employee_id)
-    if own and ex['kind'] != 'death':
+    if own and ex['kind'] != EmployeeExit.Kind.DEATH:
         notify(company_id=company_id, user_id=own, employee_id=employee_id, template='lifecycle.exit.accepted',
-               title='Resignation accepted' if ex['kind'] == 'resignation' else 'Your last working day',
+               title='Resignation accepted' if ex['kind'] == EmployeeExit.Kind.RESIGNATION else 'Your last working day',
                body=f'Your last working day is {bs_label(lwd)}. Your exit checklist is on Home.', payload={'exitId': exit_id},
                channels=('push',))
 
 
 def apply_resignation_decision(exit_id: str, state: str, ctx) -> None:
-    ex = one('SELECT status, proposed_lwd, accepted_lwd, employee_id, company_id FROM employee_exit WHERE id = %s FOR UPDATE', [exit_id])
+    ex = (EmployeeExit.objects.select_for_update().filter(pk=exit_id)
+          .values('status', 'proposed_lwd', 'accepted_lwd', 'employee_id', 'company_id').first())
     if not ex:
         raise NotFoundError('resignation not found')
-    if ex['status'] != 'pending':
+    if ex['status'] != ExitStatus.PENDING:
         raise ConflictError(f"resignation already {ex['status']}")
     if state == 'approved':
         accept_exit(str(exit_id), ex['accepted_lwd'] or ex['proposed_lwd'], ctx.actor_id)
         return
-    execute("UPDATE employee_exit SET status = 'rejected', decided_at = now() WHERE id = %s", [exit_id])
+    EmployeeExit.objects.filter(pk=exit_id).update(status=ExitStatus.REJECTED, decided_at=Now())
     own = user_id_for_employee(str(ex['employee_id']))
     if own:
         notify(company_id=str(ex['company_id']), user_id=own, employee_id=str(ex['employee_id']), template='lifecycle.exit.rejected',
@@ -357,18 +387,18 @@ def apply_resignation_decision(exit_id: str, state: str, ctx) -> None:
 
 def clearance_blockers(exit_id: str, employee_id: str) -> dict:
     """Open clearance tasks and assets still held, which stop an exit from being completed."""
-    t = one("""SELECT count(*)::int AS n FROM lifecycle_task t JOIN lifecycle_case c ON c.id = t.case_id
-                WHERE c.exit_id = %s AND c.status = 'active' AND t.status = 'open'""", [exit_id])
-    a = one('SELECT count(*)::int AS n FROM asset_assignment WHERE employee_id = %s AND returned_on IS NULL', [employee_id])
-    return {'openTasks': t['n'], 'assetsHeld': a['n']}
+    t = LifecycleTask.objects.filter(case__exit_id=exit_id, case__status=CaseStatus.ACTIVE, status=TaskStatus.OPEN).count()
+    a = AssetAssignment.objects.filter(employee_id=employee_id, returned_on__isnull=True).count()
+    return {'openTasks': t, 'assetsHeld': a}
 
 
 def complete_exit(exit_id: str, actor_id: str | None, *, skip_open_tasks: bool = False) -> None:
     """Finish an exit: the employee becomes exited (sign-in already stops after the last working day)."""
-    ex = one('SELECT status, employee_id, company_id, accepted_lwd, kind, reason FROM employee_exit WHERE id = %s FOR UPDATE', [exit_id])
+    ex = (EmployeeExit.objects.select_for_update().filter(pk=exit_id)
+          .values('status', 'employee_id', 'company_id', 'accepted_lwd', 'kind', 'reason').first())
     if not ex:
         raise NotFoundError('exit not found')
-    if ex['status'] != 'accepted':
+    if ex['status'] != ExitStatus.ACCEPTED:
         raise ConflictError(f"exit is {ex['status']}")
     if ex['accepted_lwd'] > npt_today():
         raise ConflictError(f"the last working day is {bs_label(ex['accepted_lwd'])}; complete the exit after it")
@@ -381,11 +411,12 @@ def complete_exit(exit_id: str, actor_id: str | None, *, skip_open_tasks: bool =
         n = b['openTasks']
         raise ConflictError(f"{n} clearance {'task is' if n == 1 else 'tasks are'} still open")
     if b['openTasks']:
-        execute("""UPDATE lifecycle_task t SET status = 'skipped', done_by = %s, done_at = now(), note = coalesce(note, 'Skipped when the exit was completed')
-                     FROM lifecycle_case c WHERE c.id = t.case_id AND c.exit_id = %s AND t.status = 'open'""", [actor_id, exit_id])
-    execute("UPDATE lifecycle_case SET status = 'completed', completed_at = now() WHERE exit_id = %s AND status = 'active'", [exit_id])
-    execute("UPDATE employee_exit SET status = 'completed', completed_at = now() WHERE id = %s", [exit_id])
-    execute("UPDATE employee SET status = 'exited', exit_date = %s, updated_at = now() WHERE id = %s", [ex['accepted_lwd'], employee_id])
+        (LifecycleTask.objects.filter(case__exit_id=exit_id, status=TaskStatus.OPEN)
+         .update(status=TaskStatus.SKIPPED, done_by_id=actor_id, done_at=Now(),
+                 note=Coalesce(F('note'), Value('Skipped when the exit was completed'))))
+    LifecycleCase.objects.filter(exit_id=exit_id, status=CaseStatus.ACTIVE).update(status=CaseStatus.COMPLETED, completed_at=Now())
+    EmployeeExit.objects.filter(pk=exit_id).update(status=ExitStatus.COMPLETED, completed_at=Now())
+    Employee.objects.filter(pk=employee_id).update(status=Employee.Status.EXITED, exit_date=ex['accepted_lwd'], updated_at=Now())
     audit('complete_exit', 'employee_exit', actor_id=actor_id, row_id=str(exit_id), after={'skippedTasks': b['openTasks']})
     log_career_event(company_id=str(ex['company_id']), employee_id=employee_id, kind='separation', effective_date=ex['accepted_lwd'],
                      details={'separationType': ex['kind']}, note=ex['reason'], actor_id=actor_id)
@@ -396,14 +427,19 @@ BS_MONTHS = ['Baishakh', 'Jestha', 'Ashadh', 'Shrawan', 'Bhadra', 'Ashwin', 'Kar
 
 def settlement_status(company_id: str, employee_id: str, lwd) -> dict:
     """What HR still needs to do in payroll for a leaver (final settlement run, loans, leave encashment)."""
-    period = one('SELECT id, bs_year, bs_month FROM payroll_period WHERE company_id = %s AND start_ad <= %s::date AND end_ad >= %s::date',
-                 [company_id, lwd, lwd]) if lwd else None
-    run = one("""SELECT id, status, locked_at FROM payroll_run WHERE company_id = %s AND run_type = 'final_settlement'
-                  AND params->'employeeIds' ? %s::text ORDER BY created_at DESC LIMIT 1""", [company_id, str(employee_id)])
-    loans = one("""SELECT count(*)::int AS n, coalesce(sum(l.principal - coalesce((SELECT sum(i.amount) FROM loan_installment i WHERE i.loan_id = l.id), 0)), 0)::text AS outstanding
-                     FROM loan l WHERE l.employee_id = %s AND l.status = 'active'""", [employee_id])
-    leave = one("""SELECT coalesce(sum(g.delta_days), 0)::text AS days FROM leave_ledger g JOIN leave_type t ON t.id = g.leave_type_id
-                    WHERE g.employee_id = %s AND t.encashable""", [employee_id])
+    period = (PayrollPeriod.objects.for_company(company_id).filter(start_ad__lte=lwd, end_ad__gte=lwd)
+              .values('id', 'bs_year', 'bs_month').first()) if lwd else None
+    run = (PayrollRun.objects.for_company(company_id)
+           .filter(run_type=PayrollRun.RunType.FINAL_SETTLEMENT, params__employeeIds__has_key=str(employee_id))
+           .order_by('-created_at').values('id', 'status', 'locked_at').first())
+    paid = (LoanInstallment.objects.filter(loan=OuterRef('pk')).order_by().values('loan')
+            .annotate(s=Sum('amount')).values('s'))
+    money = DecimalField(max_digits=14, decimal_places=2)
+    loans = (Loan.objects.filter(employee_id=employee_id, status=Loan.Status.ACTIVE)
+             .annotate(left=F('principal') - Coalesce(Subquery(paid, output_field=money), Value(Decimal(0)), output_field=money))
+             .aggregate(n=Count('id'), outstanding=Sum('left')))
+    leave = (LeaveLedger.objects.filter(employee_id=employee_id, leave_type__encashable=True).aggregate(days=Sum('delta_days'))['days']
+             or 0)
     steps: list[str] = []
     if not run:
         steps.append(f"Create a final settlement run for {BS_MONTHS[period['bs_month'] - 1]} {period['bs_year']} (Payroll, New run, Final settlement)."
@@ -413,13 +449,14 @@ def settlement_status(company_id: str, employee_id: str, lwd) -> dict:
     if loans['n']:
         n = loans['n']
         steps.append(f"Recover {n} active {'loan or advance' if n == 1 else 'loans or advances'} in the settlement.")
-    days = float(leave['days'])
+    days = float(leave)
     if days > 0:
         steps.append(f'Encashable leave of {days:.1f} days is paid out in the settlement.')
     return {
         'period': {'id': str(period['id']), 'bsYear': period['bs_year'], 'bsMonth': period['bs_month']} if period else None,
         'run': {'id': str(run['id']), 'status': run['status'], 'locked': bool(run['locked_at'])} if run else None,
-        'activeLoans': loans['n'], 'loanOutstanding': loans['outstanding'], 'encashableLeaveDays': int(days) if days.is_integer() else days,
+        'activeLoans': loans['n'], 'loanOutstanding': str(loans['outstanding']) if loans['outstanding'] is not None else '0',
+        'encashableLeaveDays': int(days) if days.is_integer() else days,
         'steps': steps,
     }
 
@@ -441,14 +478,23 @@ def auto_start_onboarding(company_id: str, employee_id: str, join_date, actor_id
         return None
 
 
+def notify_hr(company_id: str, **kw) -> int:
+    """One notification per person with HR in the company (members of the group with access included)."""
+    ids = user_ids_with_role(company_id, 'hr')
+    for uid in ids:
+        notify(company_id=company_id, user_id=uid, **kw)
+    return len(ids)
+
+
 # ---------------------------------------------------------------- daily job
 def lifecycle_daily(now: datetime | None = None) -> dict:
+    """Runs for every company (a background job has no active company); each step uses the row's own company."""
     today = npt_today(now)
     out = {'overdueReminders': 0, 'probationReminders': 0, 'exitsCompleted': 0, 'exitsFlagged': 0}
 
     # 1. Overdue checklist tasks: one reminder per task to whoever should act.
-    overdue = rows("""SELECT t.*, e.name_en FROM lifecycle_task t JOIN lifecycle_case c ON c.id = t.case_id JOIN employee e ON e.id = t.employee_id
-                       WHERE t.status = 'open' AND c.status = 'active' AND t.due_date < %s::date ORDER BY t.due_date LIMIT 2000""", [today])
+    overdue = (LifecycleTask.objects.filter(status=TaskStatus.OPEN, case__status=CaseStatus.ACTIVE, due_date__lt=today)
+               .annotate(name_en=F('employee__name_en')).order_by('due_date').values(*TASK_COLS, 'name_en')[:2000])
     for t in overdue:
         t = task_row(t)
         if not remind_once(t['company_id'], 'task_overdue', t['id'], 'overdue'):
@@ -459,27 +505,28 @@ def lifecycle_daily(now: datetime | None = None) -> dict:
         out['overdueReminders'] += 1
 
     # 2. Probation ending: remind the manager (HR when there is none) at each configured threshold.
-    for c in rows('SELECT id FROM company'):
-        cid = str(c['id'])
+    pending_review = ProbationReview.objects.filter(employee=OuterRef('pk'), status=ProbationReview.Status.PENDING)
+    for cid in Company.objects.values_list('id', flat=True):
+        cid = str(cid)
         policy = lifecycle_policy(cid)
         max_days = max([0, *policy['probationReminderDays']])
         if not max_days:
             continue
-        due = rows("""SELECT e.id, e.name_en, e.probation_end, (e.probation_end - %s::date) AS days_left FROM employee e
-                       WHERE e.company_id = %s AND e.status = 'active' AND e.probation_end IS NOT NULL AND e.confirmed_on IS NULL
-                         AND (e.exit_date IS NULL OR e.exit_date >= %s::date)
-                         AND e.probation_end >= %s::date AND e.probation_end <= %s::date + %s::int
-                         AND NOT EXISTS (SELECT 1 FROM probation_review r WHERE r.employee_id = e.id AND r.status = 'pending')""",
-                   [today, cid, today, today, today, max_days])
+        due = (Employee.objects.for_company(cid)
+               .filter(status=Employee.Status.ACTIVE, probation_end__isnull=False, confirmed_on__isnull=True,
+                       probation_end__gte=today, probation_end__lte=today + timedelta(days=max_days))
+               .filter(Q(exit_date__isnull=True) | Q(exit_date__gte=today)).exclude(Exists(pending_review))
+               .values('id', 'name_en', 'probation_end'))
         for e in due:
-            threshold = next((d for d in sorted(policy['probationReminderDays']) if e['days_left'] <= d), None)
+            days_left = (e['probation_end'] - today).days
+            threshold = next((d for d in sorted(policy['probationReminderDays']) if days_left <= d), None)
             if threshold is None:
                 continue
             if not remind_once(cid, 'probation', str(e['id']), f"{e['probation_end'].isoformat()}:{threshold}"):
                 continue
             mgr = manager_user_of(str(e['id']))
             targets = [mgr] if mgr else user_ids_with_role(cid, 'hr')
-            n = e['days_left']
+            n = days_left
             for user_id in targets:
                 notify(company_id=cid, user_id=user_id, template='lifecycle.probation.ending',
                        title=f"Probation ends in {n} {'day' if n == 1 else 'days'}",
@@ -488,8 +535,8 @@ def lifecycle_daily(now: datetime | None = None) -> dict:
             out['probationReminders'] += 1
 
     # 3. Exits past their last working day: complete when clearance is done, otherwise tell HR once.
-    exits = rows("""SELECT x.id, x.company_id, x.employee_id, e.name_en FROM employee_exit x JOIN employee e ON e.id = x.employee_id
-                     WHERE x.status = 'accepted' AND x.accepted_lwd < %s::date""", [today])
+    exits = (EmployeeExit.objects.filter(status=ExitStatus.ACCEPTED, accepted_lwd__lt=today)
+             .annotate(name_en=F('employee__name_en')).values('id', 'company_id', 'employee_id', 'name_en'))
     for x in exits:
         xid, cid, eid = str(x['id']), str(x['company_id']), str(x['employee_id'])
         b = clearance_blockers(xid, eid)
@@ -504,17 +551,16 @@ def lifecycle_daily(now: datetime | None = None) -> dict:
         if not remind_once(cid, 'exit_pending', xid, 'clearance'):
             continue
         t, a = b['openTasks'], b['assetsHeld']
-        notify_role(cid, 'hr', template='lifecycle.exit.clearance_pending', title=f"Exit clearance pending for {x['name_en']}",
-                    body=f"The last working day has passed. {t} clearance {'task is' if t == 1 else 'tasks are'} open and "
-                         f"{a} {'asset is' if a == 1 else 'assets are'} not returned.", payload={'exitId': xid})
+        notify_hr(cid, template='lifecycle.exit.clearance_pending', title=f"Exit clearance pending for {x['name_en']}",
+                  body=f"The last working day has passed. {t} clearance {'task is' if t == 1 else 'tasks are'} open and "
+                       f"{a} {'asset is' if a == 1 else 'assets are'} not returned.", payload={'exitId': xid})
         out['exitsFlagged'] += 1
     return out
 
 
 def diff_days(a, b) -> int:
     """Calendar days from b to a."""
-    to_d = (lambda v: v if isinstance(v, date) else date.fromisoformat(str(v)[:10]))
-    return (to_d(a) - to_d(b)).days
+    return (_d(a) - _d(b)).days
 
 
 def add_days(d: date, n: int) -> date:

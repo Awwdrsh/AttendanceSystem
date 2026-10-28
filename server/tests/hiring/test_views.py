@@ -1,7 +1,7 @@
 """The hiring hub pages and their HTMX fragments, driven through the Django test client."""
 import pytest
 
-from hajiri.core.db import one, rows
+from tests.support.sql import one, rows
 from hajiri.hiring import services as hiring
 from hajiri.workflow import service as workflow
 from tests.web.factories import audit_actions, htmx, hx_triggers, set_features_off, toasts
@@ -105,7 +105,7 @@ def test_job_form_questions_publish_close_and_policy():
     r = hr.post(f'/_/hiring/jobs/{jid}/publish', **htmx())
     assert _msg(r) == ['Published. The job is on the careers page.'] and 'hj:refresh-jobs' in hx_triggers(r)
     page = hr.get('/hiring?status=open').content.decode()
-    assert 'Data analyst' in page and f'/careers/{jid}?company=demo' in page and 'View on careers page' in page
+    assert 'Data analyst' in page and f'/careers/demo/{jid}' in page and 'View on careers page' in page   # the company's own careers address
     assert 'Data analyst' not in hr.get('/hiring?status=draft').content.decode()
     r = hr.post(f'/_/hiring/jobs/{jid}/close', **htmx())
     assert _msg(r) == ['Closed. No new applications will be accepted.']

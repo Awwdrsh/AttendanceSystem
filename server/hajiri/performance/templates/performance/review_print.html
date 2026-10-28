@@ -1,0 +1,19 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Review {{ h.emp_code }} {{ cycle.name }}</title><style>
+body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:13px;color:#17191e;margin:32px auto;max-width:860px;line-height:1.55;padding:0 24px}
+h1{font-size:20px;margin:0;font-weight:600}h2{font-size:14px;margin:24px 0 8px}.sub{color:#6b707b}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:10px 24px;margin:18px 0}
+.meta span{display:block;color:#6b707b;font-size:11.5px}table{width:100%;border-collapse:collapse}th{text-align:left;font-weight:500;color:#6b707b;font-size:12px;border-bottom:1px solid #e6e7ea;padding:6px 4px}
+td{padding:6px 4px;border-bottom:1px solid #f0f0f2;vertical-align:top}.n{text-align:right}.c{color:#6b707b;font-size:12px}.box{border:1px solid #e6e7ea;border-radius:10px;padding:12px 14px;white-space:pre-wrap}
+.final{font-size:22px;font-weight:600;color:#12773a}.sign{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-top:56px}.sign div{border-top:1px solid #9aa0aa;padding-top:6px;color:#6b707b}
+@media print{body{margin:0 auto}}</style></head><body>
+<div class="sub">{{ h.company_name }}</div><h1>{{ cycle.name }}: performance review</h1>
+<div class="meta"><div><span>Employee</span>{{ h.name_en }} ({{ h.emp_code }})</div><div><span>Designation</span>{{ h.designation|default_if_none:"—" }}</div><div><span>Manager</span>{{ h.manager_name|default_if_none:"—" }}</div>
+<div><span>Period</span>{{ period }}</div><div><span>Self score</span>{{ self_score }}</div><div><span>Final rating</span><span class="final">{{ final }}</span></div></div>
+<h2>Goals ({{ goals_weight }}%)</h2><table><thead><tr><th>Goal</th><th class="n">Weight</th><th>Self</th><th>Manager</th></tr></thead><tbody>{% for i in goals %}<tr><td>{{ i.title }}{% if i.manager_comment %}<div class="c">{{ i.manager_comment }}</div>{% endif %}</td><td class="n">{{ i.weight_text }}</td><td>{{ i.self_label }}</td><td>{{ i.manager_label }}</td></tr>{% empty %}<tr><td colspan="4" class="c">No goals in this review</td></tr>{% endfor %}</tbody></table>
+<h2>Competencies ({{ competency_weight }}%)</h2><table><thead><tr><th>Competency</th><th>Self</th><th>Manager</th></tr></thead><tbody>{% for i in competencies %}<tr><td>{{ i.title }}{% if i.manager_comment %}<div class="c">{{ i.manager_comment }}</div>{% endif %}</td><td>{{ i.self_label }}</td><td>{{ i.manager_label }}</td></tr>{% empty %}<tr><td colspan="3" class="c">No competencies in this review</td></tr>{% endfor %}</tbody></table>
+<h2>Employee's summary</h2><div class="box">{{ h.self_summary|default_if_none:"—" }}</div>
+<h2>Manager's summary</h2><div class="box">{{ h.manager_summary|default_if_none:"—" }}</div>
+{% if recommendation %}<h2>Recommendation</h2><div class="box">{{ recommendation }}</div>{% endif %}
+{% if calibration_note %}<h2>Calibration note</h2><div class="box">{{ calibration_note }}</div>{% endif %}
+{% if acknowledged_on %}<h2>Employee's acknowledgement</h2><div class="box">Acknowledged on {{ acknowledged_on }}{% if h.employee_comment %}
+{{ h.employee_comment }}{% endif %}</div>{% endif %}
+<div class="sign"><div>Employee</div><div>Manager</div><div>HR</div></div></body></html>

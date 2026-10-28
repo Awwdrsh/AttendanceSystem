@@ -5,7 +5,7 @@ from django.test import Client
 
 from hajiri.core import auth
 from hajiri.core.clock import npt_today
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from tests.core.fixtures import PW
 
 

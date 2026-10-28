@@ -124,9 +124,9 @@ def test_build_gateway_from_the_environment():
 
 @pytest.mark.django_db
 def test_gateway_reconcile_command(capsys):
-    from hajiri.core.db import execute
-    execute("INSERT INTO device (serial_no, vendor, protocol, status) VALUES ('RC-01', 'zkteco', 'adms', 'active')")
-    execute("INSERT INTO device (serial_no, vendor, protocol, status) VALUES ('RC-02', 'hikvision', 'isapi', 'active')")
+    from hajiri.db.models import Device
+    Device.objects.create(serial_no='RC-01', vendor='zkteco', protocol='adms', status='active')
+    Device.objects.create(serial_no='RC-02', vendor='hikvision', protocol='isapi', status='active')
     call_command('gateway_reconcile', '--all', '--date', '2026-09-21')
     lines = [json.loads(x) for x in capsys.readouterr().out.strip().splitlines()]
     assert [(x['sn'], x['stored'], x['note']) for x in lines] == [
@@ -193,7 +193,7 @@ class TestHttpEdge:
 
 
 class TestGatewayEnvFile:
-    """The TS gateway read apps/gateway/.env (dotenv, run from apps/gateway); the Django process has already loaded
+    """The gateway reads its own server/gateway.env (dotenv); the Django process has already loaded
     the web env files, whose PORT is the API's."""
 
     def _files(self, tmp_path, gw_text: str, web_text: str):

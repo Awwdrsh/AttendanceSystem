@@ -3,7 +3,7 @@ pure month and exit helpers of modules/insights/service.ts."""
 import pytest
 
 from engines.bs_calendar import BsDate, ad_to_bs, bs_month_bounds, bs_to_ad
-from hajiri.core.db import execute
+from tests.support.sql import execute
 from hajiri.core.errors import BadRequestError, ForbiddenError, ValidationError
 from hajiri.insights import services
 from tests.insights.helpers import engage_world
@@ -144,7 +144,7 @@ def test_kpis_bands_and_people_cost_from_locked_runs_only(w, demo):
 
 
 def test_attendance_overtime_and_leave_come_into_the_months(w, demo):
-    from hajiri.core.db import one
+    from tests.support.sql import one
     today = w['today']
     execute("UPDATE employee SET join_date = '2020-01-01' WHERE join_date IS NULL")
     lt = one("INSERT INTO leave_type (company_id, code, name_en, accrual_basis, sort_order) VALUES (%s, 'TSTL', 'Test leave', 'none', 1) RETURNING id",
@@ -156,3 +156,23 @@ def test_attendance_overtime_and_leave_come_into_the_months(w, demo):
     assert r['leaveMonthly'][-1]['days'] == 2
     assert next(k for k in r['kpis'] if k['key'] == 'leave')['value'] == 2
     assert next(k for k in r['kpis'] if k['key'] == 'leave')['delta'] == 2
+
+
+def test_a_department_filter_includes_the_teams_below_it(w, demo):
+    from hajiri.db.models import OrgUnit
+    team = OrgUnit.objects.create(company_id=demo['company_id'], kind='team', code='ENGT', name_en='Eng Team', parent_id=w['dept_a'])
+    execute('UPDATE employee_assignment SET org_unit_id = %s WHERE employee_id = %s', [team.id, w['extra'][0]])
+    execute("UPDATE employee SET join_date = '2020-01-01' WHERE join_date IS NULL")
+    labels = {d['label']: d['count'] for d in services.insights(w['hr'].user, {'orgUnitId': w['dept_a']})['departments']}
+    assert labels == {'Engineering': 4, 'Eng Team': 1}
+    assert [d['label'] for d in services.insights(w['hr'].user, {'orgUnitId': str(team.id)})['departments']] == ['Eng Team']
+
+
+def test_exit_records_give_the_voluntary_split(w, demo):
+    from hajiri.db.models import EmployeeExit
+    execute("UPDATE employee SET status = 'exited', exit_date = %s WHERE id = %s", [w['today'], w['extra'][1]])
+    EmployeeExit.objects.create(company_id=demo['company_id'], employee_id=w['extra'][1], kind=EmployeeExit.Kind.TERMINATION,
+                                voluntary=False, submitted_on=w['today'], proposed_lwd=w['today'])
+    r = services.insights(w['hr'].user, {})
+    assert r['attrition']['split'] == {'voluntary': 0, 'involuntary': 1, 'other': 0}
+    assert r['headcount'][-1]['involuntary'] == 1

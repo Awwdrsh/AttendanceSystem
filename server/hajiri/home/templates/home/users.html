@@ -2,7 +2,17 @@
 {% block title %}Users & roles · Hajiri{% endblock %}
 {% block content %}
 {% page_header "Users & roles" subtitle="Who can sign in and what they can do. Employees see only their own data, managers approve for their team, HR runs attendance, leave and payroll." %}
+  {% if is_admin and in_group %}<button type="button" class="hj-btn default" hx-get="{% url 'home:user_access_new' %}" hx-target="#hj-modal-body"><i class="ti ti-building-community" aria-hidden="true"></i>Give access from the group</button>{% endif %}
   {% if is_admin %}<button type="button" class="hj-btn" hx-get="{% url 'home:user_new' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>Add user</button>{% endif %}
 {% endpage_header %}
 {% data_table table %}
+{% if group_holders %}
+<section class="hj-stack" style="--gap:8px;margin-top:24px" id="users-group-roles">
+  <div class="hj-section-title"><div><h3>Through group roles</h3><p>These people work in every company of the group. Their roles here come from their group role{% if group_admin %} and are changed on the <a href="{% url 'web:group' %}">group page</a>{% endif %}.</p></div></div>
+  <div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
+    <thead><tr><th>Name</th><th>Roles here</th></tr></thead>
+    <tbody>{% for g in group_holders %}<tr><td><div class="hj-sm" style="font-weight:500">{{ g.name }}</div><div class="hj-small hj-muted">{{ g.email }}</div></td><td class="hj-sm">{{ g.role_text }}</td></tr>{% endfor %}</tbody>
+  </table></div></div>
+</section>
+{% endif %}
 {% endblock %}

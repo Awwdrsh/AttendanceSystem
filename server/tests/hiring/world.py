@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from django.test import Client
 
 from hajiri.careers import services as careers
-from hajiri.core.db import one, rows
+from tests.support.sql import one, rows
 from hajiri.core.errors import HttpError
 from hajiri.hiring import services as hiring
 from hajiri.workflow import service as workflow

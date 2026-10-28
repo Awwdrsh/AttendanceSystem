@@ -2,7 +2,7 @@
 from datetime import timedelta
 
 from hajiri.core.clock import npt_today
-from hajiri.core.db import one, rows
+from tests.support.sql import one, rows
 from hajiri.relations import services as S
 from tests.web.factories import hx_triggers, htmx, set_features_off, toasts
 
@@ -273,7 +273,7 @@ def test_popup_notices_fragment_and_dismissal(world):
     a = engage.post_announcement(w.hr, {'title': 'Office closed Friday', 'body': 'Tihar', 'popup': True})
     b = engage.post_announcement(w.hr, {'title': 'New leave policy', 'body': 'Read it', 'popup': True, 'requiresAck': True})
     # Both were posted in this test's transaction; make the newer one explicit (newest first).
-    from hajiri.core.db import execute
+    from tests.support.sql import execute
     execute("UPDATE announcement SET created_at = created_at - interval '1 minute' WHERE id = %s", [a['id']])
     r = s.get('/_/relations/popups', **htmx())
     html = r.content.decode()

@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, field
 
-from hajiri.core.db import execute
+from tests.support.sql import execute
 from hajiri.core.errors import HttpError
 from hajiri.files import service as files
 from hajiri.helpdesk import services as hd

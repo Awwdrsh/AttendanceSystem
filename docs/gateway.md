@@ -1,7 +1,9 @@
 # Device gateway: connecting terminals
 
-The gateway (`apps/gateway`, port 8080) is the only service terminals ever talk to (plan §7, §8.2, §12.5). Terminals are
-HTTP clients: they push punches to the gateway and poll it for commands, so branches need no static IP and no inbound
+The gateway (`server/hajiri/gateway/`, run as `manage.py run_gateway` on port 8080; the `gateway` service of
+`scripts/start.sh`, the boot services and the Docker stack) is the only service terminals ever talk to (plan §7, §8.2,
+§12.5). It is its own process with its own URLconf (`config/gateway_urls.py` is not the web app's), so it can be the
+only thing reachable from the biometric VLAN. Terminals are HTTP clients: they push punches to the gateway and poll it for commands, so branches need no static IP and no inbound
 firewall rule (plan §8.7).
 
 ## Network rules (plan §7.6, §12.5)
@@ -15,9 +17,8 @@ firewall rule (plan §8.7).
 ## Approving a new terminal
 1. Configure the terminal (below). On first contact it appears in the admin web under Devices with status **pending**;
    nothing it sends is accepted until approved (HTTP 403, so the terminal keeps buffering and retrying).
-2. Approve it: `POST /api/v1/devices/:id/activate` with `{ "branchId": "...", "name": "Front door" }` (HR/admin), or the
-   Devices screen. More than `GATEWAY_MAX_PENDING_DEVICES` (50) unapproved serials are refused outright.
-3. Map terminal user PINs to employees: `POST /api/v1/devices/:id/map` `{ "pin": "12", "employeeId": "...", "from": "2026-09-01" }`.
+2. Approve it on Settings, Devices (HR/admin): pick the branch and give it a name. More than `GATEWAY_MAX_PENDING_DEVICES` (50) unapproved serials are refused outright.
+3. Map terminal user PINs to employees on the device's Mappings tab (PIN, employee, from date).
    Punches already received for that PIN are re-attributed and recomputed; for ZKTeco the name is pushed to the terminal.
 4. Do a test punch and confirm it appears in Team Today within a minute (plan §16.4: verified within 5 minutes).
 
@@ -32,9 +33,9 @@ On the terminal: Menu → Comm → Cloud Server Setting (names vary by firmware:
 - Serial numbers must be 1–64 characters of letters, digits, `_ . : -`; anything else is rejected with HTTP 400.
 Endpoints served: `GET /iclock/cdata?SN=..&options=all` (handshake), `POST /iclock/cdata?SN=..&table=ATTLOG|OPERLOG|…`,
 `GET /iclock/getrequest`, `POST /iclock/devicecmd`, `POST /iclock/fdata`. Templates arriving in OPERLOG/fdata are stored
-encrypted (same key as the API) or discarded if `DATA_ENCRYPTION_KEY` is unset; photos are always discarded.
+encrypted (same key as the web app) or discarded if `DATA_ENCRYPTION_KEY` is unset; photos are always discarded.
 
-Simulator: `pnpm --filter @hajiri/gateway simulate -- --sn DEMO-01 --pin 1 --time "2026-09-21 10:17:03" --template`
+Simulator (from `server/`): `.venv/bin/python manage.py gateway_simulate --url http://localhost:8080 --sn DEMO-01 --pin 1 --time "2026-09-21 10:17:03" --template`
 
 ## Hikvision (ISAPI HTTP listening host, plan Appendix C)
 Configure the "HTTP listening" / "alarm server" host once per terminal, from the jump host (Digest auth, admin user):
@@ -63,17 +64,18 @@ update "last seen". Unapproved serials get 403 so the terminal re-sends after ap
 (`?sn=`); the JSON `serialNo` is used only as a fallback.
 
 **Per-device secret (plan §12.5).** Because anyone on the VLAN could post an event with a known serial, give each
-Hikvision terminal its own secret: store `sha256(secret)` in `device.comm_key_hash` (HR/admin, via SQL or the Devices
-screen once exposed) and put `&key=<secret>` in the listening-host URL (or send it as the `x-device-key` header). Events
+Hikvision terminal its own secret: set it on the device's page under Settings, Devices (HR/admin; only `sha256(secret)` is stored, in
+`device.comm_key_hash`) and put `&key=<secret>` in the listening-host URL (or send it as the `x-device-key` header). Events
 without the right key are refused with 403. ADMS terminals cannot send a key, so the check is skipped for them.
 
-Simulator: `pnpm --filter @hajiri/gateway simulate -- --vendor hikvision --sn HIK-01 --pin 1 --time "2026-09-21 10:17:03"`
+Simulator: `.venv/bin/python manage.py gateway_simulate --url http://localhost:8080 --vendor hikvision --sn HIK-01 --pin 1 --time "2026-09-21 10:17:03"`
 
 ## Daily reconciliation (plan §7.7)
-`pnpm --filter @hajiri/gateway reconcile -- --all` asks every active ADMS terminal to re-send yesterday's log; the
-idempotent ingest fills any gap and ignores the rest. Run it from cron at 01:00 (`crontab`: `0 1 * * * cd <repo> &&
-pnpm --filter @hajiri/gateway --silent reconcile -- --all >> logs/reconcile.log 2>&1`). Hikvision terminals are
-reconciled through `AcsEvent` search from the API once device credentials are stored there (not yet implemented).
+`manage.py gateway_reconcile --all [--date YYYY-MM-DD] [--company CODE]` (or `--sn <serial>` for one terminal) asks
+every active ADMS terminal to re-send yesterday's log; the idempotent ingest fills any gap and ignores the rest. Run it
+from cron at 01:00 (`crontab`: `0 1 * * * cd "<repo>/server" && .venv/bin/python manage.py gateway_reconcile --all >>
+../logs/reconcile.log 2>&1`). Hikvision terminals are
+reconciled through `AcsEvent` search once device credentials are stored there (not yet implemented).
 
 ## Commands to terminals
 Commands queued in `device_command` are delivered on the next `getrequest` poll (about every 10 s). A command that is
@@ -83,8 +85,8 @@ and `CLEAR DATA`, `CONTROL DEVICE`, firmware and file-transfer verbs are refused
 `GATEWAY_ALLOW_DANGEROUS_COMMANDS=true`.
 
 ## Raw archive
-Every POST body from an **approved** terminal is appended verbatim to `apps/gateway/data/raw/<serial>/<date>.log`
-(`GATEWAY_RAW_DIR`), rotating at 50 MB per file with at most five files per device per day (bodies beyond that are
+Every POST body from an **approved** terminal is appended verbatim to `server/data/raw/<serial>/<date>.log`
+(`GATEWAY_RAW_DIR`; a relative path is relative to `server/`), rotating at 50 MB per file with at most five files per device per day (bodies beyond that are
 dropped and counted). Unknown serials are never archived. The archive is the forensic record for disputes and protocol
 debugging; it contains template uploads, so treat the directory as sensitive and include it in the backup/retention
 policy (plan §12.9, §12.11).
@@ -93,25 +95,30 @@ policy (plan §12.9, §12.11).
 1. Receive the unit; check model and firmware against the acceptance checklist (plan Appendix D); update to the
    CVE-fixed firmware before it touches the network (plan §7.6).
 2. Set the admin password and (ZKTeco) comm key from the password manager; (Hikvision) generate the device secret,
-   store its sha256 in `device.comm_key_hash` after approval.
+   set it on the device's page after approval.
 3. Configure the server address/port (above), time zone **UTC+05:45**, and NTP to the gateway host.
 4. Connect it to the terminal VLAN. It appears as *pending*; approve it in Devices with the branch and a name.
 5. Map PINs to employees (or import the terminal's user list), with consent recorded per employee
-   (`POST /api/v1/biometrics/consent`) before enrolling faces/fingerprints.
+   (Settings, Devices, Biometrics: consent) before enrolling faces/fingerprints.
 6. Test punch: it must show in Team Today within 5 minutes. Record the firmware hash, a photo of the installation and
    the serial in the asset register; add the device to monitoring (offline alert after 120 s, page at 15 min).
 7. Disposal or RMA: disable the device, `shred-all` templates for anyone enrolled only there, and wipe the terminal
    (`CLEAR DATA` with `GATEWAY_ALLOW_DANGEROUS_COMMANDS=true`, then factory reset locally).
 
-## Environment (apps/gateway/.env)
+## Environment (server/gateway.env)
+
+The gateway reads `server/.env` (database, encryption key) and then `server/gateway.env`; for the gateway's own keys
+the value in `server/gateway.env` wins, and the web app's `PORT` is ignored.
+
 | Variable | Purpose |
 |---|---|
-| `DATABASE_URL` | shared database; omit for the in-memory demo store |
+| `PORT` | listen port (default 8080; `run_gateway --port` overrides it) |
+| `DATABASE_URL` | the web app's database (from `server/.env`); `run_gateway --memory` uses an in-memory demo store instead |
 | `GATEWAY_SIGNING_KEY` | Ed25519 key that signs every stored punch |
-| `DATA_ENCRYPTION_KEY` | same value as the API; templates are discarded without it |
+| `DATA_ENCRYPTION_KEY` | same value as the web app; templates are discarded without it |
 | `GATEWAY_MAX_PENDING_DEVICES` | cap on unapproved serials (default 50) |
 | `GATEWAY_MAX_CLOCK_SKEW_MIN` | punches further in the future are flagged `clock_skew` (default 10) |
-| `GATEWAY_RAW_DIR` | raw archive directory |
+| `GATEWAY_RAW_DIR` | raw archive directory (default `data/raw`, relative to `server/`) |
 | `GATEWAY_ALLOW_DANGEROUS_COMMANDS` | `CLEAR DATA`/firmware verbs refused unless `true`; `SHELL` is never allowed |
 
 ## Known gaps: verify on purchased hardware before go-live
@@ -120,12 +127,12 @@ policy (plan §12.9, §12.11).
   reject self-signed certificates (plan Appendix B).
 - ADMS status/verify code tables, BIODATA `Type` codes, template line layouts (`FP`, `FACE`, `BIODATA`) and the time
   sync command come from community implementations, not the vendor PUSH SDK document; capture traffic from the bench
-  units and adjust `apps/gateway/src/adms/*.ts`.
+  units and adjust `server/hajiri/gateway/adms.py`.
 - Hikvision JSON and XML field names (`AccessControllerEvent`, `employeeNoString`, `majorEventType`, `subEventType`,
   `attendanceStatus`) are from community captures; the official ISAPI document is under NDA.
 - Per-device certificates / mTLS (plan §12.5) are not implemented; ADMS terminals are trusted by serial number,
   Hikvision terminals by serial plus the optional shared secret.
-- Device offline alerts (120 s silence, page at 15 min) are raised by the API worker from `device.last_seen_at`.
-- Hikvision `AcsEvent` reconciliation (Appendix C) needs device credentials stored on the API side; not implemented.
+- Device offline alerts (120 s silence, page at 15 min) are raised by the background worker from `device.last_seen_at`.
+- Hikvision `AcsEvent` reconciliation (Appendix C) needs device credentials stored in the web app; not implemented.
 - The database outage path returns HTTP 503 so terminals keep buffering; confirm on the bench that the firmware
   retries on 503 as it does on timeouts.

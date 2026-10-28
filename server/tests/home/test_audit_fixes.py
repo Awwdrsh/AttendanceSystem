@@ -3,7 +3,7 @@ import pytest
 from django.test import Client
 from django.http import QueryDict
 
-from hajiri.core.db import execute, one
+from tests.support.sql import execute, one
 from hajiri.home import services as s
 from tests.web.factories import htmx, set_features_off, toasts
 
