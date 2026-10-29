@@ -9,7 +9,7 @@ import { Field, StatStrip } from '../../components/Kpi';
 import { PageHeader } from '../../components/PageHeader';
 import { liveStatus, StatusBadge, statusLabel, toneColor } from '../../components/StatusBadge';
 import { useI18n } from '../../i18n';
-import { bsMonthGrid, nextMonth, prevMonth, safe } from '../../lib/bs';
+import { bsMonthGrid, holidayMap, nextMonth, prevMonth, safe } from '../../lib/bs';
 import { adSpanLabel } from '../../components/BsDatePicker';
 import { bsMonthLabel, fmtDateLong, fmtTime, minutesToHm, todayNpt } from '../../lib/format';
 import { toast } from '../../lib/toast';
@@ -150,9 +150,7 @@ export default function MyAttendancePage() {
     const k = p.local_date ?? '';
     pByDate.set(k, [...(pByDate.get(k) ?? []), p]);
   }
-  const holidays = new Map(
-    (cal.data?.days ?? []).filter((d) => d.holidays.length).map((d) => [d.date, d.holidays.map((h) => h.name_en).join(', ')]),
-  );
+  const holidays = holidayMap(cal.data?.days);
   const grid = useMemo(() => {
     try {
       return bsMonthGrid(ym.year, ym.month);
@@ -254,7 +252,7 @@ export default function MyAttendancePage() {
                   color: 'inherit',
                   border: isSel ? '1px solid var(--hj-hydro)' : '1px solid var(--hj-line-soft)',
                   boxShadow: isSel ? '0 0 0 1px var(--hj-hydro)' : undefined,
-                  background: c.saturday || hol ? 'var(--hj-canvas)' : 'var(--hj-surface)',
+                  background: c.saturday || hol?.off ? 'var(--hj-canvas)' : 'var(--hj-surface)',
                   opacity: c.inMonth ? 1 : 0.35,
                   cursor: c.inMonth ? 'pointer' : 'default',
                   display: 'flex',
@@ -268,7 +266,7 @@ export default function MyAttendancePage() {
                     fw={isToday ? 800 : 650}
                     lh={1}
                     className="num"
-                    c={isToday ? 'var(--hj-on-hydro)' : c.saturday || hol ? 'var(--hj-bad)' : 'inherit'}
+                    c={isToday ? 'var(--hj-on-hydro)' : c.saturday || hol?.off ? 'var(--hj-bad)' : 'inherit'}
                     style={
                       isToday
                         ? {
@@ -306,7 +304,7 @@ export default function MyAttendancePage() {
                   </Group>
                 ) : hol ? (
                   <Text size="xs" c="dimmed" truncate visibleFrom="sm">
-                    {hol}
+                    {hol.label}
                   </Text>
                 ) : null}
                 {st ? (
@@ -336,12 +334,12 @@ export default function MyAttendancePage() {
         {selected ? (
           <Stack>
             <Group gap="sm">
-              <StatusBadge status={sel ? statusOf(sel) : holidays.get(selected) ? 'Holiday' : null} late={sel?.late_min ?? null} />
+              <StatusBadge status={sel ? statusOf(sel) : holidays.get(selected)?.off ? 'Holiday' : null} late={sel?.late_min ?? null} />
             </Group>
             {holidays.get(selected) ? (
               <Group gap={6}>
                 <IconCalendarEvent size={16} stroke={1.6} color="var(--hj-muted)" />
-                <Text size="sm">{holidays.get(selected)}</Text>
+                <Text size="sm">{holidays.get(selected).label}</Text>
               </Group>
             ) : null}
             {sel ? (

@@ -1,8 +1,0 @@
-{% extends "base.html" %}
-{% block title %}Leave policies · Hajiri{% endblock %}
-{% block content %}
-{% page_header "Leave policies" subtitle="Statutory leave follows the Labour Act and is locked with its citation. Company leave types are fully editable. The order of the list is the leave order: when two leaves are separated only by weekly offs or holidays, those days are charged to the type higher in the list if it uses the sandwich rule." %}
-  <button class="hj-btn" hx-get="{% url 'leave:type_new' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>New leave type</button>
-{% endpage_header %}
-{% include "leave/partials/types_table.html" %}
-{% endblock %}

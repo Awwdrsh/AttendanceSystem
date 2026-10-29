@@ -1,6 +1,0 @@
-<form class="hj-form" data-modal-title="Reset two-step sign-in" hx-post="{% url 'home:user_reset' target.id %}" hx-swap="none" x-data="{ reason: '' }">
-  <p class="hj-sm hj-muted" style="margin:0">For a lost or replaced phone. {{ target.name }} is signed out everywhere and signs in with their password only until they set two-step sign-in up again (straight away if their role requires it).</p>
-  <label class="hj-fieldset"><span class="hj-label">Reason</span><span class="hj-help">Kept in the audit log.</span>
-    <input class="hj-input" name="reason" placeholder="Lost phone" x-model="reason"></label>
-  <div class="hj-modal-foot"><button type="submit" class="hj-btn danger" :disabled="reason.trim().length < 3">Reset</button></div>
-</form>

@@ -1,29 +1,8 @@
 from django.urls import path
 
-from . import api, views
+from . import api
 
 urlpatterns = [
-    # Attendance hub pages (hubs.tsx AttendanceHub) and My attendance
-    path('attendance', views.today, name='today'),
-    path('attendance/exceptions', views.exceptions, name='exceptions'),
-    path('attendance/issues', views.issues, name='issues'),
-    path('attendance/penalties', views.penalties, name='penalties'),
-    path('attendance/upload', views.upload, name='upload'),
-    path('me/attendance', views.my_attendance, name='my_attendance'),
-    # Fragments and form posts
-    path('_/attendance_tools/recompute', views.recompute, name='recompute'),
-    path('_/attendance_tools/nudge', views.nudge, name='nudge'),
-    path('_/attendance_tools/policy', views.save_policy, name='policy'),
-    path('_/attendance_tools/penalties/apply', views.apply_penalties, name='apply'),
-    path('_/attendance_tools/penalties/<uuid:id>/reverse', views.reverse_penalty, name='reverse'),
-    path('_/attendance_tools/upload/template', views.upload_template, name='upload_template'),
-    path('_/attendance_tools/upload/check', views.upload_check, name='upload_check'),
-    path('_/attendance_tools/upload/import', views.upload_import, name='upload_import'),
-    path('_/attendance_tools/day', views.my_day, name='my_day'),
-    path('_/attendance_tools/whos-out', views.whos_out, name='whos_out'),
-    path('_/attendance_tools/late-note', views.late_note, name='late_note'),
-    path('_/attendance_tools/late-blocked', views.late_blocked, name='late_blocked'),
-    path('_/attendance_tools/payroll-check', views.payroll_check, name='payroll_check'),
     # JSON (TS paths)
     path('api/v1/attendance-tools/policy', api.policy, name='api_policy'),
     path('api/v1/attendance-tools/penalties', api.penalties, name='api_penalties'),

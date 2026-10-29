@@ -34,7 +34,7 @@ from django.db.models.functions import Cast, Coalesce
 
 from engines.attendance import local_date_of, local_time_ms
 
-from hajiri.attendance.repo import attendance_policy, from_ms, live_punches, to_ms
+from hajiri.attendance.repo import attendance_policy, from_ms, live_punches, local_dates_window, to_ms
 from hajiri.attendance.service import is_attendance_locked, list_days, recompute_for_punch
 from hajiri.core.audit import audit
 from hajiri.core.auth import MODULE_ROLES, AuthUser, assert_manages, company_id_of, has_module, has_role, manages
@@ -331,7 +331,8 @@ def today(user: AuthUser) -> dict:
     d = local_date_of(to_ms(_now()))
     days = list_days(employee_id, d, d)
     stored = PunchPhoto.objects.filter(punch_id=OuterRef('id'), image_enc__isnull=False)
-    punches = list(live_punches().for_company(user.company_id).filter(employee_id=employee_id, local_date=d)
+    punches = list(live_punches(*local_dates_window(d, d)).for_company(user.company_id)
+                   .filter(employee_id=employee_id, local_date=d)
                    .annotate(remote=Coalesce(Cast(KT('raw__remote'), BooleanField()), Value(False)),
                              photo_id=Subquery(stored.values('id')[:1]))
                    .order_by('punched_at')
@@ -356,7 +357,7 @@ def remote(user: AuthUser, query: dict) -> dict:
     if q.get('employeeId'):
         assert_manages(user, q['employeeId'], 'attendance')
     photos = PunchPhoto.objects.filter(punch_id=OuterRef('id'))
-    qs = (live_punches().for_company(company_id_of(user))
+    qs = (live_punches(*local_dates_window(q['from'], q['to'])).for_company(company_id_of(user))
           .filter(local_date__range=(q['from'], q['to']))
           .annotate(remote_text=KT('raw__remote'), lat_text=KT('raw__lat'))
           .filter(visible_to(user), remote_text='true'))

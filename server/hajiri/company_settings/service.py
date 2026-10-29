@@ -195,7 +195,10 @@ BRANCH_FIELDS = ('id', 'code', 'name_en', 'name_ne')
 
 
 def list_branches(user: AuthUser) -> list[dict]:
-    cid = _hr(user)
+    # Attendance admins read the list too: the kiosk set-up (Attendance -> Kiosks) ties each kiosk to a branch.
+    if not has_role(user, 'hr', 'attendance_admin'):
+        raise ForbiddenError('requires role hr or admin')
+    cid = company_id_of(user)
     return list(Branch.objects.for_company(cid).order_by('code').values(*BRANCH_FIELDS, 'tz_offset_min', 'created_at'))
 
 

@@ -8,6 +8,10 @@ __pycache__/
 htmlcov/
 server/staticfiles/
 
+# Node (frontend/; its own .gitignore covers node_modules and dist). The web app's build, server/frontend_build/,
+# IS committed: installs serve it without Node.js (scripts/build-frontend.sh rebuilds it).
+node_modules/
+
 # local configuration and secrets (never commit)
 .env
 .env.*

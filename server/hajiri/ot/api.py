@@ -1,7 +1,8 @@
 """
-Overtime JSON API for Bearer-token clients (the TS routes under /api/v1/ot). DRF views with the project defaults
-(hajiri.core.api): HajiriAuthentication, IsSignedIn, the TS error shape and JsonRenderer. Roles and validation are
-checked by the services, with the TS messages.
+Overtime JSON API (the TS routes under /api/v1/ot), called by the React app (frontend/src/api/index.js `ot`) and by
+Bearer-token clients. DRF views with SameOriginAuthentication (the session cookie checked against the Origin, as the
+TS sameOriginGuard did, since the React app sends no CSRF token) and the project defaults: IsSignedIn, the TS error
+shape and JsonRenderer. Roles and validation are checked by the services, with the TS messages.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ from rest_framework.negotiation import BaseContentNegotiation
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from hajiri.core.api import SameOriginAuthentication
 from hajiri.core.validation import plain
 
 from . import services
@@ -23,7 +25,12 @@ def _query(request) -> dict:
     return request.query_params.dict()
 
 
-class RequestsView(APIView):
+class _OtView(APIView):
+    """Cookie requests from the React app pass the Origin check; Bearer clients need none."""
+    authentication_classes = [SameOriginAuthentication]
+
+
+class RequestsView(_OtView):
     """/api/v1/ot/requests: list the requests in the user's scope, or ask for overtime pre-approval."""
 
     @extend_schema(parameters=[OtRequestsQueryIn], responses=OtRequestsOut)
@@ -35,13 +42,13 @@ class RequestsView(APIView):
         return Response(services.create_request(request.user, request.data), status=status.HTTP_201_CREATED)
 
 
-class RequestCancelView(APIView):
+class RequestCancelView(_OtView):
     @extend_schema(request=None, responses=OtOkOut)
     def post(self, request, id):
         return Response(services.cancel_request(request.user, id))
 
 
-class SlipsView(APIView):
+class SlipsView(_OtView):
     """/api/v1/ot/slips: overtime detected from punches (HR all, a manager their team, an employee their own)."""
 
     @extend_schema(parameters=[OtSlipsQueryIn], responses=OtSlipsOut)
@@ -49,19 +56,19 @@ class SlipsView(APIView):
         return Response({'slips': plain(services.list_slips(request.user, _query(request)))})
 
 
-class SlipApproveView(APIView):
+class SlipApproveView(_OtView):
     @extend_schema(request=OtApproveSlipIn, responses=OtApprovedOut)
     def post(self, request, id):
         return Response(services.approve_slip(request.user, id, request.data or {}))
 
 
-class SlipRejectView(APIView):
+class SlipRejectView(_OtView):
     @extend_schema(request=OtRejectSlipIn, responses=OtOkOut)
     def post(self, request, id):
         return Response(services.reject_slip(request.user, id, request.data))
 
 
-class SlipCompOffView(APIView):
+class SlipCompOffView(_OtView):
     @extend_schema(request=None, responses=OtCompOffOut)
     def post(self, request, id):
         return Response(services.comp_off_slip(request.user, id))
@@ -78,7 +85,7 @@ class _JsonOnly(BaseContentNegotiation):
         return renderers[0], renderers[0].media_type
 
 
-class RegisterView(APIView):
+class RegisterView(_OtView):
     """/api/v1/ot/register: the inspector-ready overtime register (JSON or CSV)."""
     content_negotiation_class = _JsonOnly
 

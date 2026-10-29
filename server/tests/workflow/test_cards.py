@@ -58,15 +58,3 @@ def test_sla_reminder_goes_to_the_line_manager(demo, login_as):
     assert out['reminded'] == 1
     assert one("SELECT user_id FROM notification_outbox WHERE template = 'workflow.sla' AND channel = 'in_app'")['user_id'].hex \
         == ram.user_id.replace('-', '')
-
-
-def test_flows_page_shows_flows(demo, login_as):
-    hr = login_as(['hr'])
-    u = unit(demo['company_id'], 'OPS')
-    flow_admin.create_flow(hr.user, {'objectType': 'leave_request', 'name': 'Ops staff', 'conditions': {'orgUnitIds': [u]},
-                                     'steps': [{'kind': 'department_head'}, {'kind': 'role', 'role': 'hr'}], 'priority': 2, 'active': False})
-    c = Client()
-    c.cookies['hajiri_session'] = hr.token
-    html = c.get('/settings/approvals?open=leave_request').content.decode()
-    assert 'Ops staff' in html and 'For in OPS' in html and 'Department head → HR' in html and 'Priority 2' in html
-    assert '1 more flow' in html

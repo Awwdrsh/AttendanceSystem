@@ -1,69 +1,56 @@
 from django.urls import path
 
-from . import views
+# JSON API (TS: /api/v1/relations/...), called by the React app with the cookie session (frontend/src/api/relations.js).
+# Literal segments (committee, mine, stages, register) come before the <id> patterns that would also match them.
+from . import api
 
-# Pages keep the React routes (hubs.tsx RelationsHub, HelpHub, ProfileHub, MyAttendanceHub); fragments live under
-# /_/relations/.
+_API = 'api/v1/relations/'
 urlpatterns = [
-    # Employee relations hub (HR)
-    path('relations', views.grievances_admin, name='grievances'),
-    path('relations/disciplinary', views.disciplinary, name='disciplinary'),
-    path('relations/milestones', views.milestones, name='milestones'),
-    path('relations/assignments', views.assignments, name='assignments'),
-    path('relations/kye', views.kye, name='kye'),
-    path('relations/devices', views.devices, name='devices'),
-    # Self-service
-    path('me/help/grievances', views.my_grievances, name='my_grievances'),
-    path('me/profile/conduct', views.conduct, name='conduct'),
-    path('me/attendance/devices', views.my_devices, name='my_devices'),
+    path(f'{_API}policy', api.PolicyView.as_view(), name='api-policy'),
+    path(f'{_API}summary', api.SummaryView.as_view(), name='api-summary'),
 
-    # Grievances
-    path('_/relations/committee', views.committee_save, name='committee'),
-    path('_/relations/grievances/new', views.grievance_new, name='grievance_new'),
-    path('_/relations/grievances/<str:id>', views.grievance, name='grievance'),
-    path('_/relations/grievances/<str:id>/files/<str:file_id>', views.grievance_file, name='grievance_file'),
-    path('_/relations/grievances/<str:id>/notes', views.grievance_note, name='grievance_note'),
-    path('_/relations/grievances/<str:id>/update', views.grievance_update, name='grievance_update'),
-    path('_/relations/grievances/<str:id>/decision', views.grievance_decide, name='grievance_decide'),
-    path('_/relations/grievances/<str:id>/appeal', views.grievance_appeal, name='grievance_appeal'),
-    path('_/relations/grievances/<str:id>/appeal-decision', views.grievance_appeal_decide, name='grievance_appeal_decide'),
-    path('_/relations/grievances/<str:id>/withdraw', views.grievance_withdraw, name='grievance_withdraw'),
-    path('_/relations/grievances/<str:id>/close', views.grievance_close, name='grievance_close'),
+    path(f'{_API}grievances/committee', api.CommitteeView.as_view(), name='api-committee'),
+    path(f'{_API}grievances', api.GrievancesView.as_view(), name='api-grievances'),
+    path(f'{_API}grievances/<str:id>', api.GrievanceView.as_view(), name='api-grievance'),
+    path(f'{_API}grievances/<str:id>/files/<str:file_id>', api.GrievanceFileView.as_view(), name='api-grievance-file'),
+    path(f'{_API}grievances/<str:id>/notes', api.GrievanceNotesView.as_view(), name='api-grievance-notes'),
+    path(f'{_API}grievances/<str:id>/decision', api.GrievanceDecisionView.as_view(), name='api-grievance-decision'),
+    path(f'{_API}grievances/<str:id>/appeal', api.GrievanceAppealView.as_view(), name='api-grievance-appeal'),
+    path(f'{_API}grievances/<str:id>/appeal-decision', api.GrievanceAppealDecisionView.as_view(), name='api-grievance-appeal-decision'),
+    path(f'{_API}grievances/<str:id>/withdraw', api.GrievanceWithdrawView.as_view(), name='api-grievance-withdraw'),
+    path(f'{_API}grievances/<str:id>/close', api.GrievanceCloseView.as_view(), name='api-grievance-close'),
 
-    # Disciplinary
-    path('_/relations/cases/new', views.case_new, name='case_new'),
-    path('_/relations/cases/<str:id>', views.case, name='case'),
-    path('_/relations/cases/<str:id>/show-cause', views.case_show_cause, name='case_show_cause'),
-    path('_/relations/cases/<str:id>/decide', views.case_decide, name='case_decide'),
-    path('_/relations/cases/<str:id>/withdraw', views.case_withdraw, name='case_withdraw'),
-    path('_/relations/cases/<str:id>/letter', views.case_letter, name='case_letter'),
-    path('_/relations/cases/<str:id>/respond', views.case_respond, name='case_respond'),
-    path('_/relations/stages', views.stages, name='stages'),
+    path(f'{_API}disciplinary/stages', api.StagesView.as_view(), name='api-stages'),
+    path(f'{_API}disciplinary/mine', api.MyCasesView.as_view(), name='api-cases-mine'),
+    path(f'{_API}disciplinary', api.CasesView.as_view(), name='api-cases'),
+    path(f'{_API}disciplinary/<str:id>', api.CaseView.as_view(), name='api-case'),
+    path(f'{_API}disciplinary/<str:id>/show-cause', api.CaseShowCauseView.as_view(), name='api-case-show-cause'),
+    path(f'{_API}disciplinary/<str:id>/respond', api.CaseRespondView.as_view(), name='api-case-respond'),
+    path(f'{_API}disciplinary/<str:id>/decide', api.CaseDecideView.as_view(), name='api-case-decide'),
+    path(f'{_API}disciplinary/<str:id>/letter', api.CaseLetterView.as_view(), name='api-case-letter'),
+    path(f'{_API}disciplinary/<str:id>/withdraw', api.CaseWithdrawView.as_view(), name='api-case-withdraw'),
 
-    # Milestones, policy, contract
-    path('_/relations/policy', views.policy, name='policy'),
-    path('_/relations/employee/<str:employee_id>', views.employee_section, name='employee_section'),
-    path('_/relations/employee/<str:employee_id>/contract', views.contract_save, name='contract'),
+    path(f'{_API}milestones', api.MilestonesView.as_view(), name='api-milestones'),
+    path(f'{_API}separating', api.SeparatingView.as_view(), name='api-separating'),
+    path(f'{_API}employees/<str:id>/contract', api.ContractView.as_view(), name='api-contract'),
 
-    # Acting and deputation
-    path('_/relations/assignments/new', views.assignment_new, name='assignment_new'),
-    path('_/relations/assignments/<str:id>/end', views.assignment_end, name='assignment_end'),
+    path(f'{_API}assignments', api.AssignmentsView.as_view(), name='api-assignments'),
+    path(f'{_API}assignments/<str:id>/end', api.AssignmentEndView.as_view(), name='api-assignment-end'),
 
-    # Know Your Employee
-    path('_/relations/kye/new', views.kye_new, name='kye_new'),
-    path('_/relations/kye/<str:id>', views.kye_campaign, name='kye_campaign'),
-    path('_/relations/kye/<str:id>/nudge', views.kye_nudge, name='kye_nudge'),
-    path('_/relations/kye/<str:id>/close', views.kye_close, name='kye_close'),
-    path('_/relations/kye/<str:id>/respond', views.kye_respond, name='kye_respond'),
+    path(f'{_API}kye/campaigns', api.CampaignsView.as_view(), name='api-campaigns'),
+    path(f'{_API}kye/campaigns/<str:id>', api.CampaignView.as_view(), name='api-campaign'),
+    path(f'{_API}kye/campaigns/<str:id>/nudge', api.CampaignNudgeView.as_view(), name='api-campaign-nudge'),
+    path(f'{_API}kye/campaigns/<str:id>/close', api.CampaignCloseView.as_view(), name='api-campaign-close'),
+    path(f'{_API}kye/campaigns/<str:id>/respond', api.CampaignRespondView.as_view(), name='api-campaign-respond'),
+    path(f'{_API}kye/mine', api.MyKyeView.as_view(), name='api-kye-mine'),
+    path(f'{_API}completeness', api.CompletenessView.as_view(), name='api-completeness'),
 
-    # Registered devices
-    path('_/relations/devices/policy', views.devices_policy, name='devices_policy'),
-    path('_/relations/devices/register', views.device_register, name='device_register'),
-    path('_/relations/devices/mine/<str:id>/remove', views.device_remove, name='device_remove'),
-    path('_/relations/devices/<str:id>/<str:action>', views.device_decide, name='device_decide'),
+    path(f'{_API}popups', api.PopupsView.as_view(), name='api-popups'),
+    path(f'{_API}popups/<str:id>/dismiss', api.PopupDismissView.as_view(), name='api-popup-dismiss'),
 
-    # Layout pop-ups and the Home card
-    path('_/relations/popups', views.popup_notices, name='popup_notices'),
-    path('_/relations/popups/<str:id>/dismiss', views.popup_dismiss, name='popup_dismiss'),
-    path('_/relations/home', views.home_card, name='home_card'),
+    path(f'{_API}devices/mine', api.MyDevicesView.as_view(), name='api-devices-mine'),
+    path(f'{_API}devices/mine/<str:id>', api.MyDeviceView.as_view(), name='api-device-mine'),
+    path(f'{_API}devices/register', api.RegisterDeviceView.as_view(), name='api-device-register'),
+    path(f'{_API}devices', api.DevicesView.as_view(), name='api-devices'),
+    path(f'{_API}devices/<str:id>/<str:action>', api.DeviceDecisionView.as_view(), name='api-device-decision'),
 ]

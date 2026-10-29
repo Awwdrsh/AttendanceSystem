@@ -48,7 +48,6 @@ def test_marking_read_stays_in_the_active_company(world):
 
     from hajiri.db.models import NotificationOutbox
     from tests.core.fixtures import bearer
-    from tests.web.factories import htmx
     a, b = str(world.alpha.id), str(world.beta.id)
     notify(company_id=a, user_id=world.dual.id, template='x', title='From Alpha', body='a')
     notify(company_id=b, user_id=world.dual.id, template='x', title='From Beta', body='b')
@@ -62,10 +61,11 @@ def test_marking_read_stays_in_the_active_company(world):
     assert [n['title'] for n in c.get('/api/v1/notifications', **bearer(token)).json()['notifications']] == ['From Beta']
     alpha_note.refresh_from_db()
     assert alpha_note.read_at is None
-    # The bell's HTMX actions follow the active company too.
+    # The bell's cookie session follows the active company too.
     page = world.signed_in(world.dual, world.beta)
-    assert page.post(f'/_/notifications/{alpha_note.id}/read', **htmx()).status_code == 404
-    assert page.post('/_/notifications/read-all', **htmx()).status_code == 204
+    assert page.post(f'/api/v1/notifications/{alpha_note.id}/read').status_code == 404
+    assert page.post('/api/v1/notifications/read-all').json() == {'marked': 0}
     alpha_note.refresh_from_db()
     assert alpha_note.read_at is None
     assert unread_count(world.dual.id, company_id=a) == 1
+

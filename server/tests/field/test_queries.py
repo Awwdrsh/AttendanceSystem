@@ -70,20 +70,29 @@ def setup(acme, client):
     return acme, boss, shift, lt
 
 
-PAGES = ['/settings/locations', '/attendance/kiosks', '/attendance/visits', '/attendance/visits?view=breaks',
-         '/attendance/issues', '/attendance/penalties', '/attendance/from-home']
+# What the HR pages load: locations, kiosks, field visits and breaks, attendance issues, late penalties, from home.
+PAGES = ['/api/v1/field/locations', '/api/v1/field/kiosks', '/api/v1/field/visits?from={from}&to={to}',
+         '/api/v1/field/breaks?from={from}&to={to}', '/api/v1/attendance-tools/issues?from={from}&to={to}',
+         '/api/v1/attendance-tools/penalties?bsYear={y}&bsMonth={m}', '/api/v1/punch/remote?from={from}&to={to}']
+
+
+def _fill(url: str) -> str:
+    today = npt_today()
+    bs = ad_to_bs(today)
+    return url.format(**{'from': (today - timedelta(days=20)).isoformat(), 'to': today.isoformat(), 'y': bs.year, 'm': bs.month})
 
 
 @pytest.mark.parametrize('url', PAGES)
 def test_hr_list_pages_do_not_query_per_row(setup, client, url):
     acme, boss, shift, lt = setup
+    url = _fill(url)
     _grow(acme, boss, shift, lt, 2, 0)
     small = _count(client, url)
     _grow(acme, boss, shift, lt, 6, 100)
     assert _count(client, url) == small
 
 
-@pytest.mark.parametrize('url', ['/me/attendance/roster', '/_/field/swaps/new'])
+@pytest.mark.parametrize('url', ['/api/v1/field/my-roster?from={from}&to={to}', '/api/v1/field/swap-colleagues?date={to}'])
 def test_my_roster_and_swap_picker_do_not_query_per_day_or_colleague(setup, url):
     from django.test import Client
     acme, boss, shift, lt = setup
@@ -91,9 +100,9 @@ def test_my_roster_and_swap_picker_do_not_query_per_day_or_colleague(setup, url)
     ShiftAssignment.objects.create(employee=me, shift=shift, valid=(npt_today() - timedelta(days=400), None))
     c = Client()
     sign_in(c, make_user(acme, roles=['employee'], employee=me))
+    url = _fill(url)
     _grow(acme, boss, shift, lt, 2, 0)
     small = _count(c, url)
     _grow(acme, boss, shift, lt, 6, 100)
     assert _count(c, url) == small
-    if url.startswith('/me/'):
-        assert _count(c, url + '?weeks=4') == small
+

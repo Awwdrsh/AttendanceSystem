@@ -1,45 +1,33 @@
 from django.urls import path
 
-from . import views
+# JSON API for the React app and Bearer-token clients (TS: /api/v1/people/...). Ids are <str:...> so the service
+# answers a malformed one with the TS 400 "Invalid UUID"; the fixed paths come before /people/<id>/... .
+from . import api
 
+P = 'api/v1/people'
 urlpatterns = [
-    # People hub (everyone) and Profile hub.
-    path('people', views.directory, name='directory'),
-    path('people/org-chart', views.org_chart, name='org_chart'),
-    path('me/profile', views.my_profile, name='profile'),
-    path('me/profile/privacy', views.my_data, name='privacy'),
-    # Employees hub tabs owned here (HR).
-    path('employees/structure', views.structure, name='structure'),
-    path('employees/requests', views.change_requests, name='requests'),
-    # Fragments.
-    path('_/people/<uuid:id>/card', views.card, name='card'),
-    path('_/people/<uuid:id>/avatar', views.avatar, name='avatar'),
-    path('_/people/<uuid:id>/avatar/change', views.employee_avatar, name='avatar_change'),
-    path('_/people/<uuid:id>/avatar/editor', views.avatar_editor, name='avatar_editor'),
-    path('_/people/me/avatar', views.my_avatar, name='my_avatar'),
-    path('_/people/<uuid:id>/sections', views.sections, name='sections'),
-    path('_/people/<uuid:id>/sections/<str:section>', views.section_edit, name='section_edit'),
-    path('_/people/<uuid:id>/history', views.history, name='history'),
-    path('_/people/<uuid:id>/career', views.career, name='career'),
-    path('_/people/<uuid:id>/career/new', views.career_new, name='career_new'),
-    path('_/people/<uuid:id>/career/<uuid:event_id>/cancel', views.career_cancel, name='career_cancel'),
-    path('_/people/me/requests', views.my_requests, name='my_requests'),
-    path('_/people/me/requests/<uuid:id>/cancel', views.request_cancel, name='request_cancel'),
-    path('_/people/requests/<uuid:id>/reveal', views.request_reveal, name='request_reveal'),
-    path('_/people/requests/<uuid:id>/proof', views.request_proof, name='request_proof'),
-    path('_/people/requests/<uuid:id>/approve', views.request_approve, name='request_approve'),
-    path('_/people/requests/<uuid:id>/reject', views.request_reject, name='request_reject'),
-    path('_/people/structure/<str:kind>/new', views.structure_edit, name='structure_new'),
-    path('_/people/structure/<str:kind>/<uuid:id>/edit', views.structure_edit, name='structure_edit'),
-    path('_/people/structure/<str:kind>/<uuid:id>/delete', views.structure_delete, name='structure_delete'),
-    path('_/people/policy', views.policy, name='policy'),
+    path(f'{P}/directory', api.DirectoryView.as_view(), name='api_directory'),
+    path(f'{P}/summary', api.SummaryView.as_view(), name='api_summary'),
+    path(f'{P}/org-chart', api.OrgChartView.as_view(), name='api_org_chart'),
+    path(f'{P}/structure', api.StructureView.as_view(), name='api_structure'),
+    path(f'{P}/structure/branches', api.BranchesView.as_view(), name='api_branches'),
+    path(f'{P}/structure/branches/<str:id>', api.BranchView.as_view(), name='api_branch'),
+    path(f'{P}/structure/units', api.UnitsView.as_view(), name='api_units'),
+    path(f'{P}/structure/units/<str:id>', api.UnitView.as_view(), name='api_unit'),
+    path(f'{P}/structure/designations', api.DesignationsView.as_view(), name='api_designations'),
+    path(f'{P}/structure/designations/<str:id>', api.DesignationView.as_view(), name='api_designation'),
+    path(f'{P}/policy', api.PolicyView.as_view(), name='api_policy'),
+    path(f'{P}/me/change-requests', api.MyChangeRequestsView.as_view(), name='api_my_requests'),
+    path(f'{P}/me/change-requests/<str:id>/cancel', api.MyChangeRequestCancelView.as_view(), name='api_my_request_cancel'),
+    path(f'{P}/me/avatar', api.MyAvatarView.as_view(), name='api_my_avatar'),
+    path(f'{P}/change-requests', api.ChangeRequestsView.as_view(), name='api_requests'),
+    path(f'{P}/change-requests/<str:id>', api.ChangeRequestView.as_view(), name='api_request'),
+    path(f'{P}/change-requests/<str:id>/proof', api.ChangeRequestProofView.as_view(), name='api_request_proof'),
+    path(f'{P}/<str:id>/card', api.CardView.as_view(), name='api_card'),
+    path(f'{P}/<str:id>/avatar', api.AvatarView.as_view(), name='api_avatar'),
+    path(f'{P}/<str:id>/profile', api.ProfileView.as_view(), name='api_profile'),
+    path(f'{P}/<str:id>/profile/<str:section>', api.ProfileSectionView.as_view(), name='api_profile_section'),
+    path(f'{P}/<str:id>/history', api.HistoryView.as_view(), name='api_history'),
+    path(f'{P}/<str:id>/career', api.CareerView.as_view(), name='api_career'),
+    path(f'{P}/<str:id>/career/<str:event_id>/cancel', api.CareerCancelView.as_view(), name='api_career_cancel'),
 ]
-
-# JSON API for Bearer-token clients (TS: /api/v1/people/...).
-from rest_framework.routers import SimpleRouter  # noqa: E402
-
-from . import api  # noqa: E402
-
-router = SimpleRouter(trailing_slash=False)
-router.register('api/v1/people', api.PeopleViewSet, basename='api-people')
-urlpatterns += router.urls

@@ -26,7 +26,7 @@ from django.db.models.functions import Cast
 from engines.bs_calendar import weekday_of
 from hajiri.attendance.service import date_range, enqueue_recompute
 from hajiri.core.audit import audit
-from hajiri.core.auth import MODULE_ROLES, AuthUser, assert_manages, has_module, has_role, manages
+from hajiri.core.auth import MODULE_ROLES, AuthUser, has_module, has_role, manages
 from hajiri.core.bsdate import bs_range
 from hajiri.core.clock import npt_today
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
@@ -36,6 +36,8 @@ from hajiri.db.models import (
     ShiftAssignment, ShiftSwap,
 )
 from hajiri.notifications.service import notify, user_id_for_employee
+# The TS shifts routes used the workflow helper (assertManages): 'not allowed to act for this employee'.
+from hajiri.workflow.service import assert_manages
 
 from .filters import HolidayFilter
 from .serializers import (
@@ -312,14 +314,24 @@ def calendar(user: AuthUser, query: dict) -> dict:
         raise BadRequestError('range must be 1 to 400 days')
     dates = date_range(q['from'], q['to'])
     weekly_off = [6]
+    emp = None
     if q.get('employeeId'):
-        emp = Employee.objects.for_company(user.company_id).filter(pk=q['employeeId']).values('weekly_off_days').first()
+        emp = Employee.objects.for_company(user.company_id).filter(pk=q['employeeId']).values('weekly_off_days', 'gender').first()
         if not emp:
             raise NotFoundError('employee not found')
         assert_manages(user, q['employeeId'], 'attendance')  # self, their manager or HR only
         weekly_off = list(emp['weekly_off_days'] or [])
     hol = (Holiday.objects.for_company(user.company_id).filter(local_date__range=(q['from'], q['to'])).order_by('local_date', 'id')
            .values('local_date', 'name_en', 'name_ne', 'gender_scope', 'optional', 'branch_id'))
+    if emp is not None:
+        # One person's calendar shows the holidays that apply to them, by the attendance engine's rule (is_holiday):
+        # company-wide or their branch on that day, for everyone or their gender. Optional ones stay, flagged.
+        from hajiri.attendance.repo import get_branch_id
+        branch_on = {}
+        hol = [h for h in hol
+               if h['gender_scope'] in (Holiday.GenderScope.ALL, emp['gender'])
+               and (h['branch_id'] is None
+                    or str(h['branch_id']) == str(branch_on.setdefault(h['local_date'], get_branch_id(q['employeeId'], _iso(h['local_date'])))))]
     bs = {_iso(ad): b for ad, b in BsCalendar.objects.filter(ad_date__range=(q['from'], q['to'])).values_list('ad_date', 'bs_date')}
     by_day: dict[str, list[dict]] = {}
     for h in hol:
@@ -421,7 +433,7 @@ def save_roster(user: AuthUser, body: dict) -> dict:
             if row['employeeId'] not in known_emps:
                 raise NotFoundError(f"employee {row['employeeId']} not found")
             if row['employeeId'] not in allowed:
-                raise ForbiddenError('not allowed to access this employee')
+                raise ForbiddenError('not allowed to act for this employee')
             if row['shiftId'] and row['shiftId'] not in known_shifts:
                 raise NotFoundError(f"shift {row['shiftId']} not found")
             if (row['employeeId'], row['localDate']) in locked:

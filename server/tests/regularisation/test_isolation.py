@@ -14,7 +14,7 @@ from hajiri.db.models import RegularisationRequest, Shift
 from hajiri.regularisation import services
 from tests.core.fixtures import bearer
 from tests.multicompany.conftest import world  # noqa: F401 - the shared fixture
-from tests.web.factories import htmx, make_employee, toasts
+from tests.web.factories import make_employee
 
 URL = '/api/v1/regularisation'
 
@@ -51,7 +51,7 @@ def beta_employee(world):  # noqa: F811
 def test_cancelling_another_companys_request_is_not_found(world, beta_request, who):  # noqa: F811
     r, body = post(api(world, getattr(world, who)), f'{URL}/{beta_request}/cancel')
     assert r.status_code == 404 and body['error'] == 'request not found'
-    page = world.signed_in(getattr(world, who)).post(f'/_/regularisation/{beta_request}/cancel', **htmx())
+    page = world.signed_in(getattr(world, who)).post(f'{URL}/{beta_request}/cancel', {}, content_type='application/json')
     assert page.status_code == 404
     assert RegularisationRequest.objects.get(pk=beta_request).status == 'pending'
 
@@ -59,22 +59,6 @@ def test_cancelling_another_companys_request_is_not_found(world, beta_request, w
 def test_the_owner_company_may_cancel(world, beta_request):  # noqa: F811
     r, body = post(api(world, world.admin_b), f'{URL}/{beta_request}/cancel')
     assert r.status_code == 200 and body == {'ok': True}
-
-
-def test_a_group_admin_cancels_after_switching_to_that_company(world, beta_request):  # noqa: F811
-    r = world.signed_in(world.admin_a, world.beta).post(f'/_/regularisation/{beta_request}/cancel', **htmx())
-    assert r.status_code == 204 and toasts(r)[0]['message'] == 'Request cancelled.'
-
-
-def test_lists_show_only_the_active_company(world, beta_request):  # noqa: F811
-    r = Client().get(URL, **api(world, world.admin_a))
-    assert r.status_code == 200 and beta_request not in {x['id'] for x in r.json()['requests']}
-    r = Client().get(URL, **api(world, world.admin_a, world.beta))
-    assert beta_request in {x['id'] for x in r.json()['requests']}
-    html = world.signed_in(world.admin_a).get('/_/regularisation/list', **htmx()).content.decode()
-    assert 'client site' not in html
-    html = world.signed_in(world.admin_a, world.beta).get('/_/regularisation/list', **htmx()).content.decode()
-    assert 'client site' in html
 
 
 def test_listing_another_companys_employee_is_not_found(world):  # noqa: F811
@@ -99,28 +83,6 @@ def test_a_shift_of_another_company_is_not_found(world):  # noqa: F811
                                        'reason': 'swap'})
 
 
-def test_hr_cannot_fix_a_punch_of_another_company(world):  # noqa: F811
-    r = world.signed_in(world.admin_a).post('/_/regularisation/fix', {
-        'employee_id': beta_employee(world), 'local_date': yesterday(), 'time': '10:00', 'direction': 'in',
-        'reason': 'device offline'}, **htmx())
-    assert r.status_code == 404 and toasts(r)[0]['message'] == 'employee not found'
-
-
-def test_the_correction_form_for_another_companys_employee_is_not_found(world):  # noqa: F811
-    c = world.signed_in(world.admin_a)
-    r = c.get(f'/_/regularisation/new?employee_id={beta_employee(world)}&date={yesterday()}', **htmx())
-    assert r.status_code == 404
-    r = c.get(f'/_/regularisation/new?employee_id={world.admin_a.employee_id}&date={yesterday()}', **htmx())
-    assert r.status_code == 200
-
-
-def test_the_shift_select_offers_only_the_active_companys_shifts(world):  # noqa: F811
-    Shift.objects.create(company=world.beta, code='BX', name_en='Beta Late', start_time='14:00', end_time='22:00')
-    Shift.objects.create(company=world.alpha, code='AX', name_en='Alpha Early', start_time='06:00', end_time='14:00')
-    html = world.signed_in(world.admin_a).get('/_/regularisation/new', **htmx()).content.decode()
-    assert 'Alpha Early, 06:00 to 14:00' in html and 'Beta Late' not in html
-
-
 # ---------------------------------------------------------------- working in a second company
 
 def test_a_member_files_with_their_employee_record_of_the_active_company(world):  # noqa: F811
@@ -142,3 +104,47 @@ def test_group_hr_fixes_punches_in_every_company_of_the_group(world):  # noqa: F
     r, body = post(api(world, world.ghr, world.alpha), URL,
                    {'employeeId': str(world.admin_c.employee_id), 'localDate': yesterday(), 'kind': 'on_duty', 'reason': 'x y'})
     assert r.status_code == 404
+
+
+def test_a_group_admin_cancels_after_switching_to_that_company(world, beta_request):  # noqa: F811
+    r = world.signed_in(world.admin_a, world.beta).post(f'{URL}/{beta_request}/cancel', {}, content_type='application/json')
+    assert r.status_code == 200 and r.json() == {'ok': True}
+
+
+def test_lists_show_only_the_active_company(world, beta_request):  # noqa: F811
+    r = Client().get(URL, **api(world, world.admin_a))
+    assert r.status_code == 200 and beta_request not in {x['id'] for x in r.json()['requests']}
+    r = Client().get(URL, **api(world, world.admin_a, world.beta))
+    assert beta_request in {x['id'] for x in r.json()['requests']}
+    # The Requests page's cookie session, with the scope it sends.
+    body = world.signed_in(world.admin_a).get(URL, {'scope': 'all'}).content.decode()
+    assert 'client site' not in body
+    body = world.signed_in(world.admin_a, world.beta).get(URL, {'scope': 'all'}).content.decode()
+    assert 'client site' in body
+
+
+def test_hr_cannot_fix_a_punch_of_another_company(world):  # noqa: F811
+    c = world.signed_in(world.admin_a)
+    body = {'employeeId': beta_employee(world), 'localDate': yesterday(), 'kind': 'missed_punch',
+            'punchTime': f'{yesterday()}T10:00:00+05:45', 'punchDirection': 'in', 'reason': 'device offline'}
+    r = c.post(URL, body, content_type='application/json')
+    assert r.status_code == 404 and r.json() == {'error': 'employee not found'}
+    r = c.post('/api/v1/punch/manual', {'employeeId': beta_employee(world), 'localDate': yesterday(), 'time': '10:00',
+                                        'direction': 'in', 'reason': 'device offline'}, content_type='application/json')
+    assert r.status_code == 404
+
+
+def test_a_correction_for_another_companys_employee_is_not_found(world):  # noqa: F811
+    c = world.signed_in(world.admin_a)
+    body = {'localDate': yesterday(), 'kind': 'on_duty', 'reason': 'client visit'}
+    assert c.post(URL, {**body, 'employeeId': beta_employee(world)}, content_type='application/json').status_code == 404
+    r = c.post(URL, {**body, 'employeeId': world.admin_a.employee_id}, content_type='application/json')
+    assert r.status_code == 201, r.content
+
+
+def test_the_shift_select_offers_only_the_active_companys_shifts(world):  # noqa: F811
+    Shift.objects.create(company=world.beta, code='BX', name_en='Beta Late', start_time='14:00', end_time='22:00')
+    Shift.objects.create(company=world.alpha, code='AX', name_en='Alpha Early', start_time='06:00', end_time='14:00')
+    # The correction form's shift select is filled from the shifts list of the active company.
+    names = {s['name_en'] for s in world.signed_in(world.admin_a).get('/api/v1/shifts').json()['shifts']}
+    assert 'Alpha Early' in names and 'Beta Late' not in names

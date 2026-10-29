@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # One-command setup of Hajiri on a fresh macOS or Ubuntu/Debian machine:
 #   git clone <repo> hajiri && cd hajiri && ./scripts/setup.sh
-# Installs Python 3.13 and PostgreSQL 18, creates the database, writes server/.env and server/gateway.env (new secrets,
+# Installs Python 3.13 and PostgreSQL 18 (no Node.js: the web app's build is committed in server/frontend_build/),
+# creates the database, writes server/.env and server/gateway.env (new secrets,
 # or, on a checkout that still has the retired TypeScript stack's apps/api/.env and apps/gateway/.env, the database,
 # keys and pepper from those files), builds server/.venv, applies migrations, seeds and creates the first admin user.
 # Safe to re-run: every step is idempotent.
@@ -98,6 +99,13 @@ fi
 if ! grep -Eq "^port = $PG_PORT\b" "$PGCONF"; then
   if [ "$OS" = mac ]; then sed -i '' -E "s/^#?port = [0-9]+/port = $PG_PORT/" "$PGCONF"
   else sudo sed -i -E "s/^#?port = [0-9]+/port = $PG_PORT/" "$PGCONF"; fi
+  if [ "$OS" = mac ]; then brew services restart postgresql@$PG_MAJOR >/dev/null; else sudo systemctl restart postgresql; fi
+fi
+# Room in the lock table (idempotent). punch_event has a partition per month, each with its indexes, so a query or a
+# backup spanning them takes hundreds of locks; the default of 64 per connection runs out ("out of shared memory").
+if ! grep -Eq "^max_locks_per_transaction = 256\b" "$PGCONF"; then
+  if [ "$OS" = mac ]; then sed -i '' -E "s/^#?max_locks_per_transaction = [0-9]+/max_locks_per_transaction = 256/" "$PGCONF"
+  else sudo sed -i -E "s/^#?max_locks_per_transaction = [0-9]+/max_locks_per_transaction = 256/" "$PGCONF"; fi
   if [ "$OS" = mac ]; then brew services restart postgresql@$PG_MAJOR >/dev/null; else sudo systemctl restart postgresql; fi
 fi
 pg_service_start
@@ -264,6 +272,7 @@ fi
 
 step "Checks"
 manage check >/dev/null && ok "Django configuration"
+check_frontend_build
 manage run_gateway --check | sed 's/^/  /'
 
 if [ "$WITH_TESTS" = 1 ]; then

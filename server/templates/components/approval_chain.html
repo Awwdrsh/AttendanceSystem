@@ -1,2 +1,0 @@
-{# ApprovalChainPreview.tsx: who will approve this, loaded from the workflow app; silent when it cannot be worked out. #}
-{% if url %}<div id="{{ id }}" hx-get="{{ url }}?object_type={{ object_type|urlencode }}&employee_id={{ employee_id|urlencode }}&amount={{ amount|urlencode }}" hx-trigger="load, hj:chain-{{ object_type }} from:body delay:300ms" hx-swap="innerHTML"><div class="hj-skeleton" style="height:44px"></div></div>{% endif %}

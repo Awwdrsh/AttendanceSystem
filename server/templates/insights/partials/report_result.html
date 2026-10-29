@@ -1,5 +1,0 @@
-{% if error %}{% alert "bad" title="Could not run the report" %}{{ error }}{% endalert %}
-{% elif table %}
-<div class="hj-row hj-gap-xs"><span class="hj-badge hj-tone-idle">{{ table.n }} {% if table.n == 1 %}row{% else %}rows{% endif %}</span></div>
-<div class="hj-mt-sm">{% report_table table.columns table.rows %}</div>
-{% endif %}

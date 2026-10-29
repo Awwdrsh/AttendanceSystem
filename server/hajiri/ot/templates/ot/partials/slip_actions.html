@@ -1,7 +1,0 @@
-{% if row.status == 'detected' or row.status == 'approved' %}
-<div class="hj-row nowrap hj-gap-xs hj-end">
-  {% if row.status == 'detected' %}<button type="button" class="hj-btn light xs" hx-get="{% url 'ot:slip_approve' row.id %}" hx-target="#hj-modal-body"><i class="ti ti-check" aria-hidden="true"></i>Approve</button>{% endif %}
-  <button type="button" class="hj-btn default xs" hx-post="{% url 'ot:slip_comp_off' row.id %}" hx-swap="none">Give comp-off</button>
-  <button type="button" class="hj-btn subtle danger xs" hx-get="{% url 'ot:slip_reject' row.id %}" hx-target="#hj-modal-body">Reject</button>
-</div>
-{% endif %}

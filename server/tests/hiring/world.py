@@ -183,7 +183,7 @@ class World:
         assert status(hiring.lookups, self.emp) == 403
         assert status(hiring.application_detail, self.other_hr, self.app_id) == 404
         assert status(hiring.get_job, self.other_hr, self.job_id) == 404
-        cv = self.client(self.ram).get(f'/_/hiring/applications/{self.app_id}/cv')
+        cv = self.client(self.ram).get(f'/api/v1/hiring/applications/{self.app_id}/cv')
         assert cv.status_code == 200
         assert 'sandbox' in cv['Content-Security-Policy']
 
@@ -222,7 +222,7 @@ class World:
         view = hiring.application_detail(self.mgr2, self.app_id)
         assert view['access'] == 'panel'
         assert view['events'] == []
-        assert self.client(self.mgr2).get(f'/_/hiring/applications/{self.app_id}/cv').status_code == 200
+        assert self.client(self.mgr2).get(f'/api/v1/hiring/applications/{self.app_id}/cv').status_code == 200
         assert status(hiring.move_application, self.mgr2, self.app_id, {'stage': 'Offer'}) == 404
         assert status(hiring.submit_scorecard, self.hr, self.interview_id, {'ratings': {'Skills': 4}, 'recommendation': 'yes'}) == 404
         assert status(hiring.submit_scorecard, self.mgr2, self.interview_id, {'ratings': {'Skills': 9}, 'recommendation': 'yes'}) == 400
@@ -295,7 +295,7 @@ class World:
         """exports a candidate for HR and purges rejected candidates after the retention period"""
         other = self._bikash()
         oid = str(other['id'])
-        ex = self.client(self.hr).get(f'/_/hiring/applications/{oid}/export')
+        ex = self.client(self.hr).get(f'/api/v1/hiring/applications/{oid}/export')
         assert ex.status_code == 200
         assert ex.json()['candidate']['email'] == 'bikash@example.com'
         assert 'attachment' in ex['Content-Disposition']

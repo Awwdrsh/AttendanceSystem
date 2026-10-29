@@ -1,26 +1,27 @@
 from django.urls import path
 
-from . import views
+# JSON API (the TS routes under /api/v1/devices and /api/v1/biometrics; api.py). Ids are <str:...> so a malformed
+# one is the TS 400 "Invalid UUID" after the role check, not a 404.
+from . import api
 
 urlpatterns = [
-    path('settings/devices', views.device_list, name='list'),
-    path('_/devices/map', views.device_map, name='map'),
-    path('_/devices/<uuid:id>', views.device_detail, name='detail'),
-    path('_/devices/<uuid:id>/commands', views.device_commands, name='commands'),
-    path('_/devices/<uuid:id>/mappings', views.device_mappings, name='mappings'),
-    path('_/devices/<uuid:id>/activate', views.device_activate, name='activate'),
-    path('_/devices/<uuid:id>/disable', views.device_disable, name='disable'),
-    path('_/devices/<uuid:id>/key', views.device_key, name='key'),
-    path('_/devices/<uuid:id>/sync-users', views.device_sync, name='sync_users'),
-    path('_/devices/<uuid:id>/command', views.device_command, name='command'),
-    # Biometrics: actions and fragments for My data (/me/profile/privacy) and the employee detail page.
-    path('_/devices/biometrics/consent', views.consent_grant, name='consent'),
-    path('_/devices/biometrics/consent/<uuid:id>/revoke', views.consent_revoke, name='consent_revoke'),
-    path('_/devices/biometrics/consents', views.consents_fragment, name='consents'),
-    path('_/devices/biometrics/templates', views.templates_fragment, name='templates'),
-    path('_/devices/biometrics/templates/<uuid:id>/shred', views.template_shred, name='template_shred'),
-    path('_/devices/biometrics/employees/<uuid:id>/shred-all', views.employee_shred_all, name='shred_all'),
-    path('_/devices/biometrics/transparency', views.transparency_fragment, name='transparency'),
-    path('_/devices/biometrics/dsar', views.dsar_download, name='dsar'),
-    path('_/devices/biometrics/retention/run', views.retention_run, name='retention_run'),
+    path('api/v1/devices', api.devices, name='api_devices'),
+    path('api/v1/devices/punches/unmapped', api.unmapped_punches, name='api_unmapped_punches'),
+    path('api/v1/devices/<str:id>/activate', api.activate, name='api_activate'),
+    path('api/v1/devices/<str:id>/key', api.key, name='api_key'),
+    path('api/v1/devices/<str:id>/disable', api.disable, name='api_disable'),
+    path('api/v1/devices/<str:id>/mappings', api.mappings, name='api_mappings'),
+    path('api/v1/devices/<str:id>/map', api.map_pin, name='api_map'),
+    path('api/v1/devices/<str:id>/commands', api.commands, name='api_commands'),
+    path('api/v1/devices/<str:id>/sync-users', api.sync_users, name='api_sync_users'),
+    path('api/v1/biometrics/transparency', api.transparency, name='api_transparency'),
+    path('api/v1/biometrics/consent', api.consent, name='api_consent'),
+    path('api/v1/biometrics/consent/<str:id>/revoke', api.consent_revoke, name='api_consent_revoke'),
+    path('api/v1/biometrics/templates', api.templates, name='api_templates'),
+    path('api/v1/biometrics/templates/unmapped', api.templates_unmapped, name='api_templates_unmapped'),
+    path('api/v1/biometrics/templates/<str:id>/shred', api.template_shred, name='api_template_shred'),
+    path('api/v1/biometrics/employees/<str:id>/shred-all', api.employee_shred_all, name='api_shred_all'),
+    path('api/v1/biometrics/dsar', api.dsar, name='api_dsar'),
+    path('api/v1/biometrics/retention/run', api.retention_run, name='api_retention_run'),
+    path('api/v1/biometrics/stats', api.stats, name='api_stats'),
 ]

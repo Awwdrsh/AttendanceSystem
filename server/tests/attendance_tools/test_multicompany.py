@@ -10,7 +10,7 @@ from django.test import Client
 
 from hajiri.db.models import LatePenalty, WorkflowInstance
 from tests.multicompany.conftest import world  # noqa: F401 - the shared group fixture
-from tests.web.factories import bearer, htmx, make_employee
+from tests.web.factories import bearer, make_employee
 
 
 def _post(token, url, body):
@@ -44,12 +44,6 @@ def test_another_companys_penalty_employee_and_request_are_not_found(world, beta
     assert LatePenalty.objects.get(pk=beta['penalty']).status == LatePenalty.Status.REVERSED
 
 
-def test_reverse_form_loads_the_penalty_first(world, beta):
-    url = f"/_/attendance_tools/penalties/{beta['penalty']}/reverse"
-    assert world.signed_in(world.admin_a).get(url, **htmx()).status_code == 404
-    assert world.signed_in(world.admin_b).get(url, **htmx()).status_code == 200
-
-
 def test_upload_matches_codes_of_the_active_company_only(world, beta):
     csv = 'emp_code,date_ad,in_time,out_time\nSAME1,2026-10-01,09:00,17:00\n'
     alpha, _ = world.session(world.admin_a)
@@ -66,3 +60,12 @@ def test_penalty_lists_and_uploads_show_only_the_active_company(world, beta):
     q = {'bsYear': 2083, 'bsMonth': 6}
     assert Client().get('/api/v1/attendance-tools/penalties', q, **bearer(alpha)).json()['lines'] == []
     assert Client().get('/api/v1/attendance-tools/uploads', **bearer(owner)).json()['uploads'] == []
+
+
+def test_reversing_looks_the_penalty_up_in_the_active_company_first(world, beta):
+    url = f"/api/v1/attendance-tools/penalties/{beta['penalty']}/reverse"
+    body = {'reason': 'entered by mistake'}
+    assert world.signed_in(world.admin_a).post(url, body, content_type='application/json').status_code == 404
+    r = world.signed_in(world.admin_b).post(url, body, content_type='application/json')
+    assert r.status_code == 200, r.content
+

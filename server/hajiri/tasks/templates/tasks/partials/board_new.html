@@ -1,9 +1,0 @@
-<form class="hj-form" data-modal-title="New team board" hx-post="{% url 'tasks:board_new' %}" hx-swap="none" x-data="{ name: '' }">
-  <div class="hj-fieldset">
-    <label class="hj-label" for="tk-new-name">Name</label>
-    <input id="tk-new-name" class="hj-input" name="name" maxlength="80" placeholder="For example: Store opening" x-model="name" autofocus>
-  </div>
-  <label class="hj-check-row hj-sm"><input type="checkbox" class="hj-switch" name="add_my_reports" checked> Add the people who report to me</label>
-  <p class="hj-small hj-muted" style="margin:0">You can add or remove people later in the board settings.</p>
-  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit" :disabled="!name.trim()">Create board</button></div>
-</form>

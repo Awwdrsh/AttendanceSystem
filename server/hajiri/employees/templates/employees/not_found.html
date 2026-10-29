@@ -1,7 +1,0 @@
-{% extends "base.html" %}
-{% block title %}Employee not found · Hajiri{% endblock %}
-{% block content %}
-{% url 'employees:list' as back %}
-{% page_header "Employee not found" back=back back_label="Employees" %}{% endpage_header %}
-{% empty_state title="We could not load this employee" hint="employee not found" %}
-{% endblock %}

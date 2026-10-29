@@ -1,34 +1,8 @@
 from django.urls import path
 
-from . import api, views
+from . import api
 
 urlpatterns = [
-    # Pages
-    path('attendance/visits', views.visits, name='visits'),
-    path('attendance/kiosks', views.kiosks, name='kiosks'),
-    path('settings/locations', views.locations, name='locations'),
-    path('me/attendance/roster', views.my_roster, name='my_roster'),
-    path('me/attendance/visits', views.my_visits, name='my_visits'),
-    path('me/attendance/kiosk', views.my_kiosk, name='my_kiosk'),
-    # Fragments and form posts
-    path('_/field/visits/<uuid:id>/photo', views.visit_photo, name='visit_photo'),
-    path('_/field/kiosks/new', views.kiosk_form, name='kiosk_new'),
-    path('_/field/kiosks/<uuid:id>/edit', views.kiosk_form, name='kiosk_edit'),
-    path('_/field/kiosks/<uuid:id>/<str:action>', views.kiosk_action, name='kiosk_action'),
-    path('_/field/locations/new', views.location_form, name='location_new'),
-    path('_/field/locations/<uuid:id>/edit', views.location_form, name='location_edit'),
-    path('_/field/locations/<uuid:id>/delete', views.location_delete, name='location_delete'),
-    path('_/field/rules', views.field_rules, name='rules'),
-    path('_/field/staff/<uuid:employee_id>', views.staff_update, name='staff_update'),
-    path('_/field/staff/<uuid:employee_id>/kiosk-reset', views.staff_kiosk_reset, name='staff_kiosk_reset'),
-    path('_/field/swaps/new', views.swap_new, name='swap_new'),
-    path('_/field/swaps/<uuid:id>/<str:action>', views.swap_action, name='swap_action'),
-    path('_/field/kiosk-pin', views.kiosk_pin, name='kiosk_pin'),
-    path('_/field/kiosk-badge', views.kiosk_badge, name='kiosk_badge'),
-    path('_/field/home', views.home_card, name='home_card'),
-    path('_/field/breaks/<str:action>', views.home_break, name='break'),
-    path('_/field/visits/start', views.home_visit_start, name='visit_start'),
-    path('_/field/visits/<uuid:id>/end', views.home_visit_end, name='visit_end'),
     # JSON (TS paths)
     path('api/v1/field/policy', api.policy, name='api_policy'),
     path('api/v1/field/me', api.me, name='api_me'),

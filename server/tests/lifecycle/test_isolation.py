@@ -10,7 +10,7 @@ from hajiri.core.clock import npt_today
 from hajiri.db.models import NotificationOutbox
 from hajiri.lifecycle import api
 from tests.people.group import build_group
-from tests.web.factories import htmx, make_employee
+from tests.web.factories import make_employee
 
 
 @pytest.fixture
@@ -38,31 +38,21 @@ def beta(g):
 
 def _requests(x):
     c, t, tp, a, xi, e = x['case'], x['task'], x['template'], x['asset'], x['exit'], x['employee']
+    L = '/api/v1/lifecycle'
     return [
-        ('get', f'/_/lifecycle/cases/{c}', None), ('post', f'/_/lifecycle/cases/{c}/tasks', {'title': 'More'}),
-        ('post', f'/_/lifecycle/tasks/{t}', {'status': 'done'}), ('get', f'/_/lifecycle/tasks/{t}/comments', None),
-        ('get', f'/_/lifecycle/probation/{e}/review', None), ('get', f'/_/lifecycle/probation/{e}/confirm', None),
-        ('get', f'/_/lifecycle/templates/onboarding/{tp}', None),
-        ('get', f'/_/lifecycle/assets/{a}/assign', None), ('get', f'/_/lifecycle/assets/{a}/return', None),
-        ('post', f'/_/lifecycle/assets/{a}/assign', {'employee_id': e}),
-        ('get', f'/_/lifecycle/exits/{xi}', None), ('get', f'/_/lifecycle/exits/{xi}/cancel', None),
-        ('post', f'/_/lifecycle/exits/{xi}/update', {'lastWorkingDay': plus(12)}),
-        ('get', f'/_/lifecycle/employees/{e}', None), ('post', f'/_/lifecycle/cases/{c}/cancel', {}),
+        ('get', f'{L}/cases/{c}', None), ('post', f'{L}/cases/{c}/tasks', {'title': 'More'}),
+        ('patch', f'{L}/tasks/{t}', {'status': 'done'}), ('get', f'{L}/tasks/{t}/comments', None),
+        ('put', f'{L}/templates/{tp}', {'kind': 'onboarding', 'name': 'Renamed', 'tasks': []}),
+        ('post', f'{L}/assets/{a}/assign', {'employeeId': e}),
+        ('get', f'{L}/exits/{xi}', None), ('patch', f'{L}/exits/{xi}', {'lastWorkingDay': plus(12)}),
+        ('get', f'{L}/employees/{e}/summary', None), ('post', f'{L}/cases/{c}/cancel', {}),
     ]
 
 
 def _call(c, method, url, data):
-    return c.post(url, data or {}, **htmx()) if method == 'post' else c.get(url, **htmx())
-
-
-def test_records_of_another_company_are_not_found(g, beta):
-    for person in (g.admin_c, g.admin_a):
-        c = g.client(person)
-        for method, url, data in _requests(beta):
-            assert _call(c, method, url, data).status_code == 404, (person.email, url)
-    owner = g.client(g.admin_b)
-    for method, url, data in _requests(beta):
-        assert _call(owner, method, url, data).status_code != 404, url
+    if method == 'get':
+        return c.get(url)
+    return getattr(c, method)(url, data or {}, content_type='application/json')
 
 
 def test_lists_show_the_active_company_only(g, beta):
@@ -101,3 +91,18 @@ def test_asset_register_filtered_by_a_sister_company_employee_is_not_found(g, be
             api.assets(person, {'employeeId': beta['employee']})
     # In Beta, Dipak manages Bina: her assets are his to see.
     assert api.assets(g.session(g.dual, g.beta), {'employeeId': beta['employee']}) == []
+
+
+def test_records_of_another_company_are_not_found(g, beta):
+    for person in (g.admin_c, g.admin_a):
+        c = g.client(person)
+        for method, url, data in _requests(beta):
+            r = _call(c, method, url, data)
+            assert r.status_code == 404, (person.email, url, r.status_code, r.content[:200])
+        # As in the old API, an asset's history is filtered by company: empty, not 404.
+        assert c.get(f"/api/v1/lifecycle/assets/{beta['asset']}/history").json() == {'history': []}
+    owner = g.client(g.admin_b)
+    for method, url, data in _requests(beta):
+        r = _call(owner, method, url, data)
+        assert r.status_code != 404 and r.status_code < 500, (url, r.status_code, r.content[:200])
+

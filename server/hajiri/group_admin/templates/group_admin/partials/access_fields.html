@@ -1,7 +1,0 @@
-<div class="hj-fieldset">
-  <label class="hj-label" for="{{ form.company_id.id_for_label }}">{{ form.company_id.label }}<span class="req" aria-hidden="true">*</span></label>
-  <select name="company_id" id="{{ form.company_id.id_for_label }}" class="hj-select" hx-get="{% url 'group_admin:access_employees' %}" hx-target="#f-employee_id" hx-swap="outerHTML" hx-trigger="change">
-    {% for id, name in form.fields.company_id.choices %}<option value="{{ id }}"{% if id == company %} selected{% endif %}>{{ name }}</option>{% endfor %}
-  </select>
-  {% for e in form.company_id.errors %}<div class="hj-error">{{ e }}</div>{% endfor %}
-</div>

@@ -23,7 +23,7 @@ from django.test import Client
 
 from hajiri.core import auth, companies
 from hajiri.db.models import Company, CompanyMembership, GroupMember
-from tests.web.factories import PW, htmx, make_company, make_employee, make_user, sign_in
+from tests.web.factories import PW, make_company, make_employee, make_user, sign_in
 
 
 @dataclass
@@ -51,8 +51,8 @@ class World:
         c = Client()
         sign_in(c, person)
         if company is not None:
-            r = c.post('/_/web/company/switch', {'company_id': str(company.id)}, **htmx())
-            assert r.status_code == 204, r.content
+            r = c.post('/api/v1/me/companies/switch', {'companyId': str(company.id)}, content_type='application/json')
+            assert r.status_code == 200, r.content
         return c
 
 

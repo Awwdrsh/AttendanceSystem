@@ -34,25 +34,6 @@ def beta(world):
 
 # (name, method, url, htmx?, data). Ids: {board}, {task}, {item}, {att}.
 CASES = [
-    ('board page', 'get', '/tasks/{board}', False, None),
-    ('board columns', 'get', '/_/tasks/boards/{board}/columns', True, None),
-    ('board report', 'get', '/_/tasks/boards/{board}/report', True, None),
-    ('board settings', 'get', '/_/tasks/boards/{board}/settings', True, None),
-    ('board archive', 'post', '/_/tasks/boards/{board}/archive', True, {}),
-    ('quick add', 'post', '/_/tasks/boards/{board}/tasks', True, {'title': 'Sneaky'}),
-    ('move', 'post', '/_/tasks/boards/{board}/move', True, {'task_id': '{task}', 'column_id': 'done'}),
-    ('todo done', 'post', '/_/tasks/todo/{task}/done', True, {}),
-    ('drawer', 'get', '/_/tasks/{task}', True, None),
-    ('task link', 'get', '/_/tasks/{task}', False, None),
-    ('task update', 'post', '/_/tasks/{task}/update', True, {'priority': 'high'}),
-    ('task delete', 'post', '/_/tasks/{task}/delete', True, {}),
-    ('checklist add', 'post', '/_/tasks/{task}/checklist', True, {'text': 'Sneaky'}),
-    ('checklist tick', 'post', '/_/tasks/checklist/{item}', True, {'done': 'on'}),
-    ('checklist delete', 'post', '/_/tasks/checklist/{item}/delete', True, {}),
-    ('comment', 'post', '/_/tasks/{task}/comments', True, {'body': 'Sneaky'}),
-    ('attach', 'post', '/_/tasks/{task}/attachments', True, {}),
-    ('attachment file', 'get', '/_/tasks/attachments/{att}/file', False, None),
-    ('attachment delete', 'post', '/_/tasks/attachments/{att}/delete', True, {}),
     ('api board', 'get', '/api/v1/tasks/boards/{board}', False, None),
     ('api board patch', 'patch', '/api/v1/tasks/boards/{board}', False, {'name': 'Renamed'}),
     ('api members', 'put', '/api/v1/tasks/boards/{board}/members', False, {'userIds': []}),
@@ -88,17 +69,6 @@ def _call(client, method, url, hx, data):
     return getattr(client, method)(url, **headers)
 
 
-@pytest.mark.parametrize('case', CASES, ids=[c[0] for c in CASES])
-def test_ids_of_another_company_are_not_found(world, beta, case):
-    name, method, url, hx, data = case
-    target, body = _fill(url, beta), _fill(data, beta)
-    for who in (world.admin_c, world.admin_a):     # outside the group; group admin working in Alpha
-        r = _call(world.signed_in(who), method, target, hx, body)
-        assert r.status_code == 404, f'{name}: {who.email} got {r.status_code}'
-    r = _call(world.signed_in(world.admin_b), method, target, hx, body)
-    assert r.status_code != 404 and r.status_code < 500, f'{name}: Beta admin got {r.status_code} (control)'
-
-
 def test_nothing_changed_by_the_refused_requests(world, beta):
     for name, method, url, hx, data in CASES:
         for who in (world.admin_c, world.admin_a):
@@ -108,16 +78,6 @@ def test_nothing_changed_by_the_refused_requests(world, beta):
     assert TaskBoard.objects.get(pk=beta['board']).name == 'Beta launch'
     assert list(TaskChecklistItem.objects.filter(task_id=beta['task']).values_list('text', 'done')) == [('Proof', False)]
     assert not Task.objects.filter(title='Sneaky').exists()
-
-
-def test_after_switching_the_board_opens(world, beta):
-    c = world.signed_in(world.admin_a)
-    assert c.get(f"/tasks/{beta['board']}").status_code == 404
-    c.post('/_/web/company/switch', {'company_id': str(world.beta.id)}, **htmx())
-    page = c.get(f"/tasks/{beta['board']}")
-    assert page.status_code == 200 and b'Print menus' in page.content
-    # Admin there through the group role: HR access, not the owner's.
-    assert b'Board settings' not in page.content
 
 
 def test_board_lists_show_only_the_active_company(world, beta):
@@ -166,24 +126,6 @@ def test_a_manager_by_membership_manages_the_reports_they_have_there(world):
     assert e.value.status == 403
 
 
-def test_each_company_has_its_own_personal_board(world):
-    _, dual_alpha = world.session(world.dual)
-    mine = tk.personal_board(dual_alpha)
-    task = tk.create_task(dual_alpha, mine['id'], {'title': 'Renew licence', 'dueDate': today()})
-    _, dual_beta = world.session(world.dual, world.beta)
-    theirs = tk.personal_board(dual_beta)
-    assert theirs['id'] != mine['id'] and theirs['company_id'] == str(world.beta.id)
-    assert [b['id'] for b in tk.list_boards(dual_beta)['boards'] if b['kind'] == 'personal'] == [theirs['id']]
-    assert tk.my_todo(dual_beta)['tasks'] == []
-    assert _status(tk.get_task, dual_beta, task['id']) == 404
-    assert _status(tk.get_board, dual_beta, mine['id']) == 404
-    page = world.signed_in(world.dual, world.beta).get('/tasks')
-    assert page.status_code == 200 and b'Renew licence' not in page.content
-    # Back in Alpha it is there as before, and still one board there.
-    assert tk.personal_board(dual_alpha)['id'] == mine['id']
-    assert task['id'] in [t['id'] for t in tk.my_todo(dual_alpha)['tasks']]
-
-
 def test_reminders_are_filed_under_each_tasks_company(world, beta):
     _, admin_a = world.session(world.admin_a)
     tk.create_task(admin_a, tk.personal_board(admin_a)['id'], {'title': 'Alpha rent', 'dueDate': today()})
@@ -203,3 +145,46 @@ def test_a_file_uploaded_in_another_company_cannot_be_attached(world, beta):
         tk.add_attachment(a_in_beta, beta['task'], {'fileId': alpha_file})
     assert e.value.status == 400 and e.value.message == 'The attached file was not found. Upload it again.'
     assert TaskAttachment.objects.filter(task_id=beta['task']).count() == 1   # Beta's own, nothing added
+
+
+@pytest.mark.parametrize('case', CASES, ids=[c[0] for c in CASES])
+def test_ids_of_another_company_are_not_found(world, beta, case):
+    name, method, url, hx, data = case
+    target, body = _fill(url, beta), _fill(data, beta)
+    for who in (world.admin_c, world.admin_a):     # outside the group; group admin working in Alpha
+        r = _call(world.signed_in(who), method, target, hx, body)
+        assert r.status_code == 404, f'{name}: {who.email} got {r.status_code}'
+    r = _call(world.signed_in(world.admin_b), method, target, hx, body)
+    assert r.status_code != 404 and r.status_code < 500, f'{name}: Beta admin got {r.status_code} (control)'
+
+
+def test_after_switching_the_board_opens(world, beta):
+    c = world.signed_in(world.admin_a)
+    assert c.get(f"/api/v1/tasks/boards/{beta['board']}").status_code == 404
+    c.post('/api/v1/me/companies/switch', {'companyId': str(world.beta.id)}, content_type='application/json')
+    r = c.get(f"/api/v1/tasks/boards/{beta['board']}")
+    assert r.status_code == 200
+    assert b'Print menus' in r.content
+    # Admin there through the group role: HR access, not the owner's (the page shows Board settings to the owner).
+    assert r.json()['access'] != 'owner'
+
+
+def test_each_company_has_its_own_personal_board(world):
+    _, dual_alpha = world.session(world.dual)
+    mine = tk.personal_board(dual_alpha)
+    task = tk.create_task(dual_alpha, mine['id'], {'title': 'Renew licence', 'dueDate': today()})
+    _, dual_beta = world.session(world.dual, world.beta)
+    theirs = tk.personal_board(dual_beta)
+    assert theirs['id'] != mine['id'] and theirs['company_id'] == str(world.beta.id)
+    assert [b['id'] for b in tk.list_boards(dual_beta)['boards'] if b['kind'] == 'personal'] == [theirs['id']]
+    assert tk.my_todo(dual_beta)['tasks'] == []
+    assert _status(tk.get_task, dual_beta, task['id']) == 404
+    assert _status(tk.get_board, dual_beta, mine['id']) == 404
+    c = world.signed_in(world.dual, world.beta)
+    for url in ('/api/v1/tasks/boards', '/api/v1/tasks/my/todo', f"/api/v1/tasks/boards/{theirs['id']}"):
+        page = c.get(url)
+        assert page.status_code == 200 and b'Renew licence' not in page.content, url
+    # Back in Alpha it is there as before, and still one board there.
+    assert tk.personal_board(dual_alpha)['id'] == mine['id']
+    assert task['id'] in [t['id'] for t in tk.my_todo(dual_alpha)['tasks']]
+

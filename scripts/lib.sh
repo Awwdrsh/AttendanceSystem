@@ -129,6 +129,26 @@ find_python313() {
   return 1
 }
 
+# ------------------------------------------------------------------ the web app (React, frontend/)
+# Built into server/frontend_build/ and committed, so installs need only Python. Node.js is needed only to rebuild it.
+FRONTEND="$ROOT/frontend"
+FRONTEND_BUILD="$SERVER/frontend_build"
+
+# Node.js new enough for Vite 8 (20.19+ or 22.12+).
+node_ok() {
+  command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 || return 1
+  node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit((a===20&&b>=19)||(a===22&&b>=12)||a>=23?0:1)' 2>/dev/null
+}
+
+# Warn (do not fail) when the committed build is missing: every page would answer "the web app has not been built".
+check_frontend_build() {
+  if [ -f "$FRONTEND_BUILD/index.html" ]; then
+    ok "web app build present (server/frontend_build)"
+  else
+    warn "server/frontend_build/index.html is missing: restore it with 'git checkout -- server/frontend_build' or build it with ./scripts/build-frontend.sh (needs Node.js)"
+  fi
+}
+
 # manage.py with the venv's Python; Django loads server/.env itself.
 manage() { "$VENV_PY" "$SERVER/manage.py" "$@"; }
 ops() { "$VENV_PY" "$OPS" "$@"; }

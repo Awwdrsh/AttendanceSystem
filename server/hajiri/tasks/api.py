@@ -1,7 +1,8 @@
 """
-Task boards JSON API for Bearer-token clients (the TS routes under /api/v1/tasks). DRF views with the project
-defaults (hajiri.core.api): HajiriAuthentication, IsSignedIn, the TS error shape and JsonRenderer, plus the Tasks
-feature switch. Rules and validation stay in services.py; every view works in the caller's active company.
+Task boards JSON API (the TS routes under /api/v1/tasks) for the React app (frontend/src/api/tasks.js) and
+Bearer-token clients. DRF views with the project defaults (hajiri.core.api): IsSignedIn, the TS error shape and
+JsonRenderer, plus the Tasks feature switch. They authenticate with SameOriginAuthentication: the React app sends
+the session cookie with an Origin check and never a CSRF token, as against the TS API. Rules and validation stay in services.py; every view works in the caller's active company.
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from hajiri.core.api import FeatureEnabled, IsSignedIn
+from hajiri.core.api import FeatureEnabled, IsSignedIn, SameOriginAuthentication
 from hajiri.files.store import stored_file_response
 
 from . import services
@@ -20,6 +21,7 @@ from .serializers import (
 
 
 class _TasksView(APIView):
+    authentication_classes = [SameOriginAuthentication]
     permission_classes = [IsSignedIn, FeatureEnabled('tasks')]
 
 

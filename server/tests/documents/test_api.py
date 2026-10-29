@@ -125,11 +125,16 @@ def test_policies_through_the_api():
 def test_feature_switch_signed_out_and_csrf():
     w = build()
     assert Client().get('/api/v1/documents/mine').status_code == 401
-    # A cookie session must send the CSRF token on writes; a Bearer token needs none.
+    # A cookie session (the React app) needs no CSRF token, but a cross-site Origin is refused (the TS
+    # sameOriginGuard); a Bearer token needs neither.
     c = Client(enforce_csrf_checks=True)
     c.cookies[auth.SESSION_COOKIE] = token_of(w.hr)
-    r = c.post('/api/v1/documents/categories', {'code': 'x_y', 'name': 'X'}, content_type='application/json')
+    r = c.post('/api/v1/documents/categories', {'code': 'x_y', 'name': 'X'}, content_type='application/json',
+               HTTP_ORIGIN='https://evil.example')
     assert r.status_code == 403
+    r = c.post('/api/v1/documents/categories', {'code': 'x_v', 'name': 'X'}, content_type='application/json',
+               HTTP_ORIGIN='http://testserver')
+    assert r.status_code == 201
     assert call(w.hr, 'post', '/api/v1/documents/categories', {'code': 'x_y', 'name': 'X'},
                 client=Client(enforce_csrf_checks=True)).status_code == 201
     set_features_off(w.co, 'documents')

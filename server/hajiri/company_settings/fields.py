@@ -94,7 +94,8 @@ class JsonString(serializers.CharField):
             raise serializers.ValidationError(f'Expected string, received {kind(data)}')
         out = super().to_internal_value(data)
         if self.pattern and not self.pattern.search(out):
-            raise serializers.ValidationError(self.pattern_message)
+            # A code of its own: the shared message mapper rewrites code 'invalid' on a CharField to 'Expected string'.
+            raise serializers.ValidationError(self.pattern_message, code='invalid_format')
         return out
 
 

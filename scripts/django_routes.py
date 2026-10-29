@@ -1,9 +1,9 @@
-"""Print the URL map as Markdown: the JSON endpoints, the gateway's routes and, with --all, every page.
+"""Print the URL map as Markdown: the JSON endpoints, the gateway's routes and, with --all, the other addresses.
 
     server/.venv/bin/python scripts/django_routes.py [--all]
 
-Without --all it lists the JSON endpoints kept for non-browser clients (/api/...) and the device gateway's routes;
-with --all it also lists every page and HTMX partial (/_/<app>/...).
+Without --all it lists the JSON endpoints (/api/...) and the device gateway's routes; with --all it also lists the
+rest: /health, the careers links and the catch-all that answers the React app's index.html for every page address.
 """
 from __future__ import annotations
 
@@ -42,15 +42,15 @@ def render(show_all: bool) -> str:
     from django.urls import get_resolver
     out: list[str] = []
     web = list(walk(get_resolver('config.urls')))
-    api = [r for r in web if r[0].startswith('/api/')]
+    api = [r for r in web if r[0].startswith(('/api/', '/^api/'))]
     out.append(f'### JSON endpoints ({len(api)})\n\n| Path | URL name | View |\n|---|---|---|')
     out += [f'| `{p}` | `{ns}:{name}` | `{view}` |' for p, ns, name, view in api]
     gw = list(walk(get_resolver('config.gateway_urls')))
     out.append(f'\n### Device gateway, port 8080 ({len(gw)})\n\n| Path | URL name | View |\n|---|---|---|')
     out += [f'| `{p}` | `{ns}:{name}` | `{view}` |' for p, ns, name, view in gw]
     if show_all:
-        rest = [r for r in web if not r[0].startswith('/api/')]
-        out.append(f'\n### Pages and partials ({len(rest)})\n\n| Path | URL name | View |\n|---|---|---|')
+        rest = [r for r in web if not r[0].startswith(('/api/', '/^api/'))]
+        out.append(f'\n### Other addresses ({len(rest)})\n\n| Path | URL name | View |\n|---|---|---|')
         out += [f'| `{p}` | `{ns}:{name}` | `{view}` |' for p, ns, name, view in rest]
     return '\n'.join(out) + '\n'
 

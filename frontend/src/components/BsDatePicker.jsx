@@ -400,6 +400,7 @@ export function BsMonthPicker({ value, onChange, label }) {
         w={140}
       />
       <Select
+        aria-label="Year"
         data={years}
         value={String(value.year)}
         onChange={(v) => v && onChange({ ...value, year: Number(v) })}

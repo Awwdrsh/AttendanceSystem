@@ -1,1 +1,0 @@
-{% load perf_tags %}{% if e.certificate_expires_on %}{% with st=e.certificate_expires_on|expiry_state %}<span class="hj-badge sm hj-tone-{% if st == 'past' %}bad{% elif st == 'soon' %}warn{% else %}idle{% endif %}">{% if st == 'past' %}Expired{% else %}Valid until{% endif %} {{ e.certificate_expires_on|bs_date_short }}</span>{% endwith %}{% endif %}

@@ -1,6 +1,0 @@
-{# A page-owned modal. Open with a button carrying data-modal-open="{{ id }}"; anything with data-modal-close closes it. #}
-<dialog class="hj-modal {{ size|default:'' }}" id="{{ id }}" aria-labelledby="{{ id }}-title"{% if static %} data-static{% endif %}{% if x_data %} x-data="{{ x_data }}"{% endif %}>
-  <div class="hj-modal-head"><div class="hj-modal-title" id="{{ id }}-title">{{ title }}</div>
-    <button type="button" class="hj-iconbtn" data-modal-close aria-label="Close"><i class="ti ti-x" aria-hidden="true"></i></button></div>
-  <div class="hj-modal-body" id="{{ id }}-body">{{ body }}</div>
-</dialog>

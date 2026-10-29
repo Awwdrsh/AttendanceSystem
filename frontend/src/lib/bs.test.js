@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { supportedBsYears } from '@/lib/bs-calendar';
-import { bsMonthGrid, nextMonth, parseTyped, prevMonth } from './bs';
+import { bsMonthGrid, holidayMap, nextMonth, parseTyped, prevMonth } from './bs';
 
 describe('BS month grid', () => {
   it('starts on Sunday, contains every day of Bhadra 2083 and marks Saturdays', () => {
@@ -28,5 +28,24 @@ describe('BS month grid', () => {
     expect(parseTyped('2083-13-01', 'bs')).toBeNull();
     expect(parseTyped('2026-02-30', 'ad')).toBeNull();
     expect(parseTyped('nope', 'ad')).toBeNull();
+  });
+});
+
+describe('holidayMap', () => {
+  it('labels optional holidays and does not treat them as days off', () => {
+    const m = holidayMap([
+      { date: '2026-09-25', holidays: [{ name_en: 'Indra Jatra', optional: true }] },
+      {
+        date: '2026-10-21',
+        holidays: [
+          { name_en: 'Dashain', optional: false },
+          { name_en: 'Extra', optional: true },
+        ],
+      },
+      { date: '2026-10-22', holidays: [] },
+    ]);
+    expect(m.get('2026-09-25')).toEqual({ label: 'Indra Jatra (optional)', off: false });
+    expect(m.get('2026-10-21')).toEqual({ label: 'Dashain, Extra (optional)', off: true });
+    expect(m.has('2026-10-22')).toBe(false);
   });
 });

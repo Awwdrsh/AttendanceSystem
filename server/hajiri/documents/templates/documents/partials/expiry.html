@@ -1,4 +1,0 @@
-{# ExpiryText: orange within 30 days, red once expired. #}
-<div class="hj-row nowrap hj-gap-xs hj-small {% if e.tone == 'bad' %}hj-bad-text{% elif e.tone == 'warn' %}hj-warn-text{% else %}hj-muted{% endif %}">
-  {% if e.warn %}<i class="ti ti-alert-triangle" aria-hidden="true"></i>{% endif %}<span>{{ e.text }}</span>
-</div>

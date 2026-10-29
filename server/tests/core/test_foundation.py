@@ -96,12 +96,18 @@ def test_drf_authentication_permissions_and_errors(co):
 
 
 @override_settings(ROOT_URLCONF='tests.core.test_foundation')
-def test_cookie_sessions_need_the_csrf_token_bearer_does_not(co):
+def test_cookie_sessions_refuse_a_foreign_origin_bearer_does_not(co):
+    """As the TS sameOriginGuard: a cookie write is refused only when its Origin is another site; the React app's
+    own writes carry no CSRF token."""
     user = make_user(co)
     c = Client(enforce_csrf_checks=True)
     token = sign_in(c, user)
-    r = c.post('/api/t/echo', json.dumps({'name': 'a', 'when': '2026-10-01'}), content_type='application/json')
+    r = c.post('/api/t/echo', json.dumps({'name': 'a', 'when': '2026-10-01'}), content_type='application/json',
+               HTTP_ORIGIN='https://evil.example')
     assert r.status_code == 403 and r.json() == {'error': 'cross-site request refused'}
+    r = c.post('/api/t/echo', json.dumps({'name': 'a', 'when': '2026-10-01'}), content_type='application/json',
+               HTTP_ORIGIN='http://testserver')
+    assert r.status_code == 200
     b = Client(enforce_csrf_checks=True)
     r = b.post('/api/t/echo', json.dumps({'name': 'a', 'when': '2026-10-01'}), content_type='application/json', **bearer(token))
     assert r.status_code == 200 and r.json() == {'name': 'a', 'when': '2026-10-01', 'kind': 'a'}

@@ -1,7 +1,0 @@
-<div class="hj-stack hj-gap-xs hj-mt-sm">
-  {% for c in comments %}<div class="hj-small"><span class="hj-strong">{{ c.author_name }}</span> <span class="hj-muted">{{ c.created_at|relative_time }}</span><br>{{ c.body }}</div>{% endfor %}
-  <form class="hj-row nowrap hj-gap-xs" hx-post="{% url 'lifecycle:comments' task_id %}" hx-target="#comments-{{ task_id }}" hx-swap="innerHTML" x-data="{ body: '' }">
-    <textarea name="body" class="hj-input" rows="1" placeholder="Add a comment" x-model="body" style="flex:1"></textarea>
-    <button type="submit" class="hj-btn default xs" :disabled="!body.trim()">Send</button>
-  </form>
-</div>

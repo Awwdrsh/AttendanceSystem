@@ -6,7 +6,7 @@ from django.test import Client
 from django.test.utils import CaptureQueriesContext
 
 from hajiri.tasks import services as tk
-from tests.web.factories import htmx, sign_in
+from tests.web.factories import sign_in
 
 from .world import build, plus, team_board, today
 
@@ -41,11 +41,10 @@ def _requests(w, task_id):
     s = Client()
     sign_in(s, w.sita)
     return {
-        'page': lambda: c.get(f'/tasks/{w.board_id}'),
-        'columns': lambda: c.get(f'/_/tasks/boards/{w.board_id}/columns', **htmx()),
-        'report': lambda: c.get(f'/_/tasks/boards/{w.board_id}/report', **htmx()),
-        'drawer': lambda: c.get(f'/_/tasks/{task_id}', **htmx()),
-        'todo': lambda: s.get('/_/tasks/todo', **htmx()),
+        'board': lambda: c.get(f'/api/v1/tasks/boards/{w.board_id}'),
+        'report': lambda: c.get(f'/api/v1/tasks/reports/boards/{w.board_id}'),
+        'drawer': lambda: c.get(f'/api/v1/tasks/{task_id}'),
+        'todo': lambda: s.get('/api/v1/tasks/my/todo'),
         'api_boards': lambda: c.get('/api/v1/tasks/boards'),
         'api_people': lambda: c.get('/api/v1/tasks/people'),
     }

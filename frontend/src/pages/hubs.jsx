@@ -1,5 +1,6 @@
 import { lazy } from 'react';
 import { useAuth } from '../auth/AuthProvider';
+import { useCompanies } from '../auth/CompaniesProvider';
 import { Hub } from '../components/Hub';
 import { AREA } from '../lib/access';
 
@@ -90,6 +91,34 @@ const SuggestionsPage = lazy(() => import('./engage/SuggestionsPage'));
 const FeaturesPage = lazy(() => import('./hr/FeaturesPage'));
 const ReportsPage = lazy(() => import('./hr/ReportsPage'));
 const ReportBuilderPage = lazy(() => import('./hr/ReportBuilderPage'));
+const GroupOverviewPage = lazy(() => import('./group/GroupOverviewPage'));
+const GroupPeoplePage = lazy(() => import('./group/GroupPeoplePage'));
+const GroupReportsPage = lazy(() => import('./group/GroupReportsPage'));
+const GroupCompaniesPage = lazy(() => import('./group/GroupCompaniesPage'));
+const GroupAccessPage = lazy(() => import('./group/GroupAccessPage'));
+const GroupTransfersPage = lazy(() => import('./group/GroupTransfersPage'));
+const GroupPoliciesPage = lazy(() => import('./group/GroupPoliciesPage'));
+
+/** Groups of companies: consolidated views (group roles, or HR/executive in two or more companies) and group
+ * administration (group admins; transfers also group HR). The server checks every rule again. */
+export function GroupHub() {
+  const { access, me } = useCompanies();
+  return (
+    <Hub
+      title="Group"
+      {...(me?.groupName ? { subtitle: me.groupName } : {})}
+      tabs={[
+        { path: '/group', label: 'Overview', element: <GroupOverviewPage />, show: access.view },
+        { path: '/group/people', label: 'People', element: <GroupPeoplePage />, show: access.view },
+        { path: '/group/reports', label: 'Reports', element: <GroupReportsPage />, show: access.view },
+        { path: '/group/companies', label: 'Companies', element: <GroupCompaniesPage />, show: access.admin || access.startGroup },
+        { path: '/group/access', label: 'Access', element: <GroupAccessPage />, show: access.admin },
+        { path: '/group/transfers', label: 'Transfers', element: <GroupTransfersPage />, show: access.transfer },
+        { path: '/group/policies', label: 'Policies', element: <GroupPoliciesPage />, show: access.admin },
+      ]}
+    />
+  );
+}
 
 export function ReportsHub() {
   return (

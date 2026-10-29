@@ -1,4 +1,4 @@
-"""The list pages run a fixed number of queries however many claims and trips there are (no N+1)."""
+"""The list endpoints of the pages run a fixed number of queries however many claims and trips there are (no N+1)."""
 from __future__ import annotations
 
 from django.db import connection
@@ -8,9 +8,10 @@ from hajiri.expenses import services as ex
 
 from .helpers import days_ago, days_ahead
 
-PAGES = (('sita', '/me/claims'), ('sita', '/me/claims/travel'), ('hr', '/expenses?status=all'),
-         ('hr', '/expenses/travel?status=all'), ('ram', '/expenses?status=all'), ('ram', '/expenses/travel?status=all'),
-         ('hr', '/_/expenses/claims/list?status=all'), ('hr', '/_/expenses/travel/list?status=all'))
+E = '/api/v1/expenses'
+PAGES = (('sita', E + '/claims?scope=own'), ('sita', E + '/travel?scope=own'), ('hr', E + '/claims?scope=all'),
+         ('hr', E + '/travel?scope=all'), ('ram', E + '/claims?scope=team'), ('ram', E + '/travel?scope=team'),
+         ('hr', E + '/reports/advances'), ('hr', E + '/reports/pending-payment'))
 
 
 def _add(w, n: int, start: int) -> None:

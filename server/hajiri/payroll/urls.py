@@ -1,60 +1,10 @@
 from django.urls import path
 
 from . import api as a
-from . import views as v
 
 P = 'api/v1/payroll/'
 
 urlpatterns = [
-    # Payroll hub (hubs.tsx PayrollHub) and the pay run page
-    path('payroll', v.runs, name='runs'),
-    path('payroll/structures', v.structures, name='structures'),
-    path('payroll/assignments', v.assignments, name='assignments'),
-    path('payroll/declarations', v.declarations, name='declarations'),
-    path('payroll/loans', v.loans, name='loans'),
-    path('payroll/reports', v.reports, name='reports'),
-    path('payroll/optimum-cit', v.optimum, name='optimum_cit'),
-    path('payroll/held-pay', v.held_pay, name='held_pay'),
-    path('payroll/opening-balances', v.openings, name='opening_balances'),
-    path('payroll/rules', v.rules, name='rules'),
-    path('payroll/runs/<uuid:id>', v.run, name='run'),
-    # Payslips hub (MyPayHub)
-    path('me/payslips', v.my_payslips, name='my_payslips'),
-    path('me/payslips/tax', v.my_tax, name='my_tax'),
-    path('me/payslips/<uuid:id>', v.payslip, name='payslip'),
-    # Fragments and form posts
-    path('_/payroll/runs/new', v.run_new, name='run_new'),
-    path('_/payroll/runs/bonus', v.bonus_new, name='bonus_new'),
-    path('_/payroll/runs/<uuid:id>/action/<str:action>', v.run_action, name='run_action'),
-    path('_/payroll/runs/<uuid:id>/override', v.run_override, name='run_override'),
-    path('_/payroll/runs/<uuid:id>/inputs/new', v.input_new, name='input_new'),
-    path('_/payroll/runs/<uuid:id>/hold', v.hold_new, name='hold_new'),
-    path('_/payroll/runs/<uuid:id>/salary-sheet.<str:fmt>', v.salary_sheet_file, name='salary_sheet_file'),
-    path('_/payroll/runs/<uuid:id>/ssf-sheet.csv', v.ssf_sheet_file, name='ssf_sheet'),
-    path('_/payroll/components/new', v.component_new, name='component_new'),
-    path('_/payroll/components/<str:code>/edit', v.component_edit, name='component_edit'),
-    path('_/payroll/structures/new', v.structure_new, name='structure_new'),
-    path('_/payroll/assignments/new', v.assignment_new, name='assignment_new'),
-    path('_/payroll/assignments/amounts', v.assignment_amounts, name='assignment_amounts'),
-    path('_/payroll/declarations/save', v.declaration_save, name='declaration_save'),
-    path('_/payroll/declarations/verify', v.declaration_verify, name='declaration_verify'),
-    path('_/payroll/loans/new', v.loan_new, name='loan_new'),
-    path('_/payroll/rules/<uuid:id>', v.rule_view, name='rule_view'),
-    path('_/payroll/rules/<uuid:id>/approve', v.rule_approve, name='rule_approve'),
-    path('_/payroll/reports/<str:kind>', v.report, name='report'),
-    path('_/payroll/optimum-cit/<uuid:employee_id>/apply', v.optimum_apply, name='optimum_apply'),
-    path('_/payroll/holds/<uuid:id>/release', v.hold_release, name='hold_release'),
-    path('_/payroll/holds/<uuid:id>/cancel', v.hold_cancel, name='hold_cancel'),
-    path('_/payroll/opening-balances/edit', v.opening_edit, name='opening_edit'),
-    path('_/payroll/opening-balances/import', v.opening_import, name='opening_import'),
-    path('_/payroll/opening-balances/<uuid:id>/delete', v.opening_delete, name='opening_delete'),
-    path('_/payroll/certificates/<str:employee>', v.certificate, name='certificate'),
-    path('_/payroll/payslips/<uuid:id>/print', v.payslip_print, name='payslip_print'),
-    path('_/payroll/tax/estimate', v.tax_estimate, name='tax_estimate'),
-    path('_/payroll/tax/submit', v.tax_submit, name='tax_submit'),
-    path('_/payroll/tax/<uuid:id>/cancel', v.tax_cancel, name='tax_cancel'),
-    path('_/payroll/tax/<uuid:id>/files/<uuid:file_id>', v.tax_file, name='tax_file'),
-    path('_/payroll/tax/optimum', v.optimum_card, name='optimum_card'),
     # JSON (TS paths under /api/v1/payroll)
     path(P + 'rules', a.rules, name='api_rules'),
     path(P + 'rules/<str:id>/approve', a.rule_approve, name='api_rule_approve'),

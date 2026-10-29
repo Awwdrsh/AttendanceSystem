@@ -19,21 +19,27 @@ from .serializers import (
     RosterDeleteIn, RosterPutIn, RosterQueryIn, ShiftIn,
 )
 
-UUID = '[0-9a-fA-F-]{36}'
+# Any one path segment: the services parse it (z.uuid() answered 400 'Invalid UUID', not 404).
+ID = '[^/]+'
 
 
 def _query(request) -> dict:
     return request.query_params.dict()
 
 
+def _shift_json(row: dict) -> dict:
+    """The TS row: assigned_employees was a count(*) (int8), which node-postgres returned as a string."""
+    return {**row, 'assigned_employees': str(row['assigned_employees'])}
+
+
 class ShiftViewSet(viewsets.ViewSet):
     """/api/v1/shifts[/<id>]: everyone reads the company's shifts; attendance admins and HR change them."""
     permission_classes = [IsSignedIn]
-    lookup_value_regex = UUID
+    lookup_value_regex = ID
 
     @extend_schema(operation_id='api_v1_shifts_list', responses=dict)
     def list(self, request):
-        return Response({'shifts': services.shifts(request.user)})
+        return Response({'shifts': [_shift_json(r) for r in services.shifts(request.user)]})
 
     @extend_schema(request=ShiftIn, responses={201: dict})
     def create(self, request):
@@ -41,7 +47,7 @@ class ShiftViewSet(viewsets.ViewSet):
 
     @extend_schema(responses=dict)
     def retrieve(self, request, pk=None):
-        return Response({'shift': services.get_shift(request.user, pk)})
+        return Response({'shift': _shift_json(services.get_shift(request.user, pk))})
 
     @extend_schema(request=ShiftIn(partial=True), responses=dict)
     def partial_update(self, request, pk=None):
@@ -65,7 +71,7 @@ class ShiftViewSet(viewsets.ViewSet):
 class HolidayViewSet(viewsets.ViewSet):
     """/api/v1/shifts/holidays[/<id>|/import-default]."""
     permission_classes = [IsSignedIn]
-    lookup_value_regex = UUID
+    lookup_value_regex = ID
 
     @extend_schema(parameters=[HolidayQueryIn], responses=dict)
     def list(self, request):
@@ -92,7 +98,7 @@ class HolidayViewSet(viewsets.ViewSet):
 class LocationViewSet(viewsets.ViewSet):
     """/api/v1/shifts/locations[/<id>]: the mobile clock-in geofences."""
     permission_classes = [IsSignedIn]
-    lookup_value_regex = UUID
+    lookup_value_regex = ID
 
     @extend_schema(responses=dict)
     def list(self, request):

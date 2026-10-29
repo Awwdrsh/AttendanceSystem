@@ -71,6 +71,20 @@ GOAL_VALUES = ('id', 'scope', 'org_unit_id', 'employee_id', 'parent_id', 'title'
                'status', 'progress', 'created_at', 'updated_at')
 
 
+KR_NUMBERS = ('start_value', 'target_value', 'current_value', 'weight')
+
+
+def _json_numbers(row: dict, keys: tuple[str, ...]) -> dict:
+    """The TS API built key results with json_agg, so their numeric columns were JSON numbers (10, 2500.5), not the
+    strings a plain numeric column gives."""
+    for k in keys:
+        v = row.get(k)
+        if v is not None:
+            f = float(v)
+            row[k] = int(f) if f.is_integer() else f
+    return row
+
+
 def _due_nulls_last():
     return F('due_date').asc(nulls_last=True)
 
@@ -83,7 +97,7 @@ def _goal_rows(qs) -> list[dict]:
     krs: dict[str, list] = {}
     for k in (PerfKeyResult.objects.filter(goal_id__in=ids).order_by('sort', 'created_at')
               .values('goal_id', 'id', 'title', 'measure', 'start_value', 'target_value', 'current_value', 'unit', 'weight')):
-        krs.setdefault(str(k.pop('goal_id')), []).append(plain_row(k))
+        krs.setdefault(str(k.pop('goal_id')), []).append(_json_numbers(plain_row(k), KR_NUMBERS))
     last = {str(c.pop('goal_id')): c for c in PerfCheckin.objects.filter(goal_id__in=ids).order_by('goal_id', '-created_at')
             .distinct('goal_id').values('goal_id', 'created_at', 'confidence', 'comment')}
     for g in goals:

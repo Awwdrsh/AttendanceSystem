@@ -14,9 +14,9 @@ from hajiri.db.models import (AppUser, AuditLog, Branch, CareerEvent, CompanyMem
                               EmployeeExit, LeaveLedger, LeaveType, LifecycleCase, LifecycleTask, NotificationOutbox,
                               SalaryAssignment, SalaryStructure, SalaryStructureVersion)
 from hajiri.group_admin import services
-from tests.web.factories import PW, htmx, make_employee, make_user, toasts
+from tests.web.factories import PW, make_employee, make_user
 
-from .conftest import actor
+from .conftest import actor, client_in
 
 
 @pytest.fixture
@@ -206,34 +206,9 @@ def test_a_member_moves_with_their_membership(world):
 
 # ---------------------------------------------------------------- pages and JSON
 
-def test_transfer_pages(world, mover):
-    emp, _ = mover
-    c = world.signed_in(world.ghr, world.alpha)
-    html = c.get('/group/transfers').content.decode()
-    assert 'New transfer' in html and 'Beta Foods' in html and 'Gamma Outside' not in html
-    opts = c.get(f'/_/group-admin/transfers/target?to_company_id={world.beta.id}', **htmx()).content.decode()
-    assert 'does not carry leave balances' in opts
-    assert c.get(f'/_/group-admin/transfers/target?to_company_id={world.gamma.id}', **htmx()).status_code == 404
-    r = c.post('/_/group-admin/transfers/new', {'employee_id': str(emp.id), 'to_company_id': str(world.gamma.id),
-                                                'effective_date': (npt_today() + timedelta(days=3)).isoformat()}, **htmx())
-    assert r.status_code == 422
-    r = c.post('/_/group-admin/transfers/new', {'employee_id': str(emp.id), 'to_company_id': str(world.beta.id),
-                                                'effective_date': (npt_today() + timedelta(days=3)).isoformat()}, **htmx())
-    assert r.status_code == 204 and r['HX-Redirect'] == '/group/transfers'
-    assert 'Ram Thapa moves to Beta Foods' in toasts(r)[0]['message']
-    assert 'Ram Thapa' in c.get('/group/transfers').content.decode()
-    # Group admins set the transfer rules; group HR cannot.
-    r = c.post('/_/group-admin/transfers/rules', {'company_id': str(world.beta.id), 'carry_leave_balance': 'on'}, **htmx())
-    assert r.status_code == 403
-    a = world.signed_in(world.admin_a)
-    assert a.post('/_/group-admin/transfers/rules', {'company_id': str(world.beta.id), 'carry_leave_balance': 'on'}, **htmx()).status_code == 204
-    assert services.carries_leave(world.beta.id)
-    assert a.post('/_/group-admin/transfers/rules', {'company_id': str(world.gamma.id)}, **htmx()).status_code == 400
-
-
 def test_transfer_api(world, mover):
     emp, _ = mover
-    c = world.signed_in(world.ghr, world.alpha)
+    c = client_in(world, world.ghr, world.alpha)
     r = c.post('/api/v1/group/transfers', _body(world, emp, toCompanyId=str(world.gamma.id)), content_type='application/json')
     assert r.status_code == 404 and r.json() == {'error': 'company not found'}
     r = c.post('/api/v1/group/transfers', _body(world, emp), content_type='application/json')

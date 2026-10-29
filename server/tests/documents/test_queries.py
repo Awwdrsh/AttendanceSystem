@@ -8,7 +8,7 @@ from django.test.utils import CaptureQueriesContext
 
 from hajiri.db.models import OrgUnit
 from hajiri.documents import services as docs
-from tests.web.factories import htmx, sign_in
+from tests.web.factories import sign_in
 
 from .world import build, upload
 
@@ -44,16 +44,17 @@ def _add_rows(w, n: int) -> None:
                                               'fileId': upload(w.sita)})
 
 
+D = '/api/v1/documents'
 PAGES = [
-    ('hr', '/employees/documents?section=review', {}),
-    ('hr', '/employees/documents?section=letters', {}),
-    ('hr', '/employees/documents?section=policies', {}),
-    ('hr', '/_/documents/policies', {'htmx': True}),
-    ('hr', '/_/documents/review', {'htmx': True}),
-    ('sita', '/me/profile/documents', {}),
-    ('sita', '/_/documents/policies/mine', {'htmx': True}),
-    ('sita', '/_/documents/docs', {'htmx': True}),
-    ('sita', '/_/documents/letters', {'htmx': True}),
+    ('hr', D + '/queue', {}),
+    ('hr', D + '/letters', {}),
+    ('hr', D + '/letter-requests', {}),
+    ('hr', D + '/policies', {}),
+    ('hr', D + '/templates', {}),
+    ('sita', D + '/mine', {}),
+    ('sita', D + '/policies', {}),
+    ('sita', D + '/letters', {}),
+    ('sita', D + '/letter-requests', {}),
 ]
 
 
@@ -62,7 +63,7 @@ def test_list_pages_do_not_grow_with_rows(who, url, opts):
     w = build()
     _add_rows(w, 1)
     c = client_for(getattr(w, who))
-    extra = htmx() if opts.get('htmx') else {}
+    extra = {}
     _count(c, url, **extra)          # warm caches (feature switches, seeded defaults)
     few = _count(c, url, **extra)
     _add_rows(w, 4)

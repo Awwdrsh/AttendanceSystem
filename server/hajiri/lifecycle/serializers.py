@@ -5,6 +5,7 @@ serializers, validated with hajiri.core.validation.validate (zod wording). Strin
 """
 from __future__ import annotations
 
+from drf_spectacular.utils import extend_schema_serializer
 from rest_framework import serializers
 
 from hajiri.core.validation import IsoDateField, MoneyField
@@ -38,6 +39,7 @@ def _nullish_date() -> IsoDateField:
     return IsoDateField(required=False, allow_null=True)
 
 
+@extend_schema_serializer(component_name='LifecyclePolicyIn')
 class PolicyIn(serializers.Serializer):
     # Notice an employee gives when resigning, in calendar days.
     noticeDays = serializers.IntegerField(min_value=0, max_value=180, default=30)
@@ -100,6 +102,7 @@ class UpdateTaskIn(serializers.Serializer):
     assigneeUserId = _nullish_uuid()
 
 
+@extend_schema_serializer(component_name='LifecycleCommentIn')
 class CommentIn(serializers.Serializer):
     body = text(2000)
 
@@ -108,6 +111,7 @@ class ProbationQuery(serializers.Serializer):
     within = serializers.IntegerField(min_value=1, max_value=365, default=60)
 
 
+@extend_schema_serializer(component_name='LifecycleReviewIn')
 class ReviewIn(serializers.Serializer):
     employeeId = serializers.UUIDField()
     rating = serializers.IntegerField(min_value=1, max_value=5)

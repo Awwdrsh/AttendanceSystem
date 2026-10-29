@@ -5,7 +5,7 @@ from django.http import QueryDict
 
 from tests.support.sql import execute, one
 from hajiri.home import services as s
-from tests.web.factories import htmx, set_features_off, toasts
+from tests.web.factories import set_features_off
 
 
 def client_for(login) -> Client:
@@ -68,43 +68,8 @@ def test_attendance_body_keeps_unset_values_unset():
     assert body['holidayWork'] == 'pay' and body['requirePreapproval'] is True and body['wfhPhotoRequired'] is False
 
 
-def test_saving_payroll_does_not_turn_settings_the_company_never_set(hr, demo):
-    execute("""UPDATE company_setting SET value = %s::jsonb WHERE company_id = %s AND key = 'leave.policy'""",
-            ['{"leaveYear": "fiscal"}', demo['company_id']])
-    html = hr.get('/settings?tab=leave').content.decode()
-    # The unset number shows an empty box (placeholder 0), not a stored 0.
-    assert 'name="maxContinuousDays" value="" placeholder="0"' in html
-    r = hr.post('/_/home/settings/leave', {'leaveYear': 'fiscal', 'maxContinuousDays': ''}, **htmx())
-    assert r.status_code == 204, r.content
-    # TS left maxContinuousDays out, so the schema default (30) was saved; posting 0 would have been refused (min 1).
-    assert stored(demo, 'leave.policy')['maxContinuousDays'] == 30
-    execute("""UPDATE company_setting SET value = %s::jsonb WHERE company_id = %s AND key = 'leave.policy'""",
-            ['{"maxContinuousDays": 10}', demo['company_id']])
-    assert '<option value="" selected hidden></option>' in hr.get('/settings?tab=leave').content.decode()
-
-
-def test_time_tracking_tab_is_empty_when_the_module_is_off(hr, demo):
-    from types import SimpleNamespace
-    assert '/_/timesheets/settings' in hr.get('/settings?tab=time').content.decode()
-    set_features_off(SimpleNamespace(id=demo['company_id']), 'time')
-    html = hr.get('/settings?tab=time').content.decode()
-    # TimeTrackingSettings drew nothing when its settings could not load; no fragment is asked for (it would 404).
-    assert r_ok(html) and '/_/timesheets/settings' not in html
-
-
 def r_ok(html: str) -> bool:
     return 'Time tracking' in html
 
 
 # ---------------------------------------------------------------- Home card
-
-def test_camera_title_follows_the_direction_and_the_button_waits(demo, login_as):
-    c = client_for(login_as(['employee'], demo['sita']))
-    html = c.get('/').content.decode()
-    assert 'id="home-camera-title">Clock in from home<' in html
-    assert "hx-disabled-elt=\"find button[type='submit']\"" in html
-    r = c.post('/_/home/punch', {'direction': 'in', 'idempotency_key': 'audit-home-0001'}, **htmx())
-    assert r.status_code == 200
-    card = c.get('/_/home/today', **htmx()).content.decode()
-    # Clocked in: a photo asked for now is for clocking out (CameraCapture title and confirm label).
-    assert 'id="home-camera-title">Clock out from home<' in card and 'Clock in from home' not in card

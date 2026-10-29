@@ -5,7 +5,7 @@ from hajiri.core import auth
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
 from hajiri.db.models import AppUser, AuditLog, CompanyMembership
 from hajiri.group_admin import services
-from tests.web.factories import PW, htmx, make_employee, toasts
+from tests.web.factories import PW, make_employee
 
 from .conftest import actor
 
@@ -116,33 +116,6 @@ def test_only_group_admins(world):
 
 
 # ---------------------------------------------------------------- pages
-
-def test_access_pages(world):
-    c = world.signed_in(world.admin_a)
-    html = c.get('/group/access').content.decode()
-    assert 'dual@alpha.test' in html and 'admin@gamma.test' not in html
-    assert c.get(f'/group/access?company={world.beta.id}').status_code == 200
-    assert c.get(f'/_/group-admin/access?company={world.gamma.id}', **htmx()).status_code == 404
-    form = c.get(f'/_/group-admin/access/new?company_id={world.beta.id}', **htmx()).content.decode()
-    assert 'Dipak at Beta' not in form            # linked records are not offered
-    emp = make_employee(world.beta, name='Free Record')
-    options = c.get(f'/_/group-admin/access/employees?company_id={world.beta.id}', **htmx()).content.decode()
-    assert 'Free Record' in options
-    assert c.get(f'/_/group-admin/access/employees?company_id={world.gamma.id}', **htmx()).status_code == 404
-    r = c.post('/_/group-admin/access/new', {'company_id': str(world.beta.id), 'email': 'solo@alpha.test',
-                                             'roles': ['hr'], 'employee_id': str(emp.id)}, **htmx())
-    assert r.status_code == 204 and toasts(r)[0]['message'] == 'Access saved.'
-    assert CompanyMembership.objects.get(user_id=world.solo.id, company=world.beta).employee_id == emp.id
-    # A company outside the group is not found (and not a choice of the form).
-    r = c.post('/_/group-admin/access/new', {'company_id': str(world.gamma.id), 'email': 'solo@alpha.test', 'roles': ['hr']}, **htmx())
-    assert r.status_code == 404
-    assert c.get(f'/_/group-admin/access/new?company_id={world.gamma.id}', **htmx()).status_code == 404
-    r = c.post(f'/_/group-admin/access/{world.solo.id}/{world.beta.id}/revoke', **htmx())
-    assert r.status_code == 204 and not CompanyMembership.objects.filter(user_id=world.solo.id, company=world.beta).exists()
-    r = c.post('/_/group-admin/access/invite', {'company_id': str(world.beta.id), 'name': 'Page Person', 'email': 'page@beta.test',
-                                                'roles': ['employee'], 'password': 'temporary-password-123'}, **htmx())
-    assert r.status_code == 204 and AppUser.objects.filter(email='page@beta.test', company=world.beta).exists()
-
 
 def test_access_api(world):
     c = world.signed_in(world.admin_a)

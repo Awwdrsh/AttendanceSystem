@@ -1,6 +1,0 @@
-<form class="hj-form" data-modal-title="Import opening balances" data-modal-size="xl" hx-post="{% url 'payroll:opening_import' %}" hx-target="this" hx-swap="outerHTML" x-data="{ csv: '' }" x-init="csv = $refs.csv.value">
-  <p class="hj-sm hj-muted" style="margin:0">One row per employee and fiscal year, using the employee code. Amounts in NPR; festival_paid is yes or no; source is previous_employer, go_live or other. Nothing is saved if any row has an error.</p>
-  <textarea class="hj-input mono" name="csv" rows="10" x-ref="csv" x-model="csv" style="font-size:12px">{{ csv }}</textarea>
-  {% if errors %}<div class="hj-stack" style="--gap:2px">{% for e in errors %}<div class="hj-small hj-bad-text">Row {{ e.row }}: {{ e.message }}</div>{% endfor %}{% if more %}<div class="hj-small hj-bad-text">and {{ more }} more</div>{% endif %}</div>{% endif %}
-  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn" :disabled="csv.trim().split('\n').length < 2">Import</button></div>
-</form>

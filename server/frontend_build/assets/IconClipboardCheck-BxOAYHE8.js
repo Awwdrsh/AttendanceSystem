@@ -1,0 +1,1 @@
+import{t as e}from"./createReactComponent-DKcgNbiR.js";var t=e(`outline`,`clipboard-check`,`ClipboardCheck`,[[`path`,{d:`M9 5h-2a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-12a2 2 0 0 0 -2 -2h-2`,key:`svg-0`}],[`path`,{d:`M9 5a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2a2 2 0 0 1 -2 2h-2a2 2 0 0 1 -2 -2`,key:`svg-1`}],[`path`,{d:`M9 14l2 2l4 -4`,key:`svg-2`}]]);export{t};

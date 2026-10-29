@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 
+from drf_spectacular.utils import extend_schema_serializer
 from rest_framework import serializers
 
 from hajiri.core.validation import IsoDateField, MoneyField
@@ -59,6 +60,7 @@ class SessionIn(serializers.Serializer):
     status = serializers.ChoiceField(LrnSession.Status.values, default=LrnSession.Status.SCHEDULED)
 
 
+@extend_schema_serializer(component_name='LearningQuestionIn')
 class QuestionIn(serializers.Serializer):
     prompt = _text(1000)
     options = serializers.ListField(child=_text(300), min_length=2, max_length=6)
@@ -70,6 +72,7 @@ class QuestionIn(serializers.Serializer):
         return attrs
 
 
+@extend_schema_serializer(component_name='LearningQuestionsIn')
 class QuestionsIn(serializers.Serializer):
     questions = serializers.ListField(child=QuestionIn(), max_length=50)
 
@@ -86,6 +89,7 @@ class SelfEnrollIn(serializers.Serializer):
     reason = serializers.CharField(max_length=1000, required=False, allow_blank=True)
 
 
+@extend_schema_serializer(component_name='LearningAssignIn')
 class AssignIn(serializers.Serializer):
     courseId = serializers.UUIDField()
     sessionId = serializers.UUIDField(required=False)

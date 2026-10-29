@@ -1,0 +1,1 @@
+import{a as e,s as t}from"./createReactComponent-DKcgNbiR.js";var n={get:e=>t(`/insights`,e),filters:()=>t(`/insights/filters`),exportCsv:(t,n)=>{let r=new URLSearchParams;for(let[e,t]of Object.entries(n))t!=null&&t!==``&&r.set(e,String(t));let i=r.toString();return e(`/insights/export/${t}${i?`?${i}`:``}`,`insights-${t}.csv`)}};export{n as t};

@@ -39,7 +39,7 @@ from django.db.models.lookups import GreaterThan
 from engines.attendance import local_date_of
 from engines.bs_calendar import weekday_of
 
-from hajiri.attendance.repo import from_ms, live_punches, to_ms
+from hajiri.attendance.repo import from_ms, live_punches, local_dates_window, to_ms
 from hajiri.attendance.service import date_range, enqueue_recompute, is_attendance_locked, recompute_for_punch
 from hajiri.core.audit import audit
 from hajiri.core.auth import MODULE_ROLES, AuthUser, assert_manages, company_id_of, has_module, has_role, manages
@@ -113,7 +113,8 @@ def ensure_kiosk_device(company_id: str) -> dict:
 
 def next_direction(employee_id: str, local_date: str | None = None) -> str:
     """Direction of the next punch today: in after nothing or an out, otherwise out."""
-    last = (live_punches().filter(employee_id=employee_id, local_date=local_date or local_date_of(to_ms(_now())))
+    d = local_date or local_date_of(to_ms(_now()))
+    last = (live_punches(*local_dates_window(d, d)).filter(employee_id=employee_id, local_date=d)
             .order_by('-punched_at').values_list('direction', flat=True).first())
     return 'in' if not last or last == PunchEvent.Direction.OUT else 'out'
 
@@ -663,8 +664,10 @@ def kiosks(user: AuthUser) -> dict:
     found = plain(list(
         Kiosk.objects.for_company(company_id_of(user))
         .annotate(branch_name=F('branch__name_en'), location_name=F('location__name'),
-                  locked=ExpressionWrapper(Q(locked_until__gt=Now()), output_field=BooleanField()),
-                  pairing_open=ExpressionWrapper(Q(pairing_expires_at__gt=Now()), output_field=BooleanField()),
+                  # never null (the TS SQL: x IS NOT NULL AND x > now())
+                  locked=ExpressionWrapper(Q(locked_until__isnull=False, locked_until__gt=Now()), output_field=BooleanField()),
+                  pairing_open=ExpressionWrapper(Q(pairing_expires_at__isnull=False, pairing_expires_at__gt=Now()),
+                                                 output_field=BooleanField()),
                   punches_today=_kiosk_punches_today(),
                   revoked=ExpressionWrapper(Q(status=Kiosk.Status.REVOKED), output_field=BooleanField()))
         .order_by('revoked', '-created_at')

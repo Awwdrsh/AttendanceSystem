@@ -1,6 +1,0 @@
-{% alert tone %}
-  <div class="hj-strong hj-sm">{{ head }}</div>
-  <div class="hj-sm hj-muted">{{ p.explanation }}{% if p.sandwichApplied %} Weekends or holidays between leave days are counted (sandwich rule).{% endif %}</div>
-  {% if bridge_text %}<div class="hj-sm hj-muted hj-mt-sm">{{ bridge_text }}</div>{% endif %}
-  <div class="hj-sm hj-mt-sm">Balance after this request: <span class="hj-strong num">{{ after }}</span> of {{ available }} days</div>
-{% endalert %}

@@ -63,10 +63,17 @@ import {
   IconUserPlus,
   IconChartHistogram,
   IconBriefcase,
+  IconBuildingSkyscraper,
+  IconBuildingCommunity,
+  IconArrowsExchange,
+  IconCopy,
+  IconKey,
 } from '@tabler/icons-react';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthProvider';
+import { useCompanies } from '../auth/CompaniesProvider';
+import { CompanySwitcher } from './CompanySwitcher';
 import { notifications as notifApi, workflow as workflowApi } from '../api';
 import { Brand } from './Brand';
 import { PopupNotices } from './relations/PopupNotices';
@@ -236,6 +243,21 @@ const NAV = [
   },
 ];
 
+/** The Group hub (groups of companies); `needs` names what GET /me/companies must allow (lib/group groupAccess). */
+const GROUP_NAV = {
+  id: 'group',
+  title: 'Group',
+  items: [
+    {
+      to: '/group',
+      label: 'Group',
+      icon: IconBuildingSkyscraper,
+      needs: 'hub',
+      keywords: ['companies', 'sister company', 'consolidated', 'group dashboard', 'all companies'],
+    },
+  ],
+};
+
 const SETTINGS = {
   to: '/settings',
   label: 'Settings',
@@ -246,6 +268,13 @@ const SETTINGS = {
 
 /** Extra jump targets for the command palette: tabs inside pages. */
 const JUMPS = [
+  { to: '/group', label: 'Group overview', group: 'Group', needs: 'view', icon: IconBuildingSkyscraper, keywords: ['consolidated', 'all companies', 'dashboard'] },
+  { to: '/group/people', label: 'Group people directory', group: 'Group', needs: 'view', icon: IconAddressBook, keywords: ['headcount', 'all companies'] },
+  { to: '/group/reports', label: 'Group reports', group: 'Group', needs: 'view', icon: IconReportAnalytics, keywords: ['consolidated', 'csv'] },
+  { to: '/group/companies', label: 'Group companies', group: 'Group', needs: 'companies', icon: IconBuildingCommunity, keywords: ['add company', 'sister company'] },
+  { to: '/group/access', label: 'Group access and roles', group: 'Group', needs: 'admin', icon: IconKey, keywords: ['membership', 'invite', 'group roles'] },
+  { to: '/group/transfers', label: 'Transfer to a sister company', group: 'Group', needs: 'transfer', icon: IconArrowsExchange, keywords: ['move employee'] },
+  { to: '/group/policies', label: 'Copy policies between companies', group: 'Group', needs: 'admin', icon: IconCopy, keywords: ['templates', 'leave types'] },
   { to: '/reports/builder', label: 'Build a report', group: 'Reports', roles: ['hr'], icon: IconReportAnalytics },
   { to: '/settings/features', label: 'Features (switch modules on or off)', group: 'Settings', roles: ['hr'], icon: IconSettings },
   { to: '/relations/disciplinary', label: 'Disciplinary cases', group: 'Employee relations', roles: ['hr'], icon: IconScale },
@@ -355,6 +384,7 @@ export function Layout() {
   const [opened, { toggle, close }] = useDisclosure();
   const mobile = useMediaQuery('(max-width: 48em)', false);
   const { user, logout, hasRole } = useAuth();
+  const { access: groupAccess, active: activeCompany, me: myCompanies, switchTo } = useCompanies();
   const { colorScheme, setColorScheme } = useMantineColorScheme();
   const loc = useLocation();
   const nav = useNavigate();
@@ -391,36 +421,57 @@ export function Layout() {
 
   const { on } = useFeatures();
   const featureOn = (f) => !f || f.some((k) => on(k));
+  const groupOn = (g) =>
+    !g ||
+    (g === 'hub' && groupAccess.hub) ||
+    (g === 'view' && groupAccess.view) ||
+    (g === 'admin' && groupAccess.admin) ||
+    (g === 'companies' && (groupAccess.admin || groupAccess.startGroup)) ||
+    (g === 'transfer' && groupAccess.transfer);
   const visible = (i) =>
     (!i.roles || hasRole(...i.roles) || (i.badge === 'approvals' && pendingApprovals > 0)) &&
     (!i.employeeOnly || !!user?.employeeId) &&
-    featureOn(i.features);
-  const groups = NAV.filter((g) => !g.roles || hasRole(...g.roles) || (g.id === 'manage' && pendingApprovals > 0))
+    featureOn(i.features) &&
+    groupOn(i.needs);
+  const groups = [...NAV, GROUP_NAV].filter((g) => !g.roles || hasRole(...g.roles) || (g.id === 'manage' && pendingApprovals > 0))
     .map((g) => ({ ...g, items: g.items.filter(visible) }))
     .filter((g) => g.items.length > 0);
   const account = ACCOUNT.filter(visible);
   const settings = visible(SETTINGS) ? SETTINGS : null;
-  const jumps = JUMPS.filter((j) => (!j.roles || hasRole(...j.roles)) && featureOn(j.features));
+  const jumps = JUMPS.filter((j) => (!j.roles || hasRole(...j.roles)) && featureOn(j.features) && groupOn(j.needs));
 
   const actions = useMemo(
     () =>
       [
         ...groups.flatMap((g) => g.items.map((i) => ({ ...i, group: g.title }))),
         ...(settings ? [{ ...settings, group: 'Settings' }] : []),
-        ...jumps.map((j) => ({ ...j, keywords: [] })),
+        ...jumps.map((j) => ({ ...j, keywords: j.keywords ?? [] })),
         ...account.map((i) => ({ ...i, group: 'Account' })),
-      ].map((i) => {
-        const Ico = i.icon;
-        return {
-          id: i.to,
-          label: i.label,
-          description: i.group,
-          keywords: i.keywords ?? [],
-          onClick: () => nav(i.to),
-          leftSection: <Ico size={18} stroke={1.6} />,
-        };
-      }),
-    [groups.length, account.length, jumps.length, user?.id, on],
+      ]
+        .map((i) => {
+          const Ico = i.icon;
+          return {
+            id: `${i.to}#${i.label}`,
+            label: i.label,
+            description: i.group,
+            keywords: i.keywords ?? [],
+            onClick: () => nav(i.to),
+            leftSection: <Ico size={18} stroke={1.6} />,
+          };
+        })
+        .concat(
+          (myCompanies?.companies ?? [])
+            .filter((c) => !c.active)
+            .map((c) => ({
+              id: `switch:${c.id}`,
+              label: `Switch to ${c.name}`,
+              description: `Company · ${c.code}`,
+              keywords: ['company', 'switch', c.code],
+              onClick: () => void switchTo(c.id).catch(() => undefined),
+              leftSection: <IconBuildingSkyscraper size={18} stroke={1.6} />,
+            })),
+        ),
+    [groups.length, account.length, jumps.length, user?.id, on, activeCompany?.id, myCompanies],
   ); // eslint-disable-line react-hooks/exhaustive-deps
 
   useHotkeys([['mod+K', () => spotlight.open()]]);
@@ -466,9 +517,12 @@ export function Layout() {
             <Burger opened={opened} onClick={toggle} size="sm" aria-label="Open menu" />
             <Brand height={18} />
           </Group>
-          <ActionIcon variant="subtle" color="gray" onClick={() => spotlight.open()} aria-label="Search">
-            <IconSearch size={18} />
-          </ActionIcon>
+          <Group gap={4} wrap="nowrap" style={{ minWidth: 0 }}>
+            <CompanySwitcher compact />
+            <ActionIcon variant="subtle" color="gray" onClick={() => spotlight.open()} aria-label="Search">
+              <IconSearch size={18} />
+            </ActionIcon>
+          </Group>
         </Group>
       </AppShell.Header>
 
@@ -486,6 +540,11 @@ export function Layout() {
               </Indicator>
             </Tooltip>
           </Group>
+          {mobile ? null : (
+            <Box mb={8}>
+              <CompanySwitcher />
+            </Box>
+          )}
           <UnstyledButton className="hj-search" onClick={() => spotlight.open()} aria-label="Search pages">
             <IconSearch size={15} stroke={1.8} /> Search or jump to
             <span className="hj-kbd">⌘K</span>
@@ -523,7 +582,10 @@ export function Layout() {
               </UnstyledButton>
             </Menu.Target>
             <Menu.Dropdown>
-              <Menu.Label>Signed in as {user?.roles.join(', ')}</Menu.Label>
+              <Menu.Label>
+                Signed in as {user?.roles.join(', ')}
+                {activeCompany ? ` in ${activeCompany.code}` : ''}
+              </Menu.Label>
               {account.map((i) => {
                 const Ico = i.icon;
                 return (

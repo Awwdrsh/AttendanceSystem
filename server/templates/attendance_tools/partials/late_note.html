@@ -1,3 +1,0 @@
-{% if late_note %}
-{% alert late_note.tone title=late_note.title %}{{ late_note.text }} <a href="{% url 'attendance_tools:my_attendance' %}?correct=1">Raise a time request</a> if a day was recorded wrongly.{% endalert %}
-{% endif %}

@@ -1,9 +1,0 @@
-<form class="hj-form" data-modal-title="Anonymous suggestion" hx-post="{% url 'engage:suggestion_new' %}" hx-swap="none" x-data="{ body: '' }">
-  <p class="hj-sm hj-muted" style="margin:0">HR sees only the topic, your words and the day it arrived. Don't include anything that identifies you unless you want to.</p>
-  <div class="hj-fieldset"><label class="hj-label" for="sg-cat">Topic</label>
-    <select id="sg-cat" name="category" class="hj-select">{% for v, l in categories %}<option value="{{ v }}"{% if v == 'general' %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
-  <div class="hj-fieldset"><label class="hj-label" for="sg-body">Your suggestion</label>
-    <textarea id="sg-body" name="body" class="hj-input" rows="4" maxlength="3000" x-model="body"></textarea></div>
-  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button>
-    <button type="submit" class="hj-btn" :disabled="body.trim().length < 5">Send anonymously</button></div>
-</form>

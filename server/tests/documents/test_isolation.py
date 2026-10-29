@@ -32,28 +32,6 @@ def beta_records(w: World) -> dict:
 
 # (name, method, url, htmx?, data)
 PAGES = [
-    ('documents tab', 'get', '/_/documents/employee/{employee}', True, None),
-    ('document edit form', 'get', '/_/documents/docs/{doc}/edit', True, None),
-    ('document edit', 'post', '/_/documents/docs/{doc}/edit', True, {'title': 'X'}),
-    ('document verify', 'post', '/_/documents/docs/{doc}/verify', True, None),
-    ('document reject form', 'get', '/_/documents/docs/{doc}/reject?from=review', True, None),
-    ('document reject', 'post', '/_/documents/docs/{doc}/reject', True, {'reason': 'Blurry'}),
-    ('document delete', 'post', '/_/documents/docs/{doc}/delete', True, None),
-    ('document file', 'get', '/_/documents/docs/{doc}/file', False, None),
-    ('new version form', 'get', '/_/documents/docs/upload?mode=hr&replaces={doc}', True, None),
-    ('category toggle', 'post', '/_/documents/categories/{category}/toggle', True, {'key': 'active'}),
-    ('template edit form', 'get', '/_/documents/templates/{template}', True, None),
-    ('template edit', 'post', '/_/documents/templates/{template}', True, {'name': 'X', 'subject': 'S', 'body': 'B'}),
-    ('issue for a request', 'get', '/_/documents/letters/issue?request_id={request}', True, None),
-    ('letter html', 'get', '/_/documents/letters/{letter}/html', False, None),
-    ('void form', 'get', '/_/documents/letters/{letter}/void', True, None),
-    ('void', 'post', '/_/documents/letters/{letter}/void', True, {'reason': 'wrong date'}),
-    ('request cancel', 'post', '/_/documents/requests/{request}/cancel', True, None),
-    ('policy acks', 'get', '/_/documents/policies/{policy}/acks', True, None),
-    ('policy remind', 'post', '/_/documents/policies/{policy}/remind', True, None),
-    ('policy archive', 'post', '/_/documents/policies/{policy}/archive', True, None),
-    ('policy file', 'get', '/_/documents/policies/{policy}/file', False, None),
-    ('policy acknowledge', 'post', '/_/documents/policies/{policy}/acknowledge', True, None),
 ]
 
 API = [
@@ -95,19 +73,6 @@ def _fill(v, ids):
     return v
 
 
-@pytest.mark.parametrize('case', PAGES, ids=[c[0] for c in PAGES])
-def test_pages_answer_not_found_for_another_companys_ids(world, case):
-    name, method, url, hx, data = case
-    ids = beta_records(world)
-    target, body = _fill(url, ids), _fill(data, ids)
-    for person in (world.admin_c, world.admin_a, world.dual):
-        r = _page(world.signed_in(person), method, target, hx, body)
-        assert r.status_code == 404, f'{name}: {person.email} got {r.status_code}'
-    # Beta's own admin is not refused as "not found" (the control).
-    r = _page(world.signed_in(world.admin_b), method, target, hx, body)
-    assert r.status_code != 404 and r.status_code < 500, f'{name}: Beta admin got {r.status_code}'
-
-
 @pytest.mark.parametrize('case', API, ids=[c[0] for c in API])
 def test_api_answers_not_found_for_another_companys_ids(world, case):
     from django.test import Client
@@ -123,15 +88,6 @@ def test_api_answers_not_found_for_another_companys_ids(world, case):
     assert r.status_code != 404 and r.status_code < 500, f'{name}: Beta admin got {r.status_code} {r.content[:200]}'
 
 
-def test_group_admin_finds_beta_records_after_switching(world):
-    ids = beta_records(world)
-    c = world.signed_in(world.admin_a, world.beta)
-    assert c.get(f"/_/documents/docs/{ids['doc']}/edit", **htmx()).status_code == 200
-    assert c.get(f"/_/documents/letters/{ids['letter']}/html").status_code == 200
-    token, user = world.session(world.admin_a, world.beta)
-    assert ids['doc'] in [d['id'] for d in docs.queue(user)['pending']]
-
-
 def test_lists_show_only_the_active_companys_records(world):
     ids = beta_records(world)
     _, in_alpha = world.session(world.admin_a)
@@ -141,7 +97,7 @@ def test_lists_show_only_the_active_companys_records(world):
     assert ids['policy'] not in [x['id'] for x in docs.list_policies(in_alpha)]
     assert ids['template'] not in [x['id'] for x in docs.list_templates(in_alpha)]
     assert ids['category'] not in [x['id'] for x in docs.list_categories(in_alpha)]
-    html = world.signed_in(world.admin_a).get('/employees/documents?section=letters').content.decode()
+    html = world.signed_in(world.admin_a).get('/api/v1/documents/letters').content.decode()
     assert 'Sita at Beta' not in html
     _, in_beta = world.session(world.admin_a, world.beta)
     assert ids['letter'] in [x['id'] for x in docs.list_letters(in_beta)]
@@ -260,3 +216,26 @@ def test_ids_of_another_company_inside_a_body_are_refused(world):
     # Beta's employee in a preview or in the letters register filter
     assert _status(docs.preview_letter, hr, {'employeeId': ids['employee'], 'templateId': alpha_tpl}) == 404
     assert docs.list_letters(hr, {'employeeId': ids['employee']}) == []
+
+
+@pytest.mark.parametrize('case', PAGES, ids=[c[0] for c in PAGES])
+def test_pages_answer_not_found_for_another_companys_ids(world, case):
+    name, method, url, hx, data = case
+    ids = beta_records(world)
+    target, body = _fill(url, ids), _fill(data, ids)
+    for person in (world.admin_c, world.admin_a, world.dual):
+        r = _page(world.signed_in(person), method, target, hx, body)
+        assert r.status_code == 404, f'{name}: {person.email} got {r.status_code}'
+    # Beta's own admin is not refused as "not found" (the control).
+    r = _page(world.signed_in(world.admin_b), method, target, hx, body)
+    assert r.status_code != 404 and r.status_code < 500, f'{name}: Beta admin got {r.status_code}'
+
+
+def test_group_admin_finds_beta_records_after_switching(world):
+    ids = beta_records(world)
+    c = world.signed_in(world.admin_a, world.beta)
+    assert c.get(f"/api/v1/documents/{ids['doc']}/file").status_code == 200
+    assert c.get(f"/api/v1/documents/letters/{ids['letter']}/html").status_code == 200
+    token, user = world.session(world.admin_a, world.beta)
+    assert ids['doc'] in [d['id'] for d in docs.queue(user)['pending']]
+

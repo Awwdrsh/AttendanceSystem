@@ -1,3 +1,0 @@
-<button type="button" id="delegate-button" class="hj-btn default" hx-get="{% url 'workflow:delegates' %}" hx-target="#hj-modal-body"
-        hx-trigger="click"><i class="ti ti-user-share" aria-hidden="true"></i>{% if delegation %}Delegated to {{ delegation.delegate_name }}{% else %}Delegate approvals{% endif %}</button>
-<span hidden hx-get="{% url 'workflow:delegate_button' %}" hx-trigger="hj:refresh-delegate-button from:body" hx-target="#delegate-button" hx-swap="outerHTML"></span>

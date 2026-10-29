@@ -1,8 +1,9 @@
 # Hajiri · हाजिरी
 
-Self-hosted multi-biometric attendance, HR and payroll platform for companies in Nepal, built on Django 6 with
-server-rendered pages (HTMX and a little Alpine.js), a background worker and a device gateway, all in `server/`. One
-install can run several companies of a group from one sign-in ([Groups of companies](#groups-of-companies)).
+Self-hosted multi-biometric attendance, HR and payroll platform for companies in Nepal: a Django 6 JSON API, a
+background worker and a device gateway in `server/`, and a React web app (plain JavaScript, Mantine, Vite) in
+`frontend/` that Django serves from its committed build, so an install needs only Python and PostgreSQL. One install can
+run several companies of a group from one sign-in ([Groups of companies](#groups-of-companies)).
 
 **plan.md** is the master plan and specification; `docs/DEVELOPMENT.md` is the developer guide; `docs/api.md` and
 `/api/docs` describe the JSON endpoints; `docs/gateway.md` explains terminal onboarding; `docs/adr/` records decisions;
@@ -10,7 +11,8 @@ install can run several companies of a group from one sign-in ([Groups of compan
 
 | Part | Where | Runs as |
 |---|---|---|
-| Web app (pages, HTMX partials, the JSON endpoints devices and integrations use) | `server/hajiri/<module>/` | `waitress` serving `config.wsgi`, port 3000 |
+| JSON API (`/api/v1/...`) for the web app, kiosk tablets and integrations | `server/hajiri/<module>/` | `waitress` serving `config.wsgi`, port 3000 |
+| Web app (React 19, Mantine, react-router; plain JavaScript) | `frontend/`, built into `server/frontend_build/` (committed) | served by the same web process: `index.html` for every page address, the build's files at the site root |
 | Background worker (recompute queue, notifications, reminders, nightly sweep, punch partitions) | `server/hajiri/worker/` | `manage.py run_worker` (scheduler + task worker), or `run_scheduler` plus `db_worker` processes |
 | Device gateway (ZKTeco ADMS push, Hikvision ISAPI push) | `server/hajiri/gateway/` | `manage.py run_gateway`, port 8080 |
 | Engines (Bikram Sambat calendar, attendance day, payroll) | `server/engines/` | pure Python, no Django |
@@ -163,6 +165,12 @@ Hajiri can run several companies of one group (a holding company and its sister 
 database and one sign-in. Each company keeps its own people, attendance, leave, payroll, documents and settings;
 nothing of one company is visible from another, except in the group views below and only to the people allowed there.
 
+> **Web app status.** The React app has the company switcher (sidebar and command palette) and the Group hub
+> (`/group`: overview, people, reports, companies, access, transfers, policies). Not in it yet, only in the JSON API:
+> choosing which company a fresh sign-in starts in, the switch that hides a company's pay from executives for a
+> company admin who has no group role (group admins have it on the Group overview), and giving or removing access
+> from the company's own Users page (the group admin does it in Group, Access).
+
 - **The active company.** Every page works in one company at a time, shown with its name and code in the sidebar (and
   the mobile top bar). People with access to more than one company get a company switcher: it reloads the same page in
   the other company (or its hub's first page when the page showed one record). Roles and the employee record are those
@@ -247,7 +255,7 @@ cd server && .venv/bin/python -m demo --database postgres://localhost:5433/hajir
 
 It refuses to run unless the target database is named with `--database` and confirmed with `--yes`, and it refuses the
 live database: the `DATABASE_URL` in the environment or `server/.env`, compared by host, port and database name.
-Records are made through the same service functions the pages use, as the HR user, the employees and their managers,
+Records are made through the same service functions the JSON API uses, as the HR user, the employees and their managers,
 so every rule, workflow, audit entry and notification applies. Every employee without an account gets one with a
 random password (reset one with `reset_password` to sign in as that person). Sections run in order, each in one
 transaction, and each is recorded when it finishes (company setting `demo.suite`), so running the command again only
@@ -301,12 +309,13 @@ gateway's raw archive is the `gateway-raw` volume; the database is `pgdata`. Adm
 | `server/config/` | settings (reads `server/.env`), the web URLconf, the gateway URLconf, WSGI |
 | `server/engines/` | `bs_calendar` (2000–2090 BS, i.e. 1943–2034 AD; 2084 onward projected), `attendance` (the day engine), `payroll` (formula DSL, tax schedules, 28 golden fixtures); pure Python, checked against fixtures recorded from the original engines |
 | `server/hajiri/db/` | models for every table (TextChoices for every constrained column, company-scoped managers) and the migrations |
-| `server/hajiri/core/`, `server/hajiri/web/` | crypto, sessions and roles, companies and groups, audit log, clock, errors, DRF base classes; middleware, layout, navigation |
-| `server/hajiri/<module>/` | one app per module: services, forms, serializers, views, templates, `urls.py`, `nav.py` |
+| `server/hajiri/core/`, `server/hajiri/web/` | crypto, sessions and roles, companies and groups, audit log, clock, errors, DRF base classes; middleware, serving the web app |
+| `server/hajiri/<module>/` | one app per module: services, serializers, `api.py` (DRF views), `urls.py`, jobs; templates only for printable HTML (certificates, offer letters, review print-outs) |
+| `frontend/` | the React web app (plain JavaScript); `server/frontend_build/` is its committed production build |
 | `server/hajiri/group/`, `server/hajiri/group_admin/` | group views and group administration |
 | `server/demo/` | the demo seeders: the demo suite, the demo roster and the demo group of companies |
 | `server/tests/` | pytest suites, one folder per app; `tests/parity/` holds the engine fixtures |
-| `scripts/` | `setup.sh`, `start.sh`, `stop.sh`, `run.sh`, `install-service.sh`, `update.sh` (shared helpers in `lib.sh`), `django_ops.py` (helpers they use), `django_routes.py` (URL map) |
+| `scripts/` | `setup.sh`, `start.sh`, `stop.sh`, `run.sh`, `install-service.sh`, `update.sh`, `build-frontend.sh` (shared helpers in `lib.sh`), `django_ops.py` (helpers they use), `django_routes.py` (URL map), `api_reference.py` (writes `docs/api.md` from `docs/openapi.yaml`) |
 | `infra/` | Docker image (`infra/docker/`) and compose stack (`infra/docker-compose.yml`) |
 | `docs/` | developer guide, API reference and schema, gateway guide, ADRs, migration record |
 
@@ -319,7 +328,7 @@ DJANGO_TEST_DATABASE=hajiri_test .venv/bin/pytest -q          # the test runner 
 ```
 
 The suite covers the engines (property tests, golden fixtures and exact parity with fixtures recorded from the original
-TypeScript engines), the gateway, every module's services and pages, the JSON endpoints, roles and scoping, and the
+TypeScript engines), the gateway, every module's services, the JSON endpoints, serving the web app, roles and scoping, and the
 groups of companies (`tests/multicompany`, `tests/group`, `tests/group_admin`, and `tests/scenario`, which walks a
 holding group of three companies end to end: policies copied, hiring, a manager in two companies, attendance upload
 and payroll in each company, a transfer, leave approvals, and every group figure checked against the company pages). See `docs/DEVELOPMENT.md` for running it in parallel.
@@ -330,13 +339,50 @@ and payroll in each company, a transfer, leave approvals, and every group figure
   own process (or, split, as a scheduler and task workers). Several workers or schedulers (or a web process started
   with `RUN_WORKER=true` where the WSGI entry point starts one) never do the same work twice: each scheduler tick and
   each job takes a PostgreSQL advisory lock. Finished task results are pruned daily.
-- Static files are served by the web process itself (WhiteNoise), so a single machine needs no web server in front.
+- The web app and static files are served by the web process itself (WhiteNoise), so a single machine needs no web
+  server in front. The files under `/assets/` carry a content hash in their names and are cached for a year;
+  `index.html`, `sw.js` and the manifest are revalidated on every load, so a release reaches browsers on their next
+  page load.
 - Logs are written to `logs/<service>.log` (`web`, `worker` or `scheduler` and `tasks*`, `gateway`; owner-only: they
   hold employee names and request details).
 - Back up the database and the gateway's raw archive (`server/data/raw`), and keep `server/.env` and
   `server/gateway.env` in the password manager: without `DATA_ENCRYPTION_KEY` a database backup cannot be read.
 
+## Web app
+
+The web app is the React app in `frontend/` (React 19, Mantine, react-router, BS date pickers; plain JavaScript, no
+TypeScript). `vite build` writes it to `server/frontend_build/`, which is **committed**: `setup.sh`, `start.sh`,
+`update.sh` and the boot services serve it as it is and never need Node.js. Django answers `index.html` for every
+address outside `/api/` and `/static/` (React Router shows the page, including the sign-in page and the old
+addresses it redirects), and WhiteNoise serves the build's files at the site root (`/assets/*`, `sw.js`,
+`manifest.webmanifest`, icons). The pages send the same Content-Security-Policy the TypeScript API sent.
+
+| Task | Command |
+|---|---|
+| Rebuild after changing `frontend/` (Node.js 20.19+ or 22.12+) | `./scripts/build-frontend.sh`, then commit `server/frontend_build/` with the change |
+| Develop with hot reload | Django on :3000 (`cd server && DJANGO_DEBUG=true .venv/bin/python manage.py runserver 3000`) and `cd frontend && npm ci && npm run dev`; open http://localhost:5173 (Vite proxies `/api` and `/health` to :3000; `API_URL=...` points it elsewhere) |
+| Unit tests of the web app | `cd frontend && npx vitest run` |
+| Check that every API call of the web app has a Django endpoint | `cd server && .venv/bin/pytest -q tests/web/test_frontend_api_paths.py` (reads `frontend/src`, no Node needed) |
+| Browser tests (every route for every role, and the main flows) | `tests/e2e/`, see `docs/DEVELOPMENT.md` |
+
+`update.sh` rebuilds the web app only when Node.js is installed and the pulled commits changed `frontend/` without a
+new build, then restarts the services; the Docker image builds it in a Node stage. Restart the web process after
+any rebuild: WhiteNoise lists the build's files when it starts, so files of a newer build are served from the folder
+by a fallback (`hajiri.web.views.build_asset`), and a file deleted by the rebuild answers an error until the restart.
+Open tabs whose old files are gone reload themselves once (`vite:preloadError` in `frontend/src/main.jsx`).
+
+**The API contract.** The React app was written against the TypeScript API (git history, commit `65a9079`:
+`apps/api/src/modules/<module>/routes.ts`, `docs/api.md`, `apps/api/test/*.test.ts`). Django keeps those paths,
+methods, query parameters, bodies, JSON field names, status codes and the error JSON (`{error, details}` or
+`{error, issues}`). All 665 routes of the TS API resolve to a Django view that answers their method; the React app
+calls about 650 of them plus the groups-of-companies endpoints (`/api/v1/me/companies...`, `/api/v1/group/...`),
+which are Django's own.
+
 ## Known gaps and assumptions
+
+The open items of the move to Django and back to the React web app (group screens still missing in the React app,
+the uncommitted build, leftover code) are listed in `docs/django-migration.md`, "Remaining gaps after the React
+return".
 
 These are documented in code comments and plan.md section 18, and need a decision or real hardware:
 

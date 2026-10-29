@@ -80,29 +80,6 @@ def declared_employee(w):
 
 # (name, method, url with {id}, maker, htmx?[, data])
 CASES = [
-    # pages and partials
-    ('run page', 'get', '/payroll/runs/{id}', payroll_run, False),
-    ('run override form', 'get', '/_/payroll/runs/{id}/override', payroll_run, True),
-    ('run input form', 'get', '/_/payroll/runs/{id}/inputs/new', payroll_run, True),
-    ('run input post', 'post', '/_/payroll/runs/{id}/inputs/new', payroll_run, True,
-     {'employee_id': '{emp}', 'component_code': 'ALLOWANCE', 'amount': '100'}),
-    ('run hold form', 'get', '/_/payroll/runs/{id}/hold', computed_run, True),
-    ('run preflight', 'post', '/_/payroll/runs/{id}/action/preflight', payroll_run, True),
-    ('salary sheet print', 'get', '/_/payroll/runs/{id}/salary-sheet.html', computed_run, False),
-    ('ssf sheet', 'get', '/_/payroll/runs/{id}/ssf-sheet.csv', payroll_run, False),
-    ('payslip page', 'get', '/me/payslips/{id}', payslip, False),
-    ('payslip print', 'get', '/_/payroll/payslips/{id}/print', payslip, False),
-    ('hold release form', 'get', '/_/payroll/holds/{id}/release', held, True),
-    ('hold cancel', 'post', '/_/payroll/holds/{id}/cancel', held, True),
-    ('opening delete', 'post', '/_/payroll/opening-balances/{id}/delete', opening, True),
-    ('cit apply form', 'get', '/_/payroll/optimum-cit/{id}/apply', beta_employee, True),
-    ('certificate', 'get', '/_/payroll/certificates/{id}', beta_employee, False),
-    # employee filters and prefills (the employee picker would draw the name of the id)
-    ('loans of employee', 'get', '/payroll/loans?employee_id={id}', beta_employee, False),
-    ('salaries of employee', 'get', '/payroll/assignments?employee_id={id}', beta_employee, False),
-    ('salary form for employee', 'get', '/_/payroll/assignments/new?employee_id={id}', beta_employee, True),
-    ('declaration of employee', 'get', '/payroll/declarations?employee_id={id}', beta_employee, False),
-    # JSON API
     ('run api', 'get', '/api/v1/payroll/runs/{id}', payroll_run, False),
     ('run inputs api', 'get', '/api/v1/payroll/runs/{id}/inputs', payroll_run, False),
     ('run preflight api', 'post_json', '/api/v1/payroll/runs/{id}/preflight', payroll_run, False),
@@ -141,20 +118,6 @@ def _fill(data, w):
     return json.loads(json.dumps(data).replace('{emp}', str(w.admin_b.employee_id)))
 
 
-@pytest.mark.parametrize('case', CASES, ids=[c[0] for c in CASES])
-def test_payroll_ids_of_another_company_are_not_found(world, case):
-    name, method, url, maker, hx, *rest = case
-    obj = maker(world)
-    target = url.format(id=obj.pk)
-    data = _fill(rest[0], world) if rest else None
-    r = _call(world.signed_in(world.admin_c), method, target, hx, data)
-    assert r.status_code == 404, f'{name}: outsider got {r.status_code}'
-    r = _call(world.signed_in(world.admin_a), method, target, hx, data)
-    assert r.status_code == 404, f'{name}: group admin working in Alpha got {r.status_code}'
-    r = _call(world.signed_in(world.admin_b), method, target, hx, data)
-    assert r.status_code != 404 and r.status_code < 500, f'{name}: Beta admin got {r.status_code} (control)'
-
-
 def test_ids_inside_a_body_are_checked_against_the_active_company(world):
     """An Alpha run cannot take inputs, holds or loans for a Beta employee; the ids behave as not found."""
     run = m.PayrollRun.objects.create(company=world.alpha, period=_period(world, world.alpha))
@@ -173,32 +136,15 @@ def test_ids_inside_a_body_are_checked_against_the_active_company(world):
     assert r.status_code == 404 and r.json()['error'] == 'payroll period not found'
 
 
-def test_each_company_runs_its_own_payroll_and_switching_follows_the_active_company(world):
-    alpha_run = m.PayrollRun.objects.create(company=world.alpha, period=_period(world, world.alpha))
-    beta_run = payroll_run(world)
-    c = world.signed_in(world.admin_a)
-    ids = {r['id'] for r in c.get('/api/v1/payroll/runs').json()['runs']}
-    assert ids == {str(alpha_run.id)}
-    assert {p['company_id'] for p in c.get('/api/v1/payroll/periods').json()['periods']} == {str(world.alpha.id)}
-    page = c.get('/payroll')
-    assert page.status_code == 200
-    # Group admin switches to Beta: Beta's runs, and Beta's run is now found.
-    assert c.post('/_/web/company/switch', {'company_id': str(world.beta.id)}, **htmx()).status_code == 204
-    ids = {r['id'] for r in c.get('/api/v1/payroll/runs').json()['runs']}
-    assert ids == {str(beta_run.id)}
-    assert c.get(f'/payroll/runs/{beta_run.id}').status_code == 200
-    assert c.get(f'/payroll/runs/{alpha_run.id}').status_code == 404
-
-
 def test_group_hr_runs_payroll_in_every_company_of_the_group(world):
     """group_hr is HR in each company of the group, one company at a time; Gamma stays out of reach."""
     beta_run = payroll_run(world)
     c = world.signed_in(world.ghr, world.alpha)
     assert c.get('/api/v1/payroll/runs').status_code == 200
     assert c.get(f'/api/v1/payroll/runs/{beta_run.id}').status_code == 404
-    c.post('/_/web/company/switch', {'company_id': str(world.beta.id)}, **htmx())
+    c.post('/api/v1/me/companies/switch', {'companyId': str(world.beta.id)}, content_type='application/json')
     assert c.get(f'/api/v1/payroll/runs/{beta_run.id}').status_code == 200
-    r = c.post('/_/web/company/switch', {'company_id': str(world.gamma.id)}, **htmx())
+    r = c.post('/api/v1/me/companies/switch', {'companyId': str(world.gamma.id)}, content_type='application/json')
     assert r.status_code == 404
 
 
@@ -215,17 +161,6 @@ def test_certificates_carry_the_active_companys_own_profile(world):
     assert 'Beta Foods Pvt. Ltd.' in text and 'PAN 600000002' in text and 'Alpha Traders' not in text
 
 
-def test_a_person_in_two_companies_sees_the_payslips_of_the_active_company_only(world):
-    """Dipak works in Alpha (HR, home) and Beta (employee, by membership), with one employee record in each company."""
-    beta_slip = _payslip(world, published=True, employee_id=world.dual_beta_employee.id)
-    c = world.signed_in(world.dual)
-    assert c.get(f'/me/payslips/{beta_slip.id}').status_code == 404
-    c.post('/_/web/company/switch', {'company_id': str(world.beta.id)}, **htmx())
-    assert c.get(f'/me/payslips/{beta_slip.id}').status_code == 200
-    mine = c.get('/api/v1/payroll/payslips').json()['payslips']
-    assert [p['id'] for p in mine] == [str(beta_slip.id)]
-
-
 def test_another_companys_employee_cannot_be_given_a_salary(world):
     std = m.SalaryStructure.objects.create(company=world.alpha, code='ALPHA', name_en='Alpha structure')
     v = m.SalaryStructureVersion.objects.create(structure=std, version=1, components=[{'code': 'BASIC'}])
@@ -240,3 +175,45 @@ def test_another_companys_employee_cannot_be_given_a_salary(world):
                content_type='application/json')
     assert r.status_code == 404 and r.json()['error'] == 'salary structure version not found'
     assert not m.SalaryAssignment.objects.filter(employee__in=[own.id, world.admin_b.employee_id]).exists()
+
+
+@pytest.mark.parametrize('case', CASES, ids=[c[0] for c in CASES])
+def test_payroll_ids_of_another_company_are_not_found(world, case):
+    name, method, url, maker, hx, *rest = case
+    obj = maker(world)
+    target = url.format(id=obj.pk)
+    data = _fill(rest[0], world) if rest else None
+    r = _call(world.signed_in(world.admin_c), method, target, hx, data)
+    assert r.status_code == 404, f'{name}: outsider got {r.status_code}'
+    r = _call(world.signed_in(world.admin_a), method, target, hx, data)
+    assert r.status_code == 404, f'{name}: group admin working in Alpha got {r.status_code}'
+    r = _call(world.signed_in(world.admin_b), method, target, hx, data)
+    assert r.status_code != 404 and r.status_code < 500, f'{name}: Beta admin got {r.status_code} (control)'
+
+
+def test_each_company_runs_its_own_payroll_and_switching_follows_the_active_company(world):
+    alpha_run = m.PayrollRun.objects.create(company=world.alpha, period=_period(world, world.alpha))
+    beta_run = payroll_run(world)
+    c = world.signed_in(world.admin_a)
+    ids = {r['id'] for r in c.get('/api/v1/payroll/runs').json()['runs']}
+    assert ids == {str(alpha_run.id)}
+    assert {p['company_id'] for p in c.get('/api/v1/payroll/periods').json()['periods']} == {str(world.alpha.id)}
+    assert c.get(f'/api/v1/payroll/runs/{beta_run.id}').status_code == 404
+    # Group admin switches to Beta: Beta's runs, and Beta's run is now found.
+    assert c.post('/api/v1/me/companies/switch', {'companyId': str(world.beta.id)}, content_type='application/json').status_code == 200
+    ids = {r['id'] for r in c.get('/api/v1/payroll/runs').json()['runs']}
+    assert ids == {str(beta_run.id)}
+    assert c.get(f'/api/v1/payroll/runs/{beta_run.id}').status_code == 200
+    assert c.get(f'/api/v1/payroll/runs/{alpha_run.id}').status_code == 404
+
+
+def test_a_person_in_two_companies_sees_the_payslips_of_the_active_company_only(world):
+    """Dipak works in Alpha (HR, home) and Beta (employee, by membership), with one employee record in each company."""
+    beta_slip = _payslip(world, published=True, employee_id=world.dual_beta_employee.id)
+    c = world.signed_in(world.dual)
+    assert c.get(f'/api/v1/payroll/payslips/{beta_slip.id}').status_code == 404
+    c.post('/api/v1/me/companies/switch', {'companyId': str(world.beta.id)}, content_type='application/json')
+    assert c.get(f'/api/v1/payroll/payslips/{beta_slip.id}').status_code == 200
+    mine = c.get('/api/v1/payroll/payslips').json()['payslips']
+    assert [p['id'] for p in mine] == [str(beta_slip.id)]
+

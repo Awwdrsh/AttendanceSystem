@@ -1,30 +1,21 @@
 from django.urls import path
 
-from . import views
+# JSON API (TS: /api/v1/helpdesk/...), called by the React app with the cookie session.
+from . import api
 
+_API = 'api/v1/helpdesk/'
 urlpatterns = [
-    path('me/help', views.mine, name='mine'),
-    path('helpdesk', views.queue, name='queue'),
-    path('_/helpdesk/tickets/new', views.new_ticket, name='new'),
-    path('_/helpdesk/tickets/<uuid:ticket_id>', views.ticket, name='ticket'),
-    path('_/helpdesk/tickets/<uuid:ticket_id>/messages', views.reply, name='reply'),
-    path('_/helpdesk/tickets/<uuid:ticket_id>/update', views.update, name='update'),
-    path('_/helpdesk/tickets/<uuid:ticket_id>/reopen', views.reopen, name='reopen'),
-    path('_/helpdesk/tickets/<uuid:ticket_id>/close', views.close, name='close'),
-    path('_/helpdesk/tickets/<uuid:ticket_id>/rate', views.rate, name='rate'),
-    path('_/helpdesk/tickets/<uuid:ticket_id>/files/<uuid:file_id>', views.ticket_file, name='file'),
-    path('_/helpdesk/categories/new', views.category_new, name='category_new'),
-    path('_/helpdesk/categories/<uuid:category_id>', views.category_edit, name='category_edit'),
-    path('_/helpdesk/settings', views.save_settings, name='settings'),
+    path(f'{_API}settings', api.SettingsView.as_view(), name='api-settings'),
+    path(f'{_API}categories', api.CategoriesView.as_view(), name='api-categories'),
+    path(f'{_API}categories/<str:category_id>', api.CategoryView.as_view(), name='api-category'),
+    path(f'{_API}agents', api.AgentsView.as_view(), name='api-agents'),
+    path(f'{_API}stats', api.StatsView.as_view(), name='api-stats'),
+    path(f'{_API}tickets', api.TicketsView.as_view(), name='api-tickets'),
+    path(f'{_API}tickets/mine', api.MyTicketsView.as_view(), name='api-tickets-mine'),
+    path(f'{_API}tickets/<str:ticket_id>', api.TicketView.as_view(), name='api-ticket'),
+    path(f'{_API}tickets/<str:ticket_id>/messages', api.MessagesView.as_view(), name='api-ticket-messages'),
+    path(f'{_API}tickets/<str:ticket_id>/reopen', api.ReopenView.as_view(), name='api-ticket-reopen'),
+    path(f'{_API}tickets/<str:ticket_id>/close', api.CloseView.as_view(), name='api-ticket-close'),
+    path(f'{_API}tickets/<str:ticket_id>/rate', api.RateView.as_view(), name='api-ticket-rate'),
+    path(f'{_API}tickets/<str:ticket_id>/files/<str:file_id>', api.TicketFileView.as_view(), name='api-ticket-file'),
 ]
-
-# JSON API for Bearer-token clients (TS: /api/v1/helpdesk/...).
-from rest_framework.routers import SimpleRouter  # noqa: E402
-
-from . import api  # noqa: E402
-
-router = SimpleRouter(trailing_slash=False)
-router.register('api/v1/helpdesk/tickets', api.HelpdeskViewSet, basename='api-ticket')
-router.register('api/v1/helpdesk/categories', api.CategoryViewSet, basename='api-category')
-router.register('api/v1/helpdesk/stats', api.StatsViewSet, basename='api-stats')
-urlpatterns += router.urls

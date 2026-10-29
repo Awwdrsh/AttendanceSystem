@@ -1,8 +1,0 @@
-{% if not t.rows %}{% empty_state title=empty compact=True %}
-{% else %}
-<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">
-  <thead><tr>{% for c in t.cols %}<th class="{% if c.money %}right{% endif %}" style="white-space:nowrap">{{ c.header }}</th>{% endfor %}</tr></thead>
-  <tbody>{% for r in t.rows %}<tr>{% for cell in r %}<td class="{% if cell.money %}right num{% endif %}">{{ cell.text }}</td>{% endfor %}</tr>{% endfor %}</tbody>
-  <tfoot><tr>{% for cell in t.foot %}<th class="{% if cell.money %}right {% endif %}num">{{ cell.text }}</th>{% endfor %}</tr></tfoot>
-</table></div></div>
-{% endif %}

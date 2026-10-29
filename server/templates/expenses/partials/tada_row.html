@@ -1,9 +1,0 @@
-<tr>
-  <td><input type="hidden" name="grade" value="{{ r.grade }}"><span class="hj-sm hj-strong">{{ r.label }}</span></td>
-  {% for c in r.cells %}
-  <td><div class="hj-row nowrap" style="gap:4px">
-    <input class="hj-input" style="width:80px" name="da|{{ r.grade }}|{{ c.dest }}" aria-label="Daily allowance" placeholder="Daily" value="{{ c.da }}">
-    <input class="hj-input" style="width:80px" name="lodging|{{ r.grade }}|{{ c.dest }}" aria-label="Lodging per night" placeholder="Night" value="{{ c.lodging }}">
-  </div></td>
-  {% endfor %}
-</tr>

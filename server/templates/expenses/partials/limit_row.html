@@ -1,7 +1,0 @@
-<div class="hj-row" style="align-items:flex-end" data-limit>
-  <div class="hj-fieldset"><label class="hj-label">Grade</label>
-    <select class="hj-select" name="limit_grade" style="width:170px">{% for g in grades %}<option value="{{ g }}"{% if g == l.grade %} selected{% endif %}>{% if g == '*' %}Every grade (*){% else %}{{ g }}{% endif %}</option>{% endfor %}</select></div>
-  <div class="hj-fieldset"><label class="hj-label">Per claim</label><input class="hj-input" name="limit_per_claim" inputmode="decimal" style="width:130px" value="{{ l.perClaim|default:'' }}"></div>
-  <div class="hj-fieldset"><label class="hj-label">Per month</label><input class="hj-input" name="limit_per_month" inputmode="decimal" style="width:130px" value="{{ l.perMonth|default:'' }}"></div>
-  <button type="button" class="hj-btn subtle danger sm" @click="$el.closest('[data-limit]').remove()">Remove</button>
-</div>

@@ -15,7 +15,7 @@ import pytest
 from hajiri.learning import services as lrn
 from hajiri.performance import services as perf
 from tests.multicompany.conftest import world  # noqa: F401  (the fixture)
-from tests.web.factories import htmx, make_employee
+from tests.web.factories import make_employee
 
 pytestmark = pytest.mark.django_db
 
@@ -67,57 +67,54 @@ def beta(world):  # noqa: F811
     return Beta(world)
 
 
+P = '/api/v1/performance/'
+L = '/api/v1/learning/'
 GETS = [
-    ('goal drawer', '/_/performance/goals/{goal}'),
-    ('company goal drawer', '/_/performance/goals/{company_goal}'),
-    ('kpi edit', '/_/performance/kpis/{kpi}/edit'),
-    ('competency edit', '/_/performance/competencies/{competency}/edit'),
-    ('cycle edit', '/_/performance/cycles/{draft}/edit'),
-    ('cycle page', '/performance/reviews?cycle={cycle}'),
-    ('review drawer', '/_/performance/reviews/{review}'),
-    ('review print', '/_/performance/reviews/{review}/print'),
-    ('1-on-1 drawer', '/_/performance/one-on-ones/{meeting}'),
-    ('course edit', '/_/learning/courses/{course}/edit'),
-    ('course assign form', '/_/learning/courses/{course}/assign'),
-    ('course join form', '/_/learning/courses/{course}/join'),
-    ('assessment', '/_/learning/enrollments/{enrollment}/assessment'),
-    ('course rating form', '/_/learning/enrollments/{enrollment}/feedback'),
-    ('certificate upload form', '/_/learning/enrollments/{enrollment}/certificate/upload'),
-    ('certificate', '/_/learning/enrollments/{enrollment}/certificate'),
+    ('goal', P + 'goals/{goal}'),
+    ('company goal', P + 'goals/{company_goal}'),
+    ('cycle', P + 'cycles/{draft}'),
+    ('calibration', P + 'cycles/{cycle}/calibration'),
+    ('review', P + 'reviews/{review}'),
+    ('review print', P + 'reviews/{review}/print'),
+    ('1-on-1', P + 'one-on-ones/{meeting}'),
+    ('journal of a Beta employee', P + 'journal?employeeId={report}'),
+    ('course', L + 'courses/{course}'),
+    ('assessment', L + 'enrollments/{enrollment}/assessment'),
 ]
 
+# (name, method, url, body)
 POSTS = [
-    ('goal check-in', '/_/performance/goals/{goal}/checkin', {'comment': 'x'}),
-    ('goal status', '/_/performance/goals/{goal}/status', {'status': 'completed'}),
-    ('goal cancel', '/_/performance/goals/{goal}/cancel', {}),
-    ('kpi edit', '/_/performance/kpis/{kpi}/edit', {'title': 'x', 'active': 'on'}),
-    ('kpi apply', '/_/performance/kpis/apply', {'kpi_id': '{kpi}', 'weight': '10'}),
-    ('competency edit', '/_/performance/competencies/{competency}/edit', {'kind': 'skill', 'name': 'x'}),
-    ('cycle edit', '/_/performance/cycles/{draft}/edit', {'name': 'x'}),
-    ('cycle delete', '/_/performance/cycles/{draft}/delete', {}),
-    ('cycle launch', '/_/performance/cycles/{draft}/launch', {}),
-    ('cycle advance', '/_/performance/cycles/{cycle}/advance', {}),
-    ('review save', '/_/performance/reviews/{review}/save', {'summary': 'x'}),
-    ('review calibrate', '/_/performance/reviews/{review}/calibrate', {'final_rating': '4', 'reason': 'Because of x'}),
-    ('review peers', '/_/performance/reviews/{review}/peers', {'employee_ids': ['{report}']}),
-    ('peer decide', '/_/performance/peers/{peer}/decide', {'approve': '1'}),
-    ('peer remove', '/_/performance/peers/{peer}/remove', {}),
-    ('1-on-1 update', '/_/performance/one-on-ones/{meeting}/update', {'action': 'notes', 'shared_notes': 'x'}),
-    ('1-on-1 item', '/_/performance/one-on-ones/{meeting}/items', {'kind': 'agenda', 'text': 'x'}),
-    ('1-on-1 item toggle', '/_/performance/one-on-one-items/{item}/toggle', {'done': 'on'}),
-    ('1-on-1 item delete', '/_/performance/one-on-one-items/{item}/delete', {}),
-    ('journal delete', '/_/performance/journal/{journal}/delete', {}),
-    ('journal add', '/_/performance/journal', {'employee_id': '{report}', 'note_date': '2026-10-01', 'note': 'x'}),
-    ('feedback give', '/_/performance/feedback/give', {'to_employee_id': '{report}', 'body': 'x'}),
-    ('course edit', '/_/learning/courses/{course}/edit', {'code': 'X', 'title': 'x'}),
-    ('course questions', '/_/learning/courses/{course}/questions', {'count': '0'}),
-    ('session add', '/_/learning/courses/{course}/sessions', {'date': '2026-12-01'}),
-    ('session status', '/_/learning/sessions/{session}/status', {'status': 'cancelled'}),
-    ('assign', '/_/learning/courses/{course}/assign', {'employee_ids': ['{report}']}),
-    ('mandatory', '/_/learning/courses/{course}/assign-mandatory', {}),
-    ('enrolment cancel', '/_/learning/enrollments/{enrollment}/cancel', {}),
-    ('enrolment attendance', '/_/learning/enrollments/{enrollment}/attendance', {'attended': '1'}),
-    ('enrolment complete', '/_/learning/enrollments/{enrollment}/complete', {}),
+    ('goal check-in', 'post', P + 'goals/{goal}/checkins', {'comment': 'x'}),
+    ('goal edit', 'patch', P + 'goals/{goal}', {'title': 'x'}),
+    ('goal key result', 'post', P + 'goals/{goal}/key-results', {'title': 'x', 'targetValue': 5}),
+    ('kpi edit', 'patch', P + 'kpis/{kpi}', {'title': 'x'}),
+    ('kpi apply', 'post', P + 'kpis/{kpi}/apply', {'employeeIds': ['{report}'], 'weight': 10}),
+    ('kpi delete', 'delete', P + 'kpis/{kpi}', {}),
+    ('course questions', 'put', L + 'courses/{course}/questions', {'questions': []}),
+    ('competency edit', 'patch', P + 'competencies/{competency}', {'name': 'x'}),
+    ('cycle edit', 'patch', P + 'cycles/{draft}', {'name': 'x'}),
+    ('cycle delete', 'delete', P + 'cycles/{draft}', {}),
+    ('cycle launch', 'post', P + 'cycles/{draft}/launch', {}),
+    ('cycle advance', 'post', P + 'cycles/{cycle}/advance', {}),
+    ('review manager', 'put', P + 'reviews/{review}/manager', {'summary': 'x'}),
+    ('review calibrate', 'post', P + 'reviews/{review}/calibrate', {'finalRating': 4, 'reason': 'Because of x'}),
+    ('review peers', 'post', P + 'reviews/{review}/peers', {'employeeIds': ['{report}']}),
+    ('peer decide', 'post', P + 'peers/{peer}/decision', {'approve': True}),
+    ('peer remove', 'delete', P + 'peers/{peer}', {}),
+    ('1-on-1 update', 'patch', P + 'one-on-ones/{meeting}', {'sharedNotes': 'x'}),
+    ('1-on-1 item', 'post', P + 'one-on-ones/{meeting}/items', {'kind': 'agenda', 'text': 'x'}),
+    ('1-on-1 item toggle', 'patch', P + 'one-on-one-items/{item}', {'done': True}),
+    ('1-on-1 item delete', 'delete', P + 'one-on-one-items/{item}', {}),
+    ('journal delete', 'delete', P + 'journal/{journal}', {}),
+    ('journal add', 'post', P + 'journal', {'employeeId': '{report}', 'noteDate': '2026-10-01', 'note': 'x'}),
+    ('course edit', 'patch', L + 'courses/{course}', {'title': 'x'}),
+    ('session add', 'post', L + 'courses/{course}/sessions', {'startsAt': '2026-12-01T10:00:00+05:45', 'endsAt': '2026-12-01T12:00:00+05:45'}),
+    ('session status', 'patch', L + 'sessions/{session}', {'status': 'cancelled'}),
+    ('assign', 'post', L + 'enrollments/assign', {'courseId': '{course}', 'employeeIds': ['{report}']}),
+    ('mandatory', 'post', L + 'courses/{course}/assign-mandatory', {}),
+    ('enrolment cancel', 'post', L + 'enrollments/{enrollment}/cancel', {}),
+    ('enrolment attendance', 'post', L + 'enrollments/{enrollment}/attendance', {'attended': True}),
+    ('enrolment complete', 'post', L + 'enrollments/{enrollment}/complete', {}),
 ]
 
 
@@ -128,28 +125,13 @@ def _fill(value, beta: Beta):
     return value.format(**ids)
 
 
-@pytest.mark.parametrize('name,url', GETS, ids=[g[0] for g in GETS])
-def test_pages_of_another_company_are_not_found(world, beta, name, url):  # noqa: F811
+@pytest.mark.parametrize('name,method,url,data', POSTS, ids=[p[0] for p in POSTS])
+def test_changes_to_another_company_are_not_found(world, beta, name, method, url, data):  # noqa: F811
     url = _fill(url, beta)
+    data = {k: _fill(v, beta) if isinstance(v, (str, list)) else v for k, v in data.items()}
     for client in (world.signed_in(world.admin_c), world.signed_in(world.admin_a)):
-        assert client.get(url, **htmx()).status_code == 404, url
-    assert world.signed_in(world.admin_b).get(url, **htmx()).status_code != 404, url
-
-
-@pytest.mark.parametrize('name,url,data', POSTS, ids=[p[0] for p in POSTS])
-def test_changes_to_another_company_are_not_found(world, beta, name, url, data):  # noqa: F811
-    url = _fill(url, beta)
-    data = {k: _fill(v, beta) for k, v in data.items()}
-    for client in (world.signed_in(world.admin_c), world.signed_in(world.admin_a)):
-        assert client.post(url, data, **htmx()).status_code == 404, url
-
-
-def test_feedback_requests_of_another_company_are_not_found(world, beta):  # noqa: F811
-    fid = beta.feedback_request()
-    for client in (world.signed_in(world.admin_c), world.signed_in(world.admin_a)):
-        assert client.get(f'/_/performance/feedback/{fid}/answer', **htmx()).status_code == 404
-        assert client.post(f'/_/performance/feedback/{fid}/decline', **htmx()).status_code == 404
-    assert world.signed_in(world.admin_b).get(f'/_/performance/feedback/{fid}/answer', **htmx()).status_code == 200
+        r = getattr(client, method)(url, data, content_type='application/json')
+        assert r.status_code == 404, (url, r.status_code, r.content[:200])
 
 
 def test_services_refuse_ids_of_another_company(world, beta):  # noqa: F811
@@ -164,19 +146,38 @@ def test_services_refuse_ids_of_another_company(world, beta):  # noqa: F811
             fn(alpha_admin, *args)
 
 
+@pytest.mark.parametrize('name,url', GETS, ids=[g[0] for g in GETS])
+def test_pages_of_another_company_are_not_found(world, beta, name, url):  # noqa: F811
+    url = _fill(url, beta)
+    for client in (world.signed_in(world.admin_c), world.signed_in(world.admin_a)):
+        r = client.get(url)
+        assert r.status_code == 404, (url, r.status_code, r.content[:200])
+    r = world.signed_in(world.admin_b).get(url)
+    assert r.status_code == 200, (url, r.status_code, r.content[:200])
+
+
+def test_feedback_requests_of_another_company_are_not_found(world, beta):  # noqa: F811
+    fid = beta.feedback_request()
+    for client in (world.signed_in(world.admin_c), world.signed_in(world.admin_a)):
+        assert client.put(f'{P}feedback/{fid}', {'body': 'x'}, content_type='application/json').status_code == 404
+        assert client.post(f'{P}feedback/{fid}/decline', {}, content_type='application/json').status_code == 404
+    # Beta's admin, who was asked, sees the request in their own list.
+    asked = world.signed_in(world.admin_b).get(f'{P}feedback?box=requests').json()
+    assert fid in str(asked)
+
+
 def test_lists_show_only_the_active_company(world, beta):  # noqa: F811
     a = world.signed_in(world.admin_a)
-    for url, text in (('/performance?view=company', 'Beta company goal'), ('/performance?view=kpis', 'Beta KPI'),
-                      ('/performance/reviews', 'Beta cycle'), ('/performance/reviews?view=competencies', 'Beta competency'),
-                      ('/performance/learning', 'Beta course'), ('/performance/learning?view=enrollments', 'Beta course'),
-                      ('/me/growth?view=company', 'Beta company goal')):
+    for url, text in ((P + 'goals?scope=company', 'Beta company goal'), (P + 'kpis', 'Beta KPI'),
+                      (P + 'cycles', 'Beta cycle'), (P + 'competencies', 'Beta competency'),
+                      (L + 'courses', 'Beta course'), (L + 'enrollments?scope=all', 'Beta course')):
         r = a.get(url)
-        assert r.status_code == 200, url
+        assert r.status_code == 200, (url, r.content[:200])
         assert text not in r.content.decode(), url
-    # The same pages in Beta do show them.
+    # The same lists in Beta do show them.
     b = world.signed_in(world.admin_a, world.beta)
-    assert 'Beta company goal' in b.get('/performance?view=company').content.decode()
-    assert 'Beta course' in b.get('/performance/learning').content.decode()
+    assert 'Beta company goal' in b.get(P + 'goals?scope=company').content.decode()
+    assert 'Beta course' in b.get(L + 'courses').content.decode()
 
 
 def test_a_person_in_two_companies_sees_the_goals_of_the_company_they_work_in(world):  # noqa: F811
@@ -186,5 +187,6 @@ def test_a_person_in_two_companies_sees_the_goals_of_the_company_they_work_in(wo
     assert [g['id'] for g in perf.list_goals(in_beta, {'scope': 'mine'})] == [gid]
     _, in_alpha = world.session(world.dual)
     assert perf.list_goals(in_alpha, {'scope': 'mine'}) == []
-    assert 'Dual at Beta' not in world.signed_in(world.dual).get('/me/growth').content.decode()
-    assert 'Dual at Beta' in world.signed_in(world.dual, world.beta).get('/me/growth').content.decode()
+    assert 'Dual at Beta' not in world.signed_in(world.dual).get(P + 'goals?scope=mine').content.decode()
+    assert 'Dual at Beta' in world.signed_in(world.dual, world.beta).get(P + 'goals?scope=mine').content.decode()
+

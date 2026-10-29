@@ -11,7 +11,6 @@ from hajiri.core.errors import BadRequestError, ForbiddenError, NotFoundError, V
 from hajiri.db.models import (ApprovalFlow, AuditLog, Holiday, LeaveType, SalaryComponent, SalaryStructure,
                               SalaryStructureVersion, Shift, WorkflowDefinition)
 from hajiri.group_admin import services
-from tests.web.factories import htmx, toasts
 
 from .conftest import actor
 
@@ -174,23 +173,3 @@ def test_nothing_targets_a_company_outside_the_group(seeded, admin):
     for person in (w.admin_b, w.ghr):
         with pytest.raises(ForbiddenError):
             services.copy_policies(actor(w, person), _body(w, ['leave_types']))
-
-
-def test_policy_pages(seeded):
-    w = seeded
-    Shift.objects.create(company=w.alpha, code='EARLY', name_en='Early', start_time=time(6), end_time=time(14))
-    c = w.signed_in(w.admin_a)
-    html = c.get('/group/policies').content.decode()
-    assert 'Beta Foods' in html and 'Gamma Outside' not in html and 'Leave types' in html
-    data = {'source_id': str(w.alpha.id), 'target_ids': [str(w.beta.id)], 'sections': ['shifts'], 'on_conflict': 'skip'}
-    r = c.post('/_/group-admin/policies/preview', data, **htmx())
-    assert r.status_code == 200 and 'Early (EARLY)' in r.content.decode() and 'Create' in r.content.decode()
-    assert not Shift.objects.for_company(w.beta.id).filter(code='EARLY').exists()
-    r = c.post('/_/group-admin/policies/apply', data, **htmx())
-    assert r.status_code == 200 and toasts(r)[0]['message'] == 'Copied: 1 created, 0 overwritten.'
-    assert Shift.objects.for_company(w.beta.id).filter(code='EARLY').exists()
-    r = c.post('/_/group-admin/policies/preview', {**data, 'target_ids': [str(w.gamma.id)]}, **htmx())
-    assert r.status_code == 400
-    j = c.post('/api/v1/group/policies/preview', _body(w, ['shifts']), content_type='application/json').json()
-    assert _actions(j, 'shifts')['EARLY'] == 'same'
-    assert w.signed_in(w.ghr).post('/_/group-admin/policies/apply', data, **htmx()).status_code == 403

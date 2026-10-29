@@ -129,7 +129,7 @@ export default function PayrollHubPage() {
               ),
             },
             { key: 'status', header: 'Status', render: (r) => <StatusBadge status={r.status} /> },
-            { key: 'n', header: 'Headcount', align: 'right', render: (r) => <span className="num">{r.totals?.payslips ?? '—'}</span> },
+            { key: 'n', header: 'Headcount', align: 'right', render: (r) => <span className="num">{r.totals?.headcount ?? '—'}</span> },
             {
               key: 'gross',
               header: 'Gross',

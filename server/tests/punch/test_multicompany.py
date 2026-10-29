@@ -73,7 +73,8 @@ def test_from_home_page_lists_only_the_active_company(world, beta_photo):
     PunchEvent.objects.create(device_sn='WEB-BETA', vendor='kiosk', device_user_pin='B200', employee_id=beta_photo['emp'],
                               punched_at=now(), device_local_time='x', local_date=npt_today(), direction='in',
                               verify_mode='web', source='web', raw={'remote': True}, idempotency_key='beta-remote-1')
-    html = world.signed_in(world.admin_a).get('/attendance/from-home').content.decode()
+    html = world.signed_in(world.admin_a).get('/api/v1/punch/remote', {'from': str(npt_today()), 'to': str(npt_today())}).content.decode()
     assert 'Bishnu Beta' not in html
-    html = world.signed_in(world.admin_b).get('/attendance/from-home').content.decode()
+    html = world.signed_in(world.admin_b).get('/api/v1/punch/remote', {'from': str(npt_today()), 'to': str(npt_today())}).content.decode()
     assert 'Bishnu Beta' in html
+

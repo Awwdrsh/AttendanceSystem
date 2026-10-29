@@ -9,7 +9,7 @@ from django.test import Client
 from django.test.utils import CaptureQueriesContext
 
 from hajiri.db.models import Device, DeviceCommand, DeviceUserMap, Employee, PunchEvent
-from tests.web.factories import htmx, sign_in
+from tests.web.factories import sign_in
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ def _add_terminals(company_id, emp_id, n, tag):
 
 def _count(client, path):
     with CaptureQueriesContext(connection) as ctx:
-        r = client.get(path, **htmx())
+        r = client.get(path)
     assert r.status_code == 200, path
     return len(ctx.captured_queries)
 
@@ -46,8 +46,8 @@ def test_list_pages_do_not_grow_queries_with_rows(demo, hr):
     emp = Employee.objects.get(pk=demo['sita'])
     _add_terminals(emp.company_id, emp.id, 1, 'A')
     dev_id = str(Device.objects.get(serial_no='A-0').id)
-    paths = ['/settings/devices', '/settings/devices?tab=unmapped', f'/_/devices/{dev_id}',
-             f'/_/devices/{dev_id}/commands', f'/_/devices/{dev_id}/mappings', '/overview']
+    paths = ['/api/v1/devices', '/api/v1/devices/punches/unmapped', f'/api/v1/devices/{dev_id}/commands',
+             f'/api/v1/devices/{dev_id}/mappings', '/api/v1/dashboard/executive']
     for p in paths:      # the first request of a session loads per-session things once
         _count(c, p)
     before = {p: _count(c, p) for p in paths}

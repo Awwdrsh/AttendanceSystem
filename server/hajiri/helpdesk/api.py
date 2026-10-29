@@ -1,97 +1,166 @@
 """
-Help desk JSON API for Bearer-token clients (the TS routes under /api/v1/helpdesk). DRF views with the project
-defaults (hajiri.core.api): HajiriAuthentication, IsSignedIn, the TS error shape and JsonRenderer. Each view adds the
-feature switch and, where the TS route did, a role. Rules and validation stay in services.py.
+Help desk JSON API: the TS routes under /api/v1/helpdesk (apps/api/src/modules/helpdesk/routes.ts), which the React
+app calls with the cookie session. Same paths, methods, bodies, JSON shapes and status codes. DRF views with
+hajiri.core.api's SameOriginAuthentication (cookie + Origin check, no CSRF token), IsSignedIn, the TS error shape and JsonRenderer. The
+feature switch is checked before any role (featureGate was mounted ahead of the routes' requireRole). Rules and
+validation stay in services.py.
 """
 from __future__ import annotations
 
-from drf_spectacular.utils import extend_schema
-from rest_framework import status, viewsets
-from rest_framework.decorators import action
+from drf_spectacular.utils import OpenApiParameter, extend_schema
+from rest_framework import status
+from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from hajiri.core.api import FeatureEnabled, HasRole, IsSignedIn, Pagination
-from hajiri.core.validation import plain
+from hajiri.core.api import FeatureEnabled, HasRole, IsSignedIn, SameOriginAuthentication
+from hajiri.files.store import stored_file_response
 
 from . import services
-from .serializers import (
-    CategoryIn, CategoryOut, CreatedTicketOut, MessageIn, PatchIn, QueueQueryIn, RateIn, TicketIn, TicketOut,
-)
+from .serializers import CategoryIn, MessageIn, PatchIn, PolicyIn, QueueQueryIn, RateIn, TicketIn
+
+FEATURE = FeatureEnabled('helpdesk')
+HR = HasRole('hr')
+# The React app sends the session cookie with fetch() and no CSRF token (as against the TS API, whose
+# sameOriginGuard checked the Origin): the default HajiriAuthentication would refuse its POST/PUT/PATCH.
+AUTH = [SameOriginAuthentication]
 
 
-class HelpdeskViewSet(viewsets.ViewSet):
-    """/api/v1/helpdesk/tickets[...]: raise, list, read and work tickets."""
-    permission_classes = [IsSignedIn, FeatureEnabled('helpdesk')]
-    lookup_value_regex = '[0-9a-fA-F-]{36}'
+class _View(APIView):
+    authentication_classes = AUTH
+    permission_classes = [IsSignedIn, FEATURE]
 
-    @extend_schema(request=None, parameters=[QueueQueryIn], responses=TicketOut(many=True))
-    def list(self, request):
-        """The queue (HR: every ticket; owners and assignees: theirs), paginated: ?page=&pageSize=."""
-        rows = services.ticket_values(services.queue_queryset(request.user, request.query_params.dict()))
-        paginator = Pagination()
-        page = paginator.paginate_queryset(rows, request, view=self)
-        return paginator.get_paginated_response([plain(r) for r in page])
 
-    @extend_schema(request=TicketIn, responses={201: CreatedTicketOut})
-    def create(self, request):
-        return Response(services.create_ticket(request.user, request.data), status=status.HTTP_201_CREATED)
+class _HrView(APIView):
+    authentication_classes = AUTH
+    permission_classes = [IsSignedIn, FEATURE, HR]
+
+
+def _created(data) -> Response:
+    return Response(data, status=status.HTTP_201_CREATED)
+
+
+# ---------------------------------------------------------------- settings and categories
+
+class SettingsView(_View):
+    """GET /helpdesk/settings (everyone) -> {policy}; PUT (HR) -> {policy}."""
 
     @extend_schema(responses=dict)
-    def retrieve(self, request, pk=None):
-        return Response(services.ticket_detail(request.user, pk))
+    def get(self, request):
+        return Response(services.get_settings(request.user))
 
-    @extend_schema(request=PatchIn, responses=dict)
-    def partial_update(self, request, pk=None):
-        return Response(services.update_ticket(request.user, pk, request.data))
-
-    @extend_schema(responses=TicketOut(many=True))
-    @action(detail=False)
-    def mine(self, request):
-        return Response(services.my_tickets(request.user))
-
-    @extend_schema(request=MessageIn, responses={201: dict})
-    @action(detail=True, methods=['post'])
-    def messages(self, request, pk=None):
-        return Response(services.add_message(request.user, pk, request.data), status=status.HTTP_201_CREATED)
-
-    @extend_schema(request=None, responses=dict)
-    @action(detail=True, methods=['post'])
-    def reopen(self, request, pk=None):
-        return Response(services.reopen_ticket(request.user, pk))
-
-    @extend_schema(request=None, responses=dict)
-    @action(detail=True, methods=['post'])
-    def close(self, request, pk=None):
-        return Response(services.close_ticket(request.user, pk))
-
-    @extend_schema(request=RateIn, responses=dict)
-    @action(detail=True, methods=['post'])
-    def rate(self, request, pk=None):
-        return Response(services.rate_ticket(request.user, pk, request.data))
+    @extend_schema(request=PolicyIn, responses=dict)
+    def put(self, request):
+        return Response(services.put_settings(request.user, request.data))
 
 
-class CategoryViewSet(viewsets.ViewSet):
-    """/api/v1/helpdesk/categories: everyone lists the active topics; HR adds them."""
-    permission_classes = [IsSignedIn, FeatureEnabled('helpdesk')]
-    serializer_class = CategoryOut   # for the schema only; services shape the rows
+class CategoriesView(_View):
+    """GET /helpdesk/categories -> {categories}; POST (HR) -> 201 {id}."""
 
-    @extend_schema(responses=CategoryOut(many=True))
-    def list(self, request):
-        return Response(services.list_categories(request.user))
-
-    def get_permissions(self):
-        if self.action == 'create':
-            return [HasRole('hr')(), FeatureEnabled('helpdesk')()]
-        return super().get_permissions()
+    @extend_schema(operation_id='api_v1_helpdesk_categories_list', responses=dict)
+    def get(self, request):
+        return Response({'categories': services.list_categories(request.user)})
 
     @extend_schema(request=CategoryIn, responses={201: dict})
-    def create(self, request):
-        return Response(services.create_category(request.user, request.data), status=status.HTTP_201_CREATED)
+    def post(self, request):
+        return _created(services.create_category(request.user, request.data))
 
 
-class StatsViewSet(viewsets.ViewSet):
-    permission_classes = [HasRole('hr'), FeatureEnabled('helpdesk')]
+class CategoryView(_View):
+    """PUT /helpdesk/categories/:id (HR) -> {ok}."""
+
+    @extend_schema(request=CategoryIn, responses=dict)
+    def put(self, request, category_id):
+        return Response(services.update_category(request.user, category_id, request.data))
+
+
+class AgentsView(_HrView):
+    """GET /helpdesk/agents (HR) -> {agents}: people HR can assign tickets to."""
 
     @extend_schema(responses=dict)
-    def list(self, request):
+    def get(self, request):
+        return Response({'agents': services.list_agents(request.user)})
+
+
+class StatsView(_HrView):
+    """GET /helpdesk/stats (HR) -> {stats, byCategory}."""
+
+    @extend_schema(responses=dict)
+    def get(self, request):
         return Response(services.stats(request.user))
+
+
+# ---------------------------------------------------------------- tickets
+
+class TicketsView(_View):
+    """GET /helpdesk/tickets -> {tickets} (the queue, at most 500); POST -> 201 {id, number, slaDueAt}."""
+
+    @extend_schema(operation_id='api_v1_helpdesk_tickets_list', parameters=[QueueQueryIn], responses=dict)
+    def get(self, request):
+        return Response({'tickets': services.queue(request.user, request.query_params.dict())})
+
+    @extend_schema(request=TicketIn, responses={201: dict})
+    def post(self, request):
+        return _created(services.create_ticket(request.user, request.data))
+
+
+class MyTicketsView(_View):
+    """GET /helpdesk/tickets/mine -> {tickets}."""
+
+    @extend_schema(responses=dict)
+    def get(self, request):
+        return Response({'tickets': services.my_tickets(request.user)})
+
+
+class TicketView(_View):
+    """GET /helpdesk/tickets/:id -> {ticket, role, messages, files, canReopen}; PATCH (the team) -> {ok}."""
+
+    @extend_schema(responses=dict)
+    def get(self, request, ticket_id):
+        return Response(services.ticket_detail(request.user, ticket_id))
+
+    @extend_schema(request=PatchIn, responses=dict)
+    def patch(self, request, ticket_id):
+        return Response(services.update_ticket(request.user, ticket_id, request.data))
+
+
+class MessagesView(_View):
+    @extend_schema(request=MessageIn, responses={201: dict})
+    def post(self, request, ticket_id):
+        return _created(services.add_message(request.user, ticket_id, request.data))
+
+
+class ReopenView(_View):
+    @extend_schema(request=None, responses=dict)
+    def post(self, request, ticket_id):
+        return Response(services.reopen_ticket(request.user, ticket_id))
+
+
+class CloseView(_View):
+    @extend_schema(request=None, responses=dict)
+    def post(self, request, ticket_id):
+        return Response(services.close_ticket(request.user, ticket_id))
+
+
+class RateView(_View):
+    @extend_schema(request=RateIn, responses=dict)
+    def post(self, request, ticket_id):
+        return Response(services.rate_ticket(request.user, ticket_id, request.data))
+
+
+class _AnyAccept(DefaultContentNegotiation):
+    """The file answer is not rendered, so whatever the browser accepts must not end in 406."""
+
+    def select_renderer(self, request, renderers, format_suffix=None):
+        return renderers[0], renderers[0].media_type
+
+
+class TicketFileView(_View):
+    """GET /helpdesk/tickets/:id/files/:fileId[?download=1]: an attachment the user may see."""
+    content_negotiation_class = _AnyAccept
+
+    @extend_schema(parameters=[OpenApiParameter('download', str, required=False)],
+                   responses={(200, 'application/octet-stream'): bytes})
+    def get(self, request, ticket_id, file_id):
+        f = services.ticket_file(request.user, ticket_id, file_id)
+        return stored_file_response(f, download=request.query_params.get('download') == '1')

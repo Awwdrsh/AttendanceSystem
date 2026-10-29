@@ -66,6 +66,7 @@ export async function api(method, path, body, opts = {}) {
     throw new ApiError(0, 'No connection. Please check your network and try again.');
   }
   if (res.status === 401 && !path.startsWith('/auth/login')) {
+    await drain(res);
     for (const l of unauthorizedListeners) l();
     throw new ApiError(401, 'Your session has ended. Please sign in again.');
   }
@@ -89,6 +90,15 @@ export async function api(method, path, body, opts = {}) {
   return data;
 }
 
+/** Read an unused body to the end, so the browser completes the request and frees its connection. */
+async function drain(res) {
+  try {
+    await res.text();
+  } catch {
+    /* the body is not needed */
+  }
+}
+
 export const get = (path, params) => api('GET', `${path}${qs(params)}`);
 export const post = (path, body) => api('POST', path, body ?? {});
 export const put = (path, body) => api('PUT', path, body ?? {});
@@ -99,6 +109,7 @@ export const del = (path, body) => api('DELETE', path, body);
 export async function download(path, filename) {
   const res = await fetch(`/api/v1${path}`, { credentials: 'include' });
   if (res.status === 401) {
+    await drain(res);
     for (const l of unauthorizedListeners) l();
     throw new ApiError(401, 'Your session has ended. Please sign in again.');
   }

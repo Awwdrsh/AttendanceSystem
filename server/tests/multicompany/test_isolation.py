@@ -163,48 +163,12 @@ def admin_b_employee(w):
 
 # (name, method, url with {id}, maker, htmx?[, POST data])
 CASES = [
-    ('employee page', 'get', '/employees/{id}', employee, False),
-    ('employee edit', 'get', '/_/employees/{id}/edit', employee, True),
-    ('employee overview', 'get', '/_/employees/{id}/overview', employee, True),
-    ('people card', 'get', '/_/people/{id}/card', employee, True),
-    ('people history', 'get', '/_/people/{id}/history', employee, True),
-    ('leave request', 'get', '/_/leave/requests/{id}', leave_request, True),
-    ('leave type edit', 'get', '/_/leave/types/{id}/edit', leave_type, True),
-    ('payroll run page', 'get', '/payroll/runs/{id}', payroll_run, False),
-    ('payroll run input', 'post', '/_/payroll/runs/{id}/inputs/new', payroll_run, True,
-     {'employee_id': '{emp}', 'component_code': 'ALLOWANCE', 'amount': '100'}),
-    ('payroll run hold', 'get', '/_/payroll/runs/{id}/hold', payroll_run, True),
-    ('documents tab', 'get', '/_/documents/employee/{id}', admin_b_employee, True),
-    ('document edit', 'get', '/_/documents/docs/{id}/edit', document, True),
-    ('document file', 'get', '/_/documents/docs/{id}/file', document, True),
     ('document file api', 'get', '/api/v1/documents/{id}/file', document, False),
-    ('document category toggle', 'post', '/_/documents/categories/{id}/toggle', document_category, True,
-     {'key': 'active', 'value': 'on'}),
     ('letter html api', 'get', '/api/v1/documents/letters/{id}/html', letter, False),
-    ('stored file', 'get', '/_/files/{id}', stored_file, True),
-    ('hiring job edit', 'get', '/_/hiring/jobs/{id}/edit', hiring_job, True),
-    ('hiring application', 'get', '/_/hiring/applications/{id}', hiring_application, True),
-    ('expense claim', 'get', '/_/expenses/claims/{id}', expense_claim, True),
-    ('helpdesk ticket', 'get', '/_/helpdesk/tickets/{id}', helpdesk_ticket, True),
     ('helpdesk ticket api', 'get', '/api/v1/helpdesk/tickets/{id}', helpdesk_ticket, False),
-    ('task board', 'get', '/tasks/{id}', task_board, False),
-    ('task board settings', 'get', '/_/tasks/boards/{id}/settings', task_board, True),
-    ('approval flow edit', 'get', '/_/workflow/flows/{id}/edit', approval_flow, True),
-    ('workflow detail', 'get', '/_/workflow/{id}', workflow_instance, True),
     ('workflow api', 'get', '/api/v1/workflow/{id}', workflow_instance, False),
     ('leave type api', 'patch', '/api/v1/leave/types/{id}', leave_type, False),
     ('leave cancel api', 'post_json', '/api/v1/leave/requests/{id}/cancel', leave_request, False),
-    ('shift edit', 'get', '/_/shifts/{id}/edit', shift, True),
-    ('holiday edit', 'get', '/_/shifts/holidays/{id}/edit', holiday, True),
-    ('device', 'get', '/_/devices/{id}', device, True),
-    ('announcement acks', 'get', '/_/engage/announcements/{id}/acks', announcement, True),
-    ('goal', 'get', '/_/performance/goals/{id}', perf_goal, True),
-    ('kpi edit', 'get', '/_/performance/kpis/{id}/edit', perf_kpi, True),
-    ('course edit', 'get', '/_/learning/courses/{id}/edit', course, True),
-    ('lifecycle case', 'get', '/_/lifecycle/cases/{id}', lifecycle_case, True),
-    ('time project edit', 'get', '/_/timesheets/projects/{id}/edit', time_project, True),
-    ('field location edit', 'get', '/_/field/locations/{id}/edit', location, True),
-    ('user reset', 'post', '/_/home/users/{id}/reset', beta_user, True),
 ]
 
 
@@ -239,9 +203,8 @@ def test_ids_of_another_company_are_not_found(world, case):
 def test_after_switching_the_record_is_found(world):
     ticket = helpdesk_ticket(world)
     c = world.signed_in(world.admin_a)
-    assert c.get(f'/_/helpdesk/tickets/{ticket.id}', **htmx()).status_code == 404
-    c.post('/_/web/company/switch', {'company_id': str(world.beta.id)}, **htmx())
-    assert c.get(f'/_/helpdesk/tickets/{ticket.id}', **htmx()).status_code == 200
+    assert c.get(f'/api/v1/helpdesk/tickets/{ticket.id}').status_code == 404
+    c.post('/api/v1/me/companies/switch', {'companyId': str(world.beta.id)}, content_type='application/json')
     assert c.get(f'/api/v1/helpdesk/tickets/{ticket.id}').status_code == 200
 
 
@@ -249,8 +212,9 @@ def test_lists_show_only_the_active_company(world):
     helpdesk_ticket(world)
     m.Employee.objects.filter(company=world.beta).update(name_en='Zed Betaperson')
     c = world.signed_in(world.admin_a)
-    assert c.get('/api/v1/helpdesk/tickets').json()['total'] == 0
-    page = c.get('/employees')
+    assert len(c.get('/api/v1/helpdesk/tickets').json()['tickets']) == 0
+    page = c.get('/api/v1/employees')
     assert page.status_code == 200 and b'Zed Betaperson' not in page.content
-    c.post('/_/web/company/switch', {'company_id': str(world.beta.id)}, **htmx())
-    assert c.get('/api/v1/helpdesk/tickets').json()['total'] == 1
+    c.post('/api/v1/me/companies/switch', {'companyId': str(world.beta.id)}, content_type='application/json')
+    assert len(c.get('/api/v1/helpdesk/tickets').json()['tickets']) == 1
+    assert b'Zed Betaperson' in c.get('/api/v1/employees').content

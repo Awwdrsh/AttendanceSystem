@@ -1,9 +1,0 @@
-{% extends "base.html" %}
-{% block title %}Holidays · Hajiri{% endblock %}
-{% block content %}
-{% page_header "Holidays" subtitle="Pick 13 paid public holidays (14 for women) from the government list (Sec 41). Red dates are observed by everyone; outlined ones are optional or for a specific community." %}
-  <button type="button" class="hj-btn default" hx-post="{% url 'shifts:holiday_import' %}" hx-vals='{"bs_year": "2083"}' hx-swap="none"><i class="ti ti-download" aria-hidden="true"></i>Import public holidays</button>
-  <button type="button" class="hj-btn" hx-get="{% url 'shifts:holiday_new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>Add holiday</button>
-{% endpage_header %}
-{% include "shifts/partials/holidays.html" %}
-{% endblock %}

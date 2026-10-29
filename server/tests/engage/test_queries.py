@@ -7,7 +7,7 @@ from django.test.utils import CaptureQueriesContext
 
 from hajiri.db.models import Employee
 from hajiri.engage import services as S
-from tests.web.factories import htmx, make_employee, make_user
+from tests.web.factories import make_employee, make_user
 
 from .conftest import client_for
 
@@ -39,38 +39,39 @@ def _add_rows(w, n: int, tag: str) -> None:
 
 def _count(client, url: str) -> int:
     with CaptureQueriesContext(connection) as q:
-        r = client.get(url, **htmx())
+        r = client.get(url)
     assert r.status_code == 200, (url, r.status_code)
     return len(q)
 
 
-PAGES = ['/_/engage/feed', '/_/engage/celebrations', '/_/engage/leaderboard', '/_/engage/surveys',
-         '/engage/suggestions', '/_/engage/kudos/new', '/_/engage/values', '/_/engage/home']
+A = '/api/v1/engage'
+PAGES = [A + '/feed', A + '/celebrations', A + '/leaderboard', A + '/surveys', A + '/suggestions', A + '/colleagues',
+         A + '/values', A + '/home', A + '/kudos']
 
 
 def test_list_pages_cost_the_same_with_more_rows(world):
     w = world
     _add_rows(w, 2, 'a')
     hr, sita = client_for(w.hr), client_for(w.sita)
-    who = {'/engage/suggestions': hr, '/_/engage/values': hr}
+    who = {A + '/suggestions': hr, A + '/values': hr}
     for u in PAGES:  # warm up: first-use work (starter company values, cached switches) is not per row
         _count(who.get(u, sita), u)
     before = {u: _count(who.get(u, sita), u) for u in PAGES}
-    before_hr_surveys = _count(hr, '/_/engage/surveys')
+    before_hr_surveys = _count(hr, A + '/surveys/manage')
     _add_rows(w, 4, 'b')
     after = {u: _count(who.get(u, sita), u) for u in PAGES}
     assert after == before
-    assert _count(hr, '/_/engage/surveys') == before_hr_surveys
+    assert _count(hr, A + '/surveys/manage') == before_hr_surveys
 
 
 def test_confirmations_cost_the_same_with_a_larger_audience(world):
     w = world
     a = S.post_announcement(w.hr, {'title': 'Read', 'body': 'x', 'requiresAck': True})['id']
     hr = client_for(w.hr)
-    before = _count(hr, f'/_/engage/announcements/{a}/acks')
+    before = _count(hr, f'{A}/announcements/{a}/acks')
     for i in range(4):
         make_user(w.co, roles=['employee'], employee=make_employee(w.co, code=f'X{i}', name=f'Extra {i}'))
-    assert _count(hr, f'/_/engage/announcements/{a}/acks') == before
+    assert _count(hr, f'{A}/announcements/{a}/acks') == before
 
 
 def test_survey_list_counts_responses_and_questions_separately(world):

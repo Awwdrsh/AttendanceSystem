@@ -31,7 +31,7 @@ def test_shift_crud_answers_like_the_ts_routes(api, demo):
     hr = api(['hr'])
     listed = hr('get', '').json()['shifts']
     gen = next(s for s in listed if s['code'] == 'GEN')
-    assert gen['start'] == '10:00:00' and gen['crosses_midnight'] is False and gen['assigned_employees'] == 2
+    assert gen['start'] == '10:00:00' and gen['crosses_midnight'] is False and gen['assigned_employees'] == '2'
     r = hr('post', '', {'code': 'NIGHT', 'nameEn': 'Night', 'start': '22:00', 'end': '06:00'})
     assert r.status_code == 201
     sid = r.json()['id']
@@ -109,3 +109,23 @@ def test_calendar_roster_and_assign(api, demo):
     spans = sorted((a.valid.lower, a.valid.upper) for a in ShiftAssignment.objects.filter(employee_id=demo['sita']))
     assert spans[-1][0].isoformat() == '2027-01-01' and spans[-1][1] is None and spans[-2][1].isoformat() == '2027-01-01'
     assert api(['employee'])('get', '/roster', **{'from': '2026-11-01', 'to': '2026-11-07'}).status_code == 403
+
+
+def test_one_persons_calendar_shows_only_the_holidays_that_apply_to_them(api, demo):
+    from hajiri.db.models import Branch, Employee
+    Employee.objects.filter(pk=demo['sita']).update(gender='male')
+    other = Branch.objects.create(company_id=demo['company_id'], code='PKR', name_en='Pokhara')
+    for day, name, scope, optional, branch in (('2026-11-02', 'Everyone', 'all', False, None),
+                                                ('2026-11-03', 'Women only', 'female', False, None),
+                                                ('2026-11-04', 'Pokhara only', 'all', False, other.id),
+                                                ('2026-11-05', 'Their branch', 'all', False, demo['branch_id']),
+                                                ('2026-11-06', 'Optional', 'all', True, None)):
+        Holiday.objects.create(company_id=demo['company_id'], local_date=day, name_en=name, gender_scope=scope,
+                               optional=optional, branch_id=branch)
+    own = api(['employee'], demo['sita'])('get', '/calendar', **{'from': '2026-11-02', 'to': '2026-11-06',
+                                                                   'employeeId': demo['sita']}).json()['days']
+    shown = {h['name_en']: h['optional'] for d in own for h in d['holidays']}
+    assert shown == {'Everyone': False, 'Their branch': False, 'Optional': True}
+    # The company calendar (no employee) still lists every holiday, for HR.
+    hr = api(['hr'])('get', '/calendar', **{'from': '2026-11-02', 'to': '2026-11-06'}).json()['days']
+    assert sum(len(d['holidays']) for d in hr) == 5

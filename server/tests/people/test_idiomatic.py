@@ -8,7 +8,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from hajiri.core.errors import ValidationError
 from hajiri.employees.service import parse_csv
 from hajiri.people import service as ppl
-from tests.web.factories import htmx, sign_in
+from tests.web.factories import sign_in
 
 
 def test_strict_bodies_refuse_unknown_keys(world):
@@ -33,22 +33,6 @@ def test_profile_sections_keep_the_ts_messages(world):
     with pytest.raises(ValidationError) as e:
         ppl.save_section(world.hr, world.sita_id, 'contact', {'personalPhone': 'call me'})
     assert e.value.issues == [{'path': 'personalPhone', 'message': 'phone number'}]
-
-
-def test_a_large_photo_is_stored_as_a_320_px_jpeg(world):
-    from PIL import Image
-
-    from hajiri.files.store import read_file
-    from django.test import Client
-    buf = io.BytesIO()
-    Image.new('RGB', (1200, 800), (200, 30, 30)).save(buf, 'PNG')
-    c = Client()
-    sign_in(c, world.sita)
-    r = c.post('/_/people/me/avatar', {'file': SimpleUploadedFile('me.png', buf.getvalue(), content_type='image/png')}, **htmx())
-    assert r.status_code == 200
-    f = ppl.avatar_file(world.sita, world.sita_id)
-    img = Image.open(io.BytesIO(read_file(str(world.company.id), f['id'])['data']))
-    assert img.format == 'JPEG' and img.size == (320, 320)
 
 
 def test_csv_import_reads_quotes_and_crlf():

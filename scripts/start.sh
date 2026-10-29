@@ -30,6 +30,9 @@ step "Migrations"
 manage migrate --noinput >/dev/null
 ok "schema up to date"
 
+step "Web app"
+check_frontend_build
+
 for port in "$WEB_PORT" "$GW_PORT"; do
   if curl -fs "http://localhost:$port/health" >/dev/null 2>&1; then
     fail "port $port is already serving Hajiri (an earlier start). Stop it first, or set PORT in server/.env / server/gateway.env."

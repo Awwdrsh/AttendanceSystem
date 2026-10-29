@@ -5,8 +5,6 @@ throttle on failed sign-ins, the session cookie set as well as the token returne
 """
 from __future__ import annotations
 
-from urllib.parse import urlparse
-
 from django.conf import settings
 from django.core.cache import cache
 from drf_spectacular.extensions import OpenApiAuthenticationExtension
@@ -17,12 +15,11 @@ from rest_framework.decorators import api_view, authentication_classes, permissi
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
-from hajiri.core import auth
-from hajiri.core.api import HajiriAuthentication, SignedInAnyState
+from hajiri.core import auth, users
+from hajiri.core.api import HasRole, IsSignedIn, SameOriginAuthentication, SignedInAnyState, same_origin  # noqa: F401
 from hajiri.core.crypto import password_policy_error
-from hajiri.core.errors import BadRequestError, ForbiddenError, HttpError, TooManyRequestsError
-from hajiri.core.cors import cors_origins
-from hajiri.core.validation import validate
+from hajiri.core.errors import BadRequestError, HttpError, TooManyRequestsError
+from hajiri.core.validation import parse_uuid, validate
 
 MAX_FAILURES_PER_IP = 30
 _WINDOW = 15 * 60
@@ -87,28 +84,9 @@ class ChangePasswordIn(serializers.Serializer):
     newPassword = serializers.CharField(max_length=256, allow_blank=True, trim_whitespace=False)
 
 
-def same_origin(request, allowed: tuple[str, ...] = ()) -> bool:
-    """A state-changing request carried by the session cookie must come from this site's own origin or a configured
-    CORS origin (the TS sameOriginGuard); Bearer requests and reads always pass."""
-    if request.method in ('GET', 'HEAD', 'OPTIONS'):
-        return True
-    origin = request.headers.get('Origin')
-    if not origin or origin == 'null':
-        ref = request.headers.get('Referer')
-        if not ref:
-            return origin != 'null'
-        u = urlparse(ref)
-        origin = f'{u.scheme}://{u.netloc}'
-    return origin == f'{request.scheme}://{request.get_host()}' or origin in allowed
-
-
-class OriginCheckedAuthentication(HajiriAuthentication):
+class OriginCheckedAuthentication(SameOriginAuthentication):
     """The session cookie or a Bearer token, with the TS API's Origin check for cookie requests instead of a CSRF
     token: these endpoints serve JSON clients on other origins (CORS_ORIGINS) that never see the CSRF cookie."""
-
-    def enforce_csrf(self, request):
-        if not same_origin(request, cors_origins()):
-            raise ForbiddenError('cross-site request refused')
 
 
 AUTH = [OriginCheckedAuthentication]
@@ -193,3 +171,149 @@ def change_password(request):
     res = Response({'ok': True})
     res.delete_cookie(auth.SESSION_COOKIE, path='/')
     return res
+
+
+# ---------------------------------------------------------------- two-step sign-in (self)
+# Like the TS routes these work before the password-change and two-step gates (SignedInAnyState), so a person who
+# must set it up can do so.
+
+class TwoFactorCodeIn(serializers.Serializer):
+    code = serializers.CharField(min_length=6, max_length=10)
+
+
+class RecoveryCodesIn(serializers.Serializer):
+    code = serializers.CharField(min_length=6, max_length=20)
+
+
+class DisableTwoFactorIn(serializers.Serializer):
+    password = serializers.CharField(min_length=1, max_length=128, trim_whitespace=False)
+    code = serializers.CharField(min_length=6, max_length=20)
+
+
+class ResetTwoFactorIn(serializers.Serializer):
+    reason = serializers.CharField(min_length=3, max_length=300)
+
+
+def _status_json(s: auth.TwoFactorStatus) -> dict:
+    return {'enabled': s.enabled, 'enabledAt': s.enabled_at, 'recoveryCodesLeft': s.recovery_codes_left,
+            'required': s.required, 'setupPending': s.setup_pending}
+
+
+@extend_schema(responses=OpenApiTypes.OBJECT, summary='Two-step sign-in status')
+@api_view(['GET'])
+@authentication_classes(AUTH)
+@permission_classes([SignedInAnyState])
+def two_factor(request):
+    return Response(_status_json(auth.two_factor_status(request.user)))
+
+
+@extend_schema(request=None, responses=OpenApiTypes.OBJECT, summary='Start setting up two-step sign-in')
+@api_view(['POST'])
+@authentication_classes(AUTH)
+@permission_classes([SignedInAnyState])
+def two_factor_setup(request):
+    if request.user.must_change_password:
+        raise BadRequestError('choose a new password first')
+    s = auth.begin_setup(request.user)
+    return Response({'secret': s['secret'], 'otpauthUri': s['otpauth_uri']})
+
+
+@extend_schema(request=TwoFactorCodeIn, responses=OpenApiTypes.OBJECT, summary='Turn two-step sign-in on')
+@api_view(['POST'])
+@authentication_classes(AUTH)
+@permission_classes([SignedInAnyState])
+def two_factor_enable(request):
+    b = validate(TwoFactorCodeIn, request.data)
+    codes = auth.confirm_setup(request.user, b['code'])
+    from hajiri.core.crypto import sha256_hex
+    from hajiri.db.models import Session
+    # The current session has just proved the second factor; sessions opened before it existed may be someone else's.
+    if request.auth:
+        Session.objects.filter(token_hash=sha256_hex(request.auth)).update(two_factor=True)
+    auth.revoke_other_sessions(request.user.id, request.auth)
+    return Response({'recoveryCodes': codes})
+
+
+@extend_schema(request=RecoveryCodesIn, responses=OpenApiTypes.OBJECT, summary='New recovery codes')
+@api_view(['POST'])
+@authentication_classes(AUTH)
+@permission_classes([SignedInAnyState])
+def two_factor_recovery_codes(request):
+    b = validate(RecoveryCodesIn, request.data)
+    return Response({'recoveryCodes': auth.regenerate_recovery_codes(request.user, b['code'])})
+
+
+@extend_schema(request=DisableTwoFactorIn, responses=OpenApiTypes.OBJECT, summary='Turn two-step sign-in off')
+@api_view(['POST'])
+@authentication_classes(AUTH)
+@permission_classes([SignedInAnyState])
+def two_factor_disable(request):
+    b = validate(DisableTwoFactorIn, request.data)
+    auth.disable_two_factor(request.user, b['password'], b['code'])
+    return Response({'ok': True})
+
+
+# ---------------------------------------------------------------- my sessions
+
+def _session_json(s: auth.SessionInfo) -> dict:
+    return {'id': s.id, 'createdAt': s.created_at, 'lastSeenAt': s.last_seen_at, 'expiresAt': s.expires_at, 'ip': s.ip,
+            'device': s.device, 'twoFactor': s.two_factor, 'current': s.current}
+
+
+@extend_schema(responses=OpenApiTypes.OBJECT, summary='My signed-in sessions')
+@api_view(['GET'])
+@authentication_classes(AUTH)
+@permission_classes([SignedInAnyState])
+def sessions(request):
+    return Response({'sessions': [_session_json(s) for s in auth.list_sessions(request.user.id, request.auth)]})
+
+
+@extend_schema(request=None, responses=OpenApiTypes.OBJECT, summary='Sign out every other session')
+@api_view(['POST'])
+@authentication_classes(AUTH)
+@permission_classes([SignedInAnyState])
+def sessions_revoke_others(request):
+    return Response({'revoked': auth.revoke_other_sessions(request.user.id, request.auth)})
+
+
+@extend_schema(request=None, responses=OpenApiTypes.OBJECT, summary='Sign out one other session')
+@api_view(['DELETE'])
+@authentication_classes(AUTH)
+@permission_classes([SignedInAnyState])
+def session_revoke(request, session_id):
+    auth.revoke_session(request.user.id, parse_uuid(session_id), request.auth)
+    return Response({'ok': True})
+
+
+# ---------------------------------------------------------------- account administration
+# Needs a real (not temporary) password and two-step sign-in set up when required: HasRole builds on IsSignedIn.
+
+@extend_schema(request=ResetTwoFactorIn, responses=OpenApiTypes.OBJECT, summary="Reset someone's two-step sign-in (admin)")
+@api_view(['POST'])
+@authentication_classes(AUTH)
+@permission_classes([HasRole('admin')])
+def user_two_factor_reset(request, user_id):
+    target = parse_uuid(user_id)
+    b = validate(ResetTwoFactorIn, request.data)
+    auth.admin_reset_two_factor(request.user, target, b['reason'])
+    return Response({'ok': True})
+
+
+@extend_schema(methods=['GET'], responses=OpenApiTypes.OBJECT, summary='Users of the company (HR)')
+@extend_schema(methods=['POST'], request=users.CreateUserIn, responses={201: OpenApiTypes.OBJECT}, summary='Create a user (admin)')
+@api_view(['GET', 'POST'])
+@authentication_classes(AUTH)
+@permission_classes([IsSignedIn])
+def user_list(request):
+    # The services check the role: listing is for HR (and admin), creating for admin.
+    if request.method == 'POST':
+        return Response({'user': user_json(users.admin_create_user(request.user, request.data))}, status=201)
+    return Response({'users': users.list_users(request.user)})
+
+
+@extend_schema(request=users.UpdateUserIn, responses=OpenApiTypes.OBJECT, summary='Change roles, status or employee link (admin)')
+@api_view(['PATCH'])
+@authentication_classes(AUTH)
+@permission_classes([HasRole('admin')])
+def user_detail(request, user_id):
+    return Response({'user': users.admin_update_user(request.user, parse_uuid(user_id), request.data)})

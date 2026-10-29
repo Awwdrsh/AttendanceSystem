@@ -217,6 +217,29 @@ CSV = ('emp_code,date_bs,in_time,out_time,note\nE001,2083-06-01,9:58,18:05,devic
        'E999,2083-06-01,10:00,18:00,\nE001,2083-13-01,10:00,,\nE001,2083-06-01,10:00,18:00,dup\n')
 
 
+def test_an_upload_that_fails_part_way_leaves_nothing_behind(demo, x, monkeypatch):
+    import hajiri.attendance_tools.services as tools
+    real, calls = tools.recompute_for_punch, []
+
+    def fails_on_the_second_day(*a, **kw):
+        calls.append(a)
+        if len(calls) == 2:
+            raise RuntimeError('database went away')
+        return real(*a, **kw)
+
+    monkeypatch.setattr(tools, 'recompute_for_punch', fails_on_the_second_day)
+    good = 'emp_code,date_bs,in_time,out_time,note\nE001,2083-06-01,9:58,18:05,\nE002,2083-06-01,10:02,18:00,\n'
+    with pytest.raises(RuntimeError):
+        post(x['hr'], '/attendance-tools/upload/import', {'csv': good, 'reason': 'device outage'})
+    # The first row's punches and day were written before the failure; all of it is rolled back.
+    assert one("SELECT count(*) AS n FROM punch_event WHERE local_date = '2026-09-17' AND source = 'manual'")['n'] == 0
+    assert one('SELECT count(*) AS n FROM attendance_upload')['n'] == 0
+    # A retry imports everything, nothing counted as a duplicate.
+    monkeypatch.setattr(tools, 'recompute_for_punch', real)
+    r = post(x['hr'], '/attendance-tools/upload/import', {'csv': good, 'reason': 'device outage'})
+    assert r.status == 201 and (r.body['punches'], r.body['duplicates'], r.body['days']) == (4, 0, 2)
+
+
 def test_manual_attendance_upload(demo, x):
     hr, ram = x['hr'], x['ram']
     # checks every row first and reports errors per line; only HR

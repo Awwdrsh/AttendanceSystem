@@ -1,4 +1,4 @@
-"""Groups of companies: every devices, biometrics and Overview page and service sees only the ACTIVE company. A Beta
+"""Groups of companies: every devices, biometrics and Overview endpoint and service sees only the ACTIVE company. A Beta
 record is 'not found' for the outsider (Gamma's admin) and for Alpha's group admin while they work in Alpha; Beta's
 own admin, or the group admin after switching to Beta, gets it."""
 from datetime import date, datetime, timezone
@@ -12,7 +12,7 @@ from hajiri.db.models import BiometricTemplate, ConsentRecord, Device, DeviceCom
 from hajiri.devices import biometrics as bio
 from hajiri.devices import services as dev
 from tests.multicompany.conftest import world  # noqa: F401  (the shared fixture)
-from tests.web.factories import htmx, make_employee
+from tests.web.factories import make_employee
 
 
 @pytest.fixture
@@ -37,64 +37,19 @@ def beta_kit(world):  # noqa: F811
 
 def _gets(k):
     e = k['emp']
-    return [f"/_/devices/{k['device']}", f"/_/devices/{k['device']}/commands", f"/_/devices/{k['device']}/mappings",
-            f"/_/devices/{k['device']}/activate", f"/_/devices/map?device={k['device']}&pin=5",
-            f'/_/devices/biometrics/consents?employeeId={e}', f'/_/devices/biometrics/templates?employeeId={e}',
-            f'/_/devices/biometrics/dsar?employeeId={e}']
+    return [f"/api/v1/devices/{k['device']}/commands", f"/api/v1/devices/{k['device']}/mappings",
+            f'/api/v1/biometrics/consent?employeeId={e}', f'/api/v1/biometrics/templates?employeeId={e}',
+            f'/api/v1/biometrics/dsar?employeeId={e}']
 
 
 def _posts(k):
-    return [(f"/_/devices/{k['device']}/disable", {}), (f"/_/devices/{k['hik']}/key", {}),
-            (f"/_/devices/{k['device']}/sync-users", {}), (f"/_/devices/{k['device']}/command", {'command': 'INFO'}),
-            (f"/_/devices/{k['device']}/activate", {'name': 'Taken'}),
-            (f"/_/devices/biometrics/consent/{k['consent']}/revoke", {}),
-            (f"/_/devices/biometrics/templates/{k['template']}/shred", {}),
-            (f"/_/devices/biometrics/employees/{k['emp']}/shred-all", {})]
-
-
-def test_beta_records_are_not_found_from_alpha_and_from_outside(world, beta_kit):  # noqa: F811
-    for person, company in ((world.admin_c, None), (world.admin_a, world.alpha), (world.ghr, world.alpha)):
-        c = world.signed_in(person, company)
-        for path in _gets(beta_kit):
-            assert c.get(path, **htmx()).status_code == 404, (person.email, path)
-        for path, data in _posts(beta_kit):
-            assert c.post(path, data, **htmx()).status_code == 404, (person.email, path)
-        # A Beta employee cannot be given a PIN on an Alpha terminal either.
-        alpha_dev = Device.objects.create(company_id=world.alpha.id if company else world.gamma.id,
-                                          serial_no=f'X-{person.email}', vendor='zkteco', protocol='adms', status='active')
-        r = c.post('/_/devices/map', {'device_id': str(alpha_dev.id), 'pin': '5', 'employee_id': beta_kit['emp'],
-                                      'valid_from': '2026-09-01'}, **htmx())
-        assert r.status_code == 404, person.email
-    # Nothing was changed.
-    assert Device.objects.get(pk=beta_kit['device']).status == 'active'
-    assert BiometricTemplate.objects.get(pk=beta_kit['template']).shredded_at is None
-    assert ConsentRecord.objects.get(pk=beta_kit['consent']).revoked_at is None
-    assert DeviceCommand.objects.filter(device_id=beta_kit['device']).count() == 1
-
-
-def test_beta_admin_and_the_group_admin_after_switching_see_the_beta_records(world, beta_kit):  # noqa: F811
-    for person in (world.admin_b, world.admin_a):
-        c = world.signed_in(person, world.beta)
-        for path in _gets(beta_kit):
-            assert c.get(path, **htmx()).status_code == 200, (person.email, path)
-
-
-def test_lists_show_only_the_active_companys_terminals_and_punches(world, beta_kit):  # noqa: F811
-    Device.objects.create(company=world.alpha, serial_no='ALPHA-ZK-1', vendor='zkteco', protocol='adms', status='active')
-    in_alpha = world.signed_in(world.admin_a, world.alpha).get('/settings/devices').content.decode()
-    assert 'ALPHA-ZK-1' in in_alpha and 'BETA-ZK-1' not in in_alpha and '909' not in in_alpha
-    in_beta = world.signed_in(world.admin_a, world.beta).get('/settings/devices').content.decode()
-    assert 'BETA-ZK-1' in in_beta and 'ALPHA-ZK-1' not in in_beta and '909' in in_beta
-
-    _, alpha_user = world.session(world.admin_a, world.alpha)
-    _, beta_user = world.session(world.admin_a, world.beta)
-    assert {d['serial_no'] for d in dev.list_devices(alpha_user)} == {'ALPHA-ZK-1'}
-    assert dev.unmapped_punches(alpha_user) == [] and [p['device_user_pin'] for p in dev.unmapped_punches(beta_user)] == ['909']
-    assert dev.mappings(alpha_user, beta_kit['device']) == [] and len(dev.mappings(beta_user, beta_kit['device'])) == 1
-    assert bio.stats(alpha_user) == [] and bio.stats(beta_user) == [{'modality': 'face', 'active': 1, 'shredded': 0, 'unmapped': 0}]
-    with pytest.raises(NotFoundError):
-        bio.templates(alpha_user, {'employeeId': beta_kit['emp']})
-    assert len(bio.templates(beta_user, {'employeeId': beta_kit['emp']})) == 1
+    return [(f"/api/v1/devices/{k['device']}/disable", {}), (f"/api/v1/devices/{k['hik']}/key", {}),
+(f"/api/v1/devices/{k['device']}/commands", {'command': 'INFO'}),
+            (f"/api/v1/devices/{k['device']}/activate", {'name': 'Taken'}),
+            (f"/api/v1/devices/{k['device']}/map", {'pin': '6', 'employeeId': k['emp'], 'from': '2026-09-01'}),
+            (f"/api/v1/biometrics/consent/{k['consent']}/revoke", {}),
+            (f"/api/v1/biometrics/templates/{k['template']}/shred", {}),
+            (f"/api/v1/biometrics/employees/{k['emp']}/shred-all", {})]
 
 
 def test_an_unclaimed_terminal_is_offered_to_each_company_until_one_activates_it(world):  # noqa: F811
@@ -109,6 +64,61 @@ def test_an_unclaimed_terminal_is_offered_to_each_company_until_one_activates_it
     assert str(Device.objects.get(pk=pending.id).company_id) == str(world.alpha.id)
 
 
+def test_beta_records_are_not_found_from_alpha_and_from_outside(world, beta_kit):  # noqa: F811
+    for person, company in ((world.admin_c, None), (world.admin_a, world.alpha), (world.ghr, world.alpha)):
+        c = world.signed_in(person, company)
+        for path in _gets(beta_kit):
+            r = c.get(path)
+            # As in the old API, a device's command and PIN lists are filtered by company: empty, not 404.
+            assert r.status_code == 404 or (r.status_code == 200 and not any(r.json().values())), (person.email, path)
+        for path, data in _posts(beta_kit):
+            assert c.post(path, data, content_type='application/json').status_code == 404, (person.email, path)
+        # As in the old API, syncing another company's terminal finds no mappings and queues nothing.
+        r = c.post(f"/api/v1/devices/{beta_kit['device']}/sync-users", {}, content_type='application/json')
+        assert r.status_code == 200 and r.json() == {'queued': 0}, person.email
+        # A Beta employee cannot be given a PIN on an Alpha terminal either.
+        alpha_dev = Device.objects.create(company_id=world.alpha.id if company else world.gamma.id,
+                                          serial_no=f'X-{person.email}', vendor='zkteco', protocol='adms', status='active')
+        r = c.post(f'/api/v1/devices/{alpha_dev.id}/map', {'pin': '5', 'employeeId': beta_kit['emp'], 'from': '2026-09-01'},
+                   content_type='application/json')
+        assert r.status_code == 404, person.email
+    # Nothing was changed.
+    assert Device.objects.get(pk=beta_kit['device']).status == 'active'
+    assert BiometricTemplate.objects.get(pk=beta_kit['template']).shredded_at is None
+    assert ConsentRecord.objects.get(pk=beta_kit['consent']).revoked_at is None
+    assert DeviceCommand.objects.filter(device_id=beta_kit['device']).count() == 1
+
+
+def test_beta_admin_and_the_group_admin_after_switching_see_the_beta_records(world, beta_kit):  # noqa: F811
+    for person in (world.admin_b, world.admin_a):
+        c = world.signed_in(person, world.beta)
+        for path in _gets(beta_kit):
+            r = c.get(path)
+            assert r.status_code == 200 and any(r.json().values()), (person.email, path)
+
+
+def test_lists_show_only_the_active_companys_terminals_and_punches(world, beta_kit):  # noqa: F811
+    Device.objects.create(company=world.alpha, serial_no='ALPHA-ZK-1', vendor='zkteco', protocol='adms', status='active')
+    def listed(c):
+        serials = {d['serial_no'] for d in c.get('/api/v1/devices').json()['devices']}
+        pins = {p['device_user_pin'] for p in c.get('/api/v1/devices/punches/unmapped').json()['punches']}
+        return serials, pins
+    serials, pins = listed(world.signed_in(world.admin_a, world.alpha))
+    assert 'ALPHA-ZK-1' in serials and 'BETA-ZK-1' not in serials and pins == set()
+    serials, pins = listed(world.signed_in(world.admin_a, world.beta))
+    assert 'BETA-ZK-1' in serials and 'ALPHA-ZK-1' not in serials and pins == {'909'}
+
+    _, alpha_user = world.session(world.admin_a, world.alpha)
+    _, beta_user = world.session(world.admin_a, world.beta)
+    assert {d['serial_no'] for d in dev.list_devices(alpha_user)} == {'ALPHA-ZK-1'}
+    assert dev.unmapped_punches(alpha_user) == [] and [p['device_user_pin'] for p in dev.unmapped_punches(beta_user)] == ['909']
+    assert dev.mappings(alpha_user, beta_kit['device']) == [] and len(dev.mappings(beta_user, beta_kit['device'])) == 1
+    assert bio.stats(alpha_user) == [] and bio.stats(beta_user) == [{'modality': 'face', 'active': 1, 'shredded': 0, 'unmapped': 0}]
+    with pytest.raises(NotFoundError):
+        bio.templates(alpha_user, {'employeeId': beta_kit['emp']})
+    assert len(bio.templates(beta_user, {'employeeId': beta_kit['emp']})) == 1
+
+
 def test_the_overview_counts_only_the_active_company(world, beta_kit):  # noqa: F811
     make_employee(world.beta, name='Second Beta')
     _, exec_alpha = world.session(world.gexec, world.alpha)
@@ -120,6 +130,8 @@ def test_the_overview_counts_only_the_active_company(world, beta_kit):  # noqa: 
     beta_attention = {n['kind'] for n in dash.executive(exec_beta)['needsAttention']}
     assert 'unmapped_punches' not in alpha_attention and 'device_offline' not in alpha_attention
     assert {'unmapped_punches', 'device_offline'} <= beta_attention
-    body = world.signed_in(world.gexec, world.beta).get('/overview').content.decode()
-    assert 'Beta gate is offline' in body
-    assert 'Beta gate is offline' not in world.signed_in(world.gexec, world.alpha).get('/overview').content.decode()
+    def labels(c):
+        return {n['label'] for n in c.get('/api/v1/dashboard/executive').json()['needsAttention']}
+    assert 'Beta gate is offline' in labels(world.signed_in(world.gexec, world.beta))
+    assert 'Beta gate is offline' not in labels(world.signed_in(world.gexec, world.alpha))
+

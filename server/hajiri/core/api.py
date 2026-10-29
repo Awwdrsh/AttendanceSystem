@@ -127,6 +127,34 @@ class HajiriAuthentication(BaseAuthentication):
         return 'Bearer'
 
 
+def same_origin(request, allowed: tuple[str, ...] = ()) -> bool:
+    """The TS sameOriginGuard: a state-changing request carried by the session cookie must come from this site's own
+    origin or a configured CORS origin (Origin header, else Referer; a request with neither passes, `Origin: null`
+    does not). Reads always pass."""
+    from urllib.parse import urlparse
+    if request.method in ('GET', 'HEAD', 'OPTIONS'):
+        return True
+    origin = request.headers.get('Origin')
+    if not origin or origin == 'null':
+        ref = request.headers.get('Referer')
+        if not ref:
+            return origin != 'null'
+        u = urlparse(ref)
+        origin = f'{u.scheme}://{u.netloc}'
+    return origin == f'{request.scheme}://{request.get_host()}' or origin in allowed
+
+
+class SameOriginAuthentication(HajiriAuthentication):
+    """The session cookie or a Bearer token, with the TS API's Origin check for cookie requests instead of Django's
+    CSRF token. The React app (frontend/src/api/client.js) sends the cookie with fetch() and never reads a CSRF
+    cookie, exactly as it did against the TS API, so its JSON endpoints authenticate with this class."""
+
+    def enforce_csrf(self, request):
+        from .cors import cors_origins
+        if not same_origin(request, cors_origins()):
+            raise ForbiddenError(CSRF_REFUSED)
+
+
 # ---------------------------------------------------------------- permissions
 
 def _user(request):
@@ -276,6 +304,14 @@ try:
     class HajiriAuthenticationScheme(OpenApiAuthenticationExtension):
         target_class = 'hajiri.core.api.HajiriAuthentication'
         name = ['session', 'bearer']
+
+        def get_security_definition(self, auto_schema):
+            return [{'type': 'apiKey', 'in': 'cookie', 'name': SESSION_COOKIE},
+                    {'type': 'http', 'scheme': 'bearer'}]
+
+    class SameOriginAuthenticationScheme(OpenApiAuthenticationExtension):
+        target_class = 'hajiri.core.api.SameOriginAuthentication'
+        name = ['sessionSameOrigin', 'bearerSameOrigin']
 
         def get_security_definition(self, auto_schema):
             return [{'type': 'apiKey', 'in': 'cookie', 'name': SESSION_COOKIE},

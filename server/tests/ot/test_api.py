@@ -1,5 +1,5 @@
 """The overtime JSON API as DRF views: validation in the TS issue shape, the register's own `format` parameter,
-sign-in and CSRF, wrong methods."""
+sign-in and the Origin check, wrong methods."""
 from __future__ import annotations
 
 from django.test import Client
@@ -47,12 +47,18 @@ def test_response_shapes(world):
     assert r['id'] == rid and r['status'] == 'pending' and r['requested_min'] == 30
 
 
-def test_sign_in_csrf_and_methods(world):
+def test_sign_in_origin_check_and_methods(world):
     assert Client().get('/api/v1/ot/slips').status_code == 401
     assert world.hr.c.delete('/api/v1/ot/slips', **bearer(world.hr.token)).status_code == 404
-    # A cookie session must carry the CSRF token; a Bearer token needs none.
+    # A cookie session (the React app, which sends no CSRF token) is checked against the Origin, as the TS
+    # sameOriginGuard did: a foreign origin is refused, the site's own origin or no Origin at all passes.
     c = browser(world.hr.token)
     c.handler.enforce_csrf_checks = True
     sid = slip(world.demo['ram'], '2026-09-26', 60)
-    assert c.post(f'/api/v1/ot/slips/{sid}/approve', '{}', content_type='application/json').status_code == 403
-    assert world.hr.post(f'/api/v1/ot/slips/{sid}/approve', {}).status_code == 200
+    r = c.post(f'/api/v1/ot/slips/{sid}/approve', '{}', content_type='application/json', HTTP_ORIGIN='https://evil.example')
+    assert r.status_code == 403 and r.json() == {'error': 'cross-site request refused'}
+    r = c.post(f'/api/v1/ot/slips/{sid}/approve', '{}', content_type='application/json', HTTP_ORIGIN='http://testserver')
+    assert r.status_code == 200 and r.json() == {'ok': True, 'approvedMin': 60}
+    # A Bearer token needs no Origin.
+    sid2 = slip(world.demo['ram'], '2026-09-27', 60)
+    assert world.hr.post(f'/api/v1/ot/slips/{sid2}/approve', {}).status_code == 200

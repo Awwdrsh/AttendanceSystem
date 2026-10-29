@@ -171,3 +171,13 @@ def test_health_and_security_headers(db, settings):
     assert "default-src 'self'" in r['Content-Security-Policy'] and "frame-ancestors 'none'" in r['Content-Security-Policy']
     assert r['X-Content-Type-Options'] == 'nosniff'
     assert 'X-Powered-By' not in r
+
+
+def test_api_answers_are_never_cached(demo, login_as):
+    """Pay, attendance and personal data must not stay in a shared computer's browser cache or a proxy."""
+    from tests.core.fixtures import bearer
+    tok = login_as(['employee'], demo['sita']).token
+    for path in ('/api/v1/auth/me', '/api/v1/punch/today', f"/api/v1/leave/balances?employeeId={demo['sita']}"):
+        r = Client().get(path, **bearer(tok))
+        assert r.status_code == 200 and r['Cache-Control'] == 'private, no-store', (path, r.get('Cache-Control'))
+    assert Client().get('/api/v1/auth/me')['Cache-Control'] == 'private, no-store'   # errors too

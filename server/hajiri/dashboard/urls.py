@@ -1,7 +1,9 @@
 from django.urls import path
 
-from . import views
+from . import api
 
 urlpatterns = [
-    path('overview', views.overview, name='overview'),
+    # JSON API (the TS routes under /api/v1/dashboard; api.py).
+    path('api/v1/dashboard/executive', api.executive, name='api_executive'),
+    path('api/v1/dashboard/me', api.me, name='api_me'),
 ]

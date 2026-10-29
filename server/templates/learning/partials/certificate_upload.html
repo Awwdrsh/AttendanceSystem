@@ -1,5 +1,0 @@
-<form class="hj-form" data-modal-title="Upload certificate" hx-post="{% url 'learning:certificate_upload' id %}" hx-swap="none">
-  <p class="hj-sm hj-muted" style="margin:0">A PDF or photo of the certificate you received, up to 4 MB. Your manager and HR can see it.</p>
-  {% file_upload "file_id" "training_certificate" label="Choose file" required=True %}
-  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit">Save</button></div>
-</form>

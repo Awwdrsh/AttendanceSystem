@@ -1,8 +1,0 @@
-<span class="hj-row" style="gap:6px" id="{{ s.dom }}-rx">
-  {% for c in s.chips %}
-  <button type="button" class="hj-btn xs {% if c.on %}light{% else %}default{% endif %}" style="border-radius:999px" aria-pressed="{% if c.on %}true{% else %}false{% endif %}"
-          aria-label="{{ c.label }}{% if c.n %}, {{ c.n }}{% endif %}" data-tip="{{ c.label }}"
-          hx-post="{% url 'engage:react' %}" hx-vals='{"target_type": "{{ s.target_type }}", "target_id": "{{ s.target_id }}", "emoji": "{{ c.key }}", "compact": "{% if s.compact %}1{% else %}0{% endif %}"}'
-          hx-target="#{{ s.dom }}-rx" hx-swap="outerHTML">{{ c.emoji }}{% if c.n %}<span class="num" style="margin-left:4px">{{ c.n }}</span>{% endif %}</button>
-  {% endfor %}
-</span>

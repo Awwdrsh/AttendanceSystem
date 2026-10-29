@@ -8,7 +8,7 @@ from hajiri.core.clock import npt_today
 from hajiri.core.errors import BadRequestError, ForbiddenError, NotFoundError
 from hajiri.core.users import company_roles, company_users, user_ids_with_role
 from hajiri.db.models import AppUser, AuditLog, CompanyMembership, Employee, GroupMember, Session
-from tests.web.factories import PW, htmx, make_employee, make_user
+from tests.web.factories import PW, make_employee, make_user
 
 
 def ids(*cos):
@@ -74,7 +74,7 @@ def test_no_access_no_switch(world, who):
         auth.switch_company(user, token, '00000000-0000-0000-0000-000000000000')
     assert auth.resolve_session(token).company_id == user.company_id
     c = world.signed_in(person)
-    assert c.post('/_/web/company/switch', {'company_id': str(target.id)}, **htmx()).status_code == 404
+    assert c.post('/api/v1/me/companies/switch', {'companyId': str(target.id)}, content_type='application/json').status_code == 404
     api = c.post('/api/v1/me/companies/switch', {'companyId': str(target.id)}, content_type='application/json')
     assert api.status_code == 404 and api.json()['error'] == 'company not found'
 

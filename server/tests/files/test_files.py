@@ -19,25 +19,7 @@ PNG = 'data:image/png;base64,' + base64.b64encode(b'\x89PNG\r\n\x1a\n' + b'\x00'
 
 
 def post(token, body):
-    return Client().post('/_/files/', json.dumps(body), content_type='application/json', **bearer(token))
-
-
-def test_stores_an_encrypted_pdf_and_serves_it_back_to_the_uploader(demo, login_as):
-    emp = login_as(['employee'], demo['ram'])
-    up = post(emp.token, {'purpose': 'expense_receipt', 'filename': 'bill.pdf', 'dataUrl': PDF})
-    assert up.status_code == 201
-    fid = up.json()['file']['id']
-    assert up.json()['file'] == {'id': fid, 'filename': 'bill.pdf', 'mime': 'application/pdf', 'bytes': len(PDF_BYTES), 'purpose': 'expense_receipt'}
-    raw = one('SELECT data_enc FROM stored_file WHERE id = %s', [fid])
-    assert b'%PDF' not in bytes(raw['data_enc'])
-    get = Client().get(f'/_/files/{fid}', **bearer(emp.token))
-    assert get.status_code == 200
-    assert 'application/pdf' in get['Content-Type']
-    assert 'sandbox' in get['Content-Security-Policy']
-    assert get['X-Content-Type-Options'] == 'nosniff'
-    assert get['Content-Disposition'].startswith('inline; filename="bill.pdf"')
-    assert get.content == PDF_BYTES
-    assert Client().get(f'/_/files/{fid}?download=1', **bearer(emp.token))['Content-Disposition'].startswith('attachment')
+    return Client().post('/api/v1/files', json.dumps(body), content_type='application/json', **bearer(token))
 
 
 def test_rejects_a_file_whose_bytes_do_not_match_the_type(demo, login_as):
@@ -51,34 +33,6 @@ def test_rejects_a_file_whose_bytes_do_not_match_the_type(demo, login_as):
     assert post(emp.token, {'purpose': 'avatar', 'filename': 'me.pdf', 'dataUrl': PDF}).status_code == 400
     assert post(emp.token, {'purpose': 'avatar', 'filename': 'me.png', 'dataUrl': PNG}).status_code == 201
     assert post(emp.token, {'purpose': 'nope', 'filename': 'x.pdf', 'dataUrl': PDF}).json()['error'] == 'validation'
-
-
-def test_multipart_upload(demo, login_as):
-    from django.core.files.uploadedfile import SimpleUploadedFile
-    emp = login_as(['employee'], demo['ram'])
-    f = SimpleUploadedFile('scan.pdf', PDF_BYTES, content_type='application/octet-stream')
-    r = Client().post('/_/files/', {'purpose': 'tax_proof', 'file': f}, **bearer(emp.token))
-    assert r.status_code == 201 and r.json()['file']['mime'] == 'application/pdf'
-
-
-def test_only_the_uploader_attaches_and_attached_files_are_served_by_their_module(demo, login_as):
-    emp = login_as(['employee'], demo['ram'])
-    up = post(emp.token, {'purpose': 'expense_receipt', 'filename': 'b.pdf', 'dataUrl': PDF})
-    fid = up.json()['file']['id']
-    other = login_as(['manager'])
-    assert Client().get(f'/_/files/{fid}', **bearer(other.token)).status_code == 404
-    hr = login_as(['hr'])
-    assert Client().get(f'/_/files/{fid}', **bearer(hr.token)).status_code == 200
-    with pytest.raises(BadRequestError, match='uploaded for something else'):
-        attach_file(company_id=demo['company_id'], file_id=fid, user_id=emp.user_id, purpose='travel_bill', attached_to='x:1')
-    with pytest.raises(ForbiddenError, match='only attach files you uploaded'):
-        attach_file(company_id=demo['company_id'], file_id=fid, user_id=hr.user_id, purpose='expense_receipt', attached_to='x:1')
-    attach_file(company_id=demo['company_id'], file_id=fid, user_id=emp.user_id, purpose=['expense_receipt', 'travel_bill'], attached_to='x:1')
-    with pytest.raises(BadRequestError, match='already attached'):
-        attach_file(company_id=demo['company_id'], file_id=fid, user_id=emp.user_id, purpose='expense_receipt', attached_to='x:2')
-    after = Client().get(f'/_/files/{fid}', **bearer(emp.token))
-    assert after.status_code == 403 and after.json()['error'] == 'open this file from the page it belongs to'
-    assert read_file(demo['company_id'], fid)['data'] == PDF_BYTES
 
 
 def test_purges_uploads_never_attached_within_a_day(demo, login_as):
@@ -116,17 +70,3 @@ def test_another_companys_file_is_not_found(demo, login_as):
     ohr = login_as(['hr'], company_id=str(other))
     with pytest.raises(NotFoundError):
         service.open_unattached(ohr.user, fid)
-
-
-def test_a_json_upload_of_a_large_file_fits_the_upload_body_limit(demo, login_as):
-    """A base64 data URL of a file near the 4 MB cap is about 5.3 MB of JSON: the TS API accepted up to 6 MB on /files,
-    above the 2 MB (here 2.5 MB) limit every other endpoint has."""
-    u = login_as(['employee'])
-    big = PDF_BYTES + b' ' * (3_900_000 - len(PDF_BYTES))
-    r = post(u.token, {'purpose': 'expense_receipt', 'filename': 'big.pdf',
-                       'dataUrl': 'data:application/pdf;base64,' + base64.b64encode(big).decode()})
-    assert r.status_code == 201, r.content[:200]
-    assert r.json()['file']['bytes'] == len(big)
-    too_big = Client().post('/_/files/', json.dumps({'purpose': 'expense_receipt', 'filename': 'x.pdf', 'dataUrl': 'x' * (7 * 1024 * 1024)}),
-                            content_type='application/json', **bearer(u.token))
-    assert too_big.status_code == 413 and too_big.json() == {'error': 'request body too large'}

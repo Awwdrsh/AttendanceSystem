@@ -1,0 +1,1 @@
+import{St as e,ot as t,yt as n}from"./createReactComponent-DKcgNbiR.js";var r=e(n(),1),i=typeof document<`u`?r.useLayoutEffect:r.useEffect;function a(e){let n=(0,r.useId)(),[a,o]=(0,r.useState)(`mantine-${n.replace(/:/g,``)}`),s=(0,r.useRef)(!1);return i(()=>{s.current||(s.current=!0,o(t()))},[]),typeof e==`string`?e:a}export{i as n,a as t};

@@ -6,6 +6,7 @@ from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from hajiri.core.api import SameOriginAuthentication
 from hajiri.core.validation import parse_uuid
 
 from . import service
@@ -13,6 +14,7 @@ from . import service
 
 class NotificationViewSet(viewsets.ViewSet):
     """GET /api/v1/notifications, POST /api/v1/notifications/read-all, POST /api/v1/notifications/<id>/read."""
+    authentication_classes = [SameOriginAuthentication]     # the React app's cookie requests: Origin check, as in TS
 
     @extend_schema(parameters=[OpenApiParameter('limit', int), OpenApiParameter('before', str),
                                OpenApiParameter('unreadOnly', bool)], responses=OpenApiTypes.OBJECT, summary='My notifications (active company)')

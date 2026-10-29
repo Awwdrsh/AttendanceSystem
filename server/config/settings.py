@@ -75,7 +75,6 @@ INSTALLED_APPS = [
     'rest_framework',
     'drf_spectacular',
     'django_filters',
-    'django_htmx',
     'django_tasks_db',
     'hajiri.db',
     'hajiri.web',
@@ -124,20 +123,18 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'hajiri.web.middleware.SecurityHeadersMiddleware',
-    # Serves /static/ itself (inside the security headers), so a single-machine install needs no web server in front.
+    # Serves /static/ and the React build itself (inside the security headers), so a single-machine install needs no
+    # web server in front.
     'hajiri.web.middleware.StaticFilesMiddleware',
     'django.middleware.common.CommonMiddleware',
-    'django_htmx.middleware.HtmxMiddleware',
-    # CORS for /api/ (CORS_ORIGINS), answered before CSRF so a preflight never reaches a view.
+    # CORS for /api/ (CORS_ORIGINS), answered first so a preflight never reaches a view.
     'hajiri.web.middleware.ApiCorsMiddleware',
-    'hajiri.web.middleware.BearerCsrfMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'hajiri.web.middleware.AuthMiddleware',
-    'hajiri.web.middleware.FlashMiddleware',
+    # The TS sameOriginGuard instead of Django's CSRF token check (the React app sends no token).
+    'hajiri.web.middleware.SameOriginMiddleware',
     'hajiri.web.middleware.HttpErrorMiddleware',
 ]
-# A refused form post answers like the TS sameOriginGuard ("cross-site request refused"), as a page, toast or JSON.
 CSRF_FAILURE_VIEW = 'hajiri.web.middleware.csrf_failure'
 CSRF_COOKIE_SAMESITE = 'Lax'
 X_FRAME_OPTIONS = 'DENY'
@@ -147,15 +144,11 @@ ROOT_URLCONF = env('DJANGO_ROOT_URLCONF', 'config.urls')
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates'],
+        'DIRS': [],
         'APP_DIRS': True,
         'OPTIONS': {
-            'context_processors': [
-                'django.template.context_processors.request',
-                'django.template.context_processors.csrf',
-                'hajiri.web.context_processors.layout',
-            ],
-            'builtins': ['hajiri.web.templatetags.hj'],
+            # Templates render the API's own HTML only (certificates, offer letters, review print-outs).
+            'context_processors': [],
         },
     },
 ]
@@ -176,10 +169,27 @@ USE_TZ = True
 
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-STATICFILES_DIRS = [BASE_DIR / 'static']
-# Until collectstatic has run (development, tests), WhiteNoise reads the files straight from STATICFILES_DIRS.
+# /static/ holds only what installed apps ship (collectstatic); the web app's files are the React build below.
+STATICFILES_DIRS: list = []
+# Until collectstatic has run (development, tests), WhiteNoise reads the files through the finders.
 WHITENOISE_USE_FINDERS = env_bool('WHITENOISE_USE_FINDERS', True)
 WHITENOISE_MAX_AGE = 3600
+
+# The web app: the React build (frontend/, `vite build` -> server/frontend_build/, committed to git). WhiteNoise serves
+# the folder at the site root (/assets/*, sw.js, manifest.webmanifest, icons); hajiri.web.views.spa answers its
+# index.html for every page address. Vite names the files under /assets/ by content hash, so they are cached for a
+# year; index.html, sw.js and the manifest are revalidated on every load.
+FRONTEND_BUILD_DIR = Path(env('FRONTEND_BUILD_DIR', str(BASE_DIR / 'frontend_build')))
+WHITENOISE_ROOT = FRONTEND_BUILD_DIR
+WHITENOISE_IMMUTABLE_FILE_TEST = r'^/assets/.+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$'
+
+
+def _static_headers(headers, path, url):
+    from hajiri.web.middleware import static_headers
+    static_headers(headers, path, url)
+
+
+WHITENOISE_ADD_HEADERS_FUNCTION = _static_headers
 
 SESSION_COOKIE_SECURE = CSRF_COOKIE_SECURE = env_bool('COOKIE_SECURE', False)
 # HTTPS-only installs: redirect plain HTTP (the /health probe is exempt) and send HSTS. Off by default because most
@@ -193,12 +203,13 @@ SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = 'Lax'
 
 # ---------------------------------------------------------------- JSON API (Django REST framework)
-# Endpoints for non-browser clients (terminals, kiosk tablets, Bearer-token integrations) under /api/. Pages and HTMX
-# partials are plain Django views. See hajiri/core/api.py and docs/django-conventions.md.
+# Every endpoint of the React app (session cookie) and of terminals, kiosk tablets and Bearer-token integrations,
+# under /api/. See hajiri/core/api.py and docs/django-conventions.md.
 REST_FRAMEWORK = {
     # ?format= is a report parameter in the TS API (csv, json), not DRF's renderer override.
     'URL_FORMAT_OVERRIDE': None,
-    'DEFAULT_AUTHENTICATION_CLASSES': ['hajiri.core.api.HajiriAuthentication'],
+    # The session cookie with the TS Origin check (the React app), or a Bearer token.
+    'DEFAULT_AUTHENTICATION_CLASSES': ['hajiri.core.api.SameOriginAuthentication'],
     'DEFAULT_PERMISSION_CLASSES': ['hajiri.core.api.IsSignedIn'],
     'DEFAULT_RENDERER_CLASSES': ['hajiri.core.api.JsonRenderer'],
     'DEFAULT_PARSER_CLASSES': ['rest_framework.parsers.JSONParser', 'rest_framework.parsers.FormParser',

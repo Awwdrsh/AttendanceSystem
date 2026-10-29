@@ -195,10 +195,19 @@ class SettlementReviewIn(serializers.Serializer):
 
 # ---------------------------------------------------------------- reports
 
+REPORT_FORMATS = ('json', 'csv')
+
+
+class ReportFormatIn(serializers.Serializer):
+    """?format=json|csv on every report (z.enum(['json', 'csv']).optional())."""
+    format = serializers.ChoiceField(REPORT_FORMATS, required=False)
+
+
 class SpendQueryIn(serializers.Serializer):
     from_ = IsoDateField()
     to = IsoDateField()
     groupBy = serializers.ChoiceField(GROUP_BY, default='category')
+    format = serializers.ChoiceField(REPORT_FORMATS, required=False)
 
 
 # The query parameter is `from`, a Python keyword: rename the declared field.

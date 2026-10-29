@@ -1,5 +1,5 @@
 """
-The hiring hub's lists and the public careers page run a fixed number of queries however many rows they show: counts,
+The hiring hub's JSON lists and the public careers endpoints run a fixed number of queries however many rows they show: counts,
 names and the next interview come from joins and subqueries, not one query per row.
 """
 from __future__ import annotations
@@ -10,17 +10,17 @@ from django.test import Client
 from django.test.utils import CaptureQueriesContext
 
 from hajiri.hiring import services as hiring
-from tests.web.factories import htmx
 
 from .world import future
 
+H = '/api/v1/hiring'
 PAGES = [
-    ('jobs', '/hiring', None),
-    ('requests', '/hiring/requisitions', None),
-    ('pipeline', '/hiring/pipeline?job={job}', None),
-    ('board fragment', '/hiring/pipeline?job={job}&include=all', 'board'),
-    ('interviews', '/hiring/interviews?scope=all', None),
-    ('candidate drawer', '/_/hiring/applications/{app}', True),
+    ('jobs', H + '/jobs', None),
+    ('requests', H + '/requisitions', None),
+    ('job', H + '/jobs/{job}', None),
+    ('board', H + '/jobs/{job}/applications', None),
+    ('interviews', H + '/interviews?scope=all', None),
+    ('candidate drawer', H + '/applications/{app}', None),
 ]
 
 
@@ -42,9 +42,8 @@ def _grow(hr, n: int, panel: list[str]) -> tuple[str, str]:
 
 
 def _count(client, url, hx) -> int:
-    headers = htmx(hx if isinstance(hx, str) else None) if hx else {}
     with CaptureQueriesContext(connection) as q:
-        r = client.get(url, **headers)
+        r = client.get(url)
     assert r.status_code == 200, (url, r.status_code)
     return len(q)
 
@@ -69,7 +68,7 @@ def test_careers_page_does_not_query_per_job(world):
     careers.apply_limiter.reset()
     _, hr = world.session(world.admin_b)
     _grow(hr, 2, [hr.id])
-    small = _count(Client(), '/careers/BETA', None)
+    small = _count(Client(), '/api/v1/public/careers/companies/BETA/jobs', None)
     _grow(hr, 6, [hr.id])
-    big = _count(Client(), '/careers/BETA', None)
+    big = _count(Client(), '/api/v1/public/careers/companies/BETA/jobs', None)
     assert big <= small

@@ -64,6 +64,39 @@ def build_world(join_days_ago: int | None = None) -> World:
     )
 
 
+class Api:
+    """The TS tests' `request(app)...set(auth(token))`: JSON calls to /api/v1 with a Bearer session of one user."""
+
+    def __init__(self, user: AuthUser):
+        from django.test import Client
+
+        from hajiri.core import auth
+        from tests.web.factories import PW, bearer
+        self.client = Client()
+        self.headers = bearer(auth.login(user.email, PW).token)
+
+    def _send(self, method: str, path: str, body=None):
+        import json
+        fn = getattr(self.client, method)
+        data = '' if body is None else json.dumps(body)
+        return fn(f'/api/v1{path}', data, content_type='application/json', **self.headers)
+
+    def get(self, path: str, **params):
+        return self.client.get(f'/api/v1{path}', params, **self.headers)
+
+    def post(self, path: str, body=None):
+        return self._send('post', path, body)
+
+    def put(self, path: str, body=None):
+        return self._send('put', path, body)
+
+    def patch(self, path: str, body=None):
+        return self._send('patch', path, body)
+
+    def delete(self, path: str):
+        return self._send('delete', path)
+
+
 @pytest.fixture
 def world(db):
     return build_world()

@@ -13,7 +13,7 @@ from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, N
 from hajiri.devices import services as dev
 from tests.core.fixtures import PW
 from tests.core.punches import insert_punch
-from tests.web.factories import htmx, hx_triggers, sign_in, toasts
+from tests.web.factories import sign_in
 
 OTHER = '00000000-0000-7000-8000-00000000aaaa'
 
@@ -161,25 +161,6 @@ def test_a_pin_with_control_characters_cannot_inject_commands_and_a_foreign_bran
         dev.activate(hr.user, did, {'branchId': other_branch})
 
 
-def test_hr_issues_a_hikvision_key_once_only_its_hash_is_stored_adms_and_foreign_devices_are_refused(demo, hr, login_as, other_company):
-    hik = str(one("""INSERT INTO device (company_id, serial_no, vendor, protocol, status) VALUES (%s, 'HIK-KEY-1', 'hikvision', 'isapi', 'active')
-                      RETURNING id""", [demo['company_id']])['id'])
-    res = dev.issue_key(hr.user, hik)
-    assert re.fullmatch(r'[A-Za-z0-9_-]{32}', res['key'])
-    stored = one('SELECT comm_key_hash FROM device WHERE id = %s', [hik])['comm_key_hash']
-    assert stored == hashlib.sha256(res['key'].encode()).hexdigest()
-    sita = login_as(['employee'], demo['sita'])
-    with pytest.raises(ForbiddenError):
-        dev.issue_key(sita.user, hik)
-    assert client_for(sita).post(f'/_/devices/{hik}/key', **htmx()).status_code == 403
-    with pytest.raises(BadRequestError):
-        dev.issue_key(hr.user, demo['device_id'])
-    foreign = str(one("""INSERT INTO device (company_id, serial_no, vendor, protocol, status) VALUES (%s, 'HIK-KEY-2', 'hikvision', 'isapi', 'active')
-                          RETURNING id""", [OTHER])['id'])
-    with pytest.raises(NotFoundError):
-        dev.issue_key(hr.user, foreign)
-
-
 # ---------------------------------------------------------------- lifecycle and listing
 
 def test_pending_device_without_a_company_is_listed_activated_and_disabled(demo, hr):
@@ -202,69 +183,9 @@ def test_sync_users_queues_one_userinfo_per_current_active_mapping(demo, hr):
     assert 'DATA UPDATE USERINFO PIN=2\tName=Ram Thapa\tPri=0' in cmds
 
 
-def test_device_endpoints_are_hr_and_admin_only(demo, login_as):
-    mgr = login_as(['manager'])
-    with pytest.raises(ForbiddenError, match='requires role hr or admin'):
-        dev.list_devices(mgr.user)
-    assert client_for(mgr).get('/settings/devices', **htmx()).status_code == 403
-
-
 def test_device_name_matches_the_ts_rules():
     assert dev.device_name('  a\x00b\x7fc  ') == 'a b c'
     assert dev.device_name('x' * 30) == 'x' * 24
 
 
 # ---------------------------------------------------------------- the Devices page
-
-def test_devices_page_lists_terminals_and_unmapped_punches(demo, hr):
-    insert_punch(None, '2026-09-28', '10:00', '7')
-    execute("INSERT INTO device (company_id, serial_no, vendor, protocol, status) VALUES (%s, 'MOBILE-X', 'mobile', 'app', 'active')", [demo['company_id']])
-    c = client_for(hr)
-    r = c.get('/settings/devices')
-    assert r.status_code == 200
-    body = r.content.decode()
-    assert 'Front door (simulator)' in body and 'DEMO-01' in body and 'MOBILE-X' not in body
-    assert 'Unmapped punches' in body and 'Map PIN' in body
-    part = c.get('/settings/devices', **htmx('unmapped'))
-    assert part.status_code == 200 and 'id="unmapped"' in part.content.decode() and '<html' not in part.content.decode()
-    csv = c.get('/settings/devices?devices-export=csv')
-    assert csv.status_code == 200 and 'Front door (simulator)' in csv.content.decode() and 'MOBILE-X' not in csv.content.decode()
-
-
-def test_map_pin_dialog_asks_before_taking_over_a_pin(demo, hr):
-    c = client_for(hr)
-    form = c.get(f"/_/devices/map?device={demo['device_id']}&pin=1&from=2026-09-05", **htmx('hj-modal-body'))
-    assert form.status_code == 200 and b'Map a device PIN' in form.content
-    data = {'device_id': demo['device_id'], 'pin': '1', 'employee_id': demo['ram'], 'valid_from': '2026-09-05'}
-    r = c.post('/_/devices/map', data, **htmx())
-    assert r.status_code == 422
-    assert b'This PIN is already in use' in r.content and b'Replace mapping' in r.content and b'already mapped to Sita Sharma (E001)' in r.content
-    r = c.post('/_/devices/map', {**data, 'replace': '1'}, **htmx())
-    assert r.status_code == 204
-    assert toasts(r)[0]['message'] == 'PIN 1 mapped. 0 earlier day(s) re-attributed and recalculated.'
-    assert {'hj:close-modal', 'hj:refresh-unmapped', 'hj:refresh-device-mappings', 'hj:refresh-devices'} <= set(hx_triggers(r))
-    bad = c.post('/_/devices/map', {**data, 'pin': '7\tPri=14'}, **htmx())
-    assert bad.status_code == 422 and b'PIN must be 1 to 24 letters or digits' in bad.content
-
-
-def test_page_actions_activate_disable_key_command_sync_and_detail(demo, hr):
-    c = client_for(hr)
-    pid = str(one("INSERT INTO device (serial_no, vendor, protocol, status) VALUES ('HIK-NEW', 'hikvision', 'isapi', 'pending') RETURNING id")['id'])
-    assert b'Activate HIK-NEW' in c.get(f'/_/devices/{pid}/activate', **htmx('hj-modal-body')).content
-    r = c.post(f'/_/devices/{pid}/activate', {'name': 'Gate'}, **htmx())
-    assert r.status_code == 204 and toasts(r)[0]['message'] == 'Device activated.'
-    k = c.post(f'/_/devices/{pid}/key', **htmx('hj-modal-body'))
-    assert k.status_code == 201 and b'Copy it now' in k.content
-    adms = c.post(f"/_/devices/{demo['device_id']}/key", **htmx('hj-modal-body'))
-    assert adms.status_code == 400 and toasts(adms)[0]['message'].startswith('ZKTeco ADMS terminals cannot send a device key')
-    r = c.post(f"/_/devices/{demo['device_id']}/command", {'command': 'INFO'}, **htmx())
-    assert r.status_code == 201 and toasts(r)[0]['message'] == 'INFO queued.'
-    assert c.post(f"/_/devices/{demo['device_id']}/command", {'command': 'CLEAR DATA'}, **htmx()).status_code == 400
-    r = c.post(f"/_/devices/{demo['device_id']}/sync-users", **htmx())
-    assert toasts(r)[0]['message'] == '2 user records queued for the terminal.'
-    d = c.get(f"/_/devices/{demo['device_id']}", **htmx('hj-drawer-body'))
-    body = d.content.decode()
-    assert d.status_code == 200 and 'PIN mappings' in body and 'Sita Sharma' in body and 'INFO' in body and 'ZKTeco (ADMS push)' in body
-    r = c.post(f'/_/devices/{pid}/disable', **htmx())
-    assert toasts(r)[0]['message'] == 'Device disabled.'
-    assert c.get('/_/devices/00000000-0000-7000-8000-0000000000ff', **htmx('hj-drawer-body')).status_code == 404

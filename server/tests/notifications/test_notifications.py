@@ -149,21 +149,3 @@ def test_senders_from_environment():
     assert isinstance(s['email'], SmtpSender) and s['email'].port == 465
     assert isinstance(s['sms'], WebhookSender)
     assert isinstance(s['push'], LogSender) and isinstance(s['webhook'], LogSender)
-
-
-def test_htmx_mark_read_actions(demo, login_as):
-    from django.test import Client
-    from tests.core.fixtures import bearer
-    me = login_as(['employee'], demo['sita'])
-    other = login_as(['employee'])
-    notify(company_id=demo['company_id'], user_id=me.user_id, template='x', title='A', body='a')
-    notify(company_id=demo['company_id'], user_id=me.user_id, template='x', title='B', body='b')
-    first = inbox(me.user_id)['notifications'][0]['id']
-    c = Client()
-    r = c.post(f'/_/notifications/{first}/read', HTTP_HX_REQUEST='true', **bearer(me.token))
-    assert r.status_code == 204 and r['HX-Trigger'] == 'notifications-changed'
-    assert inbox(me.user_id)['unread'] == 1
-    assert c.post(f'/_/notifications/{first}/read', HTTP_ACCEPT='application/json', **bearer(other.token)).status_code == 404
-    assert c.post('/_/notifications/read-all', **bearer(me.token)).status_code == 204
-    assert inbox(me.user_id)['unread'] == 0
-    assert c.post('/_/notifications/read-all').status_code == 401

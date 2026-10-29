@@ -773,8 +773,9 @@ def issues(user: AuthUser, query: dict) -> dict:
 
 
 def issue_summary(user: AuthUser, query: dict) -> dict:
-    """Pre-payroll check: the open issues of a BS month in numbers (the payroll pre-flight links here)."""
-    _require_module(user, 'attendance')
+    """Pre-payroll check: the open issues of a BS month in numbers (the payroll pre-flight links here). Payroll admins
+    read it too: it is on the first step of the pay run wizard. Only counts; the issue list stays attendance's."""
+    _require(user, *MODULE_ROLES['attendance'], *MODULE_ROLES['payroll'])
     q = validate(MonthIn, query)
     b = bs_month_bounds(q['bsYear'], q['bsMonth'])
     found = attendance_issues(company_id_of(user), b['startAd'], b['endAd'], None)
@@ -868,8 +869,10 @@ def upload_import(user: AuthUser, body: dict) -> dict:
                               {'rows': [{'line': x['line'], 'errors': x['errors']} for x in bad]})
     if not checked['rows']:
         raise BadRequestError('there are no rows to import')
-    out = import_upload(company_id, checked['rows'], b['reason'], user.id)
+    # All or nothing: a failure part-way must not leave punches behind with no upload on record (a retry would then
+    # count them as duplicates and skip recomputing their days).
     with transaction.atomic():
+        out = import_upload(company_id, checked['rows'], b['reason'], user.id)
         up = AttendanceUpload.objects.create(company_id=company_id, filename=b.get('filename') or None, reason=b['reason'],
                                              rows_total=len(checked['rows']), punches=out['punches'],
                                              duplicates=out['duplicates'], uploaded_by_id=user.id)

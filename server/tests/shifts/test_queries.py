@@ -50,7 +50,8 @@ def test_list_pages_do_not_query_per_row(setup):
         svc.create_shift(hr, {'code': code, 'nameEn': code, 'start': '06:00', 'end': '14:00'})
     for d in ('2026-12-01', '2026-12-02'):
         svc.create_holiday(hr, {'localDate': d, 'nameEn': f'Day {d}'})
-    pages = ['/settings/shifts', '/settings/holidays?year=2083', f'/attendance/rosters?week={WEEK}', f'/_/shifts/roster?week={WEEK}']
+    pages = ['/api/v1/shifts', '/api/v1/shifts/holidays', f'/api/v1/shifts/roster?from={WEEK}&to={WEEK}',
+             f'/api/v1/shifts/calendar?from={WEEK}&to={WEEK}']
     small = {p: _count(lambda p=p: c.get(p)) for p in pages}
 
     _people(company, gen, hr, 9)
@@ -100,7 +101,7 @@ def test_a_manager_rosters_only_their_people(setup):
     mgr = make_user(company, roles=['manager'], employee=boss)
     assert svc.save_roster(mgr, {'rows': [{'employeeId': str(report.id), 'localDate': '2026-11-05', 'shiftId': None},
                                           {'employeeId': str(boss.id), 'localDate': '2026-11-05', 'shiftId': None}]}) == {'upserted': 2}
-    with pytest.raises(ForbiddenError, match='not allowed to access this employee'):
+    with pytest.raises(ForbiddenError, match='not allowed to act for this employee'):
         svc.save_roster(mgr, {'rows': [{'employeeId': str(report.id), 'localDate': '2026-11-06', 'shiftId': None},
                                        {'employeeId': str(other.id), 'localDate': '2026-11-06', 'shiftId': None}]})
     assert not Roster.objects.filter(local_date='2026-11-06').exists()

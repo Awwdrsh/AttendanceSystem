@@ -1,13 +1,15 @@
 from django.urls import path
 
+from hajiri.web.views import spa
+
 from . import views
 
 urlpatterns = [
-    # Pages: one careers site per company. /careers/<key> is a company code or (the TS link) a job id.
-    path('careers', views.job_list, name='list'),
-    path('careers/<str:key>', views.entry, name='detail'),
-    path('careers/<str:code>/<uuid:job_id>', views.company_job, name='company_job'),
-    path('_/careers/<str:job_id>/apply', views.apply, name='apply'),
+    # The public careers site is the React app (CareersPage.jsx). These names stay so hiring.services.careers_url can
+    # build the links it hands out (/careers, /careers/<company code or job id>, /careers/<code>/<job id>).
+    path('careers', spa, name='list'),
+    path('careers/<str:key>', spa, name='detail'),
+    path('careers/<str:code>/<uuid:job_id>', spa, name='company_job'),
     # Public JSON (no session): company websites and job boards.
     path('api/v1/public/careers/jobs', views.JobListApi.as_view(), name='api_jobs'),
     path('api/v1/public/careers/jobs/<str:job_id>', views.JobApi.as_view(), name='api_job'),

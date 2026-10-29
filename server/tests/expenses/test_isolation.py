@@ -14,7 +14,7 @@ from hajiri.core import auth
 from hajiri.db.models import CompanyMembership, ExpensePayout, TravelBill, TravelRequest
 from hajiri.expenses import services as ex
 from hajiri.expenses.seeds import seed_expense_defaults
-from tests.web.factories import PW, bearer, htmx, make_company, make_employee, make_user, sign_in
+from tests.web.factories import PW, bearer, make_company, make_employee, make_user, sign_in
 
 from .helpers import approve_both, days_ago, days_ahead, today, upload
 
@@ -39,8 +39,8 @@ class Group:
         c = Client()
         sign_in(c, person)
         if company is not None:
-            r = c.post('/_/web/company/switch', {'company_id': str(company.id)}, **htmx())
-            assert r.status_code == 204, r.content
+            r = c.post('/api/v1/me/companies/switch', {'companyId': str(company.id)}, content_type='application/json')
+            assert r.status_code == 200, r.content
         return c
 
     def session(self, person, company=None):
@@ -84,32 +84,6 @@ def group(db) -> Group:
     return w
 
 
-def _beta_urls(w: Group) -> list[tuple[str, str, dict]]:
-    """Every expenses route that takes an id, with an id of Beta."""
-    c, t, s_, b, cat, item = w.claim, w.trip, w.settlement, w.bill, w.category, w.item
-    return [
-        ('get', f'/_/expenses/claims/{c}', {}),
-        ('get', f'/_/expenses/claims/{c}/edit', {}),
-        ('post', f'/_/expenses/claims/{c}/edit', {'title': 'x', 'action': 'draft', 'expense_date': days_ago(1), 'category_id': cat,
-                                                  'description': 'x', 'amount': '1', 'km': '', 'receipt_file_id': ''}),
-        ('post', f'/_/expenses/claims/{c}/submit', {}),
-        ('post', f'/_/expenses/claims/{c}/cancel', {}),
-        ('post', f'/_/expenses/claims/{c}/review', {'decision': 'approve'}),
-        ('post', f'/_/expenses/claims/{c}/pay-outside', {'note': 'paid in cash'}),
-        ('get', f'/_/expenses/claims/{c}/items/{item}/receipt', {}),
-        ('get', f'/_/expenses/travel/{t}', {}),
-        ('post', f'/_/expenses/travel/{t}/cancel', {}),
-        ('post', f'/_/expenses/travel/{t}/review', {'decision': 'approve'}),
-        ('post', f'/_/expenses/travel/{t}/advance-outside', {'note': 'paid in cash'}),
-        ('post', f'/_/expenses/travel/{t}/settlement', {'actual_from': today(), 'actual_to': today()}),
-        ('post', f'/_/expenses/travel/{t}/settlement/preview', {'actual_from': today(), 'actual_to': today()}),
-        ('post', f'/_/expenses/settlements/{s_}/review', {'decision': 'approve'}),
-        ('get', f'/_/expenses/settlements/{s_}/bills/{b}/file', {}),
-        ('get', f'/_/expenses/categories/{cat}/edit', {}),
-        ('post', f'/_/expenses/categories/{cat}/edit', {'name': 'Renamed', 'kind': 'amount'}),
-    ]
-
-
 def _api_urls(w: Group) -> list[tuple[str, str, dict]]:
     c, t, s_, b, cat, item = w.claim, w.trip, w.settlement, w.bill, w.category, w.item
     return [
@@ -137,58 +111,7 @@ def _call(client: Client, method: str, url: str, data: dict, headers: dict | Non
     headers = headers or {}
     if method == 'get':
         return client.get(url, **headers)
-    if method == 'post' and not url.startswith('/api/'):
-        return client.post(url, data, **headers)
     return getattr(client, method)(url, data, content_type='application/json', **headers)
-
-
-@pytest.mark.parametrize('who', ['alpha_hr', 'dual'])
-def test_beta_records_are_not_found_from_alpha(group, who):
-    w = group
-    c = w.client(getattr(w, who))
-    for method, url, data in _beta_urls(w):
-        r = _call(c, method, url, data, htmx())
-        assert r.status_code == 404, (who, method, url, r.status_code, r.content[:200])
-    token, _ = w.session(getattr(w, who))
-    api = Client()
-    for method, url, data in _api_urls(w):
-        r = _call(api, method, url, data, bearer(token))
-        assert r.status_code == 404, (who, method, url, r.status_code, r.content[:200])
-    # Nothing changed in Beta.
-    assert ex.claim_detail(w.beta_hr, w.claim)['claim']['status'] == 'pending'
-    assert TravelRequest.objects.get(pk=w.trip).status == 'settling'
-
-
-def test_the_owner_company_opens_them(group):
-    w = group
-    for person, company in ((w.beta_hr, None), (w.dual, w.beta)):
-        c = w.client(person, company)
-        assert c.get(f'/_/expenses/claims/{w.claim}', **htmx()).status_code == 200
-        assert c.get(f'/_/expenses/travel/{w.trip}', **htmx()).status_code == 200
-        assert c.get(f'/_/expenses/settlements/{w.settlement}/bills/{w.bill}/file').status_code == 200
-        assert c.get(f'/_/expenses/categories/{w.category}/edit', **htmx()).status_code == 200
-
-
-def test_lists_and_reports_show_the_active_company_only(group):
-    w = group
-    alpha = w.client(w.alpha_hr)
-    assert b'Beta taxi' not in alpha.get('/expenses?status=all').content
-    assert b'Pokhara' not in alpha.get('/expenses/travel?status=all').content
-    assert b'Pokhara' not in alpha.get('/_/expenses/reports/advances.csv').content
-    _, a_user = w.session(w.alpha_hr)
-    assert ex.list_claims(a_user, {'scope': 'all'})['claims'] == []
-    assert ex.list_trips(a_user, {'scope': 'all'})['trips'] == []
-    assert ex.report_advances(a_user)['rows'] == []
-    assert ex.report_pending_payment(a_user)['rows'] == []
-    # The same person, switched to Beta, sees Beta's claims, trips and advances.
-    _, in_beta = w.session(w.dual, w.beta)
-    assert [c['title'] for c in ex.list_claims(in_beta, {'scope': 'all'})['claims']] == ['Beta taxi']
-    assert [t['destination'] for t in ex.list_trips(in_beta, {'scope': 'all'})['trips']] == ['Pokhara']
-    assert [r['destination'] for r in ex.report_advances(in_beta)['rows']] == ['Pokhara']
-    assert b'Beta taxi' in w.client(w.dual, w.beta).get('/expenses?status=all').content
-    # Policies are per company: Alpha's categories are not Beta's.
-    alpha_cats = {c['id'] for c in ex.get_policy(a_user)['categories']}
-    assert w.category not in alpha_cats and len(alpha_cats) == 7
 
 
 def test_a_beta_category_cannot_be_used_on_an_alpha_claim(group):
@@ -236,3 +159,53 @@ def test_a_receipt_uploaded_in_beta_cannot_be_attached_in_alpha(group):
         ex.create_claim(in_alpha, {'title': 'Cross receipt', 'items': [
             {'expenseDate': days_ago(1), 'categoryId': cats['OFFICE'], 'description': 'Pens', 'amount': '120',
              'receiptFileId': file_id}]})
+
+
+@pytest.mark.parametrize('who', ['alpha_hr', 'dual'])
+def test_beta_records_are_not_found_from_alpha(group, who):
+    w = group
+    c = w.client(getattr(w, who))           # the cookie session, as the React app sends it
+    for method, url, data in _api_urls(w):
+        r = _call(c, method, url, data)
+        assert r.status_code == 404, (who, method, url, r.status_code, r.content[:200])
+    token, _ = w.session(getattr(w, who))
+    api = Client()
+    for method, url, data in _api_urls(w):
+        r = _call(api, method, url, data, bearer(token))
+        assert r.status_code == 404, (who, method, url, r.status_code, r.content[:200])
+    # Nothing changed in Beta.
+    assert ex.claim_detail(w.beta_hr, w.claim)['claim']['status'] == 'pending'
+    assert TravelRequest.objects.get(pk=w.trip).status == 'settling'
+
+
+def test_the_owner_company_opens_them(group):
+    w = group
+    for person, company in ((w.beta_hr, None), (w.dual, w.beta)):
+        c = w.client(person, company)
+        assert c.get(f'/api/v1/expenses/claims/{w.claim}').status_code == 200
+        assert c.get(f'/api/v1/expenses/travel/{w.trip}').status_code == 200
+        assert c.get(f'/api/v1/expenses/settlements/{w.settlement}/bills/{w.bill}/file').status_code == 200
+        assert w.category in {x['id'] for x in c.get('/api/v1/expenses/policy').json()['categories']}
+
+
+def test_lists_and_reports_show_the_active_company_only(group):
+    w = group
+    alpha = w.client(w.alpha_hr)
+    assert b'Beta taxi' not in alpha.get('/api/v1/expenses/claims?scope=all').content
+    assert b'Pokhara' not in alpha.get('/api/v1/expenses/travel?scope=all').content
+    assert b'Pokhara' not in alpha.get('/api/v1/expenses/reports/advances?format=csv').content
+    _, a_user = w.session(w.alpha_hr)
+    assert ex.list_claims(a_user, {'scope': 'all'})['claims'] == []
+    assert ex.list_trips(a_user, {'scope': 'all'})['trips'] == []
+    assert ex.report_advances(a_user)['rows'] == []
+    assert ex.report_pending_payment(a_user)['rows'] == []
+    # The same person, switched to Beta, sees Beta's claims, trips and advances.
+    _, in_beta = w.session(w.dual, w.beta)
+    assert [c['title'] for c in ex.list_claims(in_beta, {'scope': 'all'})['claims']] == ['Beta taxi']
+    assert [t['destination'] for t in ex.list_trips(in_beta, {'scope': 'all'})['trips']] == ['Pokhara']
+    assert [r['destination'] for r in ex.report_advances(in_beta)['rows']] == ['Pokhara']
+    assert b'Beta taxi' in w.client(w.dual, w.beta).get('/api/v1/expenses/claims?scope=all').content
+    # Policies are per company: Alpha's categories are not Beta's.
+    alpha_cats = {c['id'] for c in ex.get_policy(a_user)['categories']}
+    assert w.category not in alpha_cats and len(alpha_cats) == 7
+

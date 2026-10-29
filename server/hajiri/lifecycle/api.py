@@ -3,7 +3,8 @@ Employee lifecycle routes (port of apps/api/src/modules/lifecycle/routes.ts): on
 probation, resignations and exits, the exit interview and the asset register. Each function is one TS route: it takes
 the signed-in AuthUser and a body in the TS camelCase shape (validated with serializers.py) and raises
 hajiri.core.errors with the TS messages. Everything is scoped to the ACTIVE company; ids of another company are not
-found. (The module keeps its TS name; the pages call these functions, there is no JSON API for lifecycle.)
+found. (The module keeps its TS name; the pages call these functions, and so do the DRF views of the JSON API under
+/api/v1/lifecycle in api_views.py.)
 """
 from __future__ import annotations
 

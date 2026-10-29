@@ -1,4 +1,0 @@
-<select name="employee_id" id="f-employee_id" class="hj-select">
-  <option value="">Not linked</option>
-  {% for e in employees %}<option value="{{ e.id }}"{% if e.id == selected %} selected{% endif %}>{{ e.name }} ({{ e.code }})</option>{% endfor %}
-</select>

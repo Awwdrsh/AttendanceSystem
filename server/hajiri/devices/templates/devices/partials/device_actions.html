@@ -1,9 +1,0 @@
-<div class="hj-row nowrap hj-gap-xs hj-end">
-  {% if row.status == 'pending' %}<button type="button" class="hj-btn xs" hx-get="{% url 'devices:activate' row.id %}" hx-target="#hj-modal-body"><i class="ti ti-check" aria-hidden="true"></i>Activate</button>{% endif %}
-  <button type="button" class="hj-iconbtn" title="View details" aria-label="View details" hx-get="{% url 'devices:detail' row.id %}" hx-target="#hj-drawer-body"><i class="ti ti-info-circle" aria-hidden="true"></i></button>
-  <button type="button" class="hj-iconbtn" title="Map a PIN" aria-label="Map a PIN" hx-get="{% url 'devices:map' %}?device={{ row.id }}" hx-target="#hj-modal-body"><i class="ti ti-link" aria-hidden="true"></i></button>
-  <button type="button" class="hj-iconbtn" title="Sync users to device" aria-label="Sync users to device" hx-post="{% url 'devices:sync_users' row.id %}" hx-swap="none"><i class="ti ti-refresh" aria-hidden="true"></i></button>
-  {% if row.protocol != 'adms' and row.company_id %}<button type="button" class="hj-iconbtn" title="Issue new device key" aria-label="Issue new device key" hx-post="{% url 'devices:key' row.id %}" hx-target="#hj-modal-body"><i class="ti ti-key" aria-hidden="true"></i></button>{% endif %}
-  {% if row.status == 'active' %}<button type="button" class="hj-iconbtn" title="Disable device" aria-label="Disable device" hx-post="{% url 'devices:disable' row.id %}" hx-swap="none"
-    {% confirm_attrs "Punches from this terminal will be rejected until it is activated again. Existing attendance is kept." title=row.disable_title label="Disable device" %}><i class="ti ti-ban hj-bad-text" aria-hidden="true"></i></button>{% endif %}
-</div>

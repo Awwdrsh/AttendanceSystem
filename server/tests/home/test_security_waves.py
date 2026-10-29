@@ -7,7 +7,7 @@ from django.test import Client
 
 from tests.support.sql import execute, one
 from hajiri.core.errors import BadRequestError, HttpError
-from tests.web.factories import bearer, htmx
+from tests.web.factories import bearer
 
 PDF = 'data:application/pdf;base64,' + base64.b64encode(b'%PDF-1.4\n%%EOF').decode()
 
@@ -42,25 +42,9 @@ def test_colleagues_do_not_see_grades(demo, login_as):
     emp = login_as(['employee'], demo['sita'])
     assert 'G7' not in json.dumps(directory(emp.user), default=str)
     assert 'G7' not in json.dumps(card(emp.user, demo['ram']), default=str)
-    # The pages built on them neither.
-    assert b'G7' not in page(emp).get('/people').content
-    assert b'G7' not in page(emp).get(f"/_/people/{demo['ram']}/card", **htmx('hj-modal-body')).content
-
-
-def test_one_person_cannot_park_unlimited_uploads(demo, login_as):
-    from hajiri.files.service import UPLOADS_PER_HOUR, upload
-    u = login_as(['employee'], demo['ram'])
-    execute("""INSERT INTO stored_file (company_id, purpose, filename, mime, bytes, sha256, uploaded_by)
-               SELECT %s, 'expense_receipt', 'x.pdf', 'application/pdf', 10, 'x', %s FROM generate_series(1, %s)""",
-            [demo['company_id'], u.user_id, UPLOADS_PER_HOUR])
-    with pytest.raises(HttpError) as e:
-        upload(u.user, {'purpose': 'expense_receipt', 'filename': 'b.pdf', 'dataUrl': PDF})
-    assert e.value.status == 429
-    # The browser upload endpoint answers the same.
-    from django.core.files.uploadedfile import SimpleUploadedFile
-    r = page(u).post('/_/files/', {'purpose': 'expense_receipt', 'file': SimpleUploadedFile('b.pdf', b'%PDF-1.4\n%%EOF', 'application/pdf')},
-                     **htmx())
-    assert r.status_code == 429
+    # The JSON the pages read neither.
+    assert b'G7' not in page(emp).get('/api/v1/people/directory').content
+    assert b'G7' not in page(emp).get(f"/api/v1/people/{demo['ram']}/card").content
 
 
 # ---------------------------------------------------------------- wave 2

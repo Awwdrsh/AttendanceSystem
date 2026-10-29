@@ -5,6 +5,7 @@ problems in the zod wording, so a page post and a JSON body are refused with the
 """
 from __future__ import annotations
 
+from drf_spectacular.utils import extend_schema_serializer
 from rest_framework import serializers
 
 from hajiri.core.validation import IsoDateField
@@ -56,6 +57,7 @@ class StrictSerializer(serializers.Serializer):
 
 # ---------------------------------------------------------------- policy
 
+@extend_schema_serializer(component_name='RelationsPolicyIn')
 class PolicyIn(serializers.Serializer):
     retirementAge = serializers.IntegerField(min_value=40, max_value=80, default=58)
     serviceYears = serializers.ListField(child=serializers.IntegerField(min_value=1, max_value=60), max_length=20,
@@ -84,6 +86,7 @@ class GrievanceQueryIn(serializers.Serializer):
     status = serializers.CharField(max_length=40, required=False, trim_whitespace=False)
 
 
+@extend_schema_serializer(component_name='RelationsNoteIn')
 class NoteIn(serializers.Serializer):
     body = Text(4000)
     shared = serializers.BooleanField(default=False)
@@ -190,6 +193,7 @@ class AssignmentsQueryIn(serializers.Serializer):
     status = serializers.ChoiceField(ASSIGNMENT_STATUSES, default=EmployeeTempAssignment.Status.ACTIVE)
 
 
+@extend_schema_serializer(component_name='RelationsAssignmentIn')
 class AssignmentIn(serializers.Serializer):
     employeeId = serializers.UUIDField()
     kind = serializers.ChoiceField(EmployeeTempAssignment.Kind.values)

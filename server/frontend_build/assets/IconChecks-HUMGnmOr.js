@@ -1,0 +1,1 @@
+import{t as e}from"./createReactComponent-DKcgNbiR.js";var t=e(`outline`,`checks`,`Checks`,[[`path`,{d:`M7 12l5 5l10 -10`,key:`svg-0`}],[`path`,{d:`M2 12l5 5m5 -5l5 -5`,key:`svg-1`}]]);export{t};

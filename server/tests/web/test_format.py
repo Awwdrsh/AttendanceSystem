@@ -1,12 +1,9 @@
-"""Ports of apps/web/src/lib/format.test.ts, lib/bs.test.ts and api/client.test.ts (qs, error normalisation)."""
+"""Ports of apps/web/src/lib/format.test.ts, lib/bs.test.ts and api/client.test.ts (error normalisation)."""
 from datetime import datetime, timedelta, timezone
-
-from django.test import RequestFactory
 
 from engines.bs_calendar import supported_bs_years
 from hajiri.web import format as f
 from hajiri.web.csv import csv_cell, to_csv
-from hajiri.web.templatetags import hj
 
 
 # ---------------------------------------------------------------- format.test.ts
@@ -123,19 +120,6 @@ def test_ad_span_label():
     assert f.ad_span_label('2026-12-16', '2027-01-14') == 'Dec 2026–Jan 2027'
 
 
-# ---------------------------------------------------------------- client.test.ts: query strings (the {% qs %} tag)
-
-def _qs(path, **changes):
-    req = RequestFactory().get(path)
-    return hj.qs({'request': req}, **changes)
-
-
-def test_query_string_builder_drops_empty_values_and_encodes_the_rest():
-    assert _qs('/x', a=1, b='x y', c=None, d='', f=False) == '?a=1&b=x+y&f=False'
-    assert _qs('/x') == '?'
-    assert _qs('/x?a=1&b=2', a=None) == '?b=2'
-
-
 # ---------------------------------------------------------------- client.test.ts: error normalisation (JSON errors)
 
 def _json_error(rf, status, message, details=None):
@@ -171,13 +155,6 @@ def test_the_leave_split_suggestion_reaches_api_clients(rf):
     assert body['details']['suggestion'] == {'paidDays': 1, 'lwpDays': 2}
 
 
-def test_browser_error_toasts_cover_plain_text_and_empty_bodies():
-    # client.test.ts plain-text bodies and 'Request failed (500)': app.js shows the text, or 'Request failed (<status>)'.
-    from pathlib import Path
-    js = (Path(__file__).resolve().parents[2] / 'static/js/app.js').read_text()
-    assert "'Request failed (' + xhr.status + ')'" in js and "text.indexOf('<') === -1 ? text" in js
-
-
 # ---------------------------------------------------------------- CSV (reports/csv.ts)
 
 def test_csv_cells_quote_and_neutralise_formulas():
@@ -195,30 +172,3 @@ def test_csv_cells_quote_and_neutralise_formulas():
 def test_to_csv_has_bom_and_crlf():
     out = to_csv([{'key': 'a', 'header': 'A'}, {'key': 'b', 'header': 'B'}], [{'a': 1, 'b': 'राम'}])
     assert out == '﻿A,B\r\n1,राम\r\n'
-
-
-# ---------------------------------------------------------------- template filters
-
-def test_status_badges_always_carry_a_word():
-    html = hj.status_badge_html('Late', late=12, remote=True)
-    assert 'Late' in html and '12 min late' in html and 'Remote' in html and 'hj-tone-warn' in html
-    assert 'Missing punch' in hj.status_badge_html('Incomplete')
-    assert 'Some new status' in hj.status_badge_html('some_new_status')
-    assert hj.status_label('OnLeave') == 'On leave' and hj.status_label('HalfDayLeave') == 'Half-day leave'
-    assert hj.humanize('NotComputedYet') == 'Not computed yet'
-    assert hj.live_status('Incomplete', on_date='2026-10-26', today='2026-10-26', last_out=None, first_in='x') == 'Working'
-    assert hj.live_status('Incomplete', on_date='2026-10-25', today='2026-10-26', last_out=None, first_in='x') == 'Incomplete'
-
-
-def test_report_cells():
-    assert hj.report_cell('date', '2026-08-28') == '12 Bhadra 2083'
-    assert 'Yes' in hj.report_cell('bool', True) and 'No' in hj.report_cell('bool', False)
-    assert hj.report_cell('number', None) == '—'
-    assert hj.report_cell('text', 5) == '5'
-
-
-def test_filters_render_in_templates():
-    from django.template import Context, Template
-    t = Template('{{ d|bs_date }}|{{ m|npr }}|{{ 2083|bs_month:6 }}|{{ n|initials }}|{{ d|dual_date }}')
-    out = t.render(Context({'d': '2026-08-28', 'm': '1234567', 'n': 'Sita Sharma'}))
-    assert out.startswith('12 Bhadra 2083|NPR 12,34,567.00|Ashwin 2083|SS|12 Bhadra 2083 <span')

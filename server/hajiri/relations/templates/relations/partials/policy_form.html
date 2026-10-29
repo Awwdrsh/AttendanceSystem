@@ -1,9 +1,0 @@
-<form class="hj-form" data-modal-title="Milestone and relations settings" hx-post="{% url 'relations:policy' %}" hx-swap="none">
-  <div class="hj-fieldset"><label class="hj-label" for="p-age">Retirement age</label><div class="hj-help">Retirement date = date of birth plus this many years.</div>
-    <input id="p-age" name="retirementAge" type="number" min="40" max="80" class="hj-input" value="{{ policy.retirementAge }}"></div>
-  <div class="hj-fieldset"><label class="hj-label" for="p-years">Service years to celebrate</label><div class="hj-help">Separate the numbers with commas.</div>
-    <input id="p-years" name="serviceYears" class="hj-input" value="{{ years }}"></div>
-  <div class="hj-fieldset"><label class="hj-label" for="p-appeal">Days to appeal a grievance decision</label>
-    <input id="p-appeal" name="appealDays" type="number" min="1" max="90" class="hj-input" value="{{ policy.appealDays }}"></div>
-  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn">Save</button></div>
-</form>

@@ -2,28 +2,31 @@
 
 Hajiri is an in-house biometric attendance, HR and payroll platform for companies in Nepal. **plan.md is the
 specification**; reference its section numbers in commit messages and comments when encoding a rule (e.g. "plan
-§10.4"). The code is one Django 6 project in `server/` (Python 3.13). **docs/django-conventions.md is the rulebook**
-for models, scoping, forms, serializers, views, HTMX, templates, background work and tests; follow it literally. The
-help desk (`server/hajiri/helpdesk/`) is the worked example of every pattern.
+§10.4"). The backend is one Django 6 project in `server/` (Python 3.13): a JSON API under `/api/v1/` with the paths,
+bodies and response shapes of the original TypeScript API. The web app is the React app in `frontend/` (React 19,
+Mantine, react-router, Vite; **plain JavaScript, never TypeScript**), whose production build Django serves from
+`server/frontend_build/`. **docs/django-conventions.md is the rulebook** for models, scoping, serializers, DRF views,
+background work and tests; follow it literally. The help desk (`server/hajiri/helpdesk/`) is the worked example.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `server/config/` | `settings.py` (reads `server/.env`), `urls.py` (the web app), `gateway_urls.py` (the device gateway's own URLconf), WSGI |
+| `server/config/` | `settings.py` (reads `server/.env`), `urls.py` (the JSON API, then the React app's `index.html` for every other address), `gateway_urls.py` (the device gateway's own URLconf), WSGI |
 | `server/engines/` | `bs_calendar`, `attendance` (`compute_day`, OT), `payroll` (formula DSL, component graph, tax): pure Python, no Django, no I/O, no clock |
 | `server/hajiri/db/` | every model (one file per domain, one app labelled `hajiri`), TextChoices, company-scoped managers and the migrations |
 | `server/hajiri/core/` | sign-in, sessions, roles and the active company, groups of companies, crypto, audit log, errors, DRF authentication, permission and exception classes, settings store, collation (pyuca), images (Pillow), mail |
-| `server/hajiri/web/` | middleware, layout, navigation, decorators, shared components and template tags |
-| `server/hajiri/<module>/` | one app per module: `services.py`, `forms.py`, `serializers.py`, `views.py`, `api.py`, `jobs.py`, `urls.py`, `nav.py`, templates |
+| `server/hajiri/web/` | middleware (security headers and CSP, WhiteNoise, CORS, the session and its Origin check, JSON errors), the view that serves the React app, the OpenAPI schema and docs, shared formatting and CSV helpers |
+| `server/hajiri/<module>/` | one app per module: `services.py`, `serializers.py`, `api.py` (DRF views), `jobs.py`, `urls.py`; templates only for printable HTML the API returns |
+| `frontend/` | the React web app (`src/`, `public/` for the PWA files and icons); `vite.config.js` builds it into `server/frontend_build/` |
+| `server/frontend_build/` | the web app's production build, **committed** so installs need no Node.js; regenerate with `scripts/build-frontend.sh` |
 | `server/hajiri/gateway/` | the device gateway (ZKTeco ADMS, Hikvision ISAPI), served by `manage.py run_gateway`; see `docs/gateway.md` |
 | `server/hajiri/worker/` | the scheduler and job registry on `django.tasks` (`django_tasks_db` backend) |
 | `server/hajiri/group/`, `server/hajiri/group_admin/` | group-wide views and group administration (the only code that reads across companies) |
 | `server/demo/` | demo seeders (`seed_demo_suite`, `seed_demo_group`) |
-| `server/templates/`, `server/static/` | base layout, components, CSS (CoreValley identity), `app.js`, vendored libraries, PWA files |
 | `server/tests/` | pytest suites, one folder per app; `tests/parity/fixtures/` and `tests/engines/payroll/golden/` are fixed records |
 | `server/tools/gen_models.py` | the generator used once for the initial models (do not run it over `hajiri/db/models`) |
-| `scripts/` | install, start/stop, run, boot services, update (see README); `django_ops.py` helpers; `django_routes.py` URL map |
+| `scripts/` | install, start/stop, run, boot services, update (see README); `build-frontend.sh` (npm ci and vite build into `server/frontend_build/`); `django_ops.py` helpers; `django_routes.py` URL map |
 | `infra/` | Docker image and compose stack |
 | `docs/adr` | decisions; ADR 0001 records deviations from plan.md, ADR 0002 the move to Django |
 
@@ -41,18 +44,41 @@ Use Python 3.13 (never the Homebrew 3.14 on the development Mac: its `pyexpat` i
 PostgreSQL 18 runs on port **5433** on macOS (an existing PostgreSQL on 5432 is untouched) and 5432 on Linux. The
 database is `hajiri`; its connection string and secrets live in `server/.env` (never committed).
 
+## The web app (frontend/)
+
+Node.js 20.19+ or 22.12+ is needed only to work on the web app; installs use the committed build.
+
+```sh
+# two terminals: Django on :3000, Vite with hot reload on :5173 (proxies /api and /health to :3000)
+cd server && DJANGO_DEBUG=true .venv/bin/python manage.py runserver 3000
+cd frontend && npm ci && npm run dev                                  # open http://localhost:5173
+cd frontend && npx vitest run                                         # unit tests (lib/, api/client)
+./scripts/build-frontend.sh                                           # production build into server/frontend_build/
+```
+
+- Plain JavaScript (`.js`/`.jsx`): no TypeScript, no `.ts`/`.tsx` files, no type annotations.
+- The app calls `/api/v1/...` with the session cookie (`src/api/client.js`); it sends no CSRF token. Cookie requests
+  that change something are accepted when their `Origin` (or `Referer`) is this site or a `CORS_ORIGINS` entry, as the
+  TS `sameOriginGuard` did (`hajiri.web.middleware.SameOriginMiddleware`, `hajiri.core.api.SameOriginAuthentication`).
+- After changing `frontend/`, run `./scripts/build-frontend.sh` and commit `server/frontend_build/` with the change
+  (installs serve exactly what is committed; `update.sh` rebuilds only when Node.js is present and a pull brought
+  source changes without a build).
+- Django answers `index.html` (no-cache) for every address outside `/api/` and `/static/`; files under `/assets/`
+  are content-hashed and cached for a year; `sw.js` and the manifest are revalidated on every load.
+
 ## Commands
 
 Run from `server/`:
 
 ```sh
-DJANGO_DEBUG=true .venv/bin/python manage.py runserver 3000          # web app with reload
+DJANGO_DEBUG=true .venv/bin/python manage.py runserver 3000          # API (and the built web app) with reload
 .venv/bin/python manage.py run_worker                                 # background jobs (scheduler + task worker)
 .venv/bin/python manage.py run_gateway --memory                       # gateway on :8080 with an in-memory store
 .venv/bin/python manage.py gateway_simulate --url http://localhost:8080 --sn DEMO-01 --pin 1 --time "2026-09-21 10:17:03"
 .venv/bin/python manage.py check && .venv/bin/python manage.py makemigrations --check --dry-run
 .venv/bin/python manage.py spectacular --file ../docs/openapi.yaml --validate   # after changing a JSON endpoint
-.venv/bin/python ../scripts/django_routes.py --all                    # every URL, page and partial
+.venv/bin/python ../scripts/api_reference.py                   # then docs/api.md from that schema
+.venv/bin/python ../scripts/django_routes.py --all                    # every URL
 ```
 
 ## Tests
@@ -69,8 +95,28 @@ DJANGO_TEST_DATABASE=hajiri_t_leave .venv/bin/pytest -q tests/leave --reuse-db  
 - The engines must keep exact parity with `tests/parity/fixtures/` and the payroll golden files, which were recorded
   from the original TypeScript engines. They are a fixed record: never regenerate them from the Python code.
 - `tests/multicompany` checks the active company, switching, group roles, leavers, and that ids of another company are
-  not found on pages, partials and JSON endpoints. Add a case there for every new page or endpoint that takes an id.
+  not found on the JSON endpoints. Add a case there for every new endpoint that takes an id.
+- API tests use `django.test.Client` against `/api/v1/...` (`tests/<app>/test_api_*.py`), porting the HTTP-level
+  assertions of the TS tests (`git show 65a9079:apps/api/test/<x>.test.ts`). `tests/web/test_spa.py` checks that the
+  React app is served.
 - Use `django.test.Client`; never start a server on a fixed port in a test.
+- Browser tests (`tests/e2e/`, pytest + Playwright, skipped unless `HAJIRI_E2E_URL` is set) drive the built React
+  app on a running server: for every company role of the two demo companies, the group roles and the person who
+  works in both, they sign in through the login page and open every route of the router, failing on any console
+  error, uncaught exception, failed request or red alert; `test_actions.py` runs the main flows (leave and its
+  approval, clock-in, a new employee, a locked and published pay run, a help-desk ticket, an expense claim, the
+  group dashboard). Use a throwaway database, never the live one:
+
+  ```sh
+  .venv/bin/pip install -r requirements-dev.txt && .venv/bin/playwright install chromium
+  createdb -p 5433 hajiri_e2e
+  export DATABASE_URL=postgres://localhost:5433/hajiri_e2e
+  .venv/bin/python manage.py migrate && .venv/bin/python manage.py seed_bs_calendar
+  .venv/bin/python manage.py seed_demo_group --database $DATABASE_URL --yes
+  .venv/bin/python manage.py shell < tests/e2e/seed_users.py > /tmp/e2e-users.json   # resets passwords
+  # start the web server and the worker on that database (any free port), then:
+  HAJIRI_E2E_URL=http://localhost:8301 HAJIRI_E2E_USERS=/tmp/e2e-users.json .venv/bin/pytest -p no:cacheprovider tests/e2e
+  ```
 
 ## Conventions (summary; the full rules are in docs/django-conventions.md)
 
@@ -81,9 +127,10 @@ DJANGO_TEST_DATABASE=hajiri_t_leave .venv/bin/pytest -q tests/leave --reuse-db  
 - **Scope every query to the active company** with the company-scoped managers (`Model.objects.for_company(...)`).
   `request.hajiri_user.company_id`, `roles` and `employee_id` are those of the active company; an id of another company
   behaves as not found. Only the group apps read across companies, and only across the companies the person may see.
-- **Validation**: DRF serializers for JSON endpoints and the service contract, Django forms for page posts.
+- **Validation**: DRF serializers for the JSON endpoints and the service contract (the TS zod schemas).
 - **JSON endpoints** are DRF views with the project's authentication, permission and exception classes; they appear in
-  `/api/docs`. Pages and HTMX partials are views rendering templates (django-htmx).
+  `/api/docs`. Paths, methods, query parameters, body keys, response fields and status codes are the TS API's: the
+  React app was written against it.
 - **Enums** are TextChoices on the models; queries use them, never string literals.
 - **Background work** is a `django.tasks` task (`@task`, `.enqueue()`); periodic jobs are registered with
   `hajiri.worker.registry` (`daily_job`, `periodic_job`) and run by the scheduler.
@@ -93,7 +140,7 @@ DJANGO_TEST_DATABASE=hajiri_t_leave .venv/bin/pytest -q tests/leave --reuse-db  
   managers only their reports, employees themselves).
 - **Dates**: business dates are Nepal dates (`hajiri.core.clock.npt_today()`); the database session runs in UTC, so
   never use `current_date`, `now()::date`, `date.today()` or a UTC date for a business date. Every date shown to people
-  is Bikram Sambat with English month names (`hajiri.core.bsdate`, the `hj` template filters).
+  is Bikram Sambat with English month names (`hajiri.core.bsdate` on the server, `src/lib/bs.js` in the web app).
 - **Money** is `numeric` in SQL and `Decimal` in Python; never a float.
 - English UI throughout. Payroll is run entirely by HR: no finance role, no bank or accounting export.
 
@@ -120,6 +167,6 @@ keep `makemigrations --check --dry-run` clean. Triggers, functions and constrain
 
 ## Style
 
-Python 3.13 with type hints on public functions; module and function docstrings say what the code is for. Templates
-extend `base.html` and use the shared components in `server/templates/components/`. No inline scripts (the
-Content-Security-Policy forbids them); page behaviour lives in `server/static/js/app.js` or an app's static folder.
+Python 3.13 with type hints on public functions; module and function docstrings say what the code is for. The web
+app is plain JavaScript formatted with Prettier (`npm run format`). No inline scripts in HTML: the
+Content-Security-Policy (`script-src 'self'`) forbids them.

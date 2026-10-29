@@ -1,10 +1,8 @@
 from django.urls import path
 
-from . import api, views
+from . import api
 
 urlpatterns = [
-    # Pages
-    path('attendance/from-home', views.from_home, name='from_home'),
     # JSON (TS paths)
     path('api/v1/punch', api.punch, name='api_punch'),
     path('api/v1/punch/today', api.today, name='api_today'),

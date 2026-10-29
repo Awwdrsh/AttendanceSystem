@@ -22,6 +22,25 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   });
 }
 
+// After a new release the old page's lazily loaded files are gone from the server. Load the new release instead of
+// showing a blank page; at most once a minute, so a file that is really missing cannot cause a reload loop.
+window.addEventListener('vite:preloadError', (event) => {
+  let last = 0;
+  try {
+    last = Number(sessionStorage.getItem('hj-reloaded-at')) || 0;
+  } catch {
+    /* storage blocked: still reload once */
+  }
+  if (Date.now() - last < 60000) return;
+  try {
+    sessionStorage.setItem('hj-reloaded-at', String(Date.now()));
+  } catch {
+    /* ignore */
+  }
+  event.preventDefault();
+  window.location.reload();
+});
+
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <MantineProvider theme={theme} defaultColorScheme="light">

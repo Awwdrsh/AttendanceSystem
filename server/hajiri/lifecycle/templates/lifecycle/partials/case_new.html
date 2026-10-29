@@ -1,7 +1,0 @@
-<form class="hj-form" data-modal-title="Start onboarding" hx-post="{% url 'lifecycle:case_new' %}" hx-swap="none">
-  {% employee_picker "employee_id" value=employee_id required=True %}
-  <div class="hj-fieldset"><label class="hj-label" for="f-tpl">Checklist</label>
-    <select id="f-tpl" name="templateId" class="hj-select"><option value="">Best match for their department and branch</option>{% for t in templates %}<option value="{{ t.id }}">{{ t.name }}</option>{% endfor %}</select></div>
-  {% bs_date_input "anchorDate" label="Count due dates from" description="Leave empty to use the join date" %}
-  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn">Start</button></div>
-</form>

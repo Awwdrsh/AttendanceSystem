@@ -14,7 +14,6 @@ import pytest
 
 from hajiri.db.models import HiringApplication, NotificationOutbox
 from hajiri.hiring import services as hiring
-from tests.web.factories import htmx
 
 from .world import future
 
@@ -44,54 +43,36 @@ def _beta(world) -> Beta:
     return Beta(req, job, app, iv, offer)
 
 
-# (name, method, url, htmx) with {job}, {app}, {req}, {interview}, {offer} filled from Beta's records.
+# (name, method, url) with {job}, {app}, {req}, {interview}, {offer} filled from Beta's records.
+H = '/api/v1/hiring'
 CASES = [
-    ('job edit form', 'get', '/_/hiring/jobs/{job}/edit', True),
-    ('job publish', 'post', '/_/hiring/jobs/{job}/publish', True),
-    ('job close', 'post', '/_/hiring/jobs/{job}/close', True),
-    ('add candidate form', 'get', '/_/hiring/jobs/{job}/candidates/new', True),
-    ('pipeline board', 'get', '/hiring/pipeline?job={job}', 'board'),
-    ('job form from a request', 'get', '/_/hiring/jobs/new?requisition={req}', True),
-    ('request cancel', 'post', '/_/hiring/requisitions/{req}/cancel', True),
-    ('candidate drawer', 'get', '/_/hiring/applications/{app}', True),
-    ('candidate CV', 'get', '/_/hiring/applications/{app}/cv', False),
-    ('candidate export', 'get', '/_/hiring/applications/{app}/export', False),
-    ('candidate update', 'post', '/_/hiring/applications/{app}/update', True),
-    ('candidate move', 'post', '/_/hiring/applications/{app}/move', True),
-    ('reject form', 'get', '/_/hiring/applications/{app}/reject', True),
-    ('reopen', 'post', '/_/hiring/applications/{app}/reopen', True),
-    ('note', 'post', '/_/hiring/applications/{app}/notes', True),
-    ('interview form', 'get', '/_/hiring/applications/{app}/interviews/new', True),
-    ('offer form', 'get', '/_/hiring/applications/{app}/offers/new', True),
-    ('hire form', 'get', '/_/hiring/applications/{app}/hire', True),
-    ('interview update', 'post', '/_/hiring/interviews/{interview}/update', True),
-    ('scorecard form', 'get', '/_/hiring/interviews/{interview}/scorecard', True),
-    ('offer letter', 'get', '/_/hiring/offers/{offer}/letter', False),
-    ('offer respond', 'post', '/_/hiring/offers/{offer}/respond', True),
-    ('offer withdraw', 'post', '/_/hiring/offers/{offer}/withdraw', True),
+    ('job', 'get', H + '/jobs/{job}'),
+    ('job edit', 'patch', H + '/jobs/{job}'),
+    ('job publish', 'post', H + '/jobs/{job}/publish'),
+    ('job close', 'post', H + '/jobs/{job}/close'),
+    ('job board', 'get', H + '/jobs/{job}/applications'),
+    ('request cancel', 'post', H + '/requisitions/{req}/cancel'),
+    ('candidate', 'get', H + '/applications/{app}'),
+    ('candidate CV', 'get', H + '/applications/{app}/cv'),
+    ('candidate export', 'get', H + '/applications/{app}/export'),
+    ('candidate update', 'patch', H + '/applications/{app}'),
+    ('candidate move', 'post', H + '/applications/{app}/move'),
+    ('reopen', 'post', H + '/applications/{app}/reopen'),
+    ('note', 'post', H + '/applications/{app}/notes'),
+    ('interview update', 'patch', H + '/interviews/{interview}'),
+    ('offer letter', 'get', H + '/offers/{offer}/letter'),
+    ('offer respond', 'post', H + '/offers/{offer}/respond'),
+    ('offer withdraw', 'post', H + '/offers/{offer}/withdraw'),
 ]
 
-DATA = {'candidate update': {'rating': '4'}, 'candidate move': {'stage': 'Screening'}, 'note': {'body': 'Seen.'},
-        'offer respond': {'response': 'accepted'}, 'interview update': {'status': 'completed'}}
+DATA = {'job edit': {'title': 'Head baker'}, 'candidate update': {'rating': 4}, 'candidate move': {'stage': 'Screening'},
+        'note': {'body': 'Seen.'}, 'offer respond': {'response': 'accepted'}, 'interview update': {'status': 'completed'}}
 
 
-def _call(client, method, url, hx, data):
-    headers = htmx(hx if isinstance(hx, str) else None) if hx else {}
-    return client.post(url, data, **headers) if method == 'post' else client.get(url, **headers)
-
-
-@pytest.mark.parametrize('case', CASES, ids=[c[0] for c in CASES])
-def test_hiring_ids_of_another_company_are_not_found(world, case):
-    name, method, url, hx = case
-    b = _beta(world)
-    target = url.format(job=b.job, app=b.app, req=b.req, interview=b.interview, offer=b.offer)
-    data = DATA.get(name, {})
-    r = _call(world.signed_in(world.admin_c), method, target, hx, data)
-    assert r.status_code == 404, f'{name}: outsider got {r.status_code}'
-    r = _call(world.signed_in(world.admin_a), method, target, hx, data)
-    assert r.status_code == 404, f'{name}: group admin working in Alpha got {r.status_code}'
-    r = _call(world.signed_in(world.admin_b), method, target, hx, data)
-    assert r.status_code != 404 and r.status_code < 500, f'{name}: Beta admin got {r.status_code} (control)'
+def _call(client, method, url, data):
+    if method == 'get':
+        return client.get(url)
+    return getattr(client, method)(url, data, content_type='application/json')
 
 
 def test_services_refuse_ids_of_a_sister_company(world):
@@ -111,18 +92,6 @@ def test_services_refuse_ids_of_a_sister_company(world):
     _, admin_in_beta = world.session(world.admin_a, world.beta)
     assert [j['title'] for j in hiring.list_jobs(admin_in_beta)['jobs']] == ['Baker']
     assert hiring.get_job(admin_in_beta, b.job)['job']['company_id'] == str(world.beta.id)
-
-
-def test_hub_lists_only_the_active_company_and_follow_a_switch(world):
-    _beta(world)
-    c = world.signed_in(world.admin_a)
-    assert b'Baker' not in c.get('/hiring').content
-    assert b'Hari Baker' not in c.get('/hiring/pipeline').content
-    assert b'Baker' not in c.get('/hiring/requisitions').content
-    c.post('/_/web/company/switch', {'company_id': str(world.beta.id)}, **htmx())
-    page = c.get('/hiring').content.decode()
-    assert 'Baker' in page and '/careers/BETA' in page   # Beta's own careers address
-    assert 'Hari Baker' in c.get('/hiring/pipeline').content.decode()
 
 
 def test_people_of_the_company_sit_on_panels_and_own_candidates(world):
@@ -166,10 +135,40 @@ def test_group_hr_hears_about_applications_in_every_company_of_the_group(world):
     assert HiringApplication.objects.for_company(world.alpha.id).count() == 0
 
 
+@pytest.mark.parametrize('case', CASES, ids=[c[0] for c in CASES])
+def test_hiring_ids_of_another_company_are_not_found(world, case):
+    name, method, url = case
+    b = _beta(world)
+    target = url.format(job=b.job, app=b.app, req=b.req, interview=b.interview, offer=b.offer)
+    data = DATA.get(name, {})
+    r = _call(world.signed_in(world.admin_c), method, target, data)
+    assert r.status_code == 404, f'{name}: outsider got {r.status_code}'
+    r = _call(world.signed_in(world.admin_a), method, target, data)
+    assert r.status_code == 404, f'{name}: group admin working in Alpha got {r.status_code}'
+    r = _call(world.signed_in(world.admin_b), method, target, data)
+    assert r.status_code != 404 and r.status_code < 500, f'{name}: Beta admin got {r.status_code} (control)'
+
+
+def test_hub_lists_only_the_active_company_and_follow_a_switch(world):
+    _beta(world)
+    c = world.signed_in(world.admin_a)
+    jobs = c.get('/api/v1/hiring/jobs').json()
+    assert jobs['jobs'] == [] and jobs['companyCode'] == 'ALPHA'
+    assert b'Baker' not in c.get('/api/v1/hiring/requisitions').content
+    assert b'Hari Baker' not in c.get('/api/v1/hiring/interviews').content
+    c.post('/api/v1/me/companies/switch', {'companyId': str(world.beta.id)}, content_type='application/json')
+    jobs = c.get('/api/v1/hiring/jobs').json()
+    assert [j['title'] for j in jobs['jobs']] and 'Baker' in jobs['jobs'][0]['title']
+    assert jobs['companyCode'] == 'BETA'   # the hub links to Beta's own careers address
+    board = c.get(f"/api/v1/hiring/jobs/{jobs['jobs'][0]['id']}/applications").content.decode()
+    assert 'Hari Baker' in board
+
+
 def test_group_hr_works_hiring_in_a_sister_company(world):
     b = _beta(world)
     c = world.signed_in(world.ghr, world.alpha)   # group_hr: HR in Alpha too
-    assert c.get('/hiring').status_code == 200
-    assert c.get(f'/_/hiring/applications/{b.app}', **htmx()).status_code == 404
-    c.post('/_/web/company/switch', {'company_id': str(world.beta.id)}, **htmx())
-    assert c.get(f'/_/hiring/applications/{b.app}', **htmx()).status_code == 200
+    assert c.get('/api/v1/hiring/jobs').status_code == 200
+    assert c.get(f'/api/v1/hiring/applications/{b.app}').status_code == 404
+    c.post('/api/v1/me/companies/switch', {'companyId': str(world.beta.id)}, content_type='application/json')
+    assert c.get(f'/api/v1/hiring/applications/{b.app}').status_code == 200
+

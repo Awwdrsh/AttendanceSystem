@@ -1,22 +1,14 @@
 from django.urls import path
 
-from . import views
+# JSON API for the React app and Bearer-token clients (TS: /api/v1/employees/...). Ids are <str:...> so the service
+# answers a malformed one with the TS 400 "Invalid UUID".
+from . import api
 
 urlpatterns = [
-    path('employees', views.employee_list, name='list'),
-    path('employees/<uuid:id>', views.employee_detail, name='detail'),
-    path('_/employees/new', views.employee_new, name='new'),
-    path('_/employees/import', views.employee_import, name='import'),
-    path('_/employees/<uuid:id>/edit', views.employee_edit, name='edit'),
-    path('_/employees/<uuid:id>/overview', views.overview, name='overview'),
-    path('_/employees/<uuid:id>/sensitive', views.sensitive, name='sensitive'),
+    path('api/v1/employees', api.EmployeesView.as_view(), name='api_list'),
+    path('api/v1/employees/import', api.ImportView.as_view(), name='api_import'),
+    path('api/v1/employees/<str:id>', api.EmployeeView.as_view(), name='api_detail'),
+    path('api/v1/employees/<str:id>/sensitive', api.SensitiveView.as_view(), name='api_sensitive'),
+    path('api/v1/employees/<str:id>/assignments', api.AssignmentsView.as_view(), name='api_assignments'),
+    path('api/v1/employees/<str:id>/audit', api.AuditView.as_view(), name='api_audit'),
 ]
-
-# JSON API for Bearer-token clients (TS: /api/v1/employees/...).
-from rest_framework.routers import SimpleRouter  # noqa: E402
-
-from . import api  # noqa: E402
-
-router = SimpleRouter(trailing_slash=False)
-router.register('api/v1/employees', api.EmployeeViewSet, basename='api-employee')
-urlpatterns += router.urls

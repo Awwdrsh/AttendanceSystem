@@ -1,7 +1,9 @@
 """
 Attendance-correction JSON API (the TS routes under /api/v1/regularisation) and the offline clock-in flush the page
-script posts to. DRF views with the project defaults (hajiri.core.api): HajiriAuthentication (cookie with CSRF, or
-Bearer), IsSignedIn, the TS error shape and JsonRenderer. Rules and validation stay in services.py.
+script posts to. DRF views with the project defaults (hajiri.core.api): IsSignedIn, the TS error shape and
+JsonRenderer. The /api/v1 views authenticate with SameOriginAuthentication (the React app sends the cookie with an
+Origin check, never a CSRF token); the page script's offline flush keeps HajiriAuthentication (cookie with CSRF, or
+Bearer). Rules and validation stay in services.py.
 """
 from __future__ import annotations
 
@@ -10,12 +12,15 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from hajiri.core.api import SameOriginAuthentication
+
 from . import services
 from .serializers import CorrectionCreatedOut, CorrectionQueryIn, OfflineClockIn, CorrectionCancelOut, CorrectionIn, CorrectionListOut
 
 
 class RequestsView(APIView):
     """/api/v1/regularisation: list (own, team or all) and file a correction."""
+    authentication_classes = [SameOriginAuthentication]     # the React app's cookie requests: Origin check, as in TS
 
     @extend_schema(parameters=[CorrectionQueryIn], responses=CorrectionListOut)
     def get(self, request):
@@ -28,6 +33,7 @@ class RequestsView(APIView):
 
 class CancelView(APIView):
     """/api/v1/regularisation/<id>/cancel: withdraw a pending correction."""
+    authentication_classes = [SameOriginAuthentication]
 
     @extend_schema(request=None, responses=CorrectionCancelOut)
     def post(self, request, id):

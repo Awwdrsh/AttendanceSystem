@@ -1,9 +1,0 @@
-{% load perf_tags %}
-<form class="hj-form" data-modal-title="Assign {{ c.title }}" hx-post="{% url 'learning:assign' c.id %}" hx-swap="none">
-  {% multi_pick "employee_ids" people label="People" max=500 required=True id="as-p" %}
-  {% if sessions %}
-  <div class="hj-fieldset"><label class="hj-label" for="as-s">Session</label><select class="hj-select" id="as-s" name="session_id"><option value=""></option>
-    {% for x in sessions %}<option value="{{ x.id }}">{{ x.starts_at|short_dt }}{% if x.venue %}, {{ x.venue }}{% endif %}{% if x.capacity %} ({{ x.taken }}/{{ x.capacity }}){% endif %}</option>{% endfor %}</select></div>
-  {% endif %}
-  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit">Enrol</button></div>
-</form>

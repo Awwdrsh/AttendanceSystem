@@ -125,6 +125,7 @@ def parse_columns(value: Any) -> list[dict]:
 def check_columns(cols: list[dict], path: list) -> None:
     """The zod .refine()s on the column list: unique ids and at least one done column."""
     issues = []
+    path = '.'.join(map(str, path))   # zod issue paths reached the client joined with '.'
     if len({c['id'] for c in cols}) != len(cols):
         issues.append({'path': path, 'message': 'column ids must be unique'})
     if not any(c['done'] for c in cols):
@@ -442,7 +443,7 @@ def get_task(user: AuthUser, task_id: str) -> dict:
                 .values('id', 'body', 'created_at', 'user_id', name=F('user__name'))]
     attachments = [plain(r) for r in TaskAttachment.objects.filter(task_id=tid, file__deleted_at__isnull=True)
                    .order_by('added_at')
-                   .values('id', 'added_at', 'added_by', filename=F('file__filename'), mime=F('file__mime'),
+                   .values('id', 'added_at', filename=F('file__filename'), mime=F('file__mime'),
                            bytes=F('file__bytes'), added_by_name=F('added_by__name'))]
     return {'task': full_task(tid),
             'board': {'id': board['id'], 'name': board['name'], 'kind': board['kind'], 'columns': board['columns']},

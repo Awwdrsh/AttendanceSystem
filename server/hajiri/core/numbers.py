@@ -22,7 +22,10 @@ def round_half_up(x: float, places: int = 0) -> int | float:
 
 def to_fixed(x: float, digits: int) -> str:
     """`digits` decimals of the exact binary value of x, an exact tie going to the larger magnitude."""
-    q = Decimal(float(x)).quantize(Decimal(1).scaleb(-digits), rounding=ROUND_HALF_UP)
+    x = float(x)
+    if x == 0:
+        x = 0.0  # JS prints (-0).toFixed(2) as '0.00'
+    q = Decimal(x).quantize(Decimal(1).scaleb(-digits), rounding=ROUND_HALF_UP)
     return f'{q:.{digits}f}'
 
 

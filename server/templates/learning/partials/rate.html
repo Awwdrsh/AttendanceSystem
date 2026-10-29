@@ -1,5 +1,0 @@
-<form class="hj-form" data-modal-title="How was the course?" hx-post="{% url 'learning:rate' id %}" hx-swap="none" x-data="{ r: '' }" @change="r = ($el.querySelector('input[name=rating]:checked') || {}).value || ''">
-  {% include "performance/partials/rating_picker.html" with name="rating" value=None %}
-  <textarea class="hj-input" name="comment" rows="2" maxlength="2000" placeholder="What was useful? What would you change?" aria-label="Comment"></textarea>
-  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit" :disabled="!r" disabled>Send</button></div>
-</form>

@@ -2,6 +2,9 @@
 The overtime request contract (the zod schemas of apps/api/src/modules/ot/routes.ts) as DRF serializers. Field names
 are the TS body and query keys, so JSON clients, the page forms and the services speak the same shape;
 `hajiri.core.validation.validate` reports problems in the TS issue list.
+
+zod parity: body numbers must be JSON numbers and strings JSON strings (zod refused "45", true and 12 where the
+schema said number or string); the page forms hand the services Python values, so they are unaffected.
 """
 from __future__ import annotations
 
@@ -18,12 +21,39 @@ SCOPES = ('own', 'team', 'all')
 REGISTER_FORMATS = ('json', 'csv')
 
 
+class StrictIntegerField(serializers.IntegerField):
+    """z.number().int(): a JSON number, not a numeric string or a boolean."""
+
+    def to_internal_value(self, data):
+        if isinstance(data, (str, bool)):
+            self.fail('invalid')
+        return super().to_internal_value(data)
+
+
+class StrictCharField(serializers.CharField):
+    """z.string(): a JSON string, not a number or a boolean."""
+
+    def to_internal_value(self, data):
+        if not isinstance(data, str):
+            self.fail('invalid')
+        return super().to_internal_value(data)
+
+
+class StrictUUIDField(serializers.UUIDField):
+    """z.uuid(): a string, not a JSON number."""
+
+    def to_internal_value(self, data):
+        if not isinstance(data, str):
+            self.fail('invalid')
+        return super().to_internal_value(data)
+
+
 class OtRequestIn(serializers.Serializer):
     """POST /ot/requests."""
-    employeeId = serializers.UUIDField(required=False)
+    employeeId = StrictUUIDField(required=False)
     localDate = IsoDateField()
-    requestedMin = serializers.IntegerField(min_value=1)
-    reason = serializers.CharField(max_length=500, required=False, allow_blank=True, trim_whitespace=False)
+    requestedMin = StrictIntegerField(min_value=1)
+    reason = StrictCharField(max_length=500, required=False, allow_blank=True, trim_whitespace=False)
 
 
 class _DateRange(serializers.Serializer):
@@ -51,12 +81,12 @@ class OtSlipsQueryIn(_DateRange):
 
 class OtApproveSlipIn(serializers.Serializer):
     """POST /ot/slips/:id/approve: without approvedMin the detected minutes are approved."""
-    approvedMin = serializers.IntegerField(min_value=0, max_value=CAP_DAY_MIN, required=False)
+    approvedMin = StrictIntegerField(min_value=0, max_value=CAP_DAY_MIN, required=False)
 
 
 class OtRejectSlipIn(serializers.Serializer):
     """POST /ot/slips/:id/reject: the employee sees the reason."""
-    reason = serializers.CharField(min_length=3, max_length=500, trim_whitespace=False)
+    reason = StrictCharField(min_length=3, max_length=500, trim_whitespace=False)
 
 
 class OtRegisterQueryIn(_DateRange):

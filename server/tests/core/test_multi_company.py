@@ -8,7 +8,7 @@ from hajiri.core import auth, companies
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
 from hajiri.db.models import Company, CompanyMembership, Employee, HelpdeskTicket
 from hajiri.helpdesk import services as hd
-from tests.web.factories import PW, bearer, htmx, make_company, make_employee, make_user, sign_in, toasts
+from tests.web.factories import PW, bearer, make_company, make_employee, make_user, sign_in
 
 
 @pytest.fixture
@@ -133,43 +133,6 @@ def test_group_overview_counts_only_companies_with_a_viewing_role(group):
     hari = auth.resolve_session(token)
     assert companies.group_company_ids(hari) == [str(group['alpha'].id)]
     assert not companies.can_view_group(hari)
-
-
-def test_pages_switcher_and_group_page(group):
-    c = Client()
-    sign_in(c, 'hari@alpha.test')
-    page = c.get('/group')
-    assert page.status_code == 200 and b'Beta Foods' in page.content and b'Alpha Traders group' in page.content
-    home = c.get('/me/profile/security')
-    assert b'hj-companymenu' in home.content
-    r = c.post('/_/web/company/switch', {'company_id': str(group['beta'].id)}, **htmx())
-    assert r.status_code == 204 and r['HX-Redirect'] == '/' and toasts(r)[0]['message'] == 'Now working in Beta Foods.'
-    assert c.post('/_/web/company/switch', {'company_id': str(make_company().id)}, **htmx()).status_code == 404
-    single = Client()
-    sign_in(single, make_user(make_company(), roles=['hr']))
-    assert single.get('/group', **htmx()).status_code == 403
-
-
-def test_admin_adds_company_and_gives_access_from_the_page(db):
-    alpha = make_company('GAMMA', 'Gamma Ltd')
-    make_user(alpha, roles=['admin'], email='boss@gamma.test')
-    c = Client()
-    sign_in(c, 'boss@gamma.test')
-    assert b'not part of a group yet' in c.get('/group').content
-    assert c.post('/_/web/group/companies/new', {'code': '!', 'name_en': ''}, **htmx()).status_code == 422
-    r = c.post('/_/web/group/companies/new', {'code': 'DELTA', 'name_en': 'Delta Ltd'}, **htmx())
-    assert r.status_code == 204 and toasts(r)[0]['message'].startswith('Delta Ltd added to the group')
-    staff = make_user(alpha, roles=['employee'], email='staff@gamma.test')
-    r = c.post('/_/web/group/access/new', {'email': staff.email, 'roles': ['manager']}, **htmx())
-    assert r.status_code == 400 and 'already belongs' in toasts(r)[0]['message']     # Gamma is staff's home
-    delta = Company.objects.get(code='DELTA')
-    c.post('/_/web/company/switch', {'company_id': str(delta.id)}, **htmx())
-    r = c.post('/_/web/group/access/new', {'email': staff.email, 'roles': ['manager']}, **htmx())
-    assert r.status_code == 204 and toasts(r)[0]['message'] == 'Access given.'
-    assert list(CompanyMembership.objects.get(user_id=staff.id, company=delta).roles) == ['manager']
-    assert b'staff@gamma.test' in c.get('/_/web/group/access', **htmx('group-members')).content
-    r = c.post(f'/_/web/group/access/{staff.id}/revoke', **htmx())
-    assert r.status_code == 204 and toasts(r)[0]['message'] == 'Access removed.'
 
 
 def test_json_api_lists_and_switches(group):

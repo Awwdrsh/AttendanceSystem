@@ -74,3 +74,42 @@ _n = [0]
 def punch(tok, body, prefix='key'):
     _n[0] += 1
     return post(tok, '/punch', {'direction': 'in', 'clientTime': now_iso(), 'idempotencyKey': f'{prefix}-{_n[0]}-key', **body})
+
+
+# ---------------------------------------------------------------- the React app's cookie session
+
+class Browser:
+    """The React app (frontend/src/api/client.js): fetch() with the hajiri_session cookie, JSON bodies, no CSRF token.
+    Django's CSRF check is enforced on the client, so only the Origin check of SameOriginAuthentication lets posts
+    through. `origin` is the Origin header sent with every request (None: none, as some browsers do for same-origin)."""
+
+    def __init__(self, token: str, origin: str | None = 'http://testserver'):
+        from hajiri.core.auth import SESSION_COOKIE
+        self.c = Client(enforce_csrf_checks=True)
+        self.c.cookies[SESSION_COOKIE] = token
+        self.origin = origin
+
+    def _h(self, headers):
+        return {**({'HTTP_ORIGIN': self.origin} if self.origin else {}), **headers}
+
+    def get(self, url, query=None, **headers) -> Res:
+        return Res(self.c.get(f'/api/v1{url}', query or {}, **self._h(headers)))
+
+    def send(self, method, url, body=None, **headers) -> Res:
+        fn = getattr(self.c, method)
+        data = json.dumps(body) if body is not None else None
+        kw = {'content_type': 'application/json'} if data is not None else {}
+        return Res(fn(f'/api/v1{url}', data, **kw, **self._h(headers)) if data is not None
+                   else fn(f'/api/v1{url}', **self._h(headers)))
+
+    def post(self, url, body=None, **headers) -> Res:
+        return self.send('post', url, {} if body is None else body, **headers)
+
+    def put(self, url, body=None, **headers) -> Res:
+        return self.send('put', url, {} if body is None else body, **headers)
+
+    def delete(self, url, **headers) -> Res:
+        return self.send('delete', url, None, **headers)
+
+
+CROSS_SITE = {'error': 'cross-site request refused'}

@@ -233,6 +233,13 @@ class CompetencyIn(serializers.Serializer):
     active = serializers.BooleanField(default=True)
 
 
+class CompetencyQueryIn(serializers.Serializer):
+    """GET /competencies: the framework for a role (designation and grade), inactive ones too for HR with all=1."""
+    designation = serializers.CharField(max_length=120, required=False, allow_blank=True)
+    grade = serializers.CharField(max_length=40, required=False, allow_blank=True)
+    all = serializers.ChoiceField(('1',), required=False)
+
+
 class CycleFilterIn(serializers.Serializer):
     orgUnitIds = serializers.ListField(child=serializers.UUIDField(), max_length=200, required=False)
     branchIds = serializers.ListField(child=serializers.UUIDField(), max_length=200, required=False)

@@ -8,7 +8,7 @@ Plain functions, usable from any test that has the `db` fixture:
     def test_hr_sees_the_list(db):
         co = make_company()
         client, user = signed_in_client(co, roles=['hr'])
-        assert client.get('/employees').status_code == 200
+        assert client.get('/api/v1/employees').status_code == 200
 
 and as pytest fixtures (`from tests.web.fixtures import *` in a slice's conftest.py): company, other_company,
 employee, hr_client, employee_client, manager_setup, make_client.
@@ -64,7 +64,7 @@ def sign_in(client: Client, user_or_email, password: str = PW, *, user_agent: st
     email = user_or_email if isinstance(user_or_email, str) else user_or_email.email
     result = auth.login(email, password, auth.SessionMeta(ip=ip, user_agent=user_agent))
     if result.two_factor_required:
-        raise AssertionError('two-step sign-in is on for this user; sign in through /login/2fa instead')
+        raise AssertionError('two-step sign-in is on for this user; sign in through /api/v1/auth/login/2fa instead')
     client.cookies[auth.SESSION_COOKIE] = result.token
     return result.token
 
@@ -81,34 +81,6 @@ def signed_in_client(company, *, roles=('employee',), employee=True, client: Cli
 def bearer(token: str) -> dict:
     """Headers for a Bearer-token request: client.get(url, **bearer(token))."""
     return {'HTTP_AUTHORIZATION': f'Bearer {token}'}
-
-
-def htmx(target: str | None = None, current_url: str | None = None) -> dict:
-    """Headers HTMX sends: client.post(url, data, **htmx('table-id'))."""
-    h = {'HTTP_HX_REQUEST': 'true'}
-    if target:
-        h['HTTP_HX_TARGET'] = target
-    if current_url:
-        h['HTTP_HX_CURRENT_URL'] = current_url
-    return h
-
-
-def hx_triggers(response) -> dict:
-    """The HX-Trigger events of a response as a dict ({} if none)."""
-    raw = response.headers.get('HX-Trigger')
-    return json.loads(raw) if raw else {}
-
-
-def toasts(response) -> list[dict]:
-    """Toasts a response shows: from HX-Trigger, or from the flash cookie set for the next page."""
-    items = hx_triggers(response).get('hj:toast', {}).get('items', [])
-    if items:
-        return items
-    from django.core import signing
-
-    from hajiri.web.htmx import _SALT, FLASH_COOKIE
-    c = response.cookies.get(FLASH_COOKIE)
-    return signing.loads(c.value, salt=_SALT) if c and c.value else []
 
 
 def set_features_off(company, *keys: str) -> None:
@@ -137,3 +109,25 @@ def audit_actions(row_id=None) -> list[str]:
 
 def user_row(user) -> dict:
     return one('SELECT * FROM app_user WHERE id = %s', [user.id])
+
+
+# ---------------------------------------------------------------- retired HTMX helpers
+# The server-rendered pages and their HTMX partials are gone (the web app is the React app). These stay only so test
+# modules of the old pages still import until they are deleted; nothing answers HTMX any more.
+
+def htmx(target: str | None = None, current_url: str | None = None) -> dict:
+    h = {'HTTP_HX_REQUEST': 'true'}
+    if target:
+        h['HTTP_HX_TARGET'] = target
+    if current_url:
+        h['HTTP_HX_CURRENT_URL'] = current_url
+    return h
+
+
+def hx_triggers(response) -> dict:
+    raw = response.headers.get('HX-Trigger')
+    return json.loads(raw) if raw else {}
+
+
+def toasts(response) -> list[dict]:
+    return hx_triggers(response).get('hj:toast', {}).get('items', [])

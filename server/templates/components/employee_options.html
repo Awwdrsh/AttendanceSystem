@@ -1,2 +1,0 @@
-{% for e in employees %}<li><button type="button" role="option" data-option data-id="{{ e.id }}" data-label="{{ e.name_en }} ({{ e.emp_code }})" aria-selected="false"><span class="hj-grow hj-truncate">{{ e.name_en }}</span><span class="mono hj-small hj-muted">{{ e.emp_code }}</span>{% if e.status == 'exited' %}<span class="hj-badge sm hj-tone-idle">Exited</span>{% endif %}</button></li>
-{% empty %}<li class="none">No employee matches that search</li>{% endfor %}

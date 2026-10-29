@@ -114,11 +114,3 @@ def test_pairing_is_rate_limited(db):
         assert _k(None, '/pair', {'code': 'AAAA-BBBB'}).status == 400
     r = _k(None, '/pair', {'code': 'AAAA-BBBB'})
     assert r.status == 429 and r.body['error'] == 'Too many pairing attempts. Wait a few minutes and try again.'
-
-
-def test_kiosk_page_needs_no_session(db):
-    r = Client().get('/kiosk')
-    assert r.status_code == 200
-    html = r.content.decode()
-    assert 'hjKiosk()' in html and 'kiosk/kiosk.js' in html
-    assert 'Set up this kiosk' in html and 'Scan my QR badge' in html

@@ -1,6 +1,0 @@
-<span class="hj-row nowrap hj-gap-xs" style="justify-content:flex-end">
-  <button type="button" class="hj-iconbtn" aria-label="Edit shift" data-tip="Edit shift" hx-get="{% url 'shifts:edit' row.id %}" hx-target="#hj-drawer-body"><i class="ti ti-pencil" aria-hidden="true"></i></button>
-  <button type="button" class="hj-iconbtn" aria-label="Assign to employee" data-tip="Assign to employee" hx-get="{% url 'shifts:assign' row.id %}" hx-target="#hj-modal-body"><i class="ti ti-user-plus" aria-hidden="true"></i></button>
-  <button type="button" class="hj-iconbtn" aria-label="Delete shift" data-tip="Delete shift" hx-post="{% url 'shifts:delete' row.id %}" hx-swap="none"
-          {% confirm_attrs row.delete_message title=row.delete_title label="Delete shift" %}><i class="ti ti-trash hj-bad-text" aria-hidden="true"></i></button>
-</span>

@@ -3,9 +3,10 @@
 The rulebook every slice follows, so the app reads as one idiomatic Django product. Follow it literally. The
 foundation it describes lives in `hajiri.core` (auth, companies, scoping, validation, DRF integration, settings store,
 collation, images, mail), `hajiri.db.models` (models, choices, company querysets, SQL-function expressions),
-`hajiri.worker` (django.tasks), `hajiri.web` (decorators, layout, components) and `server/templates/`. The help desk
-(`hajiri/helpdesk/`) is the worked example: every pattern below appears there, and section 15 shows it before and
-after the conversion.
+`hajiri.worker` (django.tasks) and `hajiri.web` (middleware, serving the React app). The web app itself is the React
+app in `frontend/` (plain JavaScript); the backend's job is the JSON API it calls, with the TS API's paths, bodies,
+field names, status codes and error shapes. The help desk (`hajiri/helpdesk/`) is the worked example: every pattern
+below appears there, and section 15 shows it before and after the conversion.
 
 If you need something that is not here, list it in `sharedChangesNeeded`; do not write your own framework.
 
@@ -16,18 +17,16 @@ server/hajiri/<app>/
   services.py     business rules: ORM queries, transactions, audit, notifications; no request objects;
                   raises hajiri.core.errors; validates TS-shaped bodies with its serializers
   serializers.py  DRF serializers: the request contract (the TS zod schemas) and JSON response shapes
-  forms.py        Django forms: read page posts (HTML types, checkboxes, repeated inputs) into service input
-  views.py        page and HTMX views: form -> service -> render
-  api.py          DRF views/viewsets for JSON clients (only where a non-browser client calls them)
+  api.py          DRF views/viewsets: the JSON endpoints the React app (and Bearer clients) call
   jobs.py         background jobs registered with hajiri.worker.registry (daily/periodic)
-  urls.py         urlpatterns (mounted at the site root with namespace = app name); DRF router for api.py
-  nav.py          NAV entries (section 9)
-server/templates/<app>/ or server/hajiri/<app>/templates/<app>/
-  <page>.html     full pages: {% extends "base.html" %}
-  partials/       HTMX fragments (no extends)
+  urls.py         urlpatterns of api.py (mounted at the site root with namespace = app name); DRF routers
+server/hajiri/<app>/templates/<app>/
+  print/*.html    only for HTML the API itself returns (certificates, offer letters, review print-outs)
 server/tests/<app>/
   conftest.py     from tests.web.fixtures import *   (optional)
-  test_services.py, test_views.py, test_api.py
+  test_services.py, test_api_*.py
+frontend/src/
+  pages/<area>/*.jsx, api/<module>.js   the screens and their API calls (plain JavaScript)
 ```
 
 ## 2. Models and the ORM
@@ -149,22 +148,22 @@ companies, and they follow these rules:
   companies where they are admin, HR or executive, directly or through a group role), with
   `Model.objects.for_companies(ids)`. Never `Model.objects.all()`, never the whole group.
 - Show figures per company and totals; link to a record only through a switch to its company (POST
-  `web:switch_company` with `next`), never by opening a foreign id in the active company.
+  `/api/v1/me/companies/switch`), never by opening a foreign id in the active company.
 - Writes go to one company at a time and only through the active company (switch first), except group
   administration in `hajiri.core.companies` (`create_group_company`, `grant_access`, `grant_group_role`, ...), which
   checks `is_group_admin` / `has_role(user, 'admin')` itself and audits every change.
-- Who sees the Group hub: `hajiri.core.companies.can_open_group(user)` (`NavItem(visible=...)`); the overview:
+- Who may use the group endpoints: `hajiri.core.companies.can_open_group(user)`; the overview:
   `can_view_group(user)`; group administration: `is_group_admin(user)`.
 
 ### Testing isolation
 
 `tests/multicompany/conftest.py` builds a group of two companies plus one outside it, with people who reach one
-company, two companies, or every company through a group role (`world` fixture). A new detail page or JSON
-endpoint taking an id gets a case in `tests/multicompany/test_isolation.py` (or the same three requests in the
+company, two companies, or every company through a group role (`world` fixture). A new JSON endpoint taking an id
+gets a case in `tests/multicompany/test_isolation.py` (or the same three requests in the
 slice's tests): the outsider and the group admin working in the other company get 404, the owner company's admin
 does not.
 
-## 4. Validation: serializers for the contract, forms for pages
+## 4. Validation: serializers for the contract
 
 The request contract of a service (the TS zod schema) is a **DRF serializer** with the TS body keys as field names.
 `hajiri.core.validation.validate(Serializer, data)` returns the validated dict or raises
@@ -187,31 +186,20 @@ b = plain(validate(TicketIn, body))           # plain(): UUIDs back to strings
 - TS string formats: `IsoDateField` ('YYYY-MM-DD', real dates), `HhmmField`, `MoneyField` (amount as a string);
   `parse_uuid(value)` for a path parameter.
 
-**Page posts** are read by **Django forms** (`forms.py`): the form knows the HTML side (checkbox -> bool, number
-inputs, repeated `file_ids`, '' -> None) and builds the service input; a form error is raised as the same
-`ValidationError` (`form_issues(form)`), so pages and JSON clients get the same messages. Re-render a modal form with
-status 422 only where the TS page showed errors inside the form (section 13); otherwise let the error become a toast.
-
-```python
-@require_POST
-@login_required
-@require_feature('helpdesk')
-def reply(request, ticket_id):
-    message = MessageForm(request.POST).message()          # raises ValidationError on unreadable input
-    services.add_message(request.hajiri_user, ticket_id, message)
-    return _changed(request, ticket_id, 'Note added.' if message['internal'] else 'Message sent.')
-```
-
-Forms that stand alone (sign-in, group administration) carry their own validation and re-render with 422.
+The React app shows the `issues` itself (`frontend/src/api/client.js` normalizeError joins them as
+`path: message`), so the wording is the TS wording.
 
 ## 5. JSON endpoints: Django REST framework
 
-Only for non-browser clients (terminals, kiosk tablets, Bearer-token integrations), under `/api/v1/...` with the TS
-path. They are DRF views or viewsets; the defaults in `REST_FRAMEWORK` (config/settings.py, `hajiri.core.api`) give:
+Every endpoint the React app calls, and those of terminals, kiosk tablets and Bearer-token integrations, under
+`/api/v1/...` with the TS path. They are DRF views or viewsets; the defaults in `REST_FRAMEWORK` (config/settings.py,
+`hajiri.core.api`) give:
 
-- **Authentication** `HajiriAuthentication`: the `hajiri_session` cookie (Django's CSRF check enforced) or
-  `Authorization: Bearer <token>` (no CSRF). `request.user` is the `AuthUser` (active company); `request.auth` the
-  session token.
+- **Authentication** `SameOriginAuthentication`: the `hajiri_session` cookie, accepted for a write only when its
+  `Origin` (else `Referer`) is this site or a `CORS_ORIGINS` entry (the TS `sameOriginGuard`; the React app sends no
+  CSRF token), or `Authorization: Bearer <token>`. `hajiri.web.middleware.SameOriginMiddleware` applies the same
+  check to every cookie request, so Django's CSRF middleware is not installed. `request.user` is the `AuthUser`
+  (active company); `request.auth` the session token.
 - **Permissions** (default `IsSignedIn`): `IsSignedIn` (password changed, two-step set up when required),
   `SignedInAnyState`, `HasRole('hr', 'manager')`, `HasModule('payroll')`, `FeatureEnabled('expenses')`. Refusals use
   the TS messages (`requires role hr`, `password change required`, `feature off`).
@@ -241,32 +229,26 @@ urlpatterns += router.urls
 The views stay thin: services hold the rules and validate. The literal port's hand-written `api_view`
 (`hajiri.core.http`) and zod clone (`hajiri.core.schema`) are gone; CORS helpers live in `hajiri.core.cors`.
 
-## 6. Views (pages and HTMX)
+## 6. Views: DRF only; the pages are React
 
-Function views. Decorators from `hajiri.web.decorators`, always outermost:
-
-| decorator | meaning (TS) |
-|---|---|
-| `@login_required` | signed in, password changed, two-step set up if the company requires it (requireAuth + requirePasswordChanged) |
-| `@require_role('hr', 'manager')` | login_required + any of the roles in the active company; admin always passes. Error: `requires role hr or manager` |
-| `@require_module('payroll')` | `require_role(*MODULE_ROLES['payroll'])` (AREA in lib/access.ts) |
-| `@require_feature('expenses')` | the active company's feature switch is on; pages redirect home, other requests 404 `feature off` |
-| `@signed_in` | any session, before the gates (only for password change, two-step setup, sign out) |
-
-Also use `django.views.decorators.http.require_GET / require_POST / require_http_methods`.
+There are no server-rendered pages. Every address outside `/api/` and `/static/` answers the React app's
+`index.html` (`hajiri.web.views.spa`, the last pattern in `config/urls.py`); React Router decides what to show,
+including the sign-in page, role refusals and the legacy addresses. The backend's views are the DRF views of
+section 5.
 
 - **Errors.** Raise `BadRequestError`, `UnauthorizedError`, `ForbiddenError`, `NotFoundError`, `ConflictError` with
-  the TS message, in services or views. `HttpErrorMiddleware` turns them into JSON in the TS shape for API clients, a
-  red toast for HTMX (`Not saved` for posts, `Could not load` for gets; validation issues joined as
-  `from: YYYY-MM-DD; bad`) and a friendly error page otherwise. 401 sends the user to `/login?next=...`; "password
-  change required" and two-step setup required go to their pages.
+  the TS message, in services or views. DRF's `exception_handler` (and `HttpErrorMiddleware` for the few plain views)
+  answer the TS JSON shape. The React app reacts to 401 (sign-in), 403 `password change required` and
+  `two-step sign-in setup required` itself.
 - **Database errors** need no handling: a unique, overlap, foreign-key or check violation or a trigger's
   `RAISE EXCEPTION` becomes the same 409/400 as the TS handler. Run the statement inside `transaction.atomic` (your
   service does) so the connection stays usable; catch `IntegrityError` only to give a more specific message.
-- **Role refused on a page** lands on the first tab of the same hub the user may see, or "Not available for your role".
 - **Audit and notifications** are the service's job, exactly as in TS (`hajiri.core.audit.audit(...)`).
-- Request data: `request.hajiri_user` (`AuthUser`), `request.session_token`, `request.auth_method`
-  (`'cookie' | 'bearer' | None`), `request.htmx` (django-htmx: `request.htmx.target`, `bool(request.htmx)`).
+- **HTML the API returns** (payslips, salary sheets, letters, certificates, offer letters, review print-outs) is built
+  by the service or rendered with `render_to_string` from the app's own templates; it is opened in a new tab by the
+  React app, so it is a complete standalone document with inline styles only.
+- Request data: `request.user` / `request.hajiri_user` (`AuthUser`), `request.auth` / `request.session_token`,
+  `request.auth_method` (`'cookie' | 'bearer' | None`).
 
 ## 7. Background work: django.tasks
 
@@ -305,178 +287,36 @@ def heartbeat(now): ...
 | shrink a profile photo | `hajiri.core.images.square_jpeg(data)` (Pillow: 320 px square JPEG, quality 85, EXIF orientation) |
 | email | Django's email framework, configured from `SMTP_URL` (`hajiri.core.mail`); notifications send with `EmailSender` |
 | company settings | `hajiri.core.settings_store.get_setting`, `put_setting`, `add_setting_if_missing`, `setting_subquery` |
-| QR codes | `{% qr_code value %}` (segno) |
+| QR codes | segno (`hajiri.field` kiosk QR) |
 | CSV | `hajiri.web.csv.csv_response` / `to_csv` (the csv module, formula protection, BOM) |
 | stored files | the encrypted file store in `hajiri.files.store` (files live encrypted in the database, not on disk); `has_signature(mime, data)` checks an upload's magic number |
 | rounding for display | `hajiri.core.numbers.round_half_up(x, places)`, `to_fixed(x, digits)`, `whole(x)`; payroll amounts use the engine's Decimal helpers |
 | UUID input | `hajiri.core.scoping.as_uuid` (400 'invalid value format'), `is_uuid`; `validation.parse_uuid` ('Invalid UUID') |
-| pagination of lists | `hajiri.web.tables.Table` on a QuerySet (pages) or `hajiri.core.api.Pagination` (JSON) |
+| pagination of lists | `hajiri.core.api.Pagination` (`?page=&pageSize=`) |
 
-## 9. Navigation: nav.py
+## 9. Navigation
 
-The sidebar shows **hubs** (fixed list in `hajiri/web/nav.py` `HUBS`, mirroring Layout.tsx); each app adds the
-**tabs** of the hubs it owns. A hub appears when at least one of its tabs is visible to the user; it links to the
-first visible tab (lowest `order`); with more than one visible tab the page shows a tab strip. Every visible tab is
-also a command palette entry (Cmd/Ctrl+K).
-
-```python
-# hajiri/attendance_tools/nav.py
-from hajiri.web.nav import NavItem, area
-
-NAV = [
-    NavItem(hub='attendance', label='Issues', url_name='attendance_tools:issues', order=120,
-            roles=('manager', *area('attendance')), icon='alert-triangle',
-            palette_label='Attendance issues and reminders'),
-    NavItem(hub='attendance', label='Late penalties', url_name='attendance_tools:penalties', order=130,
-            module='attendance', icon='clock-hour-4', palette_label='Late penalties and attendance rules'),
-    NavItem(hub='attendance', label='Upload', url_name='attendance_tools:upload', order=140, module='attendance',
-            icon='clock-edit', palette_label='Upload attendance (CSV)'),
-]
-```
-
-Fields: `hub`, `label` (tab label from hubs.tsx), `url_name` (no arguments), `order` (use the hubs.tsx position x 10),
-`roles` (tab `roles`), `module` (an AREA name instead of roles), `feature` (tab `feature`), `employee_only`
-(`show: !!user?.employeeId`), `icon`, `keywords`, `palette_label` (the JUMPS label in Layout.tsx when different),
-`visible` (an extra `Callable[[AuthUser], bool]`, e.g. `can_open_group` or `is_group_admin` for the Group hub).
-
-Tab `roles` here only hide the tab; **the view's decorator enforces access** (the App.tsx route guard roles plus the
-tab roles). Single-page hubs (Home `/`, Approvals, Overview, Insights, Tasks, Help desk, Notifications) register one
-NavItem.
-
-Hub keys: `home`, `my_attendance`, `time_off`, `timesheet`, `payslips`, `claims`, `growth`, `tasks`, `help`,
-`people`, `engage`, `group`, `overview`, `approvals`, `employees`, `attendance`, `leave`, `payroll`, `expenses`, `performance`,
-`hiring`, `helpdesk`, `relations`, `insights`, `reports`, `settings`, `notifications`, `profile`.
-
-Counters: an app's nav.py may define `BADGES = {'approvals': lambda user: n}` (workflow) or `{'notifications': ...}`
-(notifications: the red dot on the bell). Keep them one cheap query.
-
-Feature switches in views and templates: `hajiri.web.nav.feature_on(request, 'expenses')` (cached per request).
+The menus, hubs, tabs, command palette and badges are the React app's (`frontend/src/components/Layout.jsx`,
+`Hub.jsx`, `lib/access.js`). Who may open a screen is decided by the endpoints it calls (`HasRole`, `HasModule`,
+`FeatureEnabled`); the React route guards only hide what would be refused. Feature switches in the API:
+`FeatureEnabled('expenses')`, or `hajiri.web.nav.feature_on(request, key)` (cached per request). The apps' `nav.py`
+files describe the retired server-rendered pages and are not read any more.
 
 ## 10. URLs
 
-- Pages keep the React route paths (`apps/web/src/App.tsx`, `pages/hubs.tsx`): `/attendance/exceptions`,
-  `/settings/shifts`, `/me/leave`, `/employees/<uuid:id>`. No trailing slash: `path('attendance/exceptions', ...)`.
-- HTMX fragments and form posts that are not pages go under `/_/<app>/...`: `path('_/shifts/<uuid:id>/delete', ...)`.
-- JSON endpoints only where a non-browser client calls them (devices, kiosk tablet background calls, Bearer-token
-  integrations). Put them under `/api/v1/...` with the TS path, so existing clients keep working.
-- Every pattern has a `name`; refer to pages with `{% url 'shifts:list' %}` and `reverse('shifts:list')`.
-  Names: `list`, `detail`, `new`, `edit`, `delete`, or the tab's slug (`exceptions`, `overtime`).
+- JSON endpoints under `/api/v1/...` with the TS path, method and parameters, so the React app and existing clients
+  keep working. No trailing slash. Ids are `<str:id>` where the TS answered a malformed id with 400 'Invalid UUID'.
+- Every pattern has a `name` (`api_<thing>`).
+- Page addresses are the React app's routes (`frontend/src/App.jsx`); do not add Django routes for them. The careers
+  site keeps named routes to `hajiri.web.views.spa` because services build public links with `reverse()`.
+- `/health`, `/api/schema` and `/api/docs` are the other non-page addresses; WhiteNoise serves `/static/` and the
+  React build's files (`/assets/*`, `sw.js`, `manifest.webmanifest`, icons) before URL routing.
 
 ## 11. Templates
 
-Every page extends `base.html` (the signed-in shell: sidebar, hub header and tabs, command palette, toasts). Pages
-without the shell (public careers, kiosk, sign-in) extend `bare.html`. The `hj` tag library is a builtin: no
-`{% load %}` needed (load `static` yourself when you need it).
-
-```django
-{% extends "base.html" %}
-{% block title %}Shifts · Hajiri{% endblock %}
-{% block content %}
-{% page_header "Shifts" subtitle="Working hours, grace and breaks. Rosters assign them to people." %}
-  <button class="hj-btn" hx-get="{% url 'shifts:new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>New shift</button>
-{% endpage_header %}
-{% data_table table %}
-{% endblock %}
-```
-
-- **Hub pages.** If the URL is one of the hub's tabs (section 9), `base.html` draws the hub title and the tab strip
-  above your content, and `page_header` automatically drops its own title, keeping only subtitle and actions (the
-  React `EmbeddedContext`). So always call `page_header` with the TS page title; it does the right thing.
-- `{% block page_class %}wide{% endblock %}` removes the 1240 px max width (salary sheets, rosters).
-- Dates are **always** Bikram Sambat: `{{ d|bs_date }}` (28 Ashwin 2083), never `|date`.
-- Money is **always** `{{ amount|npr }}` (NPR 12,34,567.00) or `|money` (no currency); pass Decimal or string.
-- Icons: `<i class="ti ti-calendar" aria-hidden="true"></i>` or `{% icon "calendar" %}`, names from tabler.io/icons
-  (the `@tabler/icons-react` name without `Icon`, kebab-case: `IconClockHour4` -> `clock-hour-4`).
-- No inline `<script>` and no `onclick=` (the CSP blocks them). Behaviour comes from HTMX attributes, Alpine
-  (`x-data`, `@click`, `x-show`) and the `data-*` hooks in `static/js/app.js` listed below.
-- Text: English, sentence case, plain words; copy the TS strings exactly (messages, labels, empty states).
-
-### Filters
-
-| filter | example |
-|---|---|
-| `bs_date` | `2026-10-14` -> `28 Ashwin 2083` (date, datetime in NPT, or ISO string; Gregorian outside the table) |
-| `bs_date_long` | `Wed, 28 Ashwin 2083` |
-| `bs_date_short` | `28 Ashwin` this BS year, else with the year |
-| `bs_datetime` | instant -> `5 Ashwin 2083, 10:17` (Nepal time) |
-| `npt_time` | instant -> `10:17` |
-| `dual_date` | `12 Bhadra 2083` + muted `28 Aug 2026` (HTML) |
-| `gregorian` | `28 Aug 2026` |
-| `bs_month` | `{{ 2083\|bs_month:6 }}` or `{{ run\|bs_month }}` (has bs_year, bs_month) -> `Ashwin 2083` |
-| `fiscal_label` | `2083/84` |
-| `npr`, `money` | `NPR 12,34,567.00`, `{{ v\|npr:0 }}` whole rupees; negative `−NPR 40,000.00`; None -> `—` |
-| `num` | `1,234` |
-| `minutes_hm` | `503` -> `8 h 23 m` |
-| `pct` | `50%` |
-| `relative_time` | `5 min ago`, `3 h ago`, `4 d ago` |
-| `devanagari` | `२०८३-०५-१२` |
-| `status_label`, `tone` | `OnLeave` -> `On leave`, tone `info` |
-| `initials`, `role_label`, `truncate_text:40`, `json_attr`, `get_item:key`, `attr:"a.b"`, `to_json` | helpers |
-
-Python equivalents are in `hajiri.web.format` (`fmt_date`, `fmt_money`, `fmt_datetime`, `minutes_to_hm`, ...): use
-them in services that build text (notifications, CSV cells, PDFs).
-
-### Components
-
-Block components (body between the tags):
-
-| tag | React |
-|---|---|
-| `{% page_header "Title" subtitle=".." back="/employees" back_label="Employees" eyebrow=".." %}actions{% endpage_header %}` | PageHeader |
-| `{% section "Title" hint=".." actions=html %}content{% endsection %}` | SectionTitle + content |
-| `{% card "Title" hint=".." padding="lg" cls=".." %}..{% endcard %}` (title optional) | Paper withBorder |
-| `{% modal "id" "Title" size="sm\|lg\|xl" %}..{% endmodal %}`; open with `data-modal-open="id"` | Modal |
-| `{% drawer "id" "Title" size="lg" %}..{% enddrawer %}` | Drawer |
-| `{% alert "ok\|warn\|bad\|info" title=".." %}text{% endalert %}` | Alert |
-
-Simple components:
-
-| tag | React |
-|---|---|
-| `{% status_badge row.status late=row.late_minutes remote=row.remote %}` | StatusBadge (dot + word, every status in `STATUS`) |
-| `{% badge "Verified" "ok" %}` (third argument True adds a dot) | Badge |
-| `{% empty_state title=".." hint=".." action_url=".." action_label=".." icon="inbox" compact=True %}` | EmptyState |
-| `{% stat_strip stats %}` with `[{'label','value','hint','tone','url'}]` | StatStrip / KpiTiles |
-| `{% field "PAN" value mono=True tip=".." %}` inside `<div class="hj-fields">` | Field |
-| `{% data_table table %}` | DataTable (section 14) |
-| `{% report_table columns rows %}` with columns `{'key','header','type': text\|number\|date\|bool}` | ReportTable |
-| `{% form_field form.name %}`, `{% form_errors form %}` | inputs with label, description, error |
-| `{% bs_date_input "from" value=.. label=".." required=True min=.. max=.. holidays={iso: name} %}` | BsDatePicker / DateField; posts ISO AD |
-| `{% bs_month_input "bs_year" "bs_month" year=2083 month=6 label="Pay period" %}` | BsMonthPicker |
-| `{% employee_picker "employee_id" value=.. label="Employee" status="active\|exited\|all" required=True %}` | EmployeePicker |
-| `{% file_upload "file_id" "expense_receipt" label="Attach receipt" value=.. filename=.. %}` | FileUpload |
-| `{% qr_code value 188 "label" %}` | QrCode (server-side SVG) |
-| `{% camera_capture name="photo" title=".." confirm_label="Clock in" id="cam" submit=True %}` inside a form | CameraCapture |
-| `{% approval_chain "leave" employee_id=.. amount=.. %}` | ApprovalChainPreview (needs `workflow:preview`) |
-| `{% chart_card "Headcount" subtitle=".." legend=legend table=table csv_url="?export=headcount" empty="No data yet" %}chart{% endchart_card %}` | ChartCard (legend shown with 2+ entries; Chart/Table switch when `table` is given) |
-| `{% column_chart labels series money=True %}`, `{% line_chart labels series suffix="%" %}`, `{% donut data center_label="people" %}`, `{% hbars data %}`, `{% trend_bars points "Attendance" %}`, `{% sparkline values %}` | charts/Charts.tsx, Kpi TrendBars |
-| `{% confirm_attrs "Delete this shift? Rosters using it stop working." label="Delete" %}` on an hx-post button | ConfirmDialog |
-| `{% qs page=2 %}` | the current query string with changes |
-
-chart_card `legend`: `[{'label', 'color'}]`; `table`: `{'columns': [str], 'rows': [[label, number|None, ...]]}`.
-`series` for charts: `[{'key', 'label', 'values': [number|None], 'color'?}]`; donut `[{'label', 'count'}]`;
-hbars `[{'label', 'value'}]`; trend points `[{'date': iso, 'value': number|None}]`.
-
-### CSS classes
-
-Use these instead of writing CSS (all in `static/css/hajiri.css`; colours are CSS variables, so dark mode works):
-
-- Layout: `hj-stack` (column, `--gap`), `hj-row` (wrapping row; `nowrap`), `hj-between`, `hj-end`, `hj-grow`,
-  `hj-grid` with `style="--cols:3"` (one column on phones), `hj-gap-xs|sm|md|lg`, `hj-mt`, `hj-mt-sm`, `hj-mb`.
-- Text: `hj-muted`, `hj-small`, `hj-sm`, `hj-strong`, `mono`, `num`, `hj-right`, `hj-truncate`, `hj-eyebrow`,
-  `hj-ok-text|warn-text|bad-text`.
-- Buttons: `hj-btn` (primary), plus `default`, `light`, `subtle`, `danger`, `gray`; sizes `xs`, `sm`, `lg`; `block`,
-  `icon`. `hj-iconbtn` for icon-only, `hj-link-btn` for text buttons. Buttons show a spinner while their HTMX request
-  runs.
-- Forms: `hj-form` (column), `hj-form-row` (2 columns, `--cols`), `hj-fieldset`, `hj-label` (+ `<span class="req">*</span>`),
-  `hj-help`, `hj-error`, `hj-input` (`lg`), `hj-select`, `hj-check`, `hj-switch`, `hj-input-wrap` (icon left),
-  `hj-filters` (filter bar above a table).
-- Panels: `hj-card` (`p-sm|md|lg|xl|0`), `hj-fields`, `hj-kv` (dl), `hj-timeline`, `hj-progress`, `hj-skeleton`.
-- Tabs inside a page: `hj-tabs` + `hj-tab` (first level), `hj-pills` + `hj-pill` (second level, inside a hub tab);
-  mark the current one with `aria-current="page"` (links) or `aria-selected="true"` (Alpine buttons).
-- Badges: `hj-badge hj-tone-ok|warn|bad|info|idle|accent` (`sm`), `hj-dot`, `hj-count`.
-- Tables without the DataTable helper: `<div class="hj-table-wrap"><div class="hj-table-scroll"><table class="hj-table">`;
-  cells `right`, `mono`, `muted`; `<tr data-href="/x">` makes a row clickable.
+Only for HTML the API returns as a document (`learning/certificate.html`, `hiring/print/offer_letter.html`,
+`performance/review_print.html`): standalone, inline styles, no scripts, no template tag libraries, rendered with
+`render_to_string`. Everything people see in the web app is React (`frontend/src`).
 
 ## 12. When raw SQL is acceptable
 
@@ -498,133 +338,27 @@ partition DDL and catalog check, the BS calendar upsert, the health probe, one o
 state expected table contents in plain SQL with `tests.support.sql` (`rows`, `one`, `execute`); application code
 never imports it.
 
-## 13. HTMX patterns
+## 13. The web app (frontend/)
 
-Setup done for you in `_document.html`: the CSRF header on `<body hx-headers>`, `responseHandling` so that 2xx and
-**422** responses swap and other 4xx/5xx do not (they show a toast instead).
+- React 19, Mantine, react-router, Vite; **plain JavaScript** (`.js`/`.jsx`, no TypeScript or type annotations).
+- `src/api/client.js` calls `/api/v1/...` with the session cookie and normalises errors; `src/api/*.js` and inline
+  `api.get/post` calls in pages are the contract the backend implements.
+- `vite build` writes `server/frontend_build/` (committed): `scripts/build-frontend.sh`. Development: Django on
+  :3000 and `npm run dev` on :5173 (Vite proxies `/api` and `/health`).
+- Served by Django: `index.html` with `Cache-Control: no-cache` and the TS Content-Security-Policy (`script-src
+  'self'`, `style-src 'self' 'unsafe-inline'`, `img-src 'self' data: blob:`, `frame-ancestors 'none'`, ...); hashed
+  `/assets/*` cached for a year (WhiteNoise, `WHITENOISE_IMMUTABLE_FILE_TEST`).
 
-**Partial vs page.** A view answers HTMX with a fragment and a normal request with the full page:
+## 14. Lists, CSV, uploads
 
-```python
-from hajiri.web.htmx import is_htmx, htmx_target
-if is_htmx(request):
-    return render(request, 'shifts/partials/row.html', ctx)
-return render(request, 'shifts/list.html', ctx)
-```
-
-**Forms in a modal** (the common case: new/edit):
-
-```django
-<button class="hj-btn" hx-get="{% url 'shifts:new' %}" hx-target="#hj-modal-body">New shift</button>
-```
-
-The GET answers a fragment whose first element names the modal: `<form data-modal-title="New shift"
-data-modal-size="lg" hx-post="{% url 'shifts:new' %}" hx-target="this" hx-swap="outerHTML" class="hj-form">`.
-The shared modal opens itself after the swap. On POST:
-
-```python
-form = ShiftForm(request.POST)
-if not form.is_valid():
-    return render(request, 'shifts/partials/form.html', {'form': form}, status=422)   # swapped in place, errors shown
-try:
-    services.create_shift(user, form.cleaned_data)
-except BadRequestError as e:                       # only if the TS page showed it inside the form
-    return render(request, 'shifts/partials/form.html', {'form': form, 'error': e.message}, status=422)
-resp = HttpResponse(status=204)
-close_modal(resp); refresh(resp, 'shifts')        # close the modal, reload the table with id "shifts"
-return toast(request, resp, 'Shift saved.')
-```
-
-Helpers in `hajiri.web.htmx`: `toast(request, response, message, tone='ok'|'info'|'warn'|'err', title=None)`,
-`trigger(response, event, detail)`, `close_modal(response)`, `refresh(response, target_id)` (anything with
-`hx-trigger="hj:refresh-<id> from:body"` reloads; data tables listen already), `hx_redirect(request, url)`
-(full-page redirect for HTMX and normal requests), `flash(response, ...)` (toast on the next page after a redirect),
-`no_swap(response)`, `is_htmx`, `htmx_target`. Toast texts and titles: copy the TS `toast.ok/err/info` calls
-(`toast.err(e, 'Not saved')` -> `tone='err', title='Not saved'`).
-
-**Out-of-band updates**: add `hx-swap-oob="true"` to an element with an id in the response to replace it too (e.g. a
-count in the header).
-
-**Confirmation** before destructive actions: `{% confirm_attrs "Message that spells out what changes." label="Delete" %}`
-on the element with `hx-post` (styled dialog via `hx-confirm`). For a plain `<form method="post">` use
-`data-confirm="..." data-confirm-label="Delete"`.
-
-**Inline row actions**: `<button hx-post="{% url 'leave:approve' r.id %}" hx-target="closest tr" hx-swap="outerHTML">`.
-
-**Filters**: `<form class="hj-filters" hx-get="" hx-target="#leave-requests" hx-push-url="true"
-hx-trigger="change, input delay:300ms from:input[type=search]">` around the inputs; the view reads `request.GET`.
-
-**Polling** (live boards): `hx-trigger="every 30s"`.
-
-**Navigation stays plain links** (full page loads); do not `hx-boost` pages.
-
-**Alpine** for local UI state only (open/closed, tabs, live character counts), never for data loading. Shared
-components: `hjDate`, `hjCombo`, `hjUpload`, `hjCamera` (registered in `app.js`).
-
-`app.js` hooks: `data-modal-open="id"`, `data-modal-close`, `data-copy="text"`, `data-download-text="element-id"
-data-filename="x.txt"`, `data-palette-open`, `data-theme-toggle`, `data-tip="tooltip text"` (any element, used by
-charts), `<tr data-href>`. JS API: `Hajiri.toast(msg, tone, title)`, `Hajiri.confirm({message, title, label}, fn)`,
-`Hajiri.bs.fmt(iso)`, `Hajiri.bs.toAd(y, m, d)`, `Hajiri.bs.fromAd(iso)`, `Hajiri.todayNpt()`,
-`Hajiri.offline.queue(userId, 'in'|'out')`, `Hajiri.deviceToken()` / `Hajiri.existingDeviceToken()` /
-`Hajiri.deviceHeaders()` (lib/deviceToken.ts).
-
-**Clock-in device token.** Put `data-device-token` on a clock-in form or button (or a parent): its HTMX requests
-carry `X-Device-Token` when this browser has a token, as the TS clock-in calls did. A registration form with an
-empty `<input type="hidden" name="device_token">` gets a new token filled in (and kept in local storage).
-
-**Offline clock-ins.** A clock-in that fails for lack of connection is queued with `Hajiri.offline.queue(userId,
-direction)`; the banner counts them. When the browser is back online `app.js` POSTs each one as JSON `{id, direction,
-at, localDate, userId}` to the URL named `regularisation:offline_flush` (put on `<body data-offline-flush-url>` by
-the layout once that URL exists). Answer 2xx when accepted (it becomes a missed-punch correction with the reason
-`Clocked <in|out> at <HH:MM> while offline (time from my phone); sent automatically when the connection came back.`),
-4xx with `{"error": "..."}` to drop it with that message, 5xx to keep it for the next try.
-
-**Popup notices** (Layout.tsx PopupNotices): when the URL name `relations:popup_notices` exists, every signed-in
-page loads it once (`hx-get`, `hx-trigger="load"`, `hx-swap="outerHTML"` on `#hj-popup-notices`). Answer an empty
-200 when there is nothing to show, or a fragment such as a `{% modal ... open=True %}`.
-
-## 14. Tables, search, sorting, pagination, CSV, uploads
-
-```python
-from hajiri.web.tables import Column, Table, table_response
-
-COLUMNS = [
-    Column('emp_code', 'Code', sortable=True, mono=True),
-    Column('name_en', 'Name', sortable=True, link=lambda r: f"/employees/{r['id']}"),
-    Column('join_date', 'Joined', format='bs_date', sortable=True),
-    Column('status', 'Status', format='status'),
-    Column('gross', 'Gross', format='npr', sortable=True),                  # numbers align right by themselves
-    Column('actions', '', template='employees/partials/row_actions.html', csv=False),
-]
-table = Table(request, rows, COLUMNS, id='employees', search=('emp_code', 'name_en'), default_sort='emp_code',
-              page_size=25, export='employees', empty_title='No employees yet', empty_hint='Add the first one.')
-return table_response(request, table, 'employees/list.html', {'table': table, ...})
-```
-
-- `rows`: list of dicts/objects or a QuerySet (then search, sort and paging run in SQL).
-- `format`: `bs_date`, `bs_date_long`, `bs_date_short`, `bs_datetime`, `time`, `relative`, `npr`, `money`, `num`,
-  `minutes`, `pct`, `yesno`, `status`, or a function of the value; `render=` a function of the row (return
-  `format_html(...)` for HTML); `template=` renders with `row` and `value`.
-- `csv=` a function of the row for the export value (default: the raw value; dates as ISO), `False` to leave out.
-- Query parameters are prefixed with the table id (`?employees-q=`, `-sort=`, `-dir=`, `-page=`, `-export=csv`), so
-  two tables on one page work. The table reloads itself over HTMX and pushes the URL.
-- `selectable=True, bulk_actions='app/partials/bulk.html'`: checkboxes named `<id>-selected`; bulk buttons use
-  `hx-include="#<id> [data-row-check]:checked"`.
-- `empty_search_title=` / `empty_search_hint=`: what an empty search shows (default 'Nothing matches that search.').
-- The table wrapper sets `hx-swap="outerHTML"` and `hx-push-url="true"`, and HTMX passes both on to buttons inside
-  rows. A row action that opens a dialog or drawer sets `hx-swap="innerHTML" hx-push-url="false"` itself.
-- CSV for other exports: `hajiri.web.csv.csv_response(filename, [{'key','header'}], rows)` (RFC 4180, BOM, formula
+- Lists: `hajiri.core.api.Pagination` (`?page=&pageSize=` -> `{items, total, page, pageSize}`) and django-filter
+  `FilterSet`s; endpoints that the TS API answered with a plain array keep doing so.
+- CSV: `hajiri.web.csv.csv_response(filename, [{'key','header'}], rows)` / `to_csv` (RFC 4180, BOM, formula
   protection, same as reports/csv.ts).
-
-### File uploads
-
-`{% file_upload "receipt_file_id" "expense_receipt" %}` uploads at once to the files app (`files:upload`, POST
-multipart `file` + `purpose`, answer `{"file": {"id", "filename", "mime", "bytes", "purpose"}}`, max 4 MB, PDF/JPEG/
-PNG/WebP) and puts the stored file id in the hidden input; your form then posts just the id and your service
-attaches it (the TS `fileIds` flow). For a direct upload in your own form (CSV imports), use `<input type="file">`
-with `hx-encoding="multipart/form-data"` and read `request.FILES`.
-
-Profile photos sent without the page script are resized on the server with `hajiri.core.images.square_jpeg`.
+- Uploads: the React app posts `/api/v1/files` (JSON data URL or multipart `file` + `purpose`, answer
+  `{"file": {"id", "filename", "mime", "bytes", "purpose"}}`, max 4 MB, PDF/JPEG/PNG/WebP) and then sends the file id
+  in the module's body (`fileIds`); the service attaches it. Profile photos are resized with
+  `hajiri.core.images.square_jpeg`.
 
 ## 15. Worked example: the help desk, before and after
 
@@ -695,9 +429,6 @@ updated_by=user.id)`; "seed once" becomes `add_setting_if_missing` + `bulk_creat
 **People** — agents and owners are `company_users(cid)` / `company_roles(cid, user_id)`, so members of the group with
 access to the company can own topics and be assigned tickets.
 
-**Page posts** — before, views assembled bodies by hand (`_int`, `_checked`, `getlist`); after, `forms.py`
-(`TicketForm(request.POST).ticket()`, `SettingsForm(...).policy()`).
-
 **JSON API** — new `api.py`: `HelpdeskViewSet` (queue paginated, mine, create, retrieve, PATCH, messages, reopen,
 close, rate), `CategoryViewSet`, `StatsViewSet`, routed under `/api/v1/helpdesk/...` and documented in `/api/docs`.
 
@@ -705,147 +436,53 @@ close, rate), `CategoryViewSet`, `StatsViewSet`, routed under `/api/v1/helpdesk/
 `autoCloseDays` (`setting_subquery`) and a `select_for_update(of=('self',))` of breached tickets followed by one
 `update()`.
 
-## 16. Worked example: a hub tab with a table, a modal form and a delete
+## 16. Tests
+
+Ports of the TS tests go in `server/tests/<app>/test_api_*.py`: the HTTP-level assertions of
+`git show 65a9079:apps/api/test/<x>.test.ts`, against `/api/v1/...` with `django.test.Client`. Use the shared
+factories:
 
 ```python
-# hajiri/shifts/urls.py
-urlpatterns = [
-    path('settings/shifts', views.shift_list, name='list'),
-    path('_/shifts/new', views.shift_new, name='new'),
-    path('_/shifts/<uuid:id>/delete', views.shift_delete, name='delete'),
-]
-
-# hajiri/shifts/nav.py
-NAV = [NavItem(hub='settings', label='Shifts', url_name='shifts:list', order=20, roles=('hr',), icon='clock-hour-4')]
-
-# hajiri/shifts/views.py
-COLUMNS = [
-    Column('name', 'Name', sortable=True),
-    Column('start_time', 'Starts', mono=True),
-    Column('grace_minutes', 'Grace', render=lambda r: f"{r['grace_minutes']} min"),
-    Column('id', '', template='shifts/partials/row_actions.html', csv=False, align='right'),
-]
-
-@require_GET
-@require_role('hr')
-def shift_list(request):
-    rows = services.list_shifts(company_id_of(request.hajiri_user))
-    table = Table(request, rows, COLUMNS, id='shifts', search=('name',), default_sort='name', export='shifts',
-                  empty_title='No shifts yet', empty_hint='Add the working hours people follow.')
-    return table_response(request, table, 'shifts/list.html', {'table': table})
-
-@require_http_methods(['GET', 'POST'])
-@require_role('hr')
-def shift_new(request):
-    form = ShiftForm(request.POST or None)
-    if request.method == 'POST':
-        if form.is_valid():
-            services.create_shift(request.hajiri_user, form.cleaned_data)
-            resp = HttpResponse(status=204)
-            close_modal(resp); refresh(resp, 'shifts')
-            return toast(request, resp, 'Shift saved.')
-        return render(request, 'shifts/partials/form.html', {'form': form}, status=422)
-    return render(request, 'shifts/partials/form.html', {'form': form})
-
-@require_POST
-@require_role('hr')
-def shift_delete(request, id):
-    services.delete_shift(request.hajiri_user, id)        # raises NotFoundError / ConflictError with TS messages
-    return toast(request, refresh(HttpResponse(status=204), 'shifts'), 'Shift deleted.')
-```
-
-```django
-{# templates/shifts/list.html #}
-{% extends "base.html" %}
-{% block content %}
-{% page_header "Shifts" subtitle="Working hours, grace and breaks." %}
-  <button class="hj-btn" hx-get="{% url 'shifts:new' %}" hx-target="#hj-modal-body"><i class="ti ti-plus" aria-hidden="true"></i>New shift</button>
-{% endpage_header %}
-{% data_table table %}
-{% endblock %}
-
-{# templates/shifts/partials/form.html #}
-<form class="hj-form" data-modal-title="New shift" hx-post="{% url 'shifts:new' %}" hx-target="this" hx-swap="outerHTML">
-  {% form_errors form %}
-  {% form_field form.name %}
-  <div class="hj-form-row">{% form_field form.start_time %}{% form_field form.end_time %}</div>
-  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit">Save</button></div>
-</form>
-
-{# templates/shifts/partials/row_actions.html #}
-<button class="hj-btn danger subtle xs" hx-post="{% url 'shifts:delete' row.id %}"
-        {% confirm_attrs "Delete this shift? Rosters that use it stop working." label="Delete" %}>Delete</button>
-```
-
-```python
-# tests/shifts/test_views.py
-def test_hr_adds_a_shift(db):
-    co = make_company()
-    c, _ = signed_in_client(co, roles=['hr'])
-    assert b'No shifts yet' in c.get('/settings/shifts').content
-    r = c.post('/_/shifts/new', {'name': 'Day', 'start_time': '10:00', 'end_time': '18:00'}, **htmx())
-    assert r.status_code == 204 and toasts(r)[0]['message'] == 'Shift saved.'
-    assert 'hj:refresh-shifts' in hx_triggers(r)
-    assert signed_in_client(co, roles=['employee'])[0].get('/settings/shifts').status_code == 403
-```
-
-## 17. Tests
-
-Ports of the TS tests go in `server/tests/<app>/`. Use the shared factories:
-
-```python
-from tests.web.factories import (PW, bearer, htmx, make_company, make_employee, make_user, set_features_off,
-                                 sign_in, signed_in_client, toasts, hx_triggers, audit_actions)
+from tests.web.factories import PW, bearer, make_company, make_employee, make_user, set_features_off, signed_in_client
 
 def test_manager_sees_only_their_team(db):
     co = make_company()
     boss = make_employee(co, name='Ram')
-    mine = make_employee(co, manager=boss)
     other = make_employee(co)
     client, user = signed_in_client(co, roles=['manager'], employee=boss)
-    r = client.get('/attendance')
-    assert r.status_code == 200
-    r = client.post(f'/_/regularisation/{other.id}/fix', {...}, **htmx())
-    assert r.status_code == 403 and toasts(r)[0]['message'] == 'not allowed to access this employee'
+    r = client.post('/api/v1/regularisation', {'employeeId': str(other.id), ...}, content_type='application/json')
+    assert r.status_code == 403 and r.json() == {'error': 'not allowed to access this employee'}
 ```
 
 - `make_company(code=None, name=...)`, `make_employee(company, code=, name=, manager=, branch=, org_unit=, **fields)`
   (adds a current `employee_assignment`, so manager scoping works), `make_user(company, roles=, employee=, email=,
   password=PW, must_change_password=)`, `sign_in(client, user)` (real session cookie), `signed_in_client(company,
-  roles=, employee=True|Employee|None)` -> `(client, user)`.
-- Request helpers: `htmx(target=None, current_url=None)` headers, `bearer(token)` headers; response helpers
-  `toasts(response)` (HX-Trigger or flash cookie), `hx_triggers(response)`; `set_features_off(company, 'expenses')`,
-  `require_two_factor_for(company, 'hr')`, `audit_actions(row_id)`, `user_row(user)`.
+  roles=, employee=True|Employee|None)` -> `(client, user)`; `bearer(token)` headers, `set_features_off(company,
+  'expenses')`, `require_two_factor_for(company, 'hr')`, `audit_actions(row_id)`, `user_row(user)`.
 - Fixtures: `from tests.web.fixtures import *` in your `tests/<app>/conftest.py` gives `acme`, `other_company`,
   `employee`, `hr_client`, `employee_client`, `manager_setup` (client, user, boss, report), `make_client(roles=...)`.
-- Assert what the TS test asserts: status codes, messages, rows, audit actions. View tests go through
-  `django.test.Client`; pages are 200 with the expected text, HTMX endpoints return fragments, toasts and
-  HX-Trigger events. `Client(enforce_csrf_checks=True)` when testing CSRF.
-- Groups of companies: `hajiri.core.companies.create_group_company(admin, {'code', 'name_en'})`,
-  `grant_access(admin_in_that_company, {'email', 'roles', 'employee_id'})` and `auth.switch_company(user, token, cid)`;
-  `tests/core/test_multi_company.py` shows a full group fixture. Test that another company's ids are not found.
-- JSON endpoints: `Client().get(url, **bearer(token))`; cookie posts need the CSRF token
-  (`Client(enforce_csrf_checks=True)` to prove it is enforced).
-- Background jobs: call the job function or `run_once([...])`; `run_job.call(name)` runs the task body; the
-  scheduler test in `tests/worker` shows enqueue and execution.
+- Assert what the TS test asserts: status codes, JSON bodies and field names, rows, audit actions.
+- Company isolation: the outsider and the group admin working in the other company get 404 for an id of another
+  company; the owner company's admin does not (`tests/multicompany`).
+- Cookie writes: the test client sends no `Origin`, which passes like the TS guard; send
+  `HTTP_ORIGIN='https://evil.example'` to prove a cross-site write is refused (`tests/web/test_spa.py`).
+- Background jobs: call the job function or `run_once([...])`; `run_job.call(name)` runs the task body.
 - Run only your tests with your own database:
   `cd server && DJANGO_TEST_DATABASE=hajiri_t_<slice> .venv/bin/pytest -q -p no:cacheprovider tests/<app>`
   (`--create-db` the first time, `--reuse-db` after).
 
-## 18. Errors and pages for special cases
+## 17. Errors and special addresses
 
-- 404/403/500 templates exist; raise the typed errors and let the middleware answer.
-- Static files are served by WhiteNoise (`hajiri.web.middleware.StaticFilesMiddleware`): from `static/` directly
-  until `collectstatic` has filled `staticfiles/`, so no web server is needed in front. Reference them with
-  `{% static %}`.
-- `bare.html` for public pages (careers, kiosk). Public endpoints that are posted by other sites' browsers (none
-  today) would need `@csrf_exempt`; device endpoints authenticate with their own key and are `@csrf_exempt` with
-  a comment saying why.
-- Bearer-token requests skip CSRF automatically.
+- Unknown addresses under `/api/` answer `{"error": "not found"}` (404); every other address is the React app.
+  `config.errors` answers 400/403/404/500 as JSON.
+- Static files and the React build are served by WhiteNoise (`hajiri.web.middleware.StaticFilesMiddleware`), so no
+  web server is needed in front.
+- Public endpoints (careers) and device endpoints authenticate with nothing or their own key; Bearer-token requests
+  and signed-out requests skip the Origin check.
 
-## 19. Sign-in and sessions (owned by web)
+## 18. Sign-in and sessions
 
-`/login` (with the two-step step), `/login/2fa`, `/logout` (POST), `/change-password`, `/setup-two-step`,
-`/me/profile/security` (sessions, recovery codes, turn off), `/_/web/me` (JSON). The session cookie
-`hajiri_session` is HttpOnly, SameSite=Lax, 12 h, Secure when `COOKIE_SECURE=true`, shared with the TS API.
-`/login` and `/login/2fa` also accept JSON (`{"email","password"}`) and answer like the TS API.
+The React app signs in through `/api/v1/auth/login` (and `/login/2fa`), `/logout`, `/me`, `/change-password`,
+`/2fa/*` and `/sessions/*` (`hajiri.integrations.auth_api`). The session cookie `hajiri_session` is HttpOnly,
+SameSite=Lax, 12 h, Secure when `COOKIE_SECURE=true`, shared with the TS API.
+

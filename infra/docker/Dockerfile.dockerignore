@@ -12,6 +12,9 @@
 **/logs
 **/.run
 server/staticfiles
+**/node_modules
+frontend/dist
+server/frontend_build
 .admin-credentials
 .git
 infra/pgdata

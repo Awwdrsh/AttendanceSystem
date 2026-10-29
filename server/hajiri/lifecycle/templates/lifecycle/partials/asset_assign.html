@@ -1,6 +1,0 @@
-<form class="hj-form" data-modal-title="Hand over {{ a.name }}" hx-post="{% url 'lifecycle:asset_assign' a.id %}" hx-swap="none">
-  {% employee_picker "employee_id" required=True %}
-  {% bs_date_input "assignedOn" value=today label="Handed over on" %}
-  <div class="hj-fieldset"><label class="hj-label">Notes</label><textarea name="notes" class="hj-input" rows="1" maxlength="500"></textarea></div>
-  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn">Hand over</button></div>
-</form>

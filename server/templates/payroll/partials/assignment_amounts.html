@@ -1,7 +1,0 @@
-{% if codes %}
-<div class="hj-stack" style="--gap:8px">
-  <div><div class="hj-strong hj-sm">Monthly amounts (NPR)</div>
-    <div class="hj-small hj-muted">Fill in fixed amounts such as BASIC, DA and ALLOWANCE. Leave calculated components (SSF, TDS, overtime) blank. Minimum wage: basic at least 12,170 and basic plus DA at least 19,550.</div></div>
-  <div class="hj-form-row">{% for c in codes %}<div class="hj-fieldset"><label class="hj-label" for="am-{{ c }}">{{ c }}</label><input class="hj-input" id="am-{{ c }}" name="amount_{{ c }}" placeholder="e.g. 40000.00" inputmode="decimal"></div>{% endfor %}</div>
-</div>
-{% else %}<p class="hj-sm hj-muted" style="margin:0">Pick a structure version to enter its amounts.</p>{% endif %}

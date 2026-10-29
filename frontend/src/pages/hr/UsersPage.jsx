@@ -1,7 +1,21 @@
-import { Avatar, Badge, Button, Drawer, Group, Modal, MultiSelect, PasswordInput, SimpleGrid, Stack, Text, TextInput } from '@mantine/core';
+import {
+  Avatar,
+  Badge,
+  Button,
+  Drawer,
+  Group,
+  Modal,
+  MultiSelect,
+  PasswordInput,
+  Select,
+  SimpleGrid,
+  Stack,
+  Text,
+  TextInput,
+} from '@mantine/core';
 import { IconPlus } from '@tabler/icons-react';
 import { useState } from 'react';
-import { auth as authApi } from '../../api';
+import { auth as authApi, employees as empApi } from '../../api';
 import { security } from '../../api/security';
 import { useAuth } from '../../auth/AuthProvider';
 import { DataTable } from '../../components/DataTable';
@@ -29,6 +43,17 @@ export default function UsersPage() {
   const [employeeId, setEmployeeId] = useState(null);
   const [busy, setBusy] = useState(false);
   const isAdmin = hasRole('admin');
+  const emps = useQuery(() => empApi.list({ status: 'active' }), []);
+  const empName = new Map((emps.data?.employees ?? []).map((e) => [e.id, `${e.name_en} (${e.emp_code})`]));
+  // An employee record belongs to one sign-in, so records linked to someone else are shown but cannot be picked.
+  const employeeOptions = (u) => {
+    const taken = new Set((q.data?.users ?? []).filter((x) => x.id !== u.id && x.employee_id).map((x) => x.employee_id));
+    return (emps.data?.employees ?? []).map((e) => ({
+      value: e.id,
+      label: `${e.name_en} (${e.emp_code})`,
+      disabled: taken.has(e.id),
+    }));
+  };
   return (
     <Stack gap="md">
       <PageHeader
@@ -98,9 +123,31 @@ export default function UsersPage() {
           {
             key: 'emp',
             header: 'Employee record',
+            width: 240,
             render: (u) =>
-              u.employee_id ? (
-                <Text size="sm">Linked</Text>
+              isAdmin && !u.membership ? (
+                // Linking is what lets someone clock in, see their attendance, apply for leave and read payslips.
+                <Select
+                  size="xs"
+                  searchable
+                  clearable
+                  placeholder="Not linked"
+                  aria-label={`Employee record for ${u.name}`}
+                  value={u.employee_id ?? null}
+                  data={employeeOptions(u)}
+                  nothingFoundMessage="No employee matches that search"
+                  onChange={async (v) => {
+                    try {
+                      await authApi.updateUser(u.id, { employeeId: v ?? null });
+                      toast.ok(v ? `${u.name} is linked to their employee record.` : `${u.name} is no longer linked.`);
+                      await q.reload();
+                    } catch (e) {
+                      toast.err(e);
+                    }
+                  }}
+                />
+              ) : u.employee_id ? (
+                <Text size="sm">{empName.get(u.employee_id) ?? 'Linked'}</Text>
               ) : (
                 <Text size="sm" c="dimmed">
                   Not linked

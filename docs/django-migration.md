@@ -6,7 +6,7 @@ was removed on 27 Oct 2026** (phase 9 below, ADR 0002): Django in `server/` is t
 Decisions taken at the start (26 Oct 2026):
 
 - **Everything moves to Python**, including the web app: Django templates with HTMX for partial updates, replacing
-  React and Mantine. The CoreValley visual identity, command palette, light and dark mode and BS dates are kept.
+  React and Mantine. *Reversed on 28 Oct 2026 (phase 10): the React app is the web UI again, served by Django.* The CoreValley visual identity, command palette, light and dark mode and BS dates are kept.
 - **Django owns the schema** from now on: models for the existing tables, an initial migration that is fake-applied on
   existing databases (`migrate --fake-initial`), so no data moves. Triggers and functions that the SQL migrations
   create (append-only punches, hash-chained audit log) are carried over as `RunSQL` operations.
@@ -147,6 +147,72 @@ Each phase ends with its tests green and is committed on its own.
    - `docs/api.md` is generated from the drf-spectacular schema (`docs/openapi.yaml`, live at `/api/docs`).
    - Not done before the removal: the side-by-side comparison of both stacks against a copy of a live database.
      Compare the first Django payroll cycles and attendance days of a live install with the previous month's results.
+10. **The React web app returns.** *28 Oct 2026.* The server-rendered pages (Django templates, HTMX partials under
+   `/_/...`, Alpine.js, `static/js/app.js`, `hajiri.css`, the vendored htmx and Alpine, django-htmx) are removed. The
+   web app is the original React app again, in `frontend/` as plain JavaScript (React 19, Mantine, react-router,
+   Vite), and Django is its backend: the JSON API under `/api/v1/` keeps the TS paths, bodies and response shapes it
+   was written against.
+   - `vite build` writes `server/frontend_build/`, which is committed, so setup, start, update and the boot services
+     need no Node.js; `scripts/build-frontend.sh` rebuilds it, `update.sh` rebuilds only when Node.js is present and
+     pulled commits changed `frontend/` without a build, and the Docker image builds it in a Node stage.
+   - Django answers `index.html` (no-cache) for every address outside `/api/` and `/static/` (`hajiri.web.views.spa`,
+     like the TS `app.get(/^\/(?!api\/|health).*/)`); WhiteNoise serves the build at the site root (`/assets/*`
+     cached for a year, `sw.js` and the manifest revalidated). Responses carry the TS helmet policy
+     (`script-src 'self'`, `style-src 'self' 'unsafe-inline'`, `img-src 'self' data: blob:`, `frame-ancestors 'none'`,
+     `script-src-attr 'none'`); `upgrade-insecure-requests` only on HTTPS installs. Unknown `/api/` addresses and
+     server errors answer the TS JSON (`{"error": "not found"}`, `{"error": "internal error"}`).
+   - Cookie requests are checked like the TS `sameOriginGuard` (Origin, else Referer, must be this site or a
+     `CORS_ORIGINS` entry) by `SameOriginMiddleware` and `SameOriginAuthentication`, the DRF default; Django's CSRF
+     token middleware is gone because the React app never sent a token.
+   - Kept: the HTML the API returns (certificates, offer letters, review print-outs, letters, payslips, salary
+     sheets), every JSON endpoint, the gateway, `/health`, `/api/schema`, `/api/docs`.
+   - The screens for groups of companies, which existed only as server-rendered pages, were rebuilt in the React
+     app on 28 to 29 Oct 2026: the company switcher (sidebar and command palette) and the Group hub (`/group`:
+     overview, people, reports, companies, access, transfers, policies) on `/api/v1/me/companies` and
+     `/api/v1/group/...`.
+11. **Final state (29 Oct 2026).** See "Architecture now" below.
+
+## Architecture now
+
+```
+browser ── React SPA (frontend/, plain JavaScript; built into server/frontend_build/, committed)
+   │           cookie session, same-origin fetch to /api/v1/...
+   ▼
+waitress :3000 ── Django (server/config, server/hajiri/<app>/)
+   ├─ WhiteNoise: /assets/*, sw.js, manifest, icons from server/frontend_build/; /static/
+   ├─ /api/v1/...  DRF views (hajiri.<app>.api) on the service layer (hajiri.<app>.services), company-scoped ORM
+   ├─ /api/schema, /api/docs (drf-spectacular), /health
+   └─ every other address: index.html (hajiri.web.views.spa); React Router shows the page
+worker ── manage.py run_worker (django.tasks scheduler + task worker), same database
+gateway :8080 ── manage.py run_gateway (ZKTeco ADMS, Hikvision ISAPI), config/gateway_urls.py
+PostgreSQL 18
+```
+
+- **No TypeScript anywhere.** The repository has no `.ts`/`.tsx` file, no `tsconfig` and no TypeScript dependency
+  (`frontend/package.json`: React, Mantine, react-router, dayjs, Vite, Vitest, Prettier). There are no
+  server-rendered pages: the only Django templates are the printable HTML documents the API returns (certificate,
+  offer letter, review print-out).
+- **Install and run need no Node.js.** `setup.sh`, `start.sh`, `update.sh` and the boot services serve the
+  committed `server/frontend_build/` (the Docker image builds it in a Node stage); Node.js 20.19+ or 22.12+ is needed
+  only to rebuild it.
+- **Develop:** Django with reload on :3000 (`cd server && DJANGO_DEBUG=true .venv/bin/python manage.py runserver
+  3000`) and Vite on :5173 (`cd frontend && npm ci && npm run dev`, which proxies `/api` and `/health` to :3000).
+- **Build:** `./scripts/build-frontend.sh` (`npm ci` + `vite build` into `server/frontend_build/`); commit the build
+  with the source change, and restart the web process after a rebuild on a running server (`update.sh` does).
+- **The contract.** The React app was written against the TS API (commit `65a9079`); Django keeps its paths,
+  methods, query parameters, bodies, JSON field names, status codes and error JSON. Checked on 29 Oct 2026: all 665
+  routes of the TS route files (`apps/api/src/modules/*/routes.ts` and the routers they mount, with the `app.ts`
+  prefixes) resolve to a Django view that has a handler for their method, and every API call in `frontend/src` does
+  too (`tests/web/test_frontend_api_paths.py` keeps checking the second). The React app calls all but these TS routes,
+  which Django has anyway: `GET /biometrics/stats`, `GET /biometrics/templates/unmapped`, `POST
+  /biometrics/retention/run`, `GET /engage/kudos`, `GET /files/:id`, `GET /lifecycle/assets/:id/history`, `GET
+  /payroll/compliance/years`, `GET /reports/adhoc/saved/:id/run`, `PATCH /settings/branches/:id`, `PATCH
+  /settings/org-units/:id`, `POST /leave/accrual/run`. Django adds `/api/v1/me/companies...` and `/api/v1/group/...`
+  for groups of companies.
+- **Tests:** API tests per app (`tests/<app>/test_api_*.py`, ported from `apps/api/test/*.test.ts`, with company
+  isolation in `tests/multicompany`), the engines' parity fixtures, the SPA serving tests (`tests/web`), the web
+  app's unit tests (`cd frontend && npx vitest run`) and the browser tests (`tests/e2e`, Playwright: every route for
+  every role of two demo companies and the group roles, plus the main flows).
 
 ## Differences from the TS app and remaining gaps
 
@@ -159,22 +225,42 @@ the Django code. Nothing in the capability list is missing. What still differs o
   Mac and the service script installs real boot agents. Run them on a test machine before relying on them.
 - **Side-by-side comparison** against a copy of a live database was not done before the TS stack was removed
   (phase 9).
-- **UI adaptations** (same data and actions, different controls): Mantine's searchable multi-select and dropdown
-  menus are checkbox lists or plain buttons; a few filters reload the whole page instead of one table. Names sort
-  with the Unicode Collation Algorithm (`hajiri.core.collation`, pyuca) like the browser's `localeCompare`; modules
-  that still use `casefold()` are converted with their slice.
-- **Profile photos** are shrunk in the browser to a 320 px square JPEG before upload, as `AvatarEditor.tsx` did
-  (`Hajiri.squareJpeg` in `static/js/app.js`); `hajiri.core.images.square_jpeg` (Pillow) does the same on the
-  server for uploads sent without the page script (wired in by the people slice).
+- **Sorting.** Names sort with the Unicode Collation Algorithm (`hajiri.core.collation`, pyuca) like the browser's
+  `localeCompare`; a few modules still use `casefold()`.
+- **Profile photos** are shrunk in the browser to a 320 px square JPEG before upload by the React app
+  (`AvatarEditor`); `hajiri.core.images.square_jpeg` (Pillow) does the same on the server for uploads sent without it.
 - **BS calendar cross-check** against the `@remotemerge/nepali-date-converter` JS library is not run in Python; the
   day-by-day parity test against the TS table (which is cross-checked there) covers it.
-- **Smoke coverage:** a signed-in walk of 683 of the 758 URL patterns per role returned no 500s; the other 75 need
-  objects the smoke data did not have and are covered only by their slices' view tests.
+- **Browser coverage (29 Oct 2026):** the Playwright crawl signs in as 21 people (all 8 company roles in both demo
+  companies, the three group roles and a person in both companies), opens every React route and hub tab with real
+  ids, and switches company for the group accounts: no console errors, failed requests or error alerts. Seven action
+  flows pass (leave and approval, clock-in, new employee, pay run locked and published, help-desk ticket, expense
+  claim, group dashboard). Routes whose records the demo data lacks are covered only by the API tests.
 - **Same as TS, by design:** regularisation keeps its own `manual_device_id` (TS `regularisation/routes.ts` had its
-  own `manualDeviceId`, with a shorter device name); the TS module's never-called JSON routes (key-result and KPI
-  edit/delete, asset edit and history, org-unit and branch edit through `/settings`) have services but no page,
-  because the React app never offered them.
+  own `manualDeviceId`, with a shorter device name); the TS routes the React app never called (listed under
+  "Architecture now") have Django endpoints but no screen, because the React app never offered them.
 - The statutory and hardware assumptions in README "Known gaps and assumptions" apply unchanged.
+
+### Remaining gaps after the React return (29 Oct 2026)
+
+State: 2,697 tests pass in six shards (`hajiri_t_cr_1..6`; 33 skipped, 32 of them the browser tests without
+`HAJIRI_E2E_URL`), plus the tests added after the run (they pass on targeted runs); `npx vitest run` 51 of 51; `vite
+build` clean and identical to the committed build; `manage.py check` clean, `makemigrations --check` no changes.
+Fixed in the final review: a gateway query-count test failed by the time of day (batches at different hours cost one
+statement more per line when a punch also touches the previous day); a file WhiteNoise listed at startup and a
+rebuild deleted now answers 404 instead of 500.
+
+- **`server/frontend_build/` is not committed yet.** Commit it only after rebuilding it from the final `frontend/src`
+  (it matches the current source).
+- **Group screens not in the React app yet:** choosing which company a fresh sign-in starts in, the switch hiding a
+  company's pay from executives for a company admin without a group role, and giving or removing access from the
+  company Users page (group admins do it in Group, Access). The JSON endpoints exist.
+- **Vestigial `nav.py` modules.** The 40 `hajiri/<app>/nav.py` files and `NavItem` in `hajiri.web.nav` describe the
+  retired server-rendered pages (their `url_name`s no longer exist); only `ROLE_LABEL`, the role help texts,
+  `feature_on` and `workflow.nav.BADGES` are still used. They can be deleted with that cleanup.
+- **TS routes without a screen** (listed under "Architecture now") are served but not exercised by the React app.
+- **Not run on real infrastructure** (Docker, boot services, Linux setup) and **no side-by-side comparison** with a
+  copy of a live database, as below.
 
 ### Remaining gaps after the final review (27 Oct 2026)
 
@@ -184,9 +270,6 @@ clean and `makemigrations --check` finds no changes. Also fixed: the navigation'
 
 Honest list of what is not idiomatic yet or not verified; none of it changes what the app does.
 
-- **Sign-in JSON.** `/login`, `/login/2fa` and `/change-password` serve both the page form and JSON clients from one
-  Django view, reading a JSON body by hand (`hajiri.web.views._json_body`) and validating with the page's Django
-  form; they are not DRF views.
 - **Output compatibility kept on purpose.** Some code still reproduces how the TypeScript app wrote values, because
   stored data or terminals depend on it: the attendance policy version is `JSON.stringify` with sorted keys
   (`company_settings.schemas`, part of `attendance_day.inputs_hash`); the gateway's `jsutil` matches what ZKTeco and
@@ -199,17 +282,12 @@ Honest list of what is not idiomatic yet or not verified; none of it changes wha
   NumberField and similar); they are not merged into `hajiri.core.validation`. Not done either: `notify_many` and a
   bulk `user_id_for_employee`, a multi-field `order_by` in `hajiri.web.tables`.
 - **Tests read tables in plain SQL** in about 99 files (`tests/support/sql.py`); application code does not.
-- **Attendance has no JSON endpoints** beyond the punch, kiosk, gateway and attendance-tools routes (as in phase 5,
-  only what non-browser clients call); recomputing a range or reading days is done from the pages, so the group
-  scenario test calls `hajiri.attendance.api.recompute_range` directly.
 - **Exits wait for clearance.** An accepted exit (including the source side of a transfer) keeps the employee's
   status `active` until clearance is done and the nightly job or HR completes it, so the company's employee list
   still shows the person, with the exit date, after the last working day. Headcounts (dashboard, reports, Insights)
   already leave them out.
 - **The `group.policy` setting** (hide pay from executives in group views) is changed only on `/group` by an admin; it
   is not on the general company settings pages or API.
-- **Smoke coverage:** about 100 record-level routes need data the demo group does not have (payroll runs, payslips,
-  holidays, overtime slips, grievances, approval flows, checklists) and are covered only by the test suite.
 - **Optional database checks not added:** that a `device_user_map` employee belongs to the device's company, a data
   migration for old active devices with no company, and expression unique constraints on time-tracking clients,
   projects and activities.

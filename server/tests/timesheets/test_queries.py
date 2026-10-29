@@ -8,21 +8,16 @@ from django.test.utils import CaptureQueriesContext
 
 from hajiri.db.models import Timesheet
 from hajiri.timesheets import services as ts
-from tests.web.factories import htmx, make_employee, sign_in
+from tests.web.factories import make_employee, sign_in
 
 from .helpers import add_days, make_world
 
 PAGES = [
-    ('hr', '/attendance/timesheets?view=approve', 'ts-review'),
-    ('hr', '/attendance/timesheets?view=history', 'ts-review'),
-    ('hr', '/attendance/timesheets?view=week&week={WEEK}', 'ts-review'),
-    ('hr', '/attendance/timesheets?view=report&group_by=project', 'ts-review'),
-    ('hr', '/attendance/timesheets?view=report&group_by=employee', 'ts-review'),
-    ('hr', '/attendance/projects?view=projects', 'ts-catalogue'),
-    ('hr', '/attendance/projects?view=clients', 'ts-catalogue'),
-    ('hr', '/attendance/projects?view=activities', 'ts-catalogue'),
-    ('sita', '/me/timesheet?week={WEEK}', None),
-    ('sita', '/_/timesheets/week?week={WEEK}', None),
+    ('hr', '/api/v1/time/timesheets?scope=all&status=submitted', None),
+    ('hr', '/api/v1/time/reports/summary?from={WEEK}&to={WEEK}&groupBy=project&scope=all', None),
+    ('hr', '/api/v1/time/reports/summary?from={WEEK}&to={WEEK}&groupBy=employee&scope=all', None),
+    ('hr', '/api/v1/time/clients?all=1', None),
+    ('sita', '/api/v1/time/week?weekStart={WEEK}', None),
     ('hr', '/api/v1/time/timesheets', None),
     ('hr', '/api/v1/time/projects?all=1', None),
     ('sita', '/api/v1/time/projects', None),
@@ -52,9 +47,8 @@ def _seed(w, n: int, tag: str) -> None:
 
 
 def _count(client: Client, url: str, target: str | None) -> int:
-    kw = htmx(target=target) if target else {}
     with CaptureQueriesContext(connection) as q:
-        r = client.get(url, **kw)
+        r = client.get(url)
     assert r.status_code == 200, (url, r.status_code, r.content[:300])
     return len(q.captured_queries)
 

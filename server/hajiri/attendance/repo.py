@@ -59,9 +59,25 @@ def latest_days():
     return AttendanceDay.objects.exclude(Exists(newer))
 
 
-def live_punches():
-    """Punches no correction has replaced (no punch_event supersedes them)."""
-    return PunchEvent.objects.exclude(Exists(PunchEvent.objects.filter(supersedes_id=OuterRef('id'))))
+def live_punches(lo_ms: int | None = None, hi_ms: int | None = None):
+    """Punches no correction has replaced (no punch_event supersedes them), punched in [lo_ms, hi_ms) when given.
+
+    punch_event is partitioned by month on punched_at. Without a window the superseded check probes (and locks) every
+    partition and its indexes, a number that grows each month; it ran PostgreSQL out of lock slots during an attendance
+    import. A row that supersedes another keeps its time (re-attribution copies punched_at; a correction moves it by
+    minutes), so the check looks a day either side of the window and PostgreSQL prunes to the months involved."""
+    sup = PunchEvent.objects.filter(supersedes_id=OuterRef('id'))
+    qs = PunchEvent.objects.all()
+    if lo_ms is not None and hi_ms is not None:
+        qs = qs.filter(punched_at__gte=from_ms(lo_ms), punched_at__lt=from_ms(hi_ms))
+        sup = sup.filter(punched_at__gte=from_ms(lo_ms - DAY_MIN * MIN_MS), punched_at__lt=from_ms(hi_ms + DAY_MIN * MIN_MS))
+    return qs.exclude(Exists(sup))
+
+
+def local_dates_window(lo: str, hi: str) -> tuple[int, int]:
+    """A punched_at window [ms, ms) holding every punch whose local_date is in [lo, hi]; an overnight shift's punch
+    carries the previous day's date, so it runs from a day before lo to two days after hi."""
+    return local_midnight_ms(lo) - DAY_MIN * MIN_MS, local_midnight_ms(hi) + 2 * DAY_MIN * MIN_MS
 
 
 def get_employee(employee_id: str) -> dict | None:
@@ -128,8 +144,7 @@ PUNCH_FIELDS = ('id', 'punched_at', 'direction', 'verify_mode', 'source')
 def get_punches_around(employee_id: str, local_date: str) -> list[Punch]:
     """Punches that could fall in any window of this date's shift: from the previous local day to two days after."""
     midnight = local_midnight_ms(local_date)
-    found = (live_punches().filter(employee_id=employee_id, punched_at__gte=from_ms(midnight - DAY_MIN * MIN_MS),
-                                   punched_at__lt=from_ms(midnight + 3 * DAY_MIN * MIN_MS))
+    found = (live_punches(midnight - DAY_MIN * MIN_MS, midnight + 3 * DAY_MIN * MIN_MS).filter(employee_id=employee_id)
              .order_by('punched_at', 'id').values(*PUNCH_FIELDS))
     return [_punch(p) for p in found]
 
@@ -250,9 +265,8 @@ def load_range_inputs(company_id: str, employees: list[dict], dates: list[str]) 
                 .order_by(F('decided_at').desc(nulls_last=True)).values('employee_id', 'local_date', 'kind', 'shift_id'))
     roster = list(Roster.objects.filter(**mine, local_date__range=(lo, hi)).values('employee_id', 'local_date', 'shift_id'))
     sa = list(ShiftAssignment.objects.filter(**mine, valid__overlap=span).values('employee_id', 'shift_id', 'valid'))
-    punches = (live_punches().filter(**mine, punched_at__gte=from_ms(local_midnight_ms(lo) - DAY_MIN * MIN_MS),
-                                     punched_at__lt=from_ms(local_midnight_ms(hi) + 3 * DAY_MIN * MIN_MS))
-               .order_by('punched_at', 'id').values('employee_id', *PUNCH_FIELDS))
+    punches = (live_punches(local_midnight_ms(lo) - DAY_MIN * MIN_MS, local_midnight_ms(hi) + 3 * DAY_MIN * MIN_MS)
+               .filter(**mine).order_by('punched_at', 'id').values('employee_id', *PUNCH_FIELDS))
     leave = list(LeaveRequest.objects.filter(**mine, status=LeaveRequest.Status.APPROVED, to_date__gte=lo, from_date__lte=hi)
                  .order_by(F('decided_at').desc(nulls_last=True))
                  .values('employee_id', 'from_date', 'to_date', 'half_day', 'from_time', 'to_time'))

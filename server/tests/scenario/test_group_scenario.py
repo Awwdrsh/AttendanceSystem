@@ -323,7 +323,7 @@ def test_a_holding_group_runs_three_companies_from_one_sign_in():
     for code, row in by_code.items():
         pc = per_company[code]
         # The employee list still shows Nima at Trek (his exit waits for clearance), but past his last working day.
-        employed = [e for e in pc['employees']['items'] if not e['exit_date'] or e['exit_date'] >= today.isoformat()]
+        employed = [e for e in pc['employees']['employees'] if not e['exit_date'] or e['exit_date'] >= today.isoformat()]
         assert row['headcount'] == expected_headcount[code] == len(employed), (code, row, pc['employees'])
         hc_this = row_of(pc['insights']['headcount'], month=this.key)
         assert row['headcount'] == hc_this['headcount']
@@ -395,21 +395,20 @@ def test_a_holding_group_runs_three_companies_from_one_sign_in():
     make_employee(outsider, name='Not In The Group')
     c = Client()
     sign_in(c, 'hari@himalaya.test')
-    page = c.get('/group/people')
+    page = c.get('/api/v1/group/people', {'pageSize': 100})
     assert page.status_code == 200
     html = page.content.decode()
     for name in ('Maya Gurung', 'Sita Shrestha', 'Pema Lama', 'Bikash Rai', 'Nima Sherpa', 'Dawa Tamang'):
         assert name in html, name
     assert 'Not In The Group' not in html
-    overview = c.get('/group').content.decode()
+    overview = c.get('/api/v1/group/dashboard').content.decode()
     for name in ('Himalaya Holdings', 'Ilam Tea Estates', 'Mustang Treks'):
         assert name in overview
     assert 'Outside Ltd' not in overview
-    # The payroll summary downloaded as CSV from /group/reports has the same gross as the JSON report.
+    # The payroll summary downloaded as CSV (the Group hub's Reports tab) has the same gross as the JSON report.
     import csv
     import io
-    got = c.get('/group/reports', {'report': 'payroll', 'period': 'month', 'bs_year': prev.year, 'bs_month': prev.month,
-                                   'format': 'csv'})
+    got = c.get('/api/v1/group/reports/payroll', {'bsYear': prev.year, 'bsMonth': prev.month, 'format': 'csv'})
     assert got.status_code == 200 and 'csv' in got['Content-Type']
     table = list(csv.DictReader(io.StringIO(got.content.decode('utf-8-sig'))))
     by_name = {r['Company']: r for r in table}
@@ -419,9 +418,9 @@ def test_a_holding_group_runs_three_companies_from_one_sign_in():
 
     # Maya's one sign-in shows each company's own team, never the other one's.
     maya.switch(hold)
-    team_h = {e['emp_code'] for e in maya.get('/api/v1/employees')['items']}
+    team_h = {e['emp_code'] for e in maya.get('/api/v1/employees')['employees']}
     maya.switch(tea)
-    team_t = {e['emp_code'] for e in maya.get('/api/v1/employees')['items']}
+    team_t = {e['emp_code'] for e in maya.get('/api/v1/employees')['employees']}
     assert 'H-002' in team_h and not team_h & {'T-001', 'T-002'}
     assert {'T-001', 'T-002'} <= team_t and 'H-002' not in team_t
     # Maya has no group role: no group dashboard.

@@ -69,3 +69,18 @@ export function parseTyped(text, calendar) {
     return null;
   }
 }
+
+/** Holidays by AD date from GET /shifts/calendar days: `label` names them ("(optional)" after an optional one) and
+ *  `off` is true only when one of them is a day off for everyone it applies to. An optional holiday is a working day
+ *  unless the person takes it, so it must not look like a day off. */
+export function holidayMap(days) {
+  const out = new Map();
+  for (const d of days ?? []) {
+    if (!d.holidays?.length) continue;
+    out.set(d.date, {
+      label: d.holidays.map((h) => (h.optional ? `${h.name_en} (optional)` : h.name_en)).join(', '),
+      off: d.holidays.some((h) => !h.optional),
+    });
+  }
+  return out;
+}

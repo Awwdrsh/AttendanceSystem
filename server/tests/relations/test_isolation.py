@@ -11,7 +11,7 @@ from hajiri.db.models import (
     Branch, Company, CompanyMembership, DisciplinaryCase, Grievance, GroupMember, NotificationOutbox,
 )
 from hajiri.relations import services as S
-from tests.web.factories import PW, htmx, make_company, make_employee, make_user, sign_in, toasts
+from tests.web.factories import PW, make_company, make_employee, make_user, sign_in
 
 from .conftest import PDF_DATA_URL
 
@@ -30,8 +30,8 @@ def client_in(person, company=None) -> Client:
     c = Client()
     sign_in(c, person)
     if company is not None:
-        r = c.post('/_/web/company/switch', {'company_id': str(company.id)}, **htmx())
-        assert r.status_code == 204, r.content
+        r = c.post('/api/v1/me/companies/switch', {'companyId': str(company.id)}, content_type='application/json')
+        assert r.status_code == 200, r.content
     return c
 
 
@@ -77,78 +77,30 @@ def grp(db):
                            assignment=assignment, notice=notice)
 
 
+R = '/api/v1/relations'
+
+
 def gets(w):
-    return [f'/_/relations/grievances/{w.grievance}', f'/_/relations/grievances/{w.grievance}/files/{w.file}',
-            f'/_/relations/cases/{w.case}', f'/_/relations/kye/{w.kye}', f'/_/relations/employee/{w.beta_e.id}']
+    return [f'{R}/grievances/{w.grievance}', f'{R}/grievances/{w.grievance}/files/{w.file}',
+            f'{R}/disciplinary/{w.case}', f'{R}/kye/campaigns/{w.kye}', f'{R}/employees/{w.beta_e.id}/contract']
 
 
 def posts(w):
-    return [(f'/_/relations/grievances/{w.grievance}/notes', {'body': 'x'}),
-            (f'/_/relations/grievances/{w.grievance}/update', {'action': 'review'}),
-            (f'/_/relations/grievances/{w.grievance}/decision', {'outcome': 'upheld', 'findings': 'x'}),
-            (f'/_/relations/grievances/{w.grievance}/close', {}),
-            (f'/_/relations/cases/{w.case}/show-cause', {'text': 'Explain', 'responseDue': '2099-01-01'}),
-            (f'/_/relations/cases/{w.case}/decide', {'note': 'x', 'force': '1'}),
-            (f'/_/relations/cases/{w.case}/withdraw', {'reason': 'x'}),
-            (f'/_/relations/kye/{w.kye}/nudge', {}), (f'/_/relations/kye/{w.kye}/close', {}),
-            (f'/_/relations/assignments/{w.assignment}/end', {'cancel': '1'}),
-            (f'/_/relations/employee/{w.beta_e.id}/contract', {'contractEnd': '2099-01-01'})]
+    """(method, url, body) of every write that takes a Beta id."""
+    return [('post', f'{R}/grievances/{w.grievance}/notes', {'body': 'x'}),
+            ('patch', f'{R}/grievances/{w.grievance}', {'status': 'under_review'}),
+            ('post', f'{R}/grievances/{w.grievance}/decision', {'outcome': 'upheld', 'findings': 'x'}),
+            ('post', f'{R}/grievances/{w.grievance}/close', {}),
+            ('post', f'{R}/disciplinary/{w.case}/show-cause', {'text': 'Explain', 'responseDue': '2099-01-01'}),
+            ('post', f'{R}/disciplinary/{w.case}/decide', {'note': 'x', 'stageId': None, 'force': True}),
+            ('post', f'{R}/disciplinary/{w.case}/withdraw', {'reason': 'x'}),
+            ('post', f'{R}/kye/campaigns/{w.kye}/nudge', {}), ('post', f'{R}/kye/campaigns/{w.kye}/close', {}),
+            ('post', f'{R}/assignments/{w.assignment}/end', {'cancel': True}),
+            ('put', f'{R}/employees/{w.beta_e.id}/contract', {'contractEnd': '2099-01-01'})]
 
 
-@pytest.mark.parametrize('who', ['admin_a', 'admin_c'])
-def test_a_sister_or_outside_company_record_is_not_found(grp, who):
-    """The group admin working in Alpha (admin in Beta too) and Gamma's admin both get 404 for Beta's records."""
-    w = grp
-    c = client_in(getattr(w, who))
-    for url in gets(w):
-        assert c.get(url, **htmx('hj-drawer-body')).status_code == 404, url
-    for url, data in posts(w):
-        assert c.post(url, data, **htmx('hj-drawer-body')).status_code == 404, url
-    # A device of another company answers exactly like a device that does not exist (the TS 409).
-    foreign = c.post(f'/_/relations/devices/{w.device}/approve', {}, **htmx())
-    missing = c.post(f'/_/relations/devices/{NOWHERE}/approve', {}, **htmx())
-    assert foreign.status_code == missing.status_code == 409
-    assert toasts(foreign)[0]['message'] == toasts(missing)[0]['message']
-    # Nothing changed in Beta.
-    assert Grievance.objects.get(pk=w.grievance).status == Grievance.Status.SUBMITTED
-    assert DisciplinaryCase.objects.get(pk=w.case).status == DisciplinaryCase.Status.OPEN
-
-
-def test_the_owner_company_and_the_group_admin_after_switching_can_open_them(grp):
-    w = grp
-    for c in (client_in(w.hr_b), client_in(w.admin_a, w.beta)):
-        for url in gets(w):
-            assert c.get(url, **htmx('hj-drawer-body')).status_code == 200, url
-    r = client_in(w.admin_a, w.beta).post(f'/_/relations/devices/{w.device}/approve', {}, **htmx())
-    assert r.status_code == 204 and toasts(r)[0]['message'] == 'Approved.'
-
-
-def test_hub_lists_show_only_the_active_company(grp):
-    w = grp
-    alpha = client_in(w.admin_a)
-    pages = {'/relations': 'Beta wet floor', '/relations/disciplinary': 'Bina Beta', '/relations/kye': 'Beta record check',
-             '/relations/devices?status=all': 'Bina phone', '/relations/assignments?status=all': 'Bina Beta'}
-    for url, text in pages.items():
-        r = alpha.get(url)
-        assert r.status_code == 200 and text not in r.content.decode(), url
-    beta = client_in(w.admin_a, w.beta)
-    for url, text in pages.items():
-        assert text in beta.get(url).content.decode(), url
-    # The services agree.
-    a = session(w.admin_a)
-    assert S.list_cases(a)['cases'] == [] and S.list_campaigns(a)['campaigns'] == [] and S.list_devices(a)['devices'] == []
-    assert S.summary(a) == {'openGrievances': 0, 'openCases': 0, 'pendingDevices': 0, 'openKye': 0, 'isHr': True}
-    assert all(m['employeeId'] != str(w.beta_e.id) for m in S.completeness(str(w.alpha.id)))
-
-
-def test_pop_up_notices_belong_to_their_company(grp):
-    w = grp
-    dual_alpha = client_in(w.dual)
-    assert dual_alpha.get('/_/relations/popups', **htmx()).content == b''
-    assert dual_alpha.post(f'/_/relations/popups/{w.notice}/dismiss', {}, **htmx()).status_code == 404
-    dual_beta = client_in(w.dual, w.beta)
-    assert 'Beta closed Friday' in dual_beta.get('/_/relations/popups', **htmx()).content.decode()
-    assert dual_beta.post(f'/_/relations/popups/{w.notice}/dismiss', {}, **htmx()).status_code == 200
+def _write(c, method, url, body):
+    return getattr(c, method)(url, body, content_type='application/json')
 
 
 def test_a_person_in_two_companies_files_with_the_record_of_the_active_company(grp):
@@ -216,3 +168,61 @@ def test_a_beta_device_token_does_not_clock_in_at_alpha(grp):
     with pytest.raises(Exception) as e:
         S.assert_registered_device(str(w.alpha.id), str(w.beta_e.id), 'beta-device-token-0123456789')
     assert getattr(e.value, 'status', None) == 403
+
+
+@pytest.mark.parametrize('who', ['admin_a', 'admin_c'])
+def test_a_sister_or_outside_company_record_is_not_found(grp, who):
+    """The group admin working in Alpha (admin in Beta too) and Gamma's admin both get 404 for Beta's records."""
+    w = grp
+    c = client_in(getattr(w, who))
+    for url in gets(w):
+        assert c.get(url).status_code == 404, url
+    for method, url, data in posts(w):
+        r = _write(c, method, url, data)
+        assert r.status_code == 404, (url, r.status_code, r.content[:200])
+    # A device of another company answers exactly like a device that does not exist (the TS 409).
+    foreign = _write(c, 'post', f'{R}/devices/{w.device}/approve', {})
+    missing = _write(c, 'post', f'{R}/devices/{NOWHERE}/approve', {})
+    assert foreign.status_code == missing.status_code == 409
+    assert foreign.json() == missing.json()
+    # Nothing changed in Beta.
+    assert Grievance.objects.get(pk=w.grievance).status == Grievance.Status.SUBMITTED
+    assert DisciplinaryCase.objects.get(pk=w.case).status == DisciplinaryCase.Status.OPEN
+
+
+def test_the_owner_company_and_the_group_admin_after_switching_can_open_them(grp):
+    w = grp
+    for c in (client_in(w.hr_b), client_in(w.admin_a, w.beta)):
+        for url in gets(w):
+            assert c.get(url).status_code == 200, url
+    r = _write(client_in(w.admin_a, w.beta), 'post', f'{R}/devices/{w.device}/approve', {})
+    assert r.status_code == 200 and r.json() == {'ok': True}
+
+
+def test_hub_lists_show_only_the_active_company(grp):
+    w = grp
+    alpha = client_in(w.admin_a)
+    pages = {f'{R}/grievances?scope=handle': 'Beta wet floor', f'{R}/disciplinary': 'Bina Beta', f'{R}/kye/campaigns': 'Beta record check',
+             f'{R}/devices?status=all': 'Bina phone', f'{R}/assignments?status=all': 'Bina Beta'}
+    for url, text in pages.items():
+        r = alpha.get(url)
+        assert r.status_code == 200 and text not in r.content.decode(), url
+    beta = client_in(w.admin_a, w.beta)
+    for url, text in pages.items():
+        assert text in beta.get(url).content.decode(), url
+    # The services agree.
+    a = session(w.admin_a)
+    assert S.list_cases(a)['cases'] == [] and S.list_campaigns(a)['campaigns'] == [] and S.list_devices(a)['devices'] == []
+    assert S.summary(a) == {'openGrievances': 0, 'openCases': 0, 'pendingDevices': 0, 'openKye': 0, 'isHr': True}
+    assert all(m['employeeId'] != str(w.beta_e.id) for m in S.completeness(str(w.alpha.id)))
+
+
+def test_pop_up_notices_belong_to_their_company(grp):
+    w = grp
+    dual_alpha = client_in(w.dual)
+    assert 'Beta closed Friday' not in dual_alpha.get(f'{R}/popups').content.decode()
+    assert _write(dual_alpha, 'post', f'{R}/popups/{w.notice}/dismiss', {}).status_code == 404
+    dual_beta = client_in(w.dual, w.beta)
+    assert 'Beta closed Friday' in dual_beta.get(f'{R}/popups').content.decode()
+    assert _write(dual_beta, 'post', f'{R}/popups/{w.notice}/dismiss', {}).status_code == 200
+

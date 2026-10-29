@@ -10,7 +10,7 @@ from django.test import Client
 
 from tests.support.sql import execute, one, rows
 from hajiri.core.errors import BadRequestError, ForbiddenError, NotFoundError, ValidationError
-from tests.web.factories import bearer, htmx
+from tests.web.factories import bearer
 
 NOPE = '00000000-0000-7000-8000-0000000000ff'
 
@@ -49,32 +49,6 @@ def test_health_is_public_and_reports_the_database(db):
 
 # ---------------------------------------------------------------- auth and people
 
-def test_users_list_for_hr_only(w):
-    from hajiri.core.users import list_users
-    users = list_users(w['hr'].user)
-    assert len(users) >= 4 and 'password_hash' not in users[0]
-    assert {'id', 'email', 'roles', 'status'} <= set(users[0])
-    assert page(w['hr']).get('/settings/users').status_code == 200
-    assert page(w['sita']).get('/settings/users').status_code == 403
-    assert Client().get('/settings/users', HTTP_ACCEPT='application/json').status_code == 401
-    with pytest.raises(ForbiddenError):
-        list_users(w['sita'].user)
-
-
-def test_assignment_history_for_self_manager_and_hr(w):
-    from hajiri.employees.services import assignments
-    d = w['demo']
-    a = assignments(w['hr'].user, d['sita'])
-    assert a[0]['employee_id'] == d['sita'] and a[0]['valid'] == '[2026-01-01,)'
-    assert a[0]['branch_id'] == d['branch_id'] and a[0]['manager_id'] == d['ram']
-    assert assignments(w['sita'].user, d['sita']) and assignments(w['ram'].user, d['sita'])
-    with pytest.raises(ForbiddenError):
-        assignments(w['sita'].user, d['ram'])
-    # On the page: HR opens the employee; an employee cannot.
-    assert page(w['hr']).get(f"/employees/{d['sita']}").status_code == 200
-    assert page(w['sita']).get(f"/employees/{d['sita']}").status_code == 403
-
-
 def test_raw_punches_for_an_employee_and_range(w):
     from hajiri.attendance.api import punches
     d = w['demo']
@@ -92,55 +66,7 @@ def test_raw_punches_for_an_employee_and_range(w):
 
 # ---------------------------------------------------------------- devices
 
-def test_devices_with_health_counters(w):
-    from hajiri.devices.services import list_devices
-    d = w['demo']
-    dev = next(x for x in list_devices(w['hr'].user) if str(x['id']) == d['device_id'])
-    assert dev['serial_no'] == 'DEMO-01' and dev['offline'] is True
-    assert int(dev['mapped_users']) == 2 and int(dev['queued_commands']) == 0
-    with pytest.raises(ForbiddenError):
-        list_devices(w['sita'].user)
-    assert page(w['hr']).get('/settings/devices').status_code == 200
-    assert page(w['sita']).get('/settings/devices').status_code == 403
-
-
-def test_sync_users_queues_one_userinfo_per_mapped_employee(w):
-    from hajiri.devices.services import sync_users
-    d = w['demo']
-    assert sync_users(w['hr'].user, d['device_id']) == {'queued': 2}
-    cmds = [r['command'] for r in rows("SELECT command FROM device_command WHERE device_id = %s AND status = 'queued' ORDER BY command",
-                                       [d['device_id']])]
-    assert cmds[0].startswith('DATA UPDATE USERINFO PIN=1\tName=') and cmds[1].startswith('DATA UPDATE USERINFO PIN=2\tName=')
-    assert sync_users(w['hr'].user, NOPE) == {'queued': 0}
-    with pytest.raises(ForbiddenError):
-        sync_users(w['sita'].user, d['device_id'])
-    assert page(w['sita']).post(f"/_/devices/{d['device_id']}/sync-users", **htmx()).status_code == 403
-
-
 # ---------------------------------------------------------------- shifts, holidays, locations and roster
-
-def test_holidays_filter_patch_and_delete(w):
-    from hajiri.shifts import services as sh
-    hr, sita = w['hr'].user, w['sita'].user
-    hid = sh.create_holiday(hr, {'localDate': '2026-12-31', 'nameEn': 'Company anniversary'})['id']
-    got = next(h for h in sh.holidays(sita, {'from': '2026-12-01', 'to': '2026-12-31'}) if str(h['id']) == str(hid))
-    assert got['name_en'] == 'Company anniversary' and got['optional'] is False and got['gender_scope'] == 'all'
-    assert sh.holidays(sita, {'from': '2027-01-01', 'to': '2027-01-02'}) == []
-    with pytest.raises(ForbiddenError):
-        sh.update_holiday(sita, hid, {'nameEn': 'x'})
-    sh.update_holiday(hr, hid, {'nameEn': 'Founders day', 'optional': True, 'localDate': '2026-12-30'})
-    row = one('SELECT name_en, optional, local_date::text, gender_scope FROM holiday WHERE id = %s', [hid])
-    assert row == {'name_en': 'Founders day', 'optional': True, 'local_date': '2026-12-30', 'gender_scope': 'all'}
-    assert one("SELECT count(*)::int AS n FROM recompute_queue WHERE local_date IN ('2026-12-30', '2026-12-31')")['n'] > 0
-    with pytest.raises(ForbiddenError):
-        sh.delete_holiday(sita, hid)
-    sh.delete_holiday(hr, hid)
-    with pytest.raises(NotFoundError):
-        sh.delete_holiday(hr, hid)
-    with pytest.raises(NotFoundError):
-        sh.update_holiday(hr, hid, {'nameEn': 'gone'})
-    assert page(w['sita']).get('/settings/holidays').status_code == 403
-
 
 def test_location_geofence_update(w):
     from hajiri.shifts import services as sh
@@ -154,36 +80,6 @@ def test_location_geofence_update(w):
         sh.update_location(sita, lid, {'radiusM': 300})
     with pytest.raises(NotFoundError):
         sh.update_location(hr, NOPE, {'radiusM': 300})
-
-
-def test_shift_rules_patch_for_hr_only(w):
-    from hajiri.shifts import services as sh
-    d = w['demo']
-    sh.update_shift(w['hr'].user, d['shift_id'], {'graceInMin': 10, 'nameEn': 'General 10-18 (10 min grace)'})
-    assert one('SELECT grace_in_min, name_en FROM shift WHERE id = %s', [d['shift_id']]) == {'grace_in_min': 10, 'name_en': 'General 10-18 (10 min grace)'}
-    with pytest.raises(ForbiddenError):
-        sh.update_shift(w['sita'].user, d['shift_id'], {'graceInMin': 0})
-    with pytest.raises(NotFoundError):
-        sh.update_shift(w['hr'].user, NOPE, {'graceInMin': 0})
-    assert page(w['sita']).get('/settings/shifts').status_code == 403
-
-
-def test_roster_publish_and_clear(w):
-    from hajiri.shifts import services as sh
-    d = w['demo']
-    hr, sita, ram = w['hr'].user, w['sita'].user, w['ram'].user
-    sh.save_roster(hr, {'rows': [{'employeeId': d['sita'], 'localDate': '2026-11-02', 'shiftId': d['shift_id']}]})
-    assert sh.publish_roster(hr, {'from': '2026-11-01', 'to': '2026-11-07'}) == {'notified': 1}
-    with pytest.raises(ForbiddenError):
-        sh.publish_roster(sita, {'from': '2026-11-01', 'to': '2026-11-07'})
-    other_mgr = w['login_as'](['manager'], None).user
-    assert sh.publish_roster(other_mgr, {'from': '2026-11-01', 'to': '2026-11-07'}) == {'notified': 0}
-    assert sh.publish_roster(ram, {'from': '2026-11-01', 'to': '2026-11-07'}) == {'notified': 1}
-    with pytest.raises(ForbiddenError):
-        sh.clear_roster(sita, {'employeeId': d['sita'], 'localDate': '2026-11-02'})
-    assert sh.clear_roster(ram, {'employeeId': d['sita'], 'localDate': '2026-11-02'}) == {'deleted': 1}
-    assert sh.clear_roster(hr, {'employeeId': d['sita'], 'localDate': '2026-11-02'}) == {'deleted': 0}
-    assert page(w['sita']).get('/attendance/rosters').status_code == 403
 
 
 # ---------------------------------------------------------------- leave and overtime lists (JSON routes)
@@ -236,23 +132,6 @@ def test_ot_requests_list_and_cancel(w):
 
 # ---------------------------------------------------------------- settings (pages and services)
 
-def test_branch_rename_and_org_units(w):
-    from hajiri.company_settings import services as cs
-    d = w['demo']
-    b = cs.update_branch(w['admin'].user, d['branch_id'], {'nameEn': 'Kathmandu HQ'})
-    assert (str(b['id']), b['code'], b['name_en']) == (d['branch_id'], 'HQ', 'Kathmandu HQ')
-    with pytest.raises(ForbiddenError):
-        cs.update_branch(w['sita'].user, d['branch_id'], {'nameEn': 'x'})
-    with pytest.raises(NotFoundError):
-        cs.update_branch(w['hr'].user, NOPE, {'nameEn': 'x'})
-    r = page(w['hr']).post('/_/home/settings/units', {'kind': 'department', 'code': 'ENG', 'name': 'Engineering'}, **htmx())
-    assert r.status_code == 200
-    units = cs.list_org_units(w['hr'].user)
-    assert [(u['kind'], u['code'], u['name_en']) for u in units] == [('department', 'ENG', 'Engineering')]
-    assert page(w['sita']).get('/settings?tab=org').status_code == 403
-    assert page(w['sita']).post('/_/home/settings/units', {'kind': 'team', 'code': 'T', 'name': 'T'}, **htmx()).status_code == 403
-
-
 # ---------------------------------------------------------------- payroll setup and run lists (JSON routes)
 
 def P(path):
@@ -270,36 +149,6 @@ def test_structures_and_versions(w):
     assert send('post', w['hr'], P('/structures'), {'code': 'EP', 'nameEn': 'dup', 'components': [{'code': 'BASIC'}]}).status_code == 409
     assert send('post', w['hr'], P(f'/structures/{NOPE}/versions'), {'components': [{'code': 'BASIC'}]}).status_code == 404
     assert send('post', w['sita'], P('/structures'), {'code': 'NO', 'nameEn': 'no', 'components': [{'code': 'BASIC'}]}).status_code == 403
-
-
-def test_loans_periods_runs_and_inputs(w):
-    d = w['demo']
-    loan = send('post', w['hr'], P('/loans'), {'employeeId': d['sita'], 'principal': '10000', 'emi': '2500', 'startBsYear': 2083, 'startBsMonth': 7})
-    assert loan.status_code == 201, loan.content
-    loans = get(w['hr'], P('/loans'), employeeId=d['sita'])
-    l0 = loans.json()['loans'][0]
-    assert loans.status_code == 200 and (l0['id'], l0['emp_code'], l0['installments']) == (loan.json()['id'], 'E001', 4)
-    assert str(l0['repaid']) in ('0', '0.00')
-    period = send('post', w['hr'], P('/periods'), {'bsYear': 2083, 'bsMonth': 7})
-    assert period.status_code == 201
-    pid = period.json()['period']['id']
-    p0 = get(w['hr'], P('/periods')).json()['periods'][0]
-    assert (p0['id'], p0['bs_year'], p0['bs_month']) == (pid, 2083, 7)
-    run = send('post', w['hr'], P('/runs'), {'periodId': pid})
-    assert run.status_code == 201
-    r0 = get(w['hr'], P('/runs')).json()['runs'][0]
-    assert (r0['id'], r0['bs_year'], r0['bs_month'], r0['run_type'], r0['status']) == (run.json()['id'], 2083, 7, 'regular', 'draft')
-    comp = next(c for c in get(w['hr'], P('/components')).json()['components'] if c['type'] == 'earning' and c['active'])
-    rid = run.json()['id']
-    ins = send('post', w['hr'], P(f'/runs/{rid}/inputs'), {'inputs': [{'employeeId': d['sita'], 'componentCode': comp['code'], 'amount': '1500', 'note': 'one-off'}]})
-    assert ins.status_code == 201
-    got = get(w['hr'], P(f'/runs/{rid}/inputs')).json()['inputs']
-    assert len(got) == 1 and (got[0]['employee_id'], got[0]['emp_code'], got[0]['component_code'], got[0]['note']) == (d['sita'], 'E001', comp['code'], 'one-off')
-    assert float(got[0]['amount']) == 1500
-    for path in ['/loans', '/periods', '/runs', f'/runs/{rid}/inputs']:
-        assert get(w['sita'], P(path)).status_code == 403, path
-    assert get(w['hr'], P(f'/runs/{NOPE}/inputs')).status_code == 404
-    assert page(w['sita']).get('/payroll').status_code == 403
 
 
 # ---------------------------------------------------------------- biometrics

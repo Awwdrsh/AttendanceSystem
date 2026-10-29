@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Update Hajiri to the latest version from GitHub: new Python dependencies, migrations and the BS calendar.
+# Update Hajiri to the latest version from GitHub: new Python dependencies, migrations and the BS calendar. The web
+# app's build comes with the code (server/frontend_build/); it is rebuilt here only when Node.js is installed and the
+# pulled commits changed frontend/ without a matching build.
 # Services installed with install-service.sh (or started with start.sh --daemon) are
 # restarted; otherwise restart start.sh yourself.
 set -euo pipefail
@@ -9,8 +11,28 @@ setup_path
 require_venv
 
 step "Pulling latest code"
+# A local rebuild (below, on an earlier update) leaves server/frontend_build/ changed; it is build output only, so
+# it is reset to the committed build before pulling.
+if ! git diff --quiet -- server/frontend_build || [ -n "$(git ls-files --others --exclude-standard -- server/frontend_build)" ]; then
+  git checkout -- server/frontend_build
+  git clean -fdq -- server/frontend_build
+  ok "local web app build reset to the committed one"
+fi
+OLD_HEAD="$(git rev-parse HEAD)"
 git pull --ff-only
 ok "$(git log -1 --format='%h %s')"
+
+step "Web app"
+if git diff --quiet "$OLD_HEAD" HEAD -- frontend; then
+  ok "unchanged"
+elif ! git diff --quiet "$OLD_HEAD" HEAD -- server/frontend_build; then
+  ok "new build pulled with the code"
+elif node_ok; then
+  "$ROOT/scripts/build-frontend.sh"
+else
+  warn "frontend/ changed without a new build and Node.js is not installed: the previous build is served (install Node.js 22 and run ./scripts/build-frontend.sh)"
+fi
+check_frontend_build
 
 step "Python dependencies"
 if ! "$VENV_PY" -m pip install -q -r "$SERVER/requirements.txt" >/tmp/hajiri-pip.log 2>&1; then

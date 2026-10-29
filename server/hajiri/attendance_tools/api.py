@@ -1,24 +1,27 @@
 """JSON endpoints of the attendance tools under /api/v1/attendance-tools (the TS paths): DRF views with the project
-defaults (HajiriAuthentication, IsSignedIn, the TS error shape), for Bearer-token clients. The pages call the same
-service functions."""
+defaults (IsSignedIn, the TS error shape) and SameOriginAuthentication (the React app's session cookie with an Origin
+check, or a Bearer token). The pages call the same service functions."""
 from __future__ import annotations
 
 from django.http import HttpResponse
 from drf_spectacular.utils import extend_schema
-from rest_framework.decorators import api_view, parser_classes, permission_classes
+from rest_framework.decorators import api_view, authentication_classes, parser_classes, permission_classes
 from rest_framework.response import Response
 
-from hajiri.core.api import HasModule
+from hajiri.core.api import HasModule, SameOriginAuthentication
 from hajiri.files.parsers import json_parser
 
 from . import serializers as s
 from . import services
 
+# The React app sends the session cookie with fetch() and an Origin check, never a CSRF token (as against the TS API).
+AUTH = [SameOriginAuthentication]
 UPLOAD_BODY_MAX = 2_000_000          # a CSV of up to 2,000 rows inside the JSON body
 
 
 @extend_schema(request=s.ExtrasPolicyIn, responses=dict)
 @api_view(['GET', 'PUT'])
+@authentication_classes(AUTH)
 def policy(request):
     if request.method == 'PUT':
         return Response(services.put_policy(request.user, request.data))
@@ -27,42 +30,49 @@ def policy(request):
 
 @extend_schema(parameters=[s.MonthIn], responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 def penalties(request):
     return Response(services.penalties(request.user, request.query_params.dict()))
 
 
 @extend_schema(parameters=[s.MonthPartialIn], responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 def penalties_me(request):
     return Response(services.my_penalties(request.user, request.query_params.dict()))
 
 
 @extend_schema(request=s.ApplyPenaltiesIn, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 def penalties_apply(request):
     return Response(services.apply(request.user, request.data))
 
 
 @extend_schema(request=s.ReverseIn, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 def penalty_reverse(request, id):
     return Response(services.reverse(request.user, id, request.data))
 
 
 @extend_schema(parameters=[s.IssueRangeIn], responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 def issues(request):
     return Response(services.issues(request.user, request.query_params.dict()))
 
 
 @extend_schema(parameters=[s.MonthIn], responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 def issues_summary(request):
     return Response(services.issue_summary(request.user, request.query_params.dict()))
 
 
 @extend_schema(request=s.EmployeeNudgeIn, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 def nudge(request):
     return Response(services.nudge(request.user, request.data))
 
@@ -75,6 +85,7 @@ def template_response() -> HttpResponse:
 
 @extend_schema(responses={(200, 'text/csv'): str})
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes([HasModule('attendance')])
 def upload_template(request):
     return template_response()
@@ -82,6 +93,7 @@ def upload_template(request):
 
 @extend_schema(request=s.AttendanceUploadIn, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @parser_classes([json_parser(UPLOAD_BODY_MAX)])
 def upload_check(request):
     return Response(services.upload_check(request.user, request.data))
@@ -89,6 +101,7 @@ def upload_check(request):
 
 @extend_schema(request=s.ImportIn, responses={201: dict})
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @parser_classes([json_parser(UPLOAD_BODY_MAX)])
 def upload_import(request):
     return Response(services.upload_import(request.user, request.data), status=201)
@@ -96,11 +109,13 @@ def upload_import(request):
 
 @extend_schema(responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 def uploads(request):
     return Response(services.uploads(request.user))
 
 
 @extend_schema(parameters=[s.WhosOutIn], responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 def whos_out(request):
     return Response(services.whos_out_for(request.user, request.query_params.dict()))

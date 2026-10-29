@@ -1,8 +1,0 @@
-{% extends "base.html" %}
-{% block title %}Shifts · Hajiri{% endblock %}
-{% block content %}
-{% page_header "Shifts" subtitle="Working hours and the rules used to mark people late, half day or absent." %}
-  <button type="button" class="hj-btn" hx-get="{% url 'shifts:new' %}" hx-target="#hj-drawer-body"><i class="ti ti-plus" aria-hidden="true"></i>New shift</button>
-{% endpage_header %}
-{% data_table table %}
-{% endblock %}

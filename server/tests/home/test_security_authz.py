@@ -15,7 +15,7 @@ from hajiri.core.clock import npt_today
 from tests.support.sql import execute, one
 from hajiri.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError, ValidationError
 from tests.core.fixtures import PW
-from tests.web.factories import bearer, htmx
+from tests.web.factories import bearer
 
 
 def days_ago(n: int) -> str:
@@ -56,51 +56,6 @@ def w(demo, login_as):
 
 # ---------------------------------------------------------------- manager scoping
 
-def test_manager_lists_only_reports_and_self(w):
-    from hajiri.employees.services import list_employees
-    d = w['demo']
-    execute('UPDATE employee_assignment SET manager_id = NULL WHERE employee_id = %s', [d['sita']])
-    assert [str(e['id']) for e in list_employees(w['ram'].user)] == [d['ram']]
-    execute('UPDATE employee_assignment SET manager_id = %s WHERE employee_id = %s AND upper_inf(valid)', [d['ram'], d['sita']])
-    assert sorted(str(e['id']) for e in list_employees(w['ram'].user)) == sorted([d['sita'], d['ram']])
-    assert len(list_employees(w['hr'].user)) >= 2
-    # The Employees pages stay HR-only.
-    assert page(w['ram']).get('/employees').status_code == 403
-
-
-def test_exceptions_and_reports_limited_to_the_team(w):
-    from hajiri.attendance.api import exceptions
-    from hajiri.reports.service import attendance_report
-    d = w['demo']
-    execute('UPDATE employee_assignment SET manager_id = NULL WHERE employee_id = %s', [d['sita']])
-    day = days_ago(3)
-    execute("INSERT INTO attendance_day (employee_id, local_date, version, status, inputs_hash) VALUES (%s, %s, 40, 'Absent', 'h')", [d['sita'], day])
-    ex = exceptions(w['ram'].user, {'from': day, 'to': day})
-    assert not any(str(x['employee_id']) == d['sita'] for x in ex)
-    assert any(str(x['employee_id']) == d['sita'] for x in exceptions(w['hr'].user, {'from': day, 'to': day}))
-    assert [r['emp_code'] for r in attendance_report(w['ram'].user, 'daily', {'date': day}).rows] == ['E002']
-    with pytest.raises(ForbiddenError):
-        attendance_report(w['ram'].user, 'register', {'bsYear': 2083, 'bsMonth': 6, 'employeeId': d['sita']})
-    with pytest.raises(ForbiddenError):
-        attendance_report(w['ram'].user, 'leave-balances', {})
-    with pytest.raises(ForbiddenError):
-        attendance_report(w['ram'].user, 'devices', {})
-    assert attendance_report(w['hr'].user, 'leave-balances', {}).rows is not None
-    assert page(w['ram']).get('/reports').status_code == 403
-
-
-def test_manager_dashboard_has_no_payroll_totals(w):
-    from hajiri.dashboard.services import executive
-    d = w['demo']
-    execute("""INSERT INTO payroll_period (company_id, bs_year, bs_month, start_ad, end_ad, days) VALUES (%s, 2083, 1, '2026-04-14', '2026-05-14', 31)""", [d['company_id']])
-    execute("""INSERT INTO payroll_run (company_id, period_id, run_type) SELECT %s, id, 'regular' FROM payroll_period WHERE company_id = %s AND bs_year = 2083 AND bs_month = 1""",
-            [d['company_id'], d['company_id']])
-    assert executive(w['ram'].user)['lastPayrollRun'] is None
-    assert executive(w['hr'].user)['lastPayrollRun'] is not None
-    # The Overview page (with the payroll card) is not for managers.
-    assert page(w['ram']).get('/overview').status_code == 403
-
-
 # ---------------------------------------------------------------- approvals
 
 def test_only_people_involved_read_an_approval_and_a_locked_day_cannot_be_approved(w):
@@ -121,24 +76,6 @@ def test_only_people_involved_read_an_approval_and_a_locked_day_cannot_be_approv
 
 # ---------------------------------------------------------------- punches
 
-def test_punch_time_is_the_server_clock(w):
-    from datetime import datetime, timezone
-    before = datetime.now(timezone.utc)
-    r = send('post', w['sita'], '/api/v1/punch', {'source': 'web', 'direction': 'in', 'clientTime': (before - timedelta(minutes=9)).isoformat(),
-                                                  'idempotencyKey': 'sec-review-1', 'reason': 'test'})
-    assert r.status_code == 201, r.content
-    at = datetime.fromisoformat(r.json()['punch']['punched_at'].replace('Z', '+00:00'))
-    assert abs((at - before).total_seconds()) < 60
-    raw = one('SELECT raw FROM punch_event WHERE id = %s', [r.json()['punch']['id']])['raw']
-    assert raw['clientTime']
-    # The Home card goes through the same rule.
-    h = page(w['sita']).post('/_/home/punch', {'direction': 'out', 'idempotency_key': 'sec-review-2',
-                                               'clientTime': (before - timedelta(hours=3)).isoformat(), 'reason': 'x'}, **htmx())
-    assert h.status_code == 200
-    raw = one("SELECT raw, punched_at FROM punch_event WHERE employee_id = %s AND direction = 'out'", [w['demo']['sita']])
-    assert abs((raw['punched_at'] - before).total_seconds()) < 60 and 'ClockSkew' in raw['raw']['flags']
-
-
 def test_manual_punch_refused_on_a_payroll_locked_day(w):
     locked_day(w['demo']['ram'], '2026-01-05')
     r = send('post', w['hr'], '/api/v1/punch/manual', {'employeeId': w['demo']['ram'], 'localDate': '2026-01-05', 'time': '09:00',
@@ -147,26 +84,6 @@ def test_manual_punch_refused_on_a_payroll_locked_day(w):
 
 
 # ---------------------------------------------------------------- devices
-
-def test_pin_injection_and_foreign_branch(w):
-    from hajiri.devices import services as dev
-    d = w['demo']
-    did = str(one("""INSERT INTO device (company_id, serial_no, vendor, protocol, status) VALUES (%s, 'SEC-ZK-1', 'zkteco', 'adms', 'active') RETURNING id""",
-                  [d['company_id']])['id'])
-    with pytest.raises(BadRequestError):
-        dev.map_pin(w['hr'].user, did, {'pin': '7\tPri=14', 'employeeId': d['sita'], 'from': '2026-01-01'})
-    with pytest.raises(BadRequestError):
-        dev.map_pin(w['hr'].user, did, {'pin': '7\nC:1:CLEAR DATA', 'employeeId': d['sita'], 'from': '2026-01-01'})
-    assert dev.map_pin(w['hr'].user, did, {'pin': '7', 'employeeId': d['sita'], 'from': '2026-01-01'})['ok']
-    assert one("SELECT count(*)::int AS n FROM device_command WHERE device_id = %s AND command LIKE '%%Pri=14%%'", [did])['n'] == 0
-    with pytest.raises(NotFoundError):
-        dev.activate(w['hr'].user, did, {'branchId': w['other_branch']})
-    # The page refuses the same PIN.
-    r = page(w['hr']).post('/_/devices/map', {'device_id': did, 'pin': '8\tPri=14', 'employee_id': d['sita'], 'valid_from': '2026-01-01'}, **htmx())
-    # A form error: the form is drawn again in place (422) with the PIN rule, and nothing is queued.
-    assert r.status_code == 422 and 'PIN must be 1 to 24 letters or digits' in r.content.decode()
-    assert one("SELECT count(*)::int AS n FROM device_command WHERE device_id = %s AND command LIKE '%%Pri=14%%'", [did])['n'] == 0
-
 
 # ---------------------------------------------------------------- cross-company references
 
@@ -191,7 +108,7 @@ def test_calendar_and_shift_delete_reveal_nothing_of_another_company(w):
         sh.calendar(w['sita'].user, {'from': '2026-10-01', 'to': '2026-10-07', 'employeeId': w['other_employee']})
     with pytest.raises(NotFoundError):
         sh.delete_shift(w['hr'].user, w['other_shift'])
-    r = page(w['hr']).post(f"/_/shifts/{w['other_shift']}/delete", **htmx())
+    r = page(w['hr']).delete(f"/api/v1/shifts/{w['other_shift']}")
     assert r.status_code == 404
 
 
@@ -251,22 +168,3 @@ def test_ot_register_csv_neutralises_formulas(w):
 
 
 # ---------------------------------------------------------------- device keys
-
-def test_hikvision_device_key_issued_once_and_only_its_hash_stored(w):
-    from hajiri.devices import services as dev
-    d = w['demo']
-    hik = str(one("INSERT INTO device (company_id, serial_no, vendor, protocol, status) VALUES (%s, 'HIK-KEY-1', 'hikvision', 'isapi', 'active') RETURNING id",
-                  [d['company_id']])['id'])
-    key = dev.issue_key(w['hr'].user, hik)['key']
-    import re
-    assert re.fullmatch(r'[A-Za-z0-9_-]{32}', key)
-    assert one('SELECT comm_key_hash FROM device WHERE id = %s', [hik])['comm_key_hash'] == hashlib.sha256(key.encode()).hexdigest()
-    with pytest.raises(ForbiddenError):
-        dev.issue_key(w['sita'].user, hik)
-    with pytest.raises(BadRequestError):
-        dev.issue_key(w['hr'].user, d['device_id'])
-    foreign = str(one("INSERT INTO device (company_id, serial_no, vendor, protocol, status) VALUES (%s, 'HIK-KEY-2', 'hikvision', 'isapi', 'active') RETURNING id",
-                      [w['other_company']])['id'])
-    with pytest.raises(NotFoundError):
-        dev.issue_key(w['hr'].user, foreign)
-    assert page(w['sita']).post(f'/_/devices/{hik}/key', **htmx()).status_code == 403

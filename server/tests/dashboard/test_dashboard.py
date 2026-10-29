@@ -10,7 +10,7 @@ from tests.support.sql import execute
 from hajiri.core.errors import BadRequestError, ForbiddenError
 from hajiri.dashboard import services as dash
 from tests.core.punches import insert_punch
-from tests.web.factories import htmx, sign_in
+from tests.web.factories import sign_in
 
 
 @pytest.fixture
@@ -91,19 +91,6 @@ def test_arrivals_ribbon_geometry_follows_arrivals_ribbon_tsx():
     assert [m['late'] for m in r['marks']] == [False, True]
     assert r['marks'][1]['title'] == 'Ram, 10:20 (late)'
     assert r['height'] == 3 * 11 + 8
-
-
-def test_overview_page_for_hr_and_access(demo, hr, emp, login_as):
-    execute("UPDATE device SET last_seen_at = now() - interval '10 minutes' WHERE id = %s", [demo['device_id']])
-    r = client_for(hr).get('/overview')
-    assert r.status_code == 200
-    body = r.content.decode()
-    for text in ('In today', 'of 2 active employees', 'Arrivals today', 'Attendance rate', 'Needs attention',
-                 'Front door (simulator) is offline', 'Check device', 'Latest clock-ins', 'No pay run yet', 'Overtime detected this month'):
-        assert text in body, text
-    assert client_for(emp).get('/overview', **htmx()).status_code == 403
-    # The page follows the App.tsx guard (insights: HR and executives); managers use the API data on other pages.
-    assert client_for(login_as(['manager'])).get('/overview', **htmx()).status_code == 403
 
 
 def test_home_pending_requests_are_newest_first_capped_at_20_and_balances_sum_own_ledger(demo, emp):

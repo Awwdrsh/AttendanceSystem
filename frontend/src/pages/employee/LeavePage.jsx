@@ -9,6 +9,7 @@ import { DataTable } from '../../components/DataTable';
 import { Field, StatStrip } from '../../components/Kpi';
 import { PageHeader, SectionTitle } from '../../components/PageHeader';
 import { StatusBadge, statusLabel } from '../../components/StatusBadge';
+import { holidayMap } from '../../lib/bs';
 import { fmtAd, fmtDateShort, fmtTime, NPT_OFFSET_MIN, todayNpt, addDays } from '../../lib/format';
 import { toast } from '../../lib/toast';
 import { useQuery } from '../../lib/useQuery';
@@ -50,11 +51,7 @@ export function LeaveApplyForm({ employeeId, onDone }) {
   const [suggestion, setSuggestion] = useState(null);
   const [busy, setBusy] = useState(false);
   const cal = useQuery(() => shiftApi.calendar(addDays(todayNpt(), -60), addDays(todayNpt(), 120), employeeId), [employeeId]);
-  const holidays = useMemo(
-    () =>
-      new Map((cal.data?.days ?? []).filter((d) => d.holidays.length).map((d) => [d.date, d.holidays.map((h) => h.name_en).join(', ')])),
-    [cal.data],
-  );
+  const holidays = useMemo(() => new Map([...holidayMap(cal.data?.days)].map(([d, h]) => [d, h.label])), [cal.data]);
 
   useEffect(() => {
     if (!typeId || !from || !to || to < from) {

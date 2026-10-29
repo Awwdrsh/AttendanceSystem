@@ -21,7 +21,7 @@ from .audit import audit
 from .collation import collate_key
 from .auth import GROUP_ROLE_GRANTS, ROLES, AuthUser, _merge_roles, create_user, has_role
 from .crypto import hash_password, password_policy_error
-from .errors import BadRequestError, ForbiddenError, NotFoundError
+from .errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
 from .scoping import as_uuid
 from .validation import validate
 
@@ -63,6 +63,12 @@ def assert_employee_in_company(employee_id: str | None, company_id: str | None) 
         raise NotFoundError('employee not found')
 
 
+def assert_employee_not_linked(employee_id: str | None, user_id=None) -> None:
+    """One sign-in per employee record (app_user.employee_id is unique): a clear 409 instead of an integrity error."""
+    if employee_id and _m().AppUser.objects.filter(employee_id=as_uuid(employee_id)).exclude(pk=user_id).exists():
+        raise ConflictError('this employee record is already linked to another sign-in')
+
+
 def list_users(actor: AuthUser) -> list[dict]:
     """Everyone who can sign in to the actor's company: its own accounts, then people of the group with access
     (`membership: True`, with their roles here and their home company's name)."""
@@ -91,6 +97,7 @@ def admin_create_user(actor: AuthUser, body: dict, pepper: str | None = None) ->
     _require(actor, 'admin')
     b = _plain(validate(CreateUserIn, body))
     assert_employee_in_company(b.get('employeeId'), actor.company_id)
+    assert_employee_not_linked(b.get('employeeId'))
     err = password_policy_error(b['password'])
     if err:
         raise BadRequestError(err)
@@ -149,6 +156,7 @@ def admin_update_user(actor: AuthUser, user_id: str, body: dict) -> dict:
     if 'employeeId' in b:
         changes['employee_id'] = b['employeeId']
     if membership is None:
+        assert_employee_not_linked(b.get('employeeId'), uid)
         m.AppUser.objects.filter(pk=uid, company_id=actor.company_id).update(**changes)
         r = m.AppUser.objects.filter(pk=uid).values('id', 'email', 'name', 'roles', 'status', 'employee_id').first()
         if b.get('status') == 'disabled':

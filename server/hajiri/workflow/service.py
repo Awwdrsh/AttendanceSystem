@@ -553,7 +553,8 @@ def _payroll_summary(company_id: str, oid: str) -> dict:
     if not r:
         return {}
     return {'run_type': r['run_type'], 'status': r['status'], 'bs_year': r['bs_year'], 'bs_month': r['bs_month'],
-            'payslips': r['n_payslips'], 'total_net': str(r['net_total'])}
+            # count(*) is bigint, which the TS API returned as a string (like every numeric), so '3' not 3.
+            'payslips': str(r['n_payslips']), 'total_net': str(r['net_total'])}
 
 
 def _training_summary(company_id: str, oid: str) -> dict:

@@ -1,8 +1,9 @@
 """
-Expenses and travel JSON API for Bearer-token clients (the TS routes under /api/v1/expenses). DRF views with the
-project defaults (hajiri.core.api): HajiriAuthentication, IsSignedIn, the TS error shape and JsonRenderer. Each view
-adds the feature switch and, where the TS route did, the HR role. Rules and validation stay in services.py, so the
-answers are the TS route's.
+Expenses and travel JSON API (the TS routes under /api/v1/expenses) for the React app and Bearer-token clients. DRF
+views with SameOriginAuthentication (the session cookie the React app sends with fetch(), checked against the Origin
+as the TS sameOriginGuard did, or a Bearer token), IsSignedIn, the TS error shape and JsonRenderer. Each view adds
+the feature switch and, where the TS route did, the HR role. Rules and validation stay in services.py, so the answers
+are the TS route's.
 """
 from __future__ import annotations
 
@@ -12,7 +13,8 @@ from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from hajiri.core.api import FeatureEnabled, HasRole, IsSignedIn
+from hajiri.core.api import FeatureEnabled, HasRole, IsSignedIn, SameOriginAuthentication
+from hajiri.core.validation import validate
 from hajiri.files.store import stored_file_response
 from hajiri.web.csv import csv_response
 
@@ -21,13 +23,16 @@ from . import services as ex
 
 FEATURE = FeatureEnabled('expenses')
 HR = HasRole('hr')
+AUTH = [SameOriginAuthentication]
 
 
 class _View(APIView):
+    authentication_classes = AUTH
     permission_classes = [IsSignedIn, FEATURE]
 
 
 class _HrView(APIView):
+    authentication_classes = AUTH
     permission_classes = [IsSignedIn, FEATURE, HR]
 
 
@@ -43,8 +48,14 @@ class ReportNegotiation(DefaultContentNegotiation):
 
 
 class _ReportView(APIView):
+    authentication_classes = AUTH
     permission_classes = [IsSignedIn, FEATURE, HR]
     content_negotiation_class = ReportNegotiation
+
+
+def _report_format(request) -> str | None:
+    """The TS routes parsed ?format with z.enum(['json', 'csv']).optional(): anything else is a 400 validation."""
+    return validate(s.ReportFormatIn, request.query_params.dict()).get('format')
 
 
 def _report(request, r: dict):
@@ -222,10 +233,12 @@ class SpendReportView(_ReportView):
 class AdvancesReportView(_ReportView):
     @extend_schema(responses=dict)
     def get(self, request):
+        _report_format(request)
         return _report(request, ex.report_advances(request.user))
 
 
 class PendingPaymentReportView(_ReportView):
     @extend_schema(responses=dict)
     def get(self, request):
+        _report_format(request)
         return _report(request, ex.report_pending_payment(request.user))

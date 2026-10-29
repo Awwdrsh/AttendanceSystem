@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from drf_spectacular.utils import extend_schema_serializer
 from rest_framework import serializers
 
 from hajiri.core.errors import ValidationError
@@ -118,6 +119,7 @@ PAN_RE = r'^\d{9}$'
 # ---------------------------------------------------------------- org structure
 
 
+@extend_schema_serializer(component_name='PeopleBranchIn')
 class BranchIn(StrictSerializer):
     code = text(20)
     nameEn = text(120)
@@ -146,6 +148,7 @@ class DesignationIn(StrictSerializer):
     active = serializers.BooleanField(required=False)
 
 
+@extend_schema_serializer(component_name='PeoplePolicyIn')
 class PolicyIn(StrictSerializer):
     makerChecker = serializers.BooleanField(default=False)
 

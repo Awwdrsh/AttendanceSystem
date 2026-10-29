@@ -1,7 +1,0 @@
-{# Empty states say what is missing and offer the next step (EmptyState.tsx). #}
-<div class="hj-empty{% if compact %} compact{% endif %}">
-  <div class="hj-empty-icon"><i class="ti ti-{{ icon }}" aria-hidden="true"></i></div>
-  <div class="hj-empty-title">{{ title }}</div>
-  {% if hint %}<div class="hj-empty-hint">{{ hint }}</div>{% endif %}
-  {% if action_label %}<a class="hj-btn sm hj-mt-sm" href="{{ action_url|default:'#' }}" {{ action_attrs|safe }}>{{ action_label }}</a>{% endif %}
-</div>

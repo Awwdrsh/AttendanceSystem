@@ -127,14 +127,13 @@ def test_fills_both_companies_and_keeps_records_apart(demo):
     theirs = HelpdeskTicket.objects.for_company(sister.pk).first()
     ours = HelpdeskTicket.objects.for_company(main.pk).first()
     client, _ = sign_in('laxmi@corevalley.test')
-    hx = {'HTTP_HX_REQUEST': 'true'}
-    assert client.get(f'/_/helpdesk/tickets/{theirs.pk}', **hx).status_code == 404
-    assert client.get(f'/_/helpdesk/tickets/{ours.pk}', **hx).status_code == 200
+    assert client.get(f'/api/v1/helpdesk/tickets/{theirs.pk}').status_code == 404
+    assert client.get(f'/api/v1/helpdesk/tickets/{ours.pk}').status_code == 200
     sister_hr, _ = sign_in(f'sabina@{SISTER_CODE.lower()}.corevalley.test')
-    assert sister_hr.get(f'/_/helpdesk/tickets/{theirs.pk}', **hx).status_code == 200
-    assert sister_hr.get(f'/_/helpdesk/tickets/{ours.pk}', **hx).status_code == 404
+    assert sister_hr.get(f'/api/v1/helpdesk/tickets/{theirs.pk}').status_code == 200
+    assert sister_hr.get(f'/api/v1/helpdesk/tickets/{ours.pk}').status_code == 404
     switched, _ = sign_in('laxmi@corevalley.test', str(sister.pk))
-    assert switched.get(f'/_/helpdesk/tickets/{theirs.pk}', **hx).status_code == 200
+    assert switched.get(f'/api/v1/helpdesk/tickets/{theirs.pk}').status_code == 200
 
     # A second run adds nothing to either company.
     before = AuditLog.objects.count()

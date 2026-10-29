@@ -37,17 +37,18 @@ def test_another_companys_upload_is_not_found_over_http(world):
     alpha_token, _ = world.session(world.admin_a)                    # group admin, working in Alpha
     outsider, _ = world.session(world.admin_c)
     for token in (alpha_token, outsider):
-        r = Client().get(f'/_/files/{fid}', **bearer(token))
+        r = Client().get(f'/api/v1/files/{fid}', **bearer(token))
         assert r.status_code == 404 and r.json() == {'error': 'file not found'}
     beta_token, _ = world.session(world.admin_b)
-    assert Client().get(f'/_/files/{fid}', **bearer(beta_token)).status_code == 200
+    assert Client().get(f'/api/v1/files/{fid}', **bearer(beta_token)).status_code == 200
     switched, _ = world.session(world.admin_a, world.beta)           # admin of Beta through the group, after a switch
-    assert Client().get(f'/_/files/{fid}', **bearer(switched)).status_code == 200
+    assert Client().get(f'/api/v1/files/{fid}', **bearer(switched)).status_code == 200
 
 
 def test_upload_endpoint_files_into_the_active_company(world):
     token, _ = world.session(world.dual, world.beta)
-    r = Client().post('/_/files/', json.dumps({'purpose': 'expense_receipt', 'filename': 'b.pdf', 'dataUrl': PDF}),
+    r = Client().post('/api/v1/files', json.dumps({'purpose': 'expense_receipt', 'filename': 'b.pdf', 'dataUrl': PDF}),
                       content_type='application/json', **bearer(token))
     assert r.status_code == 201
     assert str(StoredFile.objects.get(pk=r.json()['file']['id']).company_id) == str(world.beta.id)
+

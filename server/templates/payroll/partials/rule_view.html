@@ -1,9 +1,0 @@
-<div class="hj-stack" data-modal-title="{{ r.rule_key }}" data-modal-size="lg" style="--gap:16px">
-  {% if r.note %}<p class="hj-sm" style="margin:0">{{ r.note }}</p>{% endif %}
-  <div class="hj-fields" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
-    {% field "Effective" r.effective %}
-    {% if r.approved_at %}{% field "Approved" r.approved_at|bs_date %}{% else %}{% field "Approved" "Not yet" %}{% endif %}
-    {% field "Jurisdiction" r.jurisdiction %}
-  </div>
-  <pre class="mono hj-small hj-card p-md" style="max-height:400px;overflow:auto;margin:0">{{ value }}</pre>
-</div>

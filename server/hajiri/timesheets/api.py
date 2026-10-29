@@ -1,5 +1,5 @@
 """
-Time tracking JSON API for Bearer-token clients (the TS routes under /api/v1/time, featureGate 'time'). DRF views with
+Time tracking JSON API for the React app and Bearer-token clients (the TS routes under /api/v1/time, featureGate 'time'). DRF views with
 the project defaults (hajiri.core.api): HajiriAuthentication, IsSignedIn, the TS error shape and JsonRenderer. The
 views are thin: rules, roles (requireModule('attendance') for the catalogue and settings) and validation live in
 services.py, and everything works in the caller's active company.
@@ -11,7 +11,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from hajiri.core.api import FeatureEnabled, IsSignedIn
+from hajiri.core.api import FeatureEnabled, IsSignedIn, SameOriginAuthentication
 from hajiri.web.csv import csv_response
 
 from . import services
@@ -30,6 +30,8 @@ def _all(request) -> bool:
 
 
 class TimeView(APIView):
+    # The React app's cookie requests carry no CSRF token (as against the TS API): the Origin check instead.
+    authentication_classes = [SameOriginAuthentication]
     permission_classes = [IsSignedIn, FeatureEnabled('time')]
 
 

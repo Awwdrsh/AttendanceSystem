@@ -1,6 +1,0 @@
-<form class="hj-form" data-modal-title="Attach a company to the group" hx-post="{% url 'group_admin:company_attach' %}" hx-target="this" hx-swap="outerHTML">
-  {% form_errors form %}
-  <p class="hj-help">Bring in a company that already uses Hajiri on its own. Only companies where you are admin and that are not part of another group are listed. Its people, payroll and settings stay as they are.</p>
-  {% form_field form.company_id %}
-  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button class="hj-btn" type="submit">Attach</button></div>
-</form>

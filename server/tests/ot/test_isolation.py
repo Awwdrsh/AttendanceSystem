@@ -1,6 +1,5 @@
 """
-Overtime across a group of companies: ids of another company are not found on every page, fragment and JSON
-endpoint, lists show only the active company, and switching company follows the person's roles there.
+Overtime across a group of companies: ids of another company are not found on every JSON endpoint, lists show only the active company, and switching company follows the person's roles there.
 
     Alpha (home of admin_a, who started the group: group admin) and Beta (admin_b) form a group; Gamma (admin_c)
     is outside it. Beta has an employee with an overtime slip and a pending overtime request.
@@ -15,7 +14,7 @@ from django.test import Client
 
 from hajiri.core import auth, companies
 from hajiri.db.models import Company, OtRequest, OtSlip
-from tests.web.factories import PW, bearer, htmx, make_company, make_employee, make_user, sign_in
+from tests.web.factories import PW, bearer, make_company, make_employee, make_user, sign_in
 
 from .helpers import days_ago
 
@@ -43,7 +42,7 @@ class Group:
         c = Client()
         sign_in(c, person)
         if company is not None:
-            assert c.post('/_/web/company/switch', {'company_id': str(company.id)}, **htmx()).status_code == 204
+            assert c.post('/api/v1/me/companies/switch', {'companyId': str(company.id)}, content_type='application/json').status_code == 200
         return c
 
 
@@ -65,13 +64,6 @@ def group(db) -> Group:
     return Group(alpha, beta, admin_a, admin_b, admin_c, beta_emp, alpha_slip, beta_slip, beta_request)
 
 
-def _page(method, url, data=None):
-    def run(g: Group, person, company=None):
-        c = g.browser(person, company)
-        return getattr(c, method)(url(g), data or {}, **htmx())
-    return run
-
-
 def _api(method, url, body=None):
     def run(g: Group, person, company=None):
         h = bearer(g.token(person, company))
@@ -82,12 +74,6 @@ def _api(method, url, body=None):
 
 
 CASES = {
-    'approve modal': _page('get', lambda g: f'/_/ot/slips/{g.beta_slip.id}/approve'),
-    'approve post': _page('post', lambda g: f'/_/ot/slips/{g.beta_slip.id}/approve', {'approved_min': '30'}),
-    'reject modal': _page('get', lambda g: f'/_/ot/slips/{g.beta_slip.id}/reject'),
-    'reject post': _page('post', lambda g: f'/_/ot/slips/{g.beta_slip.id}/reject', {'reason': 'not authorised'}),
-    'comp-off post': _page('post', lambda g: f'/_/ot/slips/{g.beta_slip.id}/comp-off'),
-    'request cancel': _page('post', lambda g: f'/_/ot/requests/{g.beta_request.id}/cancel'),
     'api approve': _api('post', lambda g: f'/api/v1/ot/slips/{g.beta_slip.id}/approve', {'approvedMin': 30}),
     'api reject': _api('post', lambda g: f'/api/v1/ot/slips/{g.beta_slip.id}/reject', {'reason': 'not authorised'}),
     'api comp-off': _api('post', lambda g: f'/api/v1/ot/slips/{g.beta_slip.id}/comp-off'),
@@ -97,6 +83,16 @@ CASES = {
     'api requests filtered by a Beta employee': _api('get', lambda g: f'/api/v1/ot/requests?employeeId={g.beta_emp.id}'),
     'api slips filtered by a Beta employee': _api('get', lambda g: f'/api/v1/ot/slips?employeeId={g.beta_emp.id}'),
 }
+
+
+def test_nothing_changed_in_beta_after_the_refused_requests(group):
+    for name in ('api approve', 'api reject', 'api comp-off', 'api request cancel'):
+        CASES[name](group, group.admin_a)
+        CASES[name](group, group.admin_c)
+    group.beta_slip.refresh_from_db()
+    group.beta_request.refresh_from_db()
+    assert group.beta_slip.status == OtSlip.Status.DETECTED and group.beta_slip.reviewed_by_id is None
+    assert group.beta_request.status == OtRequest.Status.PENDING
 
 
 @pytest.mark.parametrize('name', list(CASES))
@@ -111,16 +107,6 @@ def test_ids_of_another_company_are_not_found(group, name):
     assert r.status_code == 404, f'{name}: group admin working in Alpha got {r.status_code}'
     r = case(group, group.admin_b)                       # Beta's admin: the record is really there
     assert r.status_code != 404 and r.status_code < 500, f'{name}: Beta admin got {r.status_code} {r.content[:200]}'
-
-
-def test_nothing_changed_in_beta_after_the_refused_requests(group):
-    for name in ('approve post', 'reject post', 'comp-off post', 'api approve', 'api comp-off', 'request cancel'):
-        CASES[name](group, group.admin_a)
-        CASES[name](group, group.admin_c)
-    group.beta_slip.refresh_from_db()
-    group.beta_request.refresh_from_db()
-    assert group.beta_slip.status == OtSlip.Status.DETECTED and group.beta_slip.reviewed_by_id is None
-    assert group.beta_request.status == OtRequest.Status.PENDING
 
 
 def test_lists_show_only_the_active_company(group):
@@ -141,16 +127,18 @@ def test_lists_show_only_the_active_company(group):
     reg = Client().get('/api/v1/ot/register', {'from': days_ago(10), 'to': days_ago(0)}, **bearer(in_alpha)).json()
     assert [r['name_en'] for r in reg['register']] == ['Arun Alpha']
 
-    page = group.browser(group.admin_a).get('/attendance/overtime').content.decode()
-    assert 'Arun Alpha' in page and 'Bina Beta' not in page
-    page = group.browser(group.admin_a, group.beta).get('/attendance/overtime').content.decode()
-    assert 'Bina Beta' in page and 'Arun Alpha' not in page
+    # The cookie session of the overtime page follows a company switch.
+    def names(c):
+        return {s['name_en'] for s in c.get('/api/v1/ot/slips').json()['slips']}
+    assert names(group.browser(group.admin_a)) == {'Arun Alpha'}
+    assert names(group.browser(group.admin_a, group.beta)) == {'Bina Beta'}
 
 
 def test_group_admin_decides_a_beta_slip_after_switching(group):
     c = group.browser(group.admin_a, group.beta)
-    r = c.post(f'/_/ot/slips/{group.beta_slip.id}/approve', {'approved_min': '45'}, **htmx())
-    assert r.status_code == 204
+    r = c.post(f'/api/v1/ot/slips/{group.beta_slip.id}/approve', {'approvedMin': 45}, content_type='application/json')
+    assert r.status_code == 200, r.content
     group.beta_slip.refresh_from_db()
     assert group.beta_slip.status == OtSlip.Status.APPROVED and group.beta_slip.approved_min == 45
     assert str(group.beta_slip.reviewed_by_id) == group.admin_a.id
+

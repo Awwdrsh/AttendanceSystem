@@ -26,6 +26,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { errorMessage } from '../../api/client';
 import { fileToDataUrl } from '../../api/files';
 import { careers, EMPLOYMENT, experienceText, WORK_MODE } from '../../api/hiring';
+import { careersPath } from '../../lib/careers';
 import { Brand } from '../../components/Brand';
 import { EmptyState } from '../../components/EmptyState';
 import { fmtDateShort, fmtMoney } from '../../lib/format';
@@ -488,7 +489,6 @@ function JobDetail({ jobId, company }) {
 export default function CareersPage() {
   const params = useParams();
   const [search] = useSearchParams();
-  const company = search.get('company');
-  const jobId = (params['*'] ?? '').split('/')[0];
+  const { company, jobId } = careersPath(params['*'], search.get('company'));
   return jobId ? <JobDetail jobId={jobId} company={company} /> : <JobList company={company} />;
 }

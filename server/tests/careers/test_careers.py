@@ -7,7 +7,7 @@ from hajiri.careers import services as careers
 from tests.support.sql import one, rows
 from hajiri.hiring import services as hiring
 from tests.hiring.world import QUESTIONS, World, future
-from tests.web.factories import htmx, make_company, make_user, set_features_off
+from tests.web.factories import make_company, make_user, set_features_off
 
 pytestmark = pytest.mark.django_db
 
@@ -61,57 +61,6 @@ def test_deadline_passed_closes_the_job_to_applicants():
     execute("UPDATE hiring_job SET deadline = (now() AT TIME ZONE 'Asia/Kathmandu')::date - 5 WHERE id = %s", [jid])
     assert Client().get(f'/api/v1/public/careers/jobs/{jid}').status_code == 404
     assert Client().get('/api/v1/public/careers/jobs').json()['jobs'] == []
-
-
-def test_list_page_filters_and_detail_page():
-    co, hr, jid = _open_job(category='Finance', location='Pokhara', experienceMin=2, deadline=future(9))
-    c = Client()
-    page = c.get('/careers').content.decode()
-    assert 'Work with Solo Traders' in page and 'Accountant' in page and 'Careers at Solo Traders' in page and 'Pokhara' in page
-    frag = c.get('/careers?mode=remote', **htmx('careers-jobs')).content.decode()
-    assert '<html' not in frag and 'No open positions right now' in frag
-    assert 'Accountant' in c.get('/careers?category=Finance', **htmx('careers-jobs')).content.decode()
-    d = c.get(f'/careers/{jid}').content.decode()
-    assert 'About the role' in d and '<li class="hj-sm">CA inter</li>' in d and 'Apply for this job' in d and '2+ years' in d
-    assert 'Apply by' in d
-    gone = c.get('/careers/00000000-0000-7000-8000-000000000000')
-    assert gone.status_code == 404 and 'This job is no longer accepting applications' in gone.content.decode()
-    set_features_off(co, 'hiring')
-    off = c.get('/careers')
-    assert off.status_code == 404 and 'Careers page not available' in off.content.decode()
-
-
-def test_apply_through_the_page():
-    co, hr, jid = _open_job(questions=QUESTIONS, experienceMin=2, experienceMax=5)
-    c = Client(enforce_csrf_checks=False)
-    form = {'name': 'Anita Gurung', 'email': 'anita@example.com', 'phone': '+977 9800000000', 'experienceYears': '3',
-            'answer_q1': 'yes', 'answer_q2': '4', 'answer_q3': '', 'consent': '1'}
-    r = c.post(f'/_/careers/{jid}/apply', {**form, 'cv': SimpleUploadedFile('cv.pdf', PDF_BYTES, 'application/pdf')}, **htmx('apply'))
-    assert r.status_code == 200 and 'Thank you. Your application has been received.' in r.content.decode()
-    a = one('SELECT score, knocked_out, answers, source FROM hiring_application')
-    assert (a['score'], a['knocked_out'], a['answers'], a['source']) == (100, False, {'q1': 'yes', 'q2': 4}, 'careers')
-    # Problems are shown above the button, with what was typed kept.
-    r = c.post(f'/_/careers/{jid}/apply', {**form, 'email': 'b@example.com'}, **htmx('apply'))
-    assert r.status_code == 422 and 'Please attach your CV as a PDF.' in r.content.decode() and 'value="+977 9800000000"' in r.content.decode()
-    r = c.post(f'/_/careers/{jid}/apply', {**form, 'email': 'c@example.com', 'answer_q1': '',
-                                           'cv': SimpleUploadedFile('cv.pdf', PDF_BYTES, 'application/pdf')}, **htmx('apply'))
-    assert r.status_code == 422 and 'Please answer every required question.' in r.content.decode()
-    r = c.post(f'/_/careers/{jid}/apply', {**form, 'email': 'd@example.com', 'consent': '',
-                                           'cv': SimpleUploadedFile('cv.pdf', PDF_BYTES, 'application/pdf')}, **htmx('apply'))
-    assert r.status_code == 422 and 'please agree to the processing of your data' in r.content.decode()
-    r = c.post(f'/_/careers/{jid}/apply', {**form, 'email': 'e@example.com',
-                                           'cv': SimpleUploadedFile('cv.png', b'\x89PNG\r\n\x1a\n0000', 'image/png')}, **htmx('apply'))
-    assert r.status_code == 422 and 'Please attach your CV as a PDF.' in r.content.decode()
-    r = c.post(f'/_/careers/{jid}/apply', {**form, 'email': 'f@example.com',
-                                           'cv': SimpleUploadedFile('cv.pdf', b'<html>', 'application/pdf')}, **htmx('apply'))
-    assert r.status_code == 422 and 'The file could not be read.' in r.content.decode()
-    assert len(rows('SELECT 1 FROM hiring_application')) == 1
-    # Four tries reached the server (the missing and PNG CVs were stopped before it); a fifth may, the sixth is refused.
-    c.post(f'/_/careers/{jid}/apply', {**form, 'email': 'g0@example.com', 'consent': '',
-                                       'cv': SimpleUploadedFile('cv.pdf', PDF_BYTES, 'application/pdf')}, **htmx('apply'))
-    r = c.post(f'/_/careers/{jid}/apply', {**form, 'email': 'g@example.com',
-                                           'cv': SimpleUploadedFile('cv.pdf', PDF_BYTES, 'application/pdf')}, **htmx('apply'))
-    assert r.status_code == 422 and 'Too many applications from this connection' in r.content.decode()
 
 
 def test_api_apply_creates_candidate_events_and_watchers_once():

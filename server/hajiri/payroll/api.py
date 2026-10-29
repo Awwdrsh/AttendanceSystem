@@ -1,7 +1,8 @@
 """
-Payroll JSON API under /api/v1/payroll (the TS paths), for Bearer-token integrations and the printable pages the TS web
-app opened directly (payslip, salary sheet, certificates). DRF views with the project defaults (hajiri.core.api):
-HajiriAuthentication (cookie with CSRF, or Bearer), the TS error shape and JsonRenderer. HR-only routes declare
+Payroll JSON API under /api/v1/payroll (the TS paths) for the React app, Bearer-token integrations and the printable
+pages the web app opens directly (payslip, salary sheet, certificates). DRF views with the project defaults
+(hajiri.core.api): the TS error shape and JsonRenderer, and SameOriginAuthentication (the session cookie the React app
+sends with fetch(), checked against the Origin as the TS API did, or a Bearer token). HR-only routes declare
 HasModule('payroll'); routes employees use themselves (payslips, tax savings, certificates) check access in the
 service. Bodies are JSON only; rules and validation stay in the services.
 """
@@ -9,12 +10,12 @@ from __future__ import annotations
 
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
-from rest_framework.decorators import api_view, parser_classes, permission_classes
+from rest_framework.decorators import api_view, authentication_classes, parser_classes, permission_classes
 from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.parsers import JSONParser
 from rest_framework.response import Response
 
-from hajiri.core.api import HasModule, IsSignedIn
+from hajiri.core.api import HasModule, IsSignedIn, SameOriginAuthentication
 from hajiri.core.errors import BadRequestError
 
 from . import compliance, services, tax_savings
@@ -26,6 +27,8 @@ NUL = 'text contains a character that is not allowed'
 PAYROLL = [IsSignedIn, HasModule('payroll')]
 SIGNED_IN = [IsSignedIn]
 JSON = [JSONParser]
+# The React app sends the session cookie with fetch() and an Origin header, never a CSRF token (as against the TS API).
+AUTH = [SameOriginAuthentication]
 
 
 class ReportFormatNegotiation(DefaultContentNegotiation):
@@ -70,6 +73,7 @@ def report_response(r: dict):
 @extend_schema(methods=['GET'], parameters=[s.RulesQueryIn], responses=dict)
 @extend_schema(methods=['POST'], request=s.RuleIn, responses={201: dict})
 @api_view(['GET', 'POST'])
+@authentication_classes(AUTH)
 @permission_classes(SIGNED_IN)
 @parser_classes(JSON)
 def rules(request):
@@ -81,6 +85,7 @@ def rules(request):
 
 @extend_schema(request=None, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 def rule_approve(request, id):
     return Response(services.approve_rule(request.user, id))
@@ -89,6 +94,7 @@ def rule_approve(request, id):
 @extend_schema(methods=['POST'], request=s.ComponentIn, responses={201: dict})
 @extend_schema(methods=['GET'], responses=dict)
 @api_view(['GET', 'POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def components(request):
@@ -99,6 +105,7 @@ def components(request):
 
 @extend_schema(request=s.ComponentPatchIn, responses=dict)
 @api_view(['PATCH'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def component(request, code):
@@ -110,6 +117,7 @@ def component(request, code):
 @extend_schema(methods=['POST'], request=s.StructureIn, responses={201: dict})
 @extend_schema(methods=['GET'], responses=dict)
 @api_view(['GET', 'POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def structures(request):
@@ -120,6 +128,7 @@ def structures(request):
 
 @extend_schema(request=s.StructureVersionIn, responses={201: dict})
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def structure_versions(request, id):
@@ -129,6 +138,7 @@ def structure_versions(request, id):
 @extend_schema(methods=['GET'], parameters=[s.EmployeeQueryIn], responses=dict)
 @extend_schema(methods=['POST'], request=s.AssignmentIn, responses={201: dict})
 @api_view(['GET', 'POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def assignments(request):
@@ -142,6 +152,7 @@ def assignments(request):
 @extend_schema(methods=['GET'], parameters=[s.DeclarationQueryIn], responses=dict)
 @extend_schema(methods=['PUT'], request=s.DeclarationIn, responses=dict)
 @api_view(['GET', 'PUT'])
+@authentication_classes(AUTH)
 @permission_classes(SIGNED_IN)
 @parser_classes(JSON)
 def declarations(request):
@@ -153,6 +164,7 @@ def declarations(request):
 
 @extend_schema(request=s.DeclarationVerifyIn, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def declaration_verify(request, employee_id):
@@ -162,6 +174,7 @@ def declaration_verify(request, employee_id):
 @extend_schema(methods=['GET'], parameters=[s.EmployeeQueryIn], responses=dict)
 @extend_schema(methods=['POST'], request=s.LoanIn, responses={201: dict})
 @api_view(['GET', 'POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def loans(request):
@@ -173,6 +186,7 @@ def loans(request):
 @extend_schema(methods=['GET'], parameters=[s.SavingsQueryIn], responses=dict)
 @extend_schema(methods=['POST'], request=s.SavingsIn, responses={201: dict})
 @api_view(['GET', 'POST'])
+@authentication_classes(AUTH)
 @permission_classes(SIGNED_IN)
 @parser_classes(JSON)
 def tax_savings_root(request):
@@ -183,6 +197,7 @@ def tax_savings_root(request):
 
 @extend_schema(request=None, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(SIGNED_IN)
 def tax_savings_cancel(request, id):
     return Response(tax_savings.cancel_savings(request.user, id))
@@ -190,6 +205,7 @@ def tax_savings_cancel(request, id):
 
 @extend_schema(request=s.EstimateIn, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(SIGNED_IN)
 @parser_classes(JSON)
 def tax_savings_estimate(request):
@@ -198,6 +214,7 @@ def tax_savings_estimate(request):
 
 @extend_schema(responses={200: bytes})
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(SIGNED_IN)
 def tax_savings_file(request, id, file_id):
     from hajiri.files.store import stored_file_response
@@ -210,6 +227,7 @@ def tax_savings_file(request, id, file_id):
 @extend_schema(methods=['POST'], request=s.PeriodIn, responses={201: dict})
 @extend_schema(methods=['GET'], responses=dict)
 @api_view(['GET', 'POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def periods(request):
@@ -221,6 +239,7 @@ def periods(request):
 @extend_schema(methods=['POST'], request=s.RunIn, responses={201: dict})
 @extend_schema(methods=['GET'], responses=dict, operation_id='api_v1_payroll_runs_list')
 @api_view(['GET', 'POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def runs(request):
@@ -231,6 +250,7 @@ def runs(request):
 
 @extend_schema(request=s.BonusRunIn, responses={201: dict})
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def bonus_run(request):
@@ -239,6 +259,7 @@ def bonus_run(request):
 
 @extend_schema(responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 def run(request, id):
     return Response(services.run_detail(request.user, id))
@@ -246,6 +267,7 @@ def run(request, id):
 
 @extend_schema(request=None, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 def run_preflight(request, id):
     return Response(services.run_preflight(request.user, id))
@@ -253,6 +275,7 @@ def run_preflight(request, id):
 
 @extend_schema(request=None, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 def run_lock_attendance(request, id):
     return Response(services.run_lock_attendance(request.user, id))
@@ -261,6 +284,7 @@ def run_lock_attendance(request, id):
 @extend_schema(methods=['POST'], request=s.InputsIn, responses={201: dict})
 @extend_schema(methods=['GET'], responses=dict)
 @api_view(['GET', 'POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def run_inputs(request, id):
@@ -271,6 +295,7 @@ def run_inputs(request, id):
 
 @extend_schema(request=s.ComputeIn, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def run_compute(request, id):
@@ -279,6 +304,7 @@ def run_compute(request, id):
 
 @extend_schema(request=s.ReviewIn, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def run_review(request, id):
@@ -287,6 +313,7 @@ def run_review(request, id):
 
 @extend_schema(request=None, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 def run_approve(request, id):
     return Response(services.approve(request.user, id))
@@ -294,6 +321,7 @@ def run_approve(request, id):
 
 @extend_schema(request=None, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 def run_lock(request, id):
     return Response(services.lock(request.user, id))
@@ -301,6 +329,7 @@ def run_lock(request, id):
 
 @extend_schema(request=None, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 def run_publish(request, id):
     return Response(services.publish(request.user, id))
@@ -308,6 +337,7 @@ def run_publish(request, id):
 
 @extend_schema(request=s.HoldIn, responses={201: dict})
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def run_holds(request, id):
@@ -316,6 +346,7 @@ def run_holds(request, id):
 
 @extend_schema(responses={200: str})
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 def run_ssf_sheet(request, id):
     name, text = services.ssf_sheet(request.user, id)
@@ -324,6 +355,7 @@ def run_ssf_sheet(request, id):
 
 @extend_schema(parameters=[s.SheetQueryIn], responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @report_format
 def run_salary_sheet(request, id):
@@ -335,6 +367,7 @@ def run_salary_sheet(request, id):
 
 @extend_schema(parameters=[s.PayslipsQueryIn], responses=dict, operation_id='api_v1_payroll_payslips_list')
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(SIGNED_IN)
 def payslips(request):
     return Response(services.list_payslips(request.user, _query(request)))
@@ -342,6 +375,7 @@ def payslips(request):
 
 @extend_schema(responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(SIGNED_IN)
 def payslip(request, id):
     return Response(services.payslip_detail(request.user, id))
@@ -349,6 +383,7 @@ def payslip(request, id):
 
 @extend_schema(responses={200: str})
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(SIGNED_IN)
 def payslip_html(request, id):
     return html_response(services.payslip_html(request.user, id))
@@ -359,6 +394,7 @@ def payslip_html(request, id):
 @extend_schema(methods=['GET'], parameters=[s.OpeningsQueryIn], responses=dict)
 @extend_schema(methods=['PUT'], request=s.OpeningIn, responses=dict)
 @api_view(['GET', 'PUT'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def opening_balances(request):
@@ -369,6 +405,7 @@ def opening_balances(request):
 
 @extend_schema(request=None, responses=dict)
 @api_view(['DELETE'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 def opening_balance(request, id):
     return Response(compliance.delete_opening(request.user, id))
@@ -376,6 +413,7 @@ def opening_balance(request, id):
 
 @extend_schema(request={'text/csv': str, 'application/json': dict}, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def opening_import(request):
@@ -383,13 +421,15 @@ def opening_import(request):
     if (request.content_type or '').split(';')[0].strip() in ('text/csv', 'text/plain'):
         text = request.body.decode('utf-8', errors='replace')
     else:
-        text = _body(request).get('csv')
+        b = _body(request)
+        text = b.get('csv') if isinstance(b, dict) else None   # a JSON list or string is "no CSV", not a crash
         text = text if isinstance(text, str) else None
     return Response(compliance.import_openings(request.user, text))
 
 
 @extend_schema(responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(SIGNED_IN)
 def optimum_me(request):
     return Response(compliance.optimum_me(request.user))
@@ -397,6 +437,7 @@ def optimum_me(request):
 
 @extend_schema(responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 def optimum_all(request):
     return Response(compliance.optimum_all(request.user))
@@ -404,6 +445,7 @@ def optimum_all(request):
 
 @extend_schema(request=s.ApplyCitIn, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def optimum_apply(request):
@@ -412,6 +454,7 @@ def optimum_apply(request):
 
 @extend_schema(parameters=[s.HoldsQueryIn], responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 def holds(request):
     return Response(compliance.list_holds(request.user, _query(request)))
@@ -419,6 +462,7 @@ def holds(request):
 
 @extend_schema(request=s.ReleaseIn, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @parser_classes(JSON)
 def hold_release(request, id):
@@ -427,6 +471,7 @@ def hold_release(request, id):
 
 @extend_schema(request=None, responses=dict)
 @api_view(['POST'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 def hold_cancel(request, id):
     return Response(compliance.cancel_hold(request.user, id))
@@ -434,6 +479,7 @@ def hold_cancel(request, id):
 
 @extend_schema(parameters=[s.CertificateQueryIn], responses={200: str})
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(SIGNED_IN)
 def certificate(request, employee):
     return html_response(compliance.certificate(request.user, employee, _query(request)))
@@ -441,6 +487,7 @@ def certificate(request, employee):
 
 @extend_schema(parameters=[s.AnnualQueryIn], responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @report_format
 def report_annual_tax(request):
@@ -449,6 +496,7 @@ def report_annual_tax(request):
 
 @extend_schema(parameters=[s.MonthQueryIn], responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @report_format
 def report_tax_deposit(request):
@@ -457,6 +505,7 @@ def report_tax_deposit(request):
 
 @extend_schema(parameters=[s.MonthQueryIn], responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @report_format
 def report_retirement_deposit(request):
@@ -465,6 +514,7 @@ def report_retirement_deposit(request):
 
 @extend_schema(parameters=[s.VarianceQueryIn], responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @report_format
 def report_pay_variance(request):
@@ -476,6 +526,7 @@ def report_pay_variance(request):
 
 @extend_schema(parameters=[s.LiabilityQueryIn], responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 @report_format
 def report_leave_liability(request):
@@ -487,6 +538,7 @@ def report_leave_liability(request):
 
 @extend_schema(responses=dict)
 @api_view(['GET'])
+@authentication_classes(AUTH)
 @permission_classes(PAYROLL)
 def compliance_years(request):
     return Response(compliance.compliance_years(request.user))

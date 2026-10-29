@@ -19,7 +19,7 @@ from hajiri.db.models import ApprovalFlow, ApproverDelegate, LeaveRequest, Leave
 from hajiri.workflow import flow_admin, service
 from hajiri.workflow.flows import employee_users, resolve_step
 from tests.multicompany.conftest import world  # noqa: F401  (fixture)
-from tests.web.factories import PW, htmx, make_employee, toasts
+from tests.web.factories import PW, make_employee
 
 pytestmark = pytest.mark.django_db
 
@@ -115,60 +115,11 @@ def test_delegations_apply_in_the_company_they_were_set_in(world, letters):
 
 # ---------------------------------------------------------------- another company's ids are not found
 
-@pytest.mark.parametrize('who', ['outsider', 'group_admin_in_alpha'])
-def test_beta_approval_is_not_found_from_elsewhere(world, beta_request, who):
-    inst = beta_request['inst']
-    person = world.admin_c if who == 'outsider' else world.admin_a
-    api = _bearer(world, person)
-    assert api.get(f"/api/v1/workflow/{inst['id']}").status_code == 404
-    assert api.post(f"/api/v1/workflow/{inst['id']}/approve").status_code == 404
-    assert api.post(f"/api/v1/workflow/{inst['id']}/reject", {'reason': 'no'}).status_code == 404
-    assert api.post('/api/v1/workflow/bulk-approve', {'ids': [inst['id']]}).json()['results'] == [
-        {'id': inst['id'], 'error': 'approval not found'}]
-    assert inst['id'] not in [i['instanceId'] for i in api.get('/api/v1/workflow/inbox').json()['items']]
-    c = world.signed_in(person)
-    assert c.get(f"/_/workflow/{inst['id']}", **htmx('hj-modal-body')).status_code == 404
-    assert c.get(f"/_/workflow/{inst['id']}/reject", **htmx('hj-modal-body')).status_code == 404
-    assert c.post(f"/_/workflow/{inst['id']}/approve", **htmx()).status_code == 404
-    assert service.get_instance(inst['id'])['state'] == 'pending'
-
-
 def test_beta_admin_reads_and_decides_the_beta_approval(world, beta_request):
     inst = beta_request['inst']
     api = _bearer(world, world.admin_b)
     assert api.get(f"/api/v1/workflow/{inst['id']}").status_code == 200
     assert api.post(f"/api/v1/workflow/{inst['id']}/approve").json()['state'] == 'approved'
-
-
-def test_group_admin_decides_after_switching_to_beta(world, beta_request):
-    inst = beta_request['inst']
-    c = world.signed_in(world.admin_a, world.beta)
-    r = c.post(f"/_/workflow/{inst['id']}/approve", **htmx())
-    assert r.status_code == 204 and toasts(r)[0]['message'] == 'Approved.'
-
-
-@pytest.mark.parametrize('who', ['outsider', 'group_admin_in_alpha'])
-def test_beta_flow_set_up_is_not_found_from_elsewhere(world, who):
-    _t, admin_b = world.session(world.admin_b)
-    flow_id = flow_admin.create_flow(admin_b, {'objectType': 'letter_request', 'name': 'Beta letters',
-                                               'steps': [{'kind': 'role', 'role': 'hr'}]})['id']
-    group_id = flow_admin.create_group(admin_b, {'name': 'Beta approvers', 'userIds': [str(world.admin_b.id)]})['id']
-    person = world.admin_c if who == 'outsider' else world.admin_a
-    c = world.signed_in(person)
-    assert c.get(f'/_/workflow/flows/{flow_id}/edit', **htmx('hj-modal-body')).status_code == 404
-    assert c.post(f'/_/workflow/flows/{flow_id}/edit', {'name': 'x', 'flow-0-kind': 'manager'}, **htmx()).status_code == 404
-    assert c.post(f'/_/workflow/flows/{flow_id}/active', {'active': '0'}, **htmx()).status_code == 404
-    assert c.post(f'/_/workflow/flows/{flow_id}/delete', **htmx()).status_code == 404
-    assert c.get(f'/_/workflow/groups/{group_id}/edit', **htmx('hj-modal-body')).status_code == 404
-    assert c.post(f'/_/workflow/groups/{group_id}/delete', **htmx()).status_code == 404
-    page = c.get('/settings/approvals').content.decode()
-    assert 'Beta letters' not in page and 'Beta approvers' not in page
-    assert ApprovalFlow.objects.filter(pk=flow_id, active=True).exists()
-    assert UserGroup.objects.filter(pk=group_id).exists()
-    # Beta's admin still has them
-    cb = world.signed_in(world.admin_b)
-    assert cb.get(f'/_/workflow/flows/{flow_id}/edit', **htmx('hj-modal-body')).status_code == 200
-    assert cb.get(f'/_/workflow/groups/{group_id}/edit', **htmx('hj-modal-body')).status_code == 200
 
 
 def test_a_flow_condition_or_delegate_from_another_company_is_refused(world):
@@ -186,7 +137,7 @@ def test_a_flow_condition_or_delegate_from_another_company_is_refused(world):
     did = flow_admin.add_delegate(admin_b, {'delegateId': str(world.dual.id), 'from': date.today().isoformat(),
                                             'to': (date.today() + timedelta(days=2)).isoformat()})['id']
     c = world.signed_in(world.admin_a)
-    assert c.post(f'/_/workflow/delegates/{did}/cancel', **htmx()).status_code == 404
+    assert c.delete(f'/api/v1/workflow/delegates/{did}').status_code == 404
     with pytest.raises(NotFoundError):
         flow_admin.cancel_delegate(admin_a, did)
     assert ApproverDelegate.objects.get(pk=did).cancelled_at is None
@@ -205,6 +156,64 @@ def test_preview_and_chain_in_the_active_company(world):
         flow_admin.preview(dual_alpha, {'objectType': 'letter_request', 'employeeId': str(world.dual_beta_employee.id)})
 
 
+def test_switching_company_changes_the_inbox_badge(world, beta_request):
+    token = auth.login(world.dual.email, PW).token
+    user = auth.resolve_session(token)
+    assert service.inbox_count(user) == 0
+    user = auth.switch_company(user, token, str(world.beta.id))
+    assert service.inbox_count(user) == 1
+
+
+@pytest.mark.parametrize('who', ['outsider', 'group_admin_in_alpha'])
+def test_beta_approval_is_not_found_from_elsewhere(world, beta_request, who):
+    inst = beta_request['inst']
+    person = world.admin_c if who == 'outsider' else world.admin_a
+    api = _bearer(world, person)
+    assert api.get(f"/api/v1/workflow/{inst['id']}").status_code == 404
+    assert api.post(f"/api/v1/workflow/{inst['id']}/approve").status_code == 404
+    assert api.post(f"/api/v1/workflow/{inst['id']}/reject", {'reason': 'no'}).status_code == 404
+    assert api.post('/api/v1/workflow/bulk-approve', {'ids': [inst['id']]}).json()['results'] == [
+        {'id': inst['id'], 'error': 'approval not found'}]
+    assert inst['id'] not in [i['instanceId'] for i in api.get('/api/v1/workflow/inbox').json()['items']]
+    c = world.signed_in(person)          # the approvals page's cookie session
+    assert c.get(f"/api/v1/workflow/{inst['id']}").status_code == 404
+    assert c.post(f"/api/v1/workflow/{inst['id']}/reject", {'reason': 'no'}, content_type='application/json').status_code == 404
+    assert c.post(f"/api/v1/workflow/{inst['id']}/approve", {}, content_type='application/json').status_code == 404
+    assert service.get_instance(inst['id'])['state'] == 'pending'
+
+
+def test_group_admin_decides_after_switching_to_beta(world, beta_request):
+    inst = beta_request['inst']
+    c = world.signed_in(world.admin_a, world.beta)
+    r = c.post(f"/api/v1/workflow/{inst['id']}/approve", {}, content_type='application/json')
+    assert r.status_code == 200, r.content
+    assert service.get_instance(inst['id'])['state'] != 'pending'
+
+
+@pytest.mark.parametrize('who', ['outsider', 'group_admin_in_alpha'])
+def test_beta_flow_set_up_is_not_found_from_elsewhere(world, who):
+    _t, admin_b = world.session(world.admin_b)
+    flow_id = flow_admin.create_flow(admin_b, {'objectType': 'letter_request', 'name': 'Beta letters',
+                                               'steps': [{'kind': 'role', 'role': 'hr'}]})['id']
+    group_id = flow_admin.create_group(admin_b, {'name': 'Beta approvers', 'userIds': [str(world.admin_b.id)]})['id']
+    person = world.admin_c if who == 'outsider' else world.admin_a
+    c = world.signed_in(person)
+    W = '/api/v1/workflow'
+    assert c.patch(f'{W}/flows/{flow_id}', {'name': 'x'}, content_type='application/json').status_code == 404
+    assert c.patch(f'{W}/flows/{flow_id}', {'active': False}, content_type='application/json').status_code == 404
+    assert c.delete(f'{W}/flows/{flow_id}').status_code == 404
+    assert c.patch(f'{W}/groups/{group_id}', {'name': 'x'}, content_type='application/json').status_code == 404
+    assert c.delete(f'{W}/groups/{group_id}').status_code == 404
+    listed = c.get(f'{W}/flows/config').content.decode()
+    assert 'Beta letters' not in listed and 'Beta approvers' not in listed
+    assert ApprovalFlow.objects.filter(pk=flow_id, active=True).exists()
+    assert UserGroup.objects.filter(pk=group_id).exists()
+    # Beta's admin still has them
+    cb = world.signed_in(world.admin_b)
+    listed = cb.get(f'{W}/flows/config').content.decode()
+    assert 'Beta letters' in listed and 'Beta approvers' in listed
+
+
 def test_request_history_lists_only_the_active_company(world):
     lt_a = LeaveType.objects.create(company=world.alpha, code='CL', name_en='Casual leave')
     lt_b = LeaveType.objects.create(company=world.beta, code='CL', name_en='Casual leave')
@@ -214,15 +223,8 @@ def test_request_history_lists_only_the_active_company(world):
         LeaveRequest.objects.create(employee=e, leave_type=lt, from_date=date(2026, 12, 1), to_date=date(2026, 12, 1),
                                     days_requested=1)
     c = world.signed_in(world.admin_a)
-    html = c.get('/leave/history').content.decode()
+    html = c.get('/api/v1/leave/requests', {'scope': 'all'}).content.decode()
     assert 'Alpha Leaver' in html and 'Beta Leaver' not in html
-    html = world.signed_in(world.admin_a, world.beta).get('/leave/history').content.decode()
+    html = world.signed_in(world.admin_a, world.beta).get('/api/v1/leave/requests', {'scope': 'all'}).content.decode()
     assert 'Beta Leaver' in html and 'Alpha Leaver' not in html
 
-
-def test_switching_company_changes_the_inbox_badge(world, beta_request):
-    token = auth.login(world.dual.email, PW).token
-    user = auth.resolve_session(token)
-    assert service.inbox_count(user) == 0
-    user = auth.switch_company(user, token, str(world.beta.id))
-    assert service.inbox_count(user) == 1

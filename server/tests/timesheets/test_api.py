@@ -1,4 +1,4 @@
-"""The time tracking JSON API (/api/v1/time, the TS routes) for Bearer-token clients."""
+"""The time tracking JSON API (/api/v1/time, the TS routes) for the React app and Bearer-token clients."""
 from __future__ import annotations
 
 import pytest
@@ -138,9 +138,10 @@ def test_feature_off_and_signed_out(w):
     assert r.status_code == 404 and r.json()['error'] == 'feature off'
 
 
-def test_cookie_posts_need_the_csrf_token(w):
+def test_cookie_posts_from_another_origin_are_refused(w):
+    """The React app's cookie posts carry no CSRF token; the TS Origin check guards them instead."""
     from tests.web.factories import sign_in
     c = Client(enforce_csrf_checks=True)
     sign_in(c, w.sita)
-    assert c.post(f'{API}/timer/start', {}, content_type='application/json').status_code == 403
+    assert c.post(f'{API}/timer/start', {}, content_type='application/json', HTTP_ORIGIN='https://evil.example').status_code == 403
     assert c.get(f'{API}/timer').status_code == 200

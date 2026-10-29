@@ -1,5 +1,5 @@
 """
-Groups of companies: the employee pages and the /api/v1/employees JSON API treat an employee of another company as
+Groups of companies: the /api/v1/employees JSON API treats an employee of another company as
 not found, and lists show only the active company's people.
 """
 import pytest
@@ -7,7 +7,7 @@ import pytest
 from hajiri.core import auth
 from hajiri.employees import service as emp
 from tests.people.group import build_group
-from tests.web.factories import PW, bearer, htmx
+from tests.web.factories import PW, bearer
 
 
 @pytest.fixture
@@ -16,24 +16,15 @@ def g(db):
 
 
 def _requests(eid):
-    return [('get', f'/employees/{eid}', None), ('get', f'/employees/{eid}?tab=history', None),
-            ('get', f'/_/employees/{eid}/edit', None), ('post', f'/_/employees/{eid}/edit', {'empCode': 'B100', 'nameEn': 'Bina B'}),
-            ('get', f'/_/employees/{eid}/overview', None), ('post', f'/_/employees/{eid}/sensitive', {})]
+    return [('get', f'/api/v1/employees/{eid}', None), ('get', f'/api/v1/employees/{eid}/audit', None),
+            ('get', f'/api/v1/employees/{eid}/assignments', None), ('get', f'/api/v1/employees/{eid}/sensitive', None),
+            ('patch', f'/api/v1/employees/{eid}', {'grade': 'B100'})]
 
 
 def _call(c, method, url, data):
-    return c.post(url, data or {}, **htmx()) if method == 'post' else c.get(url, **htmx())
-
-
-def test_employee_of_another_company_is_not_found(g):
-    eid = str(g.beta_emp.id)
-    for person in (g.admin_c, g.admin_a):
-        c = g.client(person)
-        for method, url, data in _requests(eid):
-            assert _call(c, method, url, data).status_code == 404, (person.email, url)
-    owner = g.client(g.admin_b)
-    for method, url, data in _requests(eid):
-        assert _call(owner, method, url, data).status_code != 404, url
+    if method == 'patch':
+        return c.patch(url, data, content_type='application/json')
+    return c.get(url)
 
 
 def test_lists_and_references_stay_in_the_active_company(g):
@@ -68,8 +59,8 @@ def test_json_api(g):
     c = g.client(g.admin_a)
     r = c.get('/api/v1/employees', **bearer(tok_a))
     body = r.json()
-    assert r.status_code == 200 and set(body) == {'items', 'total', 'page', 'pageSize'}
-    assert 'A100' in {e['emp_code'] for e in body['items']} and 'B100' not in {e['emp_code'] for e in body['items']}
+    assert r.status_code == 200 and set(body) == {'employees'}
+    assert 'A100' in {e['emp_code'] for e in body['employees']} and 'B100' not in {e['emp_code'] for e in body['employees']}
     assert c.get(f'/api/v1/employees/{g.beta_emp.id}', **bearer(tok_a)).status_code == 404
     assert c.get(f'/api/v1/employees/{g.beta_emp.id}/assignments', **bearer(tok_a)).status_code == 404
     assert c.patch(f'/api/v1/employees/{g.beta_emp.id}', {'grade': 'X'}, content_type='application/json',
@@ -79,9 +70,9 @@ def test_json_api(g):
     assert r.status_code == 201
     new_id = r.json()['id']
     r = c.get(f'/api/v1/employees/{new_id}', **bearer(tok_a))
-    assert r.status_code == 200 and r.json()['company_id'] == str(g.alpha.id)
+    assert r.status_code == 200 and r.json()['employee']['company_id'] == str(g.alpha.id)
     r = c.patch(f'/api/v1/employees/{new_id}', {'grade': 'G2'}, content_type='application/json', **bearer(tok_a))
-    assert r.status_code == 200 and r.json()['grade'] == 'G2'
+    assert r.status_code == 200 and r.json()['employee']['grade'] == 'G2'
     r = c.post('/api/v1/employees', {'empCode': '', 'nameEn': 'x'}, content_type='application/json', **bearer(tok_a))
     assert r.status_code == 400 and r.json()['error'] == 'validation'
     assert r.json()['issues'][0] == {'path': 'empCode', 'message': 'Too small: expected string to have >=1 characters'}
@@ -90,3 +81,15 @@ def test_json_api(g):
     # An employee (no HR, no manager) may not list the master.
     tok_e = auth.login(g.ghr.email, PW).token        # group HR is HR in Alpha too: allowed
     assert g.client(g.ghr).get('/api/v1/employees', **bearer(tok_e)).status_code == 200
+
+
+def test_employee_of_another_company_is_not_found(g):
+    eid = str(g.beta_emp.id)
+    for person in (g.admin_c, g.admin_a):
+        c = g.client(person)
+        for method, url, data in _requests(eid):
+            assert _call(c, method, url, data).status_code == 404, (person.email, url)
+    owner = g.client(g.admin_b)
+    for method, url, data in _requests(eid):
+        assert _call(owner, method, url, data).status_code != 404, url
+

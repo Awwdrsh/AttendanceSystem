@@ -1,9 +1,0 @@
-<div class="hj-stack" data-modal-title="Read confirmations" data-modal-size="lg" style="--gap:12px">
-  <div class="hj-row hj-between"><span class="hj-sm">{{ d.acked }} of {{ d.audience }} confirmed</span><span class="hj-sm hj-muted">{{ d.pct }}%</span></div>
-  <div class="hj-progress"><div style="width:{{ d.pct }}%"></div></div>
-  <div class="hj-table-wrap"><div class="hj-table-scroll" style="max-height:380px">
-    <table class="hj-table"><thead><tr><th>Name</th><th>Code</th><th>Confirmed</th></tr></thead>
-      <tbody>{% for p in d.people %}<tr><td>{{ p.name }}</td><td class="mono">{{ p.empCode }}</td>
-        <td>{% if p.ackedAt %}<span class="hj-row" style="gap:4px"><i class="ti ti-check hj-ok-text" aria-hidden="true"></i>{{ p.ackedAt|bs_date }}</span>{% else %}<span class="hj-muted">Not yet</span>{% endif %}</td></tr>{% endfor %}</tbody>
-    </table></div></div>
-</div>

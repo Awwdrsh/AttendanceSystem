@@ -1,0 +1,1 @@
+import{St as e,yt as t}from"./createReactComponent-DKcgNbiR.js";var n=e(t(),1);function r(e){let t=(0,n.createContext)(null);return[t,()=>{let r=(0,n.use)(t);if(r===null)throw Error(e);return r}]}export{r as t};

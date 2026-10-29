@@ -12,7 +12,7 @@ from django.test import Client
 from hajiri.core.clock import now, npt_today
 from hajiri.db.models import Employee, FieldVisit, Kiosk, Location, ShiftSwap
 from tests.multicompany.conftest import world  # noqa: F401 - the shared group fixture
-from tests.web.factories import bearer, htmx, make_employee
+from tests.web.factories import bearer, make_employee
 
 
 def _json(method, token, url, body=None):
@@ -98,21 +98,6 @@ def test_swaps_and_colleagues_stay_inside_the_company(world, beta):
     assert r.status_code == 404 and r.json()['error'] == 'colleague not found'
 
 
-def test_pages_answer_404_for_another_companys_ids(world, beta):
-    c = world.signed_in(world.admin_a)
-    for url in (f"/_/field/locations/{beta['loc']}/edit", f"/_/field/kiosks/{beta['kiosk']}/edit",
-                f"/_/field/visits/{beta['visit']}/photo"):
-        assert c.get(url, **htmx()).status_code == 404, url
-    for url in (f"/_/field/locations/{beta['loc']}/delete", f"/_/field/kiosks/{beta['kiosk']}/revoke",
-                f"/_/field/staff/{beta['emp']}/kiosk-reset"):
-        assert c.post(url, **htmx()).status_code == 404, url
-    assert Location.objects.filter(pk=beta['loc']).exists()
-    assert Kiosk.objects.get(pk=beta['kiosk']).status != Kiosk.Status.REVOKED
-    owner = world.signed_in(world.admin_b)
-    assert owner.get(f"/_/field/kiosks/{beta['kiosk']}/edit", **htmx()).status_code == 200
-    assert owner.get(f"/_/field/locations/{beta['loc']}/edit", **htmx()).status_code == 200
-
-
 def test_my_day_follows_the_active_company(world):
     """dual's field work is on in Beta only: their Beta employee record answers there, the Alpha one at home."""
     Employee.objects.filter(pk=world.dual_beta_employee.id).update(field_work=True)
@@ -120,3 +105,19 @@ def test_my_day_follows_the_active_company(world):
     there, _ = world.session(world.dual, world.beta)
     assert _json('get', home, '/api/v1/field/me').json()['fieldWork'] is False
     assert _json('get', there, '/api/v1/field/me').json()['fieldWork'] is True
+
+
+def test_pages_answer_404_for_another_companys_ids(world, beta):
+    c = world.signed_in(world.admin_a)
+    assert c.get(f"/api/v1/field/visits/{beta['visit']}/photo").status_code == 404
+    assert c.patch(f"/api/v1/field/locations/{beta['loc']}", {'name': 'x'}, content_type='application/json').status_code == 404
+    assert c.patch(f"/api/v1/field/kiosks/{beta['kiosk']}", {'name': 'x'}, content_type='application/json').status_code == 404
+    for url in (f"/api/v1/field/kiosks/{beta['kiosk']}/revoke", f"/api/v1/field/staff/{beta['emp']}/kiosk-reset"):
+        assert c.post(url, {}, content_type='application/json').status_code == 404, url
+    assert c.delete(f"/api/v1/field/locations/{beta['loc']}").status_code == 404
+    assert Location.objects.filter(pk=beta['loc']).exists()
+    assert Kiosk.objects.get(pk=beta['kiosk']).status != Kiosk.Status.REVOKED
+    owner = world.signed_in(world.admin_b)
+    assert beta['kiosk'] in {k['id'] for k in owner.get('/api/v1/field/kiosks').json()['kiosks']}
+    assert beta['loc'] in {x['id'] for x in owner.get('/api/v1/field/locations').json()['locations']}
+

@@ -1,9 +1,13 @@
-"""Every app mounts at the site root using the same paths as the React app, so links and bookmarks keep working.
-Partial (HTMX) endpoints live under /_/<app>/. The device gateway has its own URLconf (config/gateway_urls.py)."""
-from django.urls import include, path
+"""URLs of the web process. Every app mounts its JSON endpoints at the site root with the TS paths (/api/v1/...).
+Every other address is the React app (frontend/, built into server/frontend_build/): hajiri.web.views.spa answers
+its index.html and React Router shows the page, as the TS API served apps/web/dist. WhiteNoise serves the build's
+files (/assets/*, sw.js, manifest.webmanifest, icons) and /static/ before any of this runs. The device gateway has
+its own URLconf (config/gateway_urls.py)."""
+from django.urls import include, path, re_path
+
+from hajiri.web.views import spa
 
 urlpatterns = [
-    # Groups of companies: mounted first so their pages take over /group from hajiri.web.group once they exist.
     path('', include('hajiri.group.urls')),
     path('', include('hajiri.group_admin.urls')),
     path('', include(('hajiri.web.urls', 'web'))),
@@ -43,6 +47,13 @@ urlpatterns = [
     path('', include(('hajiri.kiosk.urls', 'kiosk'))),
     path('', include(('hajiri.payroll.urls', 'payroll'))),
     path('', include(('hajiri.home.urls', 'home'))),
+    # The React app: every address outside /api/ and /static/ (TS: app.get(/^\/(?!api\/|health).*/, index.html)).
+    # A clock-in device pointed at the web port by mistake gets a 404, not the app's HTML (its routes live on the
+    # gateway process, config/gateway_urls.py).
+    re_path(r'^(?!api/|static/|health$|(?i:iclock|hikvision)/).*$', spa, name='spa'),
 ]
 
+handler400 = 'config.errors.bad_request'
+handler403 = 'config.errors.forbidden'
 handler404 = 'config.errors.not_found'
+handler500 = 'config.errors.server_error'

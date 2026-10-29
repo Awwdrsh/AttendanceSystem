@@ -1,16 +1,18 @@
 import { lazy } from 'react';
 import { Navigate, Route, Routes, useParams } from 'react-router-dom';
 import { Layout } from './components/Layout';
-import { RequireRole } from './auth/RequireRole';
+import { RequireEmployee, RequireRole } from './auth/RequireRole';
 import { AREA } from './lib/access';
 import { useAuth } from './auth/AuthProvider';
 import { FeatureRoute, FeaturesProvider } from './lib/features';
+import { CompaniesProvider, useCompanies } from './auth/CompaniesProvider';
 import {
   AttendanceHub,
   EMPLOYEES_HUB_PATHS,
   EmployeesHub,
   EngageHub,
   ExpensesHub,
+  GroupHub,
   GrowthHub,
   HiringHub,
   LeaveHub,
@@ -55,6 +57,13 @@ function Home() {
   return <HomePage />;
 }
 
+/** The Group hub, once GET /me/companies says this person may open it. */
+function GroupRoute() {
+  const { access, loading } = useCompanies();
+  if (loading) return null;
+  return access.hub ? <GroupHub /> : <Navigate to="/" replace />;
+}
+
 function EmployeeRedirect() {
   const { id } = useParams();
   return <Navigate to={`/employees/${id ?? ''}`} replace />;
@@ -95,15 +104,22 @@ export function App() {
         <Route
           element={
             <FeaturesProvider>
-              <Layout />
+              <CompaniesProvider>
+                <Layout />
+              </CompaniesProvider>
             </FeaturesProvider>
           }
         >
           <Route path="/" element={<Home />} />
-          <Route path="/me/attendance/*" element={<MyAttendanceHub />} />
-          <Route path="/me/timesheet" element={<TimesheetHub />} />
-          <Route path="/me/claims/*" element={<MyClaimsHub />} />
-          <Route path="/me/growth/*" element={<GrowthHub />} />
+          <Route element={<RequireEmployee />}>
+            <Route path="/me/attendance/*" element={<MyAttendanceHub />} />
+            <Route path="/me/timesheet" element={<TimesheetHub />} />
+            <Route path="/me/claims/*" element={<MyClaimsHub />} />
+            <Route path="/me/growth/*" element={<GrowthHub />} />
+            <Route path="/me/leave" element={<LeavePage />} />
+            <Route path="/me/payslips" element={<MyPayHub />} />
+            <Route path="/me/payslips/tax" element={<MyPayHub />} />
+          </Route>
           <Route
             path="/me/help/*"
             element={
@@ -130,14 +146,13 @@ export function App() {
           />
           <Route path="/people/*" element={<PeopleHub />} />
           <Route path="/engage/*" element={<EngageHub />} />
-          <Route path="/me/leave" element={<LeavePage />} />
-          <Route path="/me/payslips" element={<MyPayHub />} />
-          <Route path="/me/payslips/tax" element={<MyPayHub />} />
+          {/* HR opens any payslip here from the pay run, so this one is not limited to employees. */}
           <Route path="/me/payslips/:id" element={<PayslipDetailPage />} />
           <Route path="/me/notifications" element={<NotificationsPage />} />
           <Route path="/me/profile/*" element={<ProfileHub />} />
           {/* Anyone can be asked to approve (a named person or a group member in a flow); the inbox shows only their items. */}
           <Route path="/approvals" element={<ApprovalsPage />} />
+          <Route path="/group/*" element={<GroupRoute />} />
           <Route element={<RequireRole roles={['manager', ...AREA.attendance]} />}>
             <Route path="/attendance/*" element={<AttendanceHub />} />
             <Route path="/leave/*" element={<LeaveHub />} />

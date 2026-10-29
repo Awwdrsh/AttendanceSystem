@@ -19,7 +19,7 @@ from hajiri.core import auth, companies
 from hajiri.core.errors import BadRequestError
 from hajiri.db.models import Branch, Company, CompanyMembership, NotificationOutbox
 from hajiri.engage import services as S
-from tests.web.factories import PW, htmx, make_company, make_employee, make_user, sign_in
+from tests.web.factories import PW, make_company, make_employee, make_user, sign_in
 
 
 @dataclass
@@ -38,8 +38,8 @@ class Group:
         c = Client()
         sign_in(c, person)
         if company is not None:
-            r = c.post('/_/web/company/switch', {'company_id': str(company.id)}, **htmx())
-            assert r.status_code == 204, r.content
+            r = c.post('/api/v1/me/companies/switch', {'companyId': str(company.id)}, content_type='application/json')
+            assert r.status_code == 200, r.content
         return c
 
     def working_in(self, person, company) -> auth.AuthUser:
@@ -113,75 +113,6 @@ def beta_employee(g):
     return g.beta_colleague.employee_id
 
 
-CASES = [
-    # (name, method, url, maker, data)
-    ('announcement pin', 'post', '/_/engage/announcements/{id}/pin', announcement, {'pinned': '1'}),
-    ('announcement ack', 'post', '/_/engage/announcements/{id}/ack', announcement, {}),
-    ('announcement acks', 'get', '/_/engage/announcements/{id}/acks', announcement, {}),
-    ('announcement delete', 'post', '/_/engage/announcements/{id}/delete', announcement, {}),
-    ('announcement reaction', 'post', '/_/engage/react', announcement,
-     {'target_type': 'announcement', 'target_id': '{id}', 'emoji': 'like'}),
-    ('announcement comments', 'get', '/_/engage/comments?target_type=announcement&target_id={id}', announcement, {}),
-    ('kudos delete', 'post', '/_/engage/kudos/{id}/delete', kudos, {}),
-    ('kudos reaction', 'post', '/_/engage/react', kudos, {'target_type': 'kudos', 'target_id': '{id}', 'emoji': 'clap'}),
-    ('kudos comment', 'post', '/_/engage/comments', kudos, {'target_type': 'kudos', 'target_id': '{id}', 'body': 'Hi'}),
-    ('celebration wish', 'post', '/_/engage/comments', beta_employee,
-     {'target_type': 'celebration', 'target_id': 'joined:{id}', 'body': 'Welcome'}),
-    ('comment delete', 'post', '/_/engage/comments/{id}/delete', comment, {}),
-    ('value toggle', 'post', '/_/engage/values/{id}/toggle', value, {}),
-    ('survey edit form', 'get', '/_/engage/surveys/{id}/edit', draft_survey, {}),
-    ('survey publish', 'post', '/_/engage/surveys/{id}/publish', draft_survey, {}),
-    ('survey delete', 'post', '/_/engage/surveys/{id}/delete', draft_survey, {}),
-    ('survey close', 'post', '/_/engage/surveys/{id}/close', open_survey, {}),
-    ('survey closing-day form', 'get', '/_/engage/surveys/{id}/closing-day', open_survey, {}),
-    ('survey extend', 'post', '/_/engage/surveys/{id}/extend', open_survey, {'closes_on': '{today}'}),
-    ('survey answer form', 'get', '/_/engage/surveys/{id}/answer', open_survey, {}),
-    ('survey results', 'get', '/_/engage/surveys/{id}/results', open_survey, {}),
-    ('survey results csv', 'get', '/_/engage/surveys/{id}/results.csv', open_survey, {}),
-    ('suggestion reply form', 'get', '/_/engage/suggestions/{id}/reply', suggestion, {}),
-    ('suggestion update', 'post', '/_/engage/suggestions/{id}/update', suggestion, {'status': 'reviewed'}),
-    ('suggestion reply', 'post', '/_/engage/suggestions/{id}/reply', suggestion, {'reply': 'Thanks, noted'}),
-    ('survey edit', 'post', '/_/engage/surveys/{id}/edit', draft_survey,
-     {'title': 'Renamed', 'opens_on': '{today}', 'closes_on': '{today}',
-      'questions_json': '[{{"kind": "rating", "prompt": "How was it?"}}]'}),
-    ('survey answer', 'post', '/_/engage/surveys/{id}/answer', open_survey, {}),
-]
-
-
-def _call(client, method, url, data):
-    if method == 'post':
-        return client.post(url, data, **htmx())
-    return client.get(url, **htmx())
-
-
-@pytest.mark.parametrize('case', CASES, ids=[c[0] for c in CASES])
-def test_ids_of_another_company_are_not_found(group, case):
-    name, method, url, maker, data = case
-    rid = maker(group)
-    target = url.format(id=rid)
-    body = {k: v.format(id=rid, today=_today()) for k, v in data.items()}
-    for who, client in (('outsider', group.client(group.admin_c)), ('group admin in Alpha', group.client(group.admin_a))):
-        r = _call(client, method, target, body)
-        assert r.status_code == 404, f'{name}: {who} got {r.status_code}'
-    r = _call(group.client(group.admin_b), method, target, body)
-    assert r.status_code != 404 and r.status_code < 500, f'{name}: Beta admin got {r.status_code} (control)'
-
-
-def test_services_treat_foreign_ids_as_not_found(group):
-    g = group
-    a, k, s = announcement(g), kudos(g), open_survey(g)
-    alpha_hr = g.working_in(g.dual, g.alpha)
-    for fn, args, message in ((S.ack_announcement, (a,), 'announcement not found'),
-                              (S.delete_kudos, (k,), 'kudos not found'),
-                              (S.get_survey, (s,), 'survey not found'),
-                              (S.results, (s,), 'survey not found'),
-                              (S.update_value, (value(g), {'active': False}), 'value not found'),
-                              (S.update_suggestion, (suggestion(g), {'status': 'archived'}), 'suggestion not found')):
-        with pytest.raises(Exception) as e:
-            fn(alpha_hr, *args)
-        assert getattr(e.value, 'status', None) == 404 and e.value.message == message, fn.__name__
-
-
 def test_ids_of_another_company_in_a_body_are_refused(group):
     g = group
     alpha_hr = g.working_in(g.dual, g.alpha)
@@ -199,25 +130,6 @@ def test_ids_of_another_company_in_a_body_are_refused(group):
         S.create_survey(alpha_hr, {'title': 'x', 'audienceKind': 'branch', 'audienceId': str(branch.id),
                                    'opensOn': _today(), 'closesOn': _today(), 'questions': QUESTIONS})
     assert e.value.message == 'pick the branch or department this is for'
-
-
-def test_feed_and_lists_follow_the_active_company(group):
-    g = group
-    announcement(g)
-    kudos(g)
-    open_survey(g)
-    suggestion(g)
-    c = g.client(g.admin_a)
-    feed = c.get('/_/engage/feed', **htmx()).content.decode()
-    assert 'Beta news' not in feed and 'Thanks for the help' not in feed
-    assert 'Beta pulse' not in c.get('/_/engage/surveys', **htmx()).content.decode()
-    assert 'A canteen for Beta' not in c.get('/engage/suggestions').content.decode()
-    assert 'Beta spirit' not in c.get('/_/engage/values', **htmx()).content.decode()
-    c.post('/_/web/company/switch', {'company_id': str(g.beta.id)}, **htmx())
-    feed = c.get('/_/engage/feed', **htmx()).content.decode()
-    assert 'Beta news' in feed and 'Thanks for the help' in feed
-    assert 'Beta pulse' in c.get('/_/engage/surveys', **htmx()).content.decode()
-    assert 'A canteen for Beta' in c.get('/engage/suggestions').content.decode()
 
 
 def test_a_member_is_reached_and_answers_in_the_company_they_work_in(group):
@@ -243,3 +155,31 @@ def test_a_member_is_reached_and_answers_in_the_company_they_work_in(group):
     acks = S.announcement_acks(g.admin_b, S.post_announcement(g.admin_b, {'title': 'Read me', 'body': 'x',
                                                                            'requiresAck': True})['id'])
     assert 'Dipak at Beta' in [p['name'] for p in acks['people']]
+
+
+# Ids of another company on every /api/v1/engage endpoint: tests/engage/test_api_isolation.py.
+
+
+def test_feed_and_lists_follow_the_active_company(group):
+    g = group
+    announcement(g)
+    kudos(g)
+    open_survey(g)
+    suggestion(g)
+    c = g.client(g.admin_a)
+
+    def text(path):
+        r = c.get(path)
+        assert r.status_code == 200, (path, r.content)
+        return r.content.decode()
+    feed = text('/api/v1/engage/feed')
+    assert 'Beta news' not in feed and 'Thanks for the help' not in feed
+    assert 'Beta pulse' not in text('/api/v1/engage/surveys/manage')
+    assert 'A canteen for Beta' not in text('/api/v1/engage/suggestions')
+    assert 'Beta spirit' not in text('/api/v1/engage/values')
+    c.post('/api/v1/me/companies/switch', {'companyId': str(g.beta.id)}, content_type='application/json')
+    feed = text('/api/v1/engage/feed')
+    assert 'Beta news' in feed and 'Thanks for the help' in feed
+    assert 'Beta pulse' in text('/api/v1/engage/surveys/manage')
+    assert 'A canteen for Beta' in text('/api/v1/engage/suggestions')
+

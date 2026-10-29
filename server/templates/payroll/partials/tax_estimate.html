@@ -1,5 +1,0 @@
-{% if not_current %}<p class="hj-sm hj-muted" style="margin:0">Tax estimates are shown for the current fiscal year.</p>
-{% elif est and not est.available %}{% alert "info" %}{{ est.reason }}{% endalert %}
-{% elif stats %}{% stat_strip stats %}
-<div id="tax-line" hx-swap-oob="true">{% if line %}<p class="hj-sm" style="margin:0">{{ line }}</p>{% endif %}</div>
-{% endif %}

@@ -1,7 +1,0 @@
-<form class="hj-form" data-modal-title="Return of {{ a.name }}" hx-post="{% url 'lifecycle:asset_return' a.id %}" hx-swap="none">
-  <p class="hj-sm hj-muted" style="margin:0">From {{ a.employee_name }}. Choose Lost if it was not returned; the asset is then retired.</p>
-  <div class="hj-fieldset"><label class="hj-label">Condition on return</label><select name="condition" class="hj-select">{% for v, l in conditions %}<option value="{{ v }}"{% if v == a.condition %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
-  {% bs_date_input "returnedOn" value=today label="Returned on" %}
-  <div class="hj-fieldset"><label class="hj-label">Notes</label><textarea name="notes" class="hj-input" rows="1" maxlength="500"></textarea></div>
-  <div class="hj-modal-foot"><button type="button" class="hj-btn default" data-modal-close>Cancel</button><button type="submit" class="hj-btn">Record return</button></div>
-</form>

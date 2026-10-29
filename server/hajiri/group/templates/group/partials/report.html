@@ -1,8 +1,0 @@
-<div id="group-report" class="hj-stack" style="--gap:12px">
-  <div class="hj-row hj-between" style="align-items:center">
-    <div><div class="hj-strong">{{ table.extra.title }}</div><div class="hj-small hj-muted">{{ table.extra.period }} · {{ report_desc }}</div></div>
-    <a class="hj-btn default" href="{% url 'group:reports' %}?{{ csv_query }}" download><i class="ti ti-download" aria-hidden="true"></i>Export CSV</a>
-  </div>
-  {% if table.extra.hidden %}{% alert "info" title="Some pay figures are hidden" %}{{ table.extra.hidden|join:", " }} {% if table.extra.hidden|length == 1 %}does{% else %}do{% endif %} not show pay figures to executives.{% endalert %}{% endif %}
-  {% report_table columns table.rows empty_title="No figures for this period." %}
-</div>

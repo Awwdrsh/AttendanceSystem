@@ -1,3 +1,0 @@
-{% extends hj_user|yesno:"base.html,bare.html" %}
-{% block title %}Not found · Hajiri{% endblock %}
-{% block content %}{% include "web/_error_body.html" with status=404 title="Not found" message="This page does not exist, or it has moved. Check the address, or use the menu or search (Ctrl K) to find what you need." %}{% endblock %}

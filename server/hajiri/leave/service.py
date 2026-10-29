@@ -69,7 +69,8 @@ def out(x):
 
 
 def fixed(x: float, digits: int) -> str:
-    return to_fixed(x, digits)
+    """Number.prototype.toFixed: (-0).toFixed(2) is '0.00' in JavaScript (a negated empty sum is -0 here and there)."""
+    return to_fixed(0.0 if x == 0 else x, digits)
 
 
 def dec(x) -> Decimal:

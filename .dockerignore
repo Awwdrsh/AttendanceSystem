@@ -15,3 +15,5 @@ server/staticfiles
 .admin-credentials
 .git
 infra/pgdata
+**/node_modules
+server/frontend_build

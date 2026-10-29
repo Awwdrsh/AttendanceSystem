@@ -169,7 +169,7 @@ export default function RunWizardPage() {
   const varianceRows = run.variance?.byEmployee ?? [];
   const slips = q.data?.payslips ?? [];
   const canCompute = ['draft', 'preflight_failed', 'computed', 'reviewed'].includes(run.status);
-  const headcount = totals.payslips ?? String(slips.length);
+  const headcount = totals.headcount ?? String(slips.length);
   const totalGross = totals.gross ?? sum(slips, 'gross');
   const totalTds = totals.tds ?? sum(slips, 'tds');
   const totalNet = totals.net ?? sum(slips, 'net');

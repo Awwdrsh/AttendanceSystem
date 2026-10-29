@@ -1,9 +1,0 @@
-<div class="hj-stack hj-gap-sm">
-  {% for r in c.rows %}
-  <div title="{{ r.label }}: {{ r.value }}">
-    <div class="hj-row nowrap hj-between hj-small" style="margin-bottom:3px"><span class="hj-truncate">{{ r.label }}</span><span class="hj-strong num" style="flex:none">{{ r.value }}</span></div>
-    <div class="hj-hbar"><div style="width:{{ r.pct }}%;background:{{ c.color }}"></div></div>
-  </div>
-  {% endfor %}
-  {% if c.more %}<div class="hj-small hj-muted">and {{ c.more }} more (see the table view)</div>{% endif %}
-</div>

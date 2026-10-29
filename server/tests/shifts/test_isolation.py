@@ -1,4 +1,4 @@
-"""Groups of companies: every shifts page, fragment and JSON endpoint works in the ACTIVE company only. A record of
+"""Groups of companies: every shifts JSON endpoint works in the ACTIVE company only. A record of
 another company is not found (404) for an outsider and for a group admin who is working in a sister company; the
 owning company's admin reaches it. Group roles count as company roles where they are working."""
 from __future__ import annotations
@@ -11,7 +11,7 @@ from django.test import Client
 from hajiri.db.models import Holiday, Location, Roster, Shift, ShiftAssignment
 from hajiri.shifts import services as svc
 from tests.multicompany.conftest import world  # noqa: F401  (the group fixture)
-from tests.web.factories import bearer, htmx, make_employee
+from tests.web.factories import bearer, make_employee
 
 
 @pytest.fixture
@@ -45,44 +45,6 @@ def _strangers(world):  # noqa: F811
     return [world.signed_in(world.admin_c), world.signed_in(world.admin_a, world.alpha)]
 
 
-def test_pages_and_fragments_of_another_company_are_not_found(world, beta):  # noqa: F811
-    gets = [f"/_/shifts/{beta['shift']}/edit", f"/_/shifts/{beta['shift']}/assign", f"/_/shifts/holidays/{beta['holiday']}/edit"]
-    posts = [(f"/_/shifts/{beta['shift']}/edit", {'code': 'X', 'name_en': 'X', 'start': '09:00', 'end': '17:00', 'grace_in_min': 0,
-                                                 'grace_out_min': 0, 'early_in_window_min': 0, 'late_out_window_min': 0,
-                                                 'break_minutes': 0, 'half_day_threshold_min': 0, 'absent_threshold_min': 0,
-                                                 'pairing_mode': 'alternating', 'rounding_min': 0, 'rounding_direction': 'nearest'}),
-             (f"/_/shifts/{beta['spare']}/delete", {}),
-             (f"/_/shifts/holidays/{beta['holiday']}/delete", {}),
-             (f"/_/shifts/holidays/{beta['holiday']}/edit", {'local_date': '2026-12-30', 'name_en': 'Moved', 'gender_scope': 'all'}),
-             ('/_/shifts/roster/cell', {'employee_id': beta['employee'], 'date': '2026-11-03', 'value': 'off', 'week': '2026-11-01'}),
-             ('/_/shifts/roster/cell', {'employee_id': beta['employee'], 'date': '2026-11-02', 'value': '', 'week': '2026-11-01'})]
-    for c in _strangers(world):
-        for url in gets:
-            assert c.get(url, **htmx('hj-modal-body')).status_code == 404, url
-        for url, data in posts:
-            assert c.post(url, data, **htmx()).status_code == 404, url
-    assert Shift.objects.filter(pk__in=[beta['shift'], beta['spare']]).count() == 2
-    assert Holiday.objects.get(pk=beta['holiday']).name_en == 'Beta day out'
-    assert list(Roster.objects.filter(employee_id=beta['employee']).values_list('shift_id', flat=True)) == [Shift.objects.get(pk=beta['shift']).pk]
-    owner = world.signed_in(world.admin_b)
-    for url in gets:
-        assert owner.get(url, **htmx('hj-modal-body')).status_code == 200, url
-    assert owner.post(f"/_/shifts/{beta['spare']}/delete", **htmx()).status_code == 204
-
-
-def test_assigning_or_rostering_across_companies_is_not_found(world, beta):  # noqa: F811
-    _, admin_a = world.session(world.admin_a, world.alpha)
-    alpha_shift = svc.create_shift(admin_a, {'code': 'ADAY', 'nameEn': 'Alpha day', 'start': '10:00', 'end': '18:00'})['id']
-    c = world.signed_in(world.admin_a, world.alpha)
-    r = c.post(f'/_/shifts/{alpha_shift}/assign', {'employee_id': beta['employee'], 'from_date': '2026-11-01'}, **htmx())
-    assert r.status_code == 404
-    r = c.post('/_/shifts/roster/cell', {'employee_id': world.solo.employee_id, 'date': '2026-11-02', 'value': beta['shift'],
-                                         'week': '2026-11-01'}, **htmx())
-    assert r.status_code == 404
-    assert not ShiftAssignment.objects.filter(shift_id=alpha_shift).exists()
-    assert not Roster.objects.filter(shift_id=beta['shift']).exclude(employee_id=beta['employee']).exists()
-
-
 def test_json_endpoints_of_another_company_are_not_found(world, beta):  # noqa: F811
     for call in (_api(world, world.admin_c), _api(world, world.admin_a, world.alpha)):
         assert call('get', f"/{beta['shift']}").status_code == 404
@@ -99,27 +61,8 @@ def test_json_endpoints_of_another_company_are_not_found(world, beta):  # noqa: 
     assert Shift.objects.get(pk=beta['shift']).grace_in_min == 0
     assert Location.objects.filter(pk=beta['location']).exists() and Holiday.objects.filter(pk=beta['holiday']).exists()
     owner = _api(world, world.admin_b)
-    assert owner('get', f"/{beta['shift']}").json()['shift']['assigned_employees'] == 1
+    assert owner('get', f"/{beta['shift']}").json()['shift']['assigned_employees'] == '1'
     assert owner('patch', f"/locations/{beta['location']}", {'radiusM': 300}).json() == {'ok': True}
-
-
-def test_lists_show_only_the_active_company(world, beta):  # noqa: F811
-    alpha = _api(world, world.admin_a, world.alpha)
-    assert alpha('get', '').json() == {'shifts': []}
-    assert alpha('get', '/holidays').json() == {'holidays': []}
-    assert alpha('get', '/locations').json() == {'locations': []}
-    grid = alpha('get', '/roster', **{'from': '2026-11-01', 'to': '2026-11-07'}).json()
-    assert grid['roster'] == [] and beta['employee'] not in {e['id'] for e in grid['employees']}
-    assert alpha('post', '/roster/publish', {'from': '2026-11-01', 'to': '2026-11-07'}).json() == {'notified': 0}
-    assert alpha('post', '/roster/copy-week', {'weekStart': '2026-11-08'}).json() == {'copied': 0, 'skippedLocked': 0}
-    page = world.signed_in(world.admin_a, world.alpha)
-    assert 'Beta day' not in page.get('/settings/shifts').content.decode()
-    assert 'Beta day out' not in page.get('/settings/holidays?year=2083').content.decode()
-    assert 'Bina Beta' not in page.get('/attendance/rosters?week=2026-11-01').content.decode()
-    # The same group admin, switched to Beta, works there.
-    in_beta = _api(world, world.admin_a, world.beta)
-    assert [s['code'] for s in in_beta('get', '').json()['shifts']] == ['BDAY', 'BSPARE']
-    assert 'Bina Beta' in world.signed_in(world.admin_a, world.beta).get('/attendance/rosters?week=2026-11-01').content.decode()
 
 
 def test_group_hr_manages_shifts_in_the_company_they_work_in(world, beta):  # noqa: F811
@@ -133,3 +76,61 @@ def test_group_hr_manages_shifts_in_the_company_they_work_in(world, beta):  # no
     gexec = _api(world, world.gexec, world.beta)
     assert len(gexec('get', '').json()['shifts']) == 2
     assert gexec('post', '', {'code': 'NO', 'nameEn': 'No', 'start': '08:00', 'end': '16:00'}).status_code == 403
+
+
+def test_the_cookie_session_of_the_pages_is_scoped_the_same_way(world, beta):  # noqa: F811
+    """The React pages call the same endpoints with the session cookie."""
+    def j(c, method, url, body=None):
+        if method == 'get':
+            return c.get(url)
+        return getattr(c, method)(url, body if body is not None else {}, content_type='application/json')
+    S = '/api/v1/shifts'
+    for c in _strangers(world):
+        assert j(c, 'get', f"{S}/{beta['shift']}").status_code == 404
+        assert j(c, 'patch', f"{S}/{beta['shift']}", {'nameEn': 'X'}).status_code == 404
+        assert j(c, 'delete', f"{S}/{beta['spare']}").status_code == 404
+        assert j(c, 'patch', f"{S}/holidays/{beta['holiday']}", {'nameEn': 'Moved'}).status_code == 404
+        assert j(c, 'delete', f"{S}/holidays/{beta['holiday']}").status_code == 404
+        r = j(c, 'put', f'{S}/roster', {'rows': [{'employeeId': beta['employee'], 'localDate': '2026-11-03', 'shiftId': None}]})
+        assert r.status_code == 404
+    assert Shift.objects.filter(pk__in=[beta['shift'], beta['spare']]).count() == 2
+    assert Holiday.objects.get(pk=beta['holiday']).name_en == 'Beta day out'
+    assert list(Roster.objects.filter(employee_id=beta['employee']).values_list('shift_id', flat=True)) == [Shift.objects.get(pk=beta['shift']).pk]
+    owner = world.signed_in(world.admin_b)
+    assert j(owner, 'get', f"{S}/{beta['shift']}").status_code == 200
+    assert j(owner, 'delete', f"{S}/{beta['spare']}").status_code == 200
+
+
+def test_assigning_or_rostering_across_companies_is_not_found(world, beta):  # noqa: F811
+    _, admin_a = world.session(world.admin_a, world.alpha)
+    alpha_shift = svc.create_shift(admin_a, {'code': 'ADAY', 'nameEn': 'Alpha day', 'start': '10:00', 'end': '18:00'})['id']
+    c = world.signed_in(world.admin_a, world.alpha)
+    r = c.post('/api/v1/shifts/assign', {'employeeId': beta['employee'], 'shiftId': alpha_shift, 'from': '2026-11-01'},
+               content_type='application/json')
+    assert r.status_code == 404
+    r = c.put('/api/v1/shifts/roster', {'rows': [{'employeeId': world.solo.employee_id, 'localDate': '2026-11-02',
+                                                  'shiftId': beta['shift']}]}, content_type='application/json')
+    assert r.status_code in (400, 404), r.content
+    assert not ShiftAssignment.objects.filter(shift_id=alpha_shift).exists()
+    assert not Roster.objects.filter(shift_id=beta['shift']).exclude(employee_id=beta['employee']).exists()
+
+
+def test_lists_show_only_the_active_company(world, beta):  # noqa: F811
+    alpha = _api(world, world.admin_a, world.alpha)
+    assert alpha('get', '').json() == {'shifts': []}
+    assert alpha('get', '/holidays').json() == {'holidays': []}
+    assert alpha('get', '/locations').json() == {'locations': []}
+    grid = alpha('get', '/roster', **{'from': '2026-11-01', 'to': '2026-11-07'}).json()
+    assert grid['roster'] == [] and beta['employee'] not in {e['id'] for e in grid['employees']}
+    assert alpha('post', '/roster/publish', {'from': '2026-11-01', 'to': '2026-11-07'}).json() == {'notified': 0}
+    assert alpha('post', '/roster/copy-week', {'weekStart': '2026-11-08'}).json() == {'copied': 0, 'skippedLocked': 0}
+    page = world.signed_in(world.admin_a, world.alpha)        # the cookie session of the pages
+    assert 'Beta day' not in page.get('/api/v1/shifts').content.decode()
+    assert 'Beta day out' not in page.get('/api/v1/shifts/holidays').content.decode()
+    week = {'from': '2026-11-01', 'to': '2026-11-07'}
+    assert 'Bina Beta' not in page.get('/api/v1/shifts/roster', week).content.decode()
+    # The same group admin, switched to Beta, works there.
+    in_beta = _api(world, world.admin_a, world.beta)
+    assert [s['code'] for s in in_beta('get', '').json()['shifts']] == ['BDAY', 'BSPARE']
+    assert 'Bina Beta' in world.signed_in(world.admin_a, world.beta).get('/api/v1/shifts/roster', week).content.decode()
+

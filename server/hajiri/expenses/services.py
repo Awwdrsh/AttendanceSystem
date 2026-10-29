@@ -1160,7 +1160,7 @@ def _spend_lines(company_id: str, from_: str, to: str) -> list[dict]:
 def report_spend(user: AuthUser, query: dict) -> dict:
     """Approved claims and settled trips grouped by category, department, BS month or employee."""
     _require_hr(user)
-    q = validate(s.SpendQueryIn, {k: v for k, v in (query or {}).items() if k in ('from', 'to', 'groupBy') and v not in (None, '')})
+    q = validate(s.SpendQueryIn, {k: v for k, v in (query or {}).items() if k in ('from', 'to', 'groupBy', 'format') and v not in (None, '')})
     if q['to'] < q['from']:
         raise BadRequestError('the end date must be after the start date')
     gb = q['groupBy']

@@ -10,7 +10,8 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[3]
 SCRIPTS = REPO / 'scripts'
-SHELL_SCRIPTS = ['lib.sh', 'setup.sh', 'start.sh', 'stop.sh', 'run.sh', 'install-service.sh', 'update.sh']
+SHELL_SCRIPTS = ['lib.sh', 'setup.sh', 'start.sh', 'stop.sh', 'run.sh', 'install-service.sh', 'update.sh',
+                 'build-frontend.sh']
 
 
 def ops_module():
@@ -44,9 +45,13 @@ def test_docker_entrypoint_parses():
 
 
 def test_no_script_runs_node_or_reads_the_ts_env_files():
+    """Installs need only Python: Node.js runs only in build-frontend.sh (lib.sh checks its version, update.sh calls
+    the build script when Node.js is there)."""
     for path in SCRIPTS.glob('*.sh'):
         text = path.read_text()
-        assert 'pnpm' not in text and 'node ' not in text and '-django.sh' not in text, path.name
+        assert 'pnpm' not in text and '-django.sh' not in text, path.name
+        if path.name not in ('build-frontend.sh', 'lib.sh'):
+            assert 'node ' not in text and 'npm ' not in text and 'npx ' not in text, path.name
         # apps/api/.env and apps/gateway/.env are only read by setup.sh, once, to move an old install's secrets over.
         assert path.name == 'setup.sh' or 'apps/' not in text, path.name
 
@@ -232,3 +237,55 @@ def test_ops_has_user_and_has_company(db):
     auth.create_user(company_id=cid, email='Ops.Person@Acme.test', name='Ops', password='correct-horse-battery-staple', roles=['admin'])
     assert mod.has_user('OPS.person@acme.test') and not mod.has_user('nobody@acme.test')
     assert mod.has_company('ACME') and not mod.has_company('acme-not')
+
+
+# ---------------------------------------------------------------- the web app's build (React, frontend/)
+
+def test_vite_builds_into_the_folder_django_serves():
+    cfg = (REPO / 'frontend' / 'vite.config.js').read_text()
+    assert "'../server/frontend_build'" in cfg and 'emptyOutDir: true' in cfg
+    from django.conf import settings
+    assert Path(settings.FRONTEND_BUILD_DIR) == REPO / 'server' / 'frontend_build'
+    assert Path(settings.WHITENOISE_ROOT) == Path(settings.FRONTEND_BUILD_DIR)
+
+
+def test_build_script_runs_npm_ci_and_vite_build():
+    text = (SCRIPTS / 'build-frontend.sh').read_text()
+    assert 'npm ci' in text and 'npx vite build' in text and 'node_ok' in text
+    assert '--no-install' in text
+
+
+def test_update_rebuilds_only_with_node_and_changed_sources():
+    text = (SCRIPTS / 'update.sh').read_text()
+    assert 'git diff --quiet "$OLD_HEAD" HEAD -- frontend' in text
+    assert 'git diff --quiet "$OLD_HEAD" HEAD -- server/frontend_build' in text
+    assert 'elif node_ok; then\n  "$ROOT/scripts/build-frontend.sh"' in text
+    # A local rebuild is reset before pulling, so `git pull --ff-only` is never blocked by build output.
+    assert text.index('git checkout -- server/frontend_build') < text.index('git pull --ff-only')
+
+
+def test_setup_and_start_check_the_committed_build():
+    assert 'check_frontend_build' in (SCRIPTS / 'setup.sh').read_text()
+    assert 'check_frontend_build' in (SCRIPTS / 'start.sh').read_text()
+
+
+def test_docker_builds_the_web_app_in_a_node_stage():
+    text = (REPO / 'infra' / 'docker' / 'Dockerfile').read_text()
+    assert 'FROM node:22-bookworm-slim AS frontend' in text
+    assert 'RUN npm ci' in text and 'npx vite build' in text
+    assert 'COPY --from=frontend /build/server/frontend_build server/frontend_build' in text
+    ignore = (REPO / 'infra' / 'docker' / 'Dockerfile.dockerignore').read_text().split()
+    assert '**/node_modules' in ignore and 'server/frontend_build' in ignore
+
+
+def test_node_ok_checks_the_vite_node_versions():
+    text = (SCRIPTS / 'lib.sh').read_text()
+    assert '(a===20&&b>=19)||(a===22&&b>=12)||a>=23' in text
+    import shutil
+    if shutil.which('node'):
+        r = subprocess.run(['bash', '-c', f'source "{SCRIPTS / "lib.sh"}"; node_ok && echo yes || echo no'],
+                           capture_output=True, text=True, timeout=30)
+        major, minor = (int(x) for x in subprocess.run(['node', '-p', 'process.versions.node'], capture_output=True,
+                                                         text=True).stdout.split('.')[:2])
+        expected = (major == 20 and minor >= 19) or (major == 22 and minor >= 12) or major >= 23
+        assert r.stdout.strip() == ('yes' if expected else 'no')

@@ -1,0 +1,1 @@
+import{P as e,R as t,T as n}from"./createReactComponent-DKcgNbiR.js";import{t as r}from"./InputBase-BSRfNNck.js";var i=t(),a=n(t=>{let n=e([`Input`,`InputWrapper`,`TextInput`],null,t);return(0,i.jsx)(r,{component:`input`,...n,__staticSelector:`TextInput`})});a.classes=r.classes,a.displayName=`@mantine/core/TextInput`;export{a as t};

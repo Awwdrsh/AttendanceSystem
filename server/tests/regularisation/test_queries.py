@@ -13,7 +13,7 @@ from hajiri.core.clock import npt_today
 from hajiri.db.models import Company, PunchEvent
 from hajiri.regularisation import services
 from tests.core.fixtures import bearer
-from tests.web.factories import htmx, make_employee
+from tests.web.factories import make_employee
 
 
 def _file(user, employee_id, n: int):
@@ -34,7 +34,7 @@ def test_the_lists_do_not_query_per_row(demo, reg):
     page = Client()
     page.cookies[auth.SESSION_COOKIE] = hr.token
     api = lambda: Client().get('/api/v1/regularisation', **bearer(hr.token))  # noqa: E731
-    html = lambda: page.get('/_/regularisation/list', **htmx())  # noqa: E731
+    html = lambda: page.get('/api/v1/regularisation', {'scope': 'all'})  # noqa: E731  (the Requests page)
     _file(hr.user, demo['sita'], 2)
     few = (_count(api), _count(html))
     _file(hr.user, demo['ram'], 8)
