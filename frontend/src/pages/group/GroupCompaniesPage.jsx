@@ -76,14 +76,16 @@ function CompanyForm({ company, opened, onClose, onSaved, startsGroup }) {
     <Modal
       opened={opened}
       onClose={busy ? () => undefined : onClose}
-      title={<Text fw={600}>{editing ? `Edit ${company.nameEn}` : startsGroup ? 'Start a group: add a sister company' : 'Add a company'}</Text>}
+      title={
+        <Text fw={600}>{editing ? `Edit ${company.nameEn}` : startsGroup ? 'Start a group: add a sister company' : 'Add a company'}</Text>
+      }
       size="lg"
     >
       <Stack gap="sm">
         {!editing ? (
           <Text size="sm" c="dimmed">
-            The new company starts with the standard Nepal defaults (leave types, approval flows, settings). Its people,
-            payroll and records are its own; group views add them up.
+            The new company starts with the standard Nepal defaults (leave types, approval flows, settings). Its people, payroll and records
+            are its own; group views add them up.
           </Text>
         ) : null}
         <Group grow align="flex-start">

@@ -1,4 +1,18 @@
-import { Accordion, Badge, Button, Checkbox, Group, MultiSelect, Paper, Radio, Select, SimpleGrid, Stack, Table, Text } from '@mantine/core';
+import {
+  Accordion,
+  Badge,
+  Button,
+  Checkbox,
+  Group,
+  MultiSelect,
+  Paper,
+  Radio,
+  Select,
+  SimpleGrid,
+  Stack,
+  Table,
+  Text,
+} from '@mantine/core';
 import { IconCopy, IconEye } from '@tabler/icons-react';
 import { useEffect, useState } from 'react';
 import { group as groupApi } from '../../api/group';
@@ -39,8 +53,8 @@ function PlanView({ plan, applied }) {
     <Stack gap="md">
       <Text size="sm" c="dimmed">
         {applied ? 'Copied' : 'Copying'} from {plan.source.name}
-        {plan.onConflict === 'overwrite' ? ', overwriting what differs' : ', keeping what already exists'}:{' '}
-        {policyTotalsLabel(plan.totals)}.
+        {plan.onConflict === 'overwrite' ? ', overwriting what differs' : ', keeping what already exists'}: {policyTotalsLabel(plan.totals)}
+        .
       </Text>
       {plan.targets.map((t) => (
         <Paper withBorder p="md" key={t.companyId}>
@@ -188,19 +202,15 @@ export default function GroupPoliciesPage() {
               </SimpleGrid>
             </Checkbox.Group>
           </div>
-          <Radio.Group
-            label="When the target already has it with different values"
-            value={onConflict}
-            onChange={setOnConflict}
-          >
+          <Radio.Group label="When the target already has it with different values" value={onConflict} onChange={setOnConflict}>
             <Group mt={6}>
               <Radio value="skip" label="Keep the target's version" />
               <Radio value="overwrite" label="Overwrite with the source's version" />
             </Group>
           </Radio.Group>
           <Text size="xs" c="dimmed">
-            Anything that names people, branches or departments of the source company (approval steps naming a person,
-            conditional flows, branch holidays) is never copied; statutory components are never overwritten.
+            Anything that names people, branches or departments of the source company (approval steps naming a person, conditional flows,
+            branch holidays) is never copied; statutory components are never overwritten.
           </Text>
           <Group justify="flex-end">
             <Button variant="default" leftSection={<IconEye size={16} stroke={1.6} />} disabled={!ready} loading={busy} onClick={preview}>

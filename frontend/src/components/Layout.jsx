@@ -268,13 +268,62 @@ const SETTINGS = {
 
 /** Extra jump targets for the command palette: tabs inside pages. */
 const JUMPS = [
-  { to: '/group', label: 'Group overview', group: 'Group', needs: 'view', icon: IconBuildingSkyscraper, keywords: ['consolidated', 'all companies', 'dashboard'] },
-  { to: '/group/people', label: 'Group people directory', group: 'Group', needs: 'view', icon: IconAddressBook, keywords: ['headcount', 'all companies'] },
-  { to: '/group/reports', label: 'Group reports', group: 'Group', needs: 'view', icon: IconReportAnalytics, keywords: ['consolidated', 'csv'] },
-  { to: '/group/companies', label: 'Group companies', group: 'Group', needs: 'companies', icon: IconBuildingCommunity, keywords: ['add company', 'sister company'] },
-  { to: '/group/access', label: 'Group access and roles', group: 'Group', needs: 'admin', icon: IconKey, keywords: ['membership', 'invite', 'group roles'] },
-  { to: '/group/transfers', label: 'Transfer to a sister company', group: 'Group', needs: 'transfer', icon: IconArrowsExchange, keywords: ['move employee'] },
-  { to: '/group/policies', label: 'Copy policies between companies', group: 'Group', needs: 'admin', icon: IconCopy, keywords: ['templates', 'leave types'] },
+  {
+    to: '/group',
+    label: 'Group overview',
+    group: 'Group',
+    needs: 'view',
+    icon: IconBuildingSkyscraper,
+    keywords: ['consolidated', 'all companies', 'dashboard'],
+  },
+  {
+    to: '/group/people',
+    label: 'Group people directory',
+    group: 'Group',
+    needs: 'view',
+    icon: IconAddressBook,
+    keywords: ['headcount', 'all companies'],
+  },
+  {
+    to: '/group/reports',
+    label: 'Group reports',
+    group: 'Group',
+    needs: 'view',
+    icon: IconReportAnalytics,
+    keywords: ['consolidated', 'csv'],
+  },
+  {
+    to: '/group/companies',
+    label: 'Group companies',
+    group: 'Group',
+    needs: 'companies',
+    icon: IconBuildingCommunity,
+    keywords: ['add company', 'sister company'],
+  },
+  {
+    to: '/group/access',
+    label: 'Group access and roles',
+    group: 'Group',
+    needs: 'admin',
+    icon: IconKey,
+    keywords: ['membership', 'invite', 'group roles'],
+  },
+  {
+    to: '/group/transfers',
+    label: 'Transfer to a sister company',
+    group: 'Group',
+    needs: 'transfer',
+    icon: IconArrowsExchange,
+    keywords: ['move employee'],
+  },
+  {
+    to: '/group/policies',
+    label: 'Copy policies between companies',
+    group: 'Group',
+    needs: 'admin',
+    icon: IconCopy,
+    keywords: ['templates', 'leave types'],
+  },
   { to: '/reports/builder', label: 'Build a report', group: 'Reports', roles: ['hr'], icon: IconReportAnalytics },
   { to: '/settings/features', label: 'Features (switch modules on or off)', group: 'Settings', roles: ['hr'], icon: IconSettings },
   { to: '/relations/disciplinary', label: 'Disciplinary cases', group: 'Employee relations', roles: ['hr'], icon: IconScale },
@@ -433,7 +482,8 @@ export function Layout() {
     (!i.employeeOnly || !!user?.employeeId) &&
     featureOn(i.features) &&
     groupOn(i.needs);
-  const groups = [...NAV, GROUP_NAV].filter((g) => !g.roles || hasRole(...g.roles) || (g.id === 'manage' && pendingApprovals > 0))
+  const groups = [...NAV, GROUP_NAV]
+    .filter((g) => !g.roles || hasRole(...g.roles) || (g.id === 'manage' && pendingApprovals > 0))
     .map((g) => ({ ...g, items: g.items.filter(visible) }))
     .filter((g) => g.items.length > 0);
   const account = ACCOUNT.filter(visible);

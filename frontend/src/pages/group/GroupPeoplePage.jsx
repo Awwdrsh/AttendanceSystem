@@ -82,10 +82,20 @@ export default function GroupPeoplePage() {
         subtitle="Everyone in the companies of the group you can see, with headcount by company, branch, department, gender and employment type."
         actions={
           <>
-            <Button variant="default" size="sm" leftSection={<IconDownload size={16} stroke={1.6} />} onClick={() => csv(groupApi.peopleCsv)}>
+            <Button
+              variant="default"
+              size="sm"
+              leftSection={<IconDownload size={16} stroke={1.6} />}
+              onClick={() => csv(groupApi.peopleCsv)}
+            >
               People CSV
             </Button>
-            <Button variant="default" size="sm" leftSection={<IconDownload size={16} stroke={1.6} />} onClick={() => csv(groupApi.breakdownsCsv)}>
+            <Button
+              variant="default"
+              size="sm"
+              leftSection={<IconDownload size={16} stroke={1.6} />}
+              onClick={() => csv(groupApi.breakdownsCsv)}
+            >
               Breakdowns CSV
             </Button>
           </>
@@ -155,7 +165,13 @@ export default function GroupPeoplePage() {
                   {d.total.toLocaleString('en-US')} people
                 </Text>
               </Group>
-              {b.totals.length ? <HBars data={b.totals} max={8} /> : <Text size="sm" c="dimmed">No one matches.</Text>}
+              {b.totals.length ? (
+                <HBars data={b.totals} max={8} />
+              ) : (
+                <Text size="sm" c="dimmed">
+                  No one matches.
+                </Text>
+              )}
             </Paper>
           ))}
         </SimpleGrid>

@@ -1,16 +1,4 @@
-import {
-  Badge,
-  Button,
-  Checkbox,
-  Group,
-  Modal,
-  MultiSelect,
-  PasswordInput,
-  Select,
-  Stack,
-  Text,
-  TextInput,
-} from '@mantine/core';
+import { Badge, Button, Checkbox, Group, Modal, MultiSelect, PasswordInput, Select, Stack, Text, TextInput } from '@mantine/core';
 import { IconKey, IconPencil, IconTrash, IconUserPlus } from '@tabler/icons-react';
 import { useEffect, useState } from 'react';
 import { group as groupApi } from '../../api/group';
@@ -117,15 +105,13 @@ function AccessForm({ opened, onClose, onSaved, companies, initial, invite }) {
           data={ROLE_OPTIONS}
           value={v.roles ?? []}
           onChange={set('roles')}
-          description={(v.roles ?? []).map((r) => ROLE_HELP[r]).filter(Boolean).join('. ')}
+          description={(v.roles ?? [])
+            .map((r) => ROLE_HELP[r])
+            .filter(Boolean)
+            .join('. ')}
           required
         />
-        <EmployeeSelect
-          companyId={v.companyId}
-          keep={initial?.employeeId}
-          value={v.employeeId ?? null}
-          onChange={set('employeeId')}
-        />
+        <EmployeeSelect companyId={v.companyId} keep={initial?.employeeId} value={v.employeeId ?? null} onChange={set('employeeId')} />
         {invite ? (
           <PasswordInput
             label="Temporary password"
@@ -236,7 +222,12 @@ export default function GroupAccessPage() {
         subtitle="Who can work in which company of the group, with which roles and as which employee. A person can have a different role in each company."
         actions={
           <>
-            <Button variant="default" size="sm" leftSection={<IconUserPlus size={16} stroke={1.6} />} onClick={() => setForm({ invite: true })}>
+            <Button
+              variant="default"
+              size="sm"
+              leftSection={<IconUserPlus size={16} stroke={1.6} />}
+              onClick={() => setForm({ invite: true })}
+            >
               Invite new person
             </Button>
             <Button size="sm" leftSection={<IconKey size={16} stroke={1.6} />} onClick={() => setForm({})}>

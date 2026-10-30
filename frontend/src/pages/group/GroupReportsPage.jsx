@@ -98,7 +98,13 @@ export default function GroupReportsPage() {
                 onChange={(v) => v && set('bsMonth')(Number(v))}
                 allowDeselect={false}
               />
-              <Select label="Year" data={years} value={String(f.bsYear)} onChange={(v) => v && set('bsYear')(Number(v))} allowDeselect={false} />
+              <Select
+                label="Year"
+                data={years}
+                value={String(f.bsYear)}
+                onChange={(v) => v && set('bsYear')(Number(v))}
+                allowDeselect={false}
+              />
             </SimpleGrid>
           )}
         </SimpleGrid>
@@ -113,7 +119,12 @@ export default function GroupReportsPage() {
         {r.error ? (
           <EmptyState title="Could not run the report" hint={r.error} />
         ) : (
-          <ReportTable columns={r.data?.columns ?? []} rows={r.data?.rows ?? []} loading={r.loading} emptyTitle="Nothing to report for this period." />
+          <ReportTable
+            columns={r.data?.columns ?? []}
+            rows={r.data?.rows ?? []}
+            loading={r.loading}
+            emptyTitle="Nothing to report for this period."
+          />
         )}
       </div>
     </Stack>

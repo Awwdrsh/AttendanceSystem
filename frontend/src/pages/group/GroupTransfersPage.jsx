@@ -61,7 +61,11 @@ function TransferRules({ canEdit }) {
               }}
             />
           ))}
-          {q.error ? <Text size="sm" c="red">{q.error}</Text> : null}
+          {q.error ? (
+            <Text size="sm" c="red">
+              {q.error}
+            </Text>
+          ) : null}
         </Stack>
       </Paper>
     </div>
@@ -77,10 +81,7 @@ export default function GroupTransfersPage() {
   const [confirm, setConfirm] = useState(false);
   const [employeeName, setEmployeeName] = useState('');
   const [result, setResult] = useState(null);
-  const options = useQuery(
-    () => (f.toCompanyId ? groupApi.transferTarget(f.toCompanyId) : Promise.resolve(null)),
-    [f.toCompanyId],
-  );
+  const options = useQuery(() => (f.toCompanyId ? groupApi.transferTarget(f.toCompanyId) : Promise.resolve(null)), [f.toCompanyId]);
   useEffect(() => {
     setF((x) => ({ ...x, branchId: null, orgUnitId: null, managerId: null, shiftId: null, carryLeave: false }));
   }, [f.toCompanyId]);
@@ -164,10 +165,45 @@ export default function GroupTransfersPage() {
                 onChange={set('empCode')}
               />
               <TextInput label="Designation there" value={f.designation} onChange={set('designation')} />
-              <Select label="Branch" placeholder="None" clearable searchable data={opts(o?.branches)} value={f.branchId} onChange={set('branchId')} disabled={!o} />
-              <Select label="Department" placeholder="None" clearable searchable data={opts(o?.orgUnits)} value={f.orgUnitId} onChange={set('orgUnitId')} disabled={!o} />
-              <Select label="Manager" placeholder="None" clearable searchable data={opts(o?.managers)} value={f.managerId} onChange={set('managerId')} disabled={!o} />
-              <Select label="Shift" placeholder="Company default" clearable data={opts(o?.shifts)} value={f.shiftId} onChange={set('shiftId')} disabled={!o} />
+              <Select
+                label="Branch"
+                placeholder="None"
+                clearable
+                searchable
+                data={opts(o?.branches)}
+                value={f.branchId}
+                onChange={set('branchId')}
+                disabled={!o}
+              />
+              <Select
+                label="Department"
+                placeholder="None"
+                clearable
+                searchable
+                data={opts(o?.orgUnits)}
+                value={f.orgUnitId}
+                onChange={set('orgUnitId')}
+                disabled={!o}
+              />
+              <Select
+                label="Manager"
+                placeholder="None"
+                clearable
+                searchable
+                data={opts(o?.managers)}
+                value={f.managerId}
+                onChange={set('managerId')}
+                disabled={!o}
+              />
+              <Select
+                label="Shift"
+                placeholder="Company default"
+                clearable
+                data={opts(o?.shifts)}
+                value={f.shiftId}
+                onChange={set('shiftId')}
+                disabled={!o}
+              />
             </SimpleGrid>
             <Checkbox
               label="Carry the leave balance over"
@@ -208,7 +244,7 @@ export default function GroupTransfersPage() {
               {result.leaveCarried?.length
                 ? `Leave carried: ${result.leaveCarried.map((l) => `${l.days} ${l.name}`).join(', ')}.`
                 : 'No leave carried.'}{' '}
-              {result.salaryCarried ? 'Salary carried over.' : result.salaryNote ?? ''}
+              {result.salaryCarried ? 'Salary carried over.' : (result.salaryNote ?? '')}
             </Text>
             <SwitchLink companyId={result.toCompanyId} to={`/employees/${result.toEmployeeId}`}>
               Open the new record in {result.toCompany}

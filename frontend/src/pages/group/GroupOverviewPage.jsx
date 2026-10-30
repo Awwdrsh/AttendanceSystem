@@ -92,7 +92,13 @@ function AttritionChart({ d }) {
 function NeedsAttention({ items }) {
   const groups = attentionByCompany(items);
   if (!groups.length)
-    return <EmptyState compact title="Nothing needs attention" hint="No offline devices, missed payroll, expiring documents or waiting approvals." />;
+    return (
+      <EmptyState
+        compact
+        title="Nothing needs attention"
+        hint="No offline devices, missed payroll, expiring documents or waiting approvals."
+      />
+    );
   return (
     <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
       {groups.map((g) => (
