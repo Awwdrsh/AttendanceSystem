@@ -74,7 +74,7 @@ export default function RulesPage() {
             key: 'src',
             header: 'Source',
             render: (r) =>
-              r.source_url ? (
+              r.source_url && /^https?:\/\//.test(r.source_url) ? (
                 <Anchor
                   href={r.source_url}
                   target="_blank"
@@ -86,6 +86,8 @@ export default function RulesPage() {
                   Open
                   <IconExternalLink size={14} stroke={1.6} />
                 </Anchor>
+              ) : r.source_url ? (
+                <Text size="sm">{r.source_url}</Text>
               ) : (
                 <Text size="sm" c="dimmed">
                   —

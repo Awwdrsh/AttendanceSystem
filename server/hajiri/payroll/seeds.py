@@ -39,7 +39,7 @@ RULES = [
     {'key': 'tds.deposit_days', 'fromAd': '2017-09-04', 'toAd': None, 'fromBs': '2074-05-19', 'toBs': None,
      'value': {'days': 25, 'lateInterest': '0.15', 'annualReturnBy': 'Ashwin end'}, 'source': 'https://lawalpine.com/blog/tds-in-nepal'},
     {'key': 'payroll.proration', 'fromAd': '2017-09-04', 'toAd': None, 'fromBs': '2074-05-19', 'toBs': None,
-     'value': {'default': 'bs_calendar_days', 'alternatives': ['fixed_30', '26_day'], 'hourlyDivisor': 208}, 'source': 'plan.md §6.10/§11.3 (practice, not law)'},
+     'value': {'default': 'bs_calendar_days', 'alternatives': ['fixed_30', '26_day'], 'hourlyDivisor': 208}, 'source': 'Common payroll practice in Nepal (not set by law)'},
 ]
 
 

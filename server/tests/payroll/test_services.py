@@ -197,3 +197,11 @@ def test_rule_source_must_be_a_web_link(demo, login_as):
     second = post(admin, '/rules', {**base, 'validFromAd': '2026-07-17', 'validFromBs': '2083-04-01', 'supersedesId': first.body['id']})
     assert second.status == 201
     assert str(one('SELECT valid_to_ad FROM rule_version WHERE id = %s', [first.body['id']])['valid_to_ad']) == '2026-07-16'
+
+
+def test_every_statutory_rule_names_a_source_a_person_can_read():
+    """The Rules page links a source that is a web address and shows any other source as text, so it must never be an
+    internal note."""
+    from hajiri.payroll.seeds import RULES
+    for r in RULES:
+        assert r['source'].startswith('https://') or ('plan.md' not in r['source'] and '§' not in r['source']), r['key']
