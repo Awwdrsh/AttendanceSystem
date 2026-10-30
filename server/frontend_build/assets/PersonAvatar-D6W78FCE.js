@@ -1,1 +1,0 @@
-import{R as e}from"./createReactComponent-DKcgNbiR.js";import{Xt as t}from"./index-DX20uwZI.js";import{n}from"./people-JIxToYp-.js";var r=e();function i({id:e,name:i,hasAvatar:a,size:o=40,version:s,...c}){let l=a?`${n(e)}${s?`?v=${s}`:``}`:null;return(0,r.jsx)(t,{src:l,name:i,alt:i,size:o,radius:`xl`,color:`brand`,variant:`light`,...c})}export{i as t};
