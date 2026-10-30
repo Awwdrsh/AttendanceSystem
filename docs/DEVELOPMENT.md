@@ -110,11 +110,11 @@ DJANGO_TEST_DATABASE=hajiri_t_leave .venv/bin/pytest -q tests/leave --reuse-db  
   ```sh
   .venv/bin/pip install -r requirements-dev.txt && .venv/bin/playwright install chromium
   createdb -p 5433 hajiri_e2e
-  export DATABASE_URL=postgres://localhost:5433/hajiri_e2e
-  .venv/bin/python manage.py migrate && .venv/bin/python manage.py seed_bs_calendar
-  .venv/bin/python manage.py seed_demo_group --database $DATABASE_URL --yes
-  .venv/bin/python manage.py shell < tests/e2e/seed_users.py > /tmp/e2e-users.json   # resets passwords
-  # start the web server and the worker on that database (any free port), then:
+  E2E=postgres://localhost:5433/hajiri_e2e
+  DATABASE_URL=$E2E .venv/bin/python manage.py migrate && DATABASE_URL=$E2E .venv/bin/python manage.py seed_bs_calendar
+  .venv/bin/python manage.py seed_demo_group --database $E2E --yes   # not with DATABASE_URL set: it counts as live
+  DATABASE_URL=$E2E .venv/bin/python manage.py shell < tests/e2e/seed_users.py > /tmp/e2e-users.json   # resets passwords
+  # start the web server and the worker with DATABASE_URL=$E2E (any free port), then:
   HAJIRI_E2E_URL=http://localhost:8301 HAJIRI_E2E_USERS=/tmp/e2e-users.json .venv/bin/pytest -p no:cacheprovider tests/e2e
   ```
 
